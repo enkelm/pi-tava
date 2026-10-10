@@ -200,9 +200,9 @@ function MentionedText({ text }) {
 }
 
 /** A subagent's report: who, whether it answered or failed, and what it said. */
-function Report({ report, view, fresh }) {
+function Report({ report, view, fresh, readOnly = false }) {
     const [, name, verb, after, text] = report;
-    const child = view.subagents.find((agent) => agent.name === name);
+    const child = !readOnly && view.subagents.find((agent) => agent.name === name);
     // A failed one says why: "failed: stopped before it answered", "failed: Bad request".
     const why = verb === "failed" ? after.replace(/^:\s*/, "") : "";
 
@@ -212,6 +212,7 @@ function Report({ report, view, fresh }) {
         <div class="report-head">
             <span class="report-name">${name}</span> ${verb}
             ${
+                !readOnly &&
                 child &&
                 html`<button class="link" onClick=${() => openSubagent(child.conversationId)}>
                     Open →
@@ -219,7 +220,7 @@ function Report({ report, view, fresh }) {
             }
         </div>
         ${why && html`<div class="report-why">${why}</div>`}
-        ${text && html`<${Collapsible} text=${text} />`}
+        ${text && html`<${Collapsible} text=${text} readOnly=${readOnly} />`}
     </div>`;
 }
 
@@ -252,7 +253,7 @@ function clock(at) {
  * A person's message: a filled row with a prompt mark, the accent's for your own and the author's color for someone
  * else's, then who sent it and when, and what they wrote.
  */
-function UserEntry({ entry, view, users }) {
+function UserEntry({ entry, view, users, readOnly = false }) {
     const [fresh] = useState(() => settledFor !== null && settledFor === view.conversation?.id);
 
     // A report has nobody's name on it: a person's message that looks like one is theirs.
@@ -272,9 +273,9 @@ function UserEntry({ entry, view, users }) {
         const reports = parts.map((part) => REPORT.exec(part)).filter(Boolean);
 
         return reports.length === 1
-            ? html`<${Report} report=${reports[0]} view=${view} fresh=${fresh} />`
+            ? html`<${Report} report=${reports[0]} view=${view} fresh=${fresh} readOnly=${readOnly} />`
             : html`<div class="report-group">
-                  ${reports.map((report) => html`<${Report} report=${report} view=${view} fresh=${fresh} />`)}
+                  ${reports.map((report) => html`<${Report} report=${report} view=${view} fresh=${fresh} readOnly=${readOnly} />`)}
               </div>`;
     }
 
@@ -287,7 +288,7 @@ function UserEntry({ entry, view, users }) {
             <div class="report-head">
                 <span class="report-name mono">${command}</span> ${what} · ${how}
             </div>
-            <${Collapsible} text=${output} limit=${300} />
+            <${Collapsible} text=${output} limit=${300} readOnly=${readOnly} />
         </div>`;
     }
 
@@ -317,23 +318,25 @@ function UserEntry({ entry, view, users }) {
     const name = author ?? (scheduled ? "Pi" : undefined);
     // Your own messages take the accent; someone else's, their color; one from someone the app does not know (a name
     // the message carries, the main agent, Pi's own schedule), a quiet one.
-    const mark =
-        authorId === store.state.me?.id || (authorId === undefined && name === undefined)
-            ? "var(--accent)"
-            : authorId === undefined
-              ? "var(--muted)"
-              : personColor(authorId);
+    const mark = readOnly
+        ? "var(--muted)"
+        : authorId === store.state.me?.id || (authorId === undefined && name === undefined)
+          ? "var(--accent)"
+          : authorId === undefined
+            ? "var(--muted)"
+            : personColor(authorId);
 
     // Who it is from, for themes: you, someone else, a linked session, or no one the app knows (Pi's schedule, the main
     // agent, a watch or a webhook).
-    const from =
-        peerText !== undefined
-            ? "linked"
-            : authorId === undefined
-              ? "other"
-              : authorId === store.state.me?.id
-                ? "me"
-                : "person";
+    const from = readOnly
+        ? "other"
+        : peerText !== undefined
+          ? "linked"
+          : authorId === undefined
+            ? "other"
+            : authorId === store.state.me?.id
+              ? "me"
+              : "person";
 
     return html`<div
         class=${`user-row ${fresh ? "enter" : ""}`}
@@ -341,14 +344,15 @@ function UserEntry({ entry, view, users }) {
         id=${`entry-${entry.id}`}
     >
         <div
-            class="prompt tappable"
+            class=${`prompt ${readOnly ? "" : "tappable"}`}
             data-part="prompt"
             data-from=${from}
-            title="Edit, send again, or copy"
-            tabindex="0"
-            onClick=${(event) => openMessage(event, entry.id)}
+            title=${readOnly ? undefined : "Edit, send again, or copy"}
+            tabindex=${readOnly ? undefined : "0"}
+            onClick=${readOnly ? undefined : (event) => openMessage(event, entry.id)}
             onKeyDown=${(event) => {
                 if (
+                    !readOnly &&
                     (event.key === "Enter" || event.key === " ") &&
                     event.target === event.currentTarget
                 ) {
@@ -373,6 +377,7 @@ function UserEntry({ entry, view, users }) {
             </span>
             <div class="prompt-body" data-part="prompt-text">
                 ${
+                    !readOnly &&
                     skill &&
                     html`<button
                         class="chip skill-chip"
@@ -383,16 +388,19 @@ function UserEntry({ entry, view, users }) {
                     </button>`
                 }
                 ${
-                    (skill ? skill[3] : body) &&
+                    (readOnly ? body : skill ? skill[3] : body) &&
                     html`<div class="user-text">
                         ${
-                            via
-                                ? html`<${FencedText} text=${body} />`
-                                : html`<${MentionedText} text=${skill ? skill[3] : body} />`
+                            readOnly
+                                ? body
+                                : via
+                                  ? html`<${FencedText} text=${body} />`
+                                  : html`<${MentionedText} text=${skill ? skill[3] : body} />`
                         }
                     </div>`
                 }
                 ${
+                    !readOnly &&
                     entry.files?.length > 0 &&
                     html`<div class="attachments">
                         ${entry.files.map(
@@ -408,6 +416,7 @@ function UserEntry({ entry, view, users }) {
                     </div>`
                 }
                 ${
+                    !readOnly &&
                     pictures.length > 0 &&
                     html`<div class="thumbs">
                         ${pictures.map(
@@ -422,24 +431,32 @@ function UserEntry({ entry, view, users }) {
                     </div>`
                 }
                 ${
+                    !readOnly &&
                     entry.images > 0 &&
                     !attachments &&
                     html`<${EntryImages} entryId=${entry.id} count=${entry.images} label="Image" />`
                 }
+                ${readOnly && html`<${SavedImages} count=${entry.images || pictures.length} />`}
             </div>
         </div>
     </div>`;
 }
 
-function Collapsible({ text, limit = 600 }) {
+function SavedImages({ count }) {
+    return count > 0
+        ? html`<p class="small muted">${count} image(s) in saved history, not shown in this mirror.</p>`
+        : null;
+}
+
+function Collapsible({ text, limit = 600, readOnly = false }) {
     const [open, setOpen] = useState(false);
 
     if (text.length <= limit) {
-        return html`<${Markdown} text=${text} />`;
+        return html`<${Markdown} text=${text} readOnly=${readOnly} />`;
     }
 
     return html`<div class=${`collapsible ${open ? "open" : ""}`}>
-        <${Markdown} text=${open ? text : `${text.slice(0, limit)}…`} />
+        <${Markdown} text=${open ? text : `${text.slice(0, limit)}…`} readOnly=${readOnly} />
         <button class="link" onClick=${() => setOpen(!open)}>
             ${open ? "Show less" : "Show more"}
         </button>
@@ -449,7 +466,7 @@ function Collapsible({ text, limit = 600 }) {
 // ─── What Pi did: its thinking and tool calls, a line each on a timeline ───────────────
 
 /** What a step's mark says, by how the call went; a call still running shows a spinner instead. */
-const MARKS = { done: "✓", error: "×", denied: "×", stopped: "–", approval: "!" };
+const MARKS = { done: "✓", error: "×", denied: "×", stopped: "–", saved: "–", approval: "!" };
 
 /** A step's mark: a small circle that says how it went. A thought is ✦, and a subagent's call ⑂ unless it failed. */
 function StepMark({ status, kind }) {
@@ -754,12 +771,19 @@ function ToolStep({
     canRun,
     busy,
     conversationId,
+    readOnly = false,
 }) {
     const [open, setOpen] = useState(false);
     const [full, setFull] = useState(null);
-    const view = store.state.view;
-    const decision = decisionOf(view.decisions, call, result);
-    const status = callStatus({ result, slot, approval, decision, streaming, canRun, busy });
+    const view = readOnly ? null : store.state.view;
+    const decision = readOnly ? undefined : decisionOf(view.decisions, call, result);
+    const status = readOnly
+        ? result
+            ? result.isError
+                ? "error"
+                : "done"
+            : "saved"
+        : callStatus({ result, slot, approval, decision, streaming, canRun, busy });
     // A call that finishes while on screen flashes once.
     const [settled, setSettled] = useState(false);
     const was = useRef(status);
@@ -807,6 +831,7 @@ function ToolStep({
 
         if (
             (call.name === "read" || call.name === "write" || call.name === "edit") &&
+            !readOnly &&
             typeof args.path === "string" &&
             args.path !== ""
         ) {
@@ -833,7 +858,7 @@ function ToolStep({
         }
 
         if (call.name === "edit") {
-            if (details?.diff) {
+            if (details?.diff && !readOnly) {
                 parts.push(
                     html`<${DiffBlock} text=${details.diff} path=${args.path ?? ""} bare=${true} />`,
                 );
@@ -921,21 +946,25 @@ function ToolStep({
             )
             .replace(/^<harness>\s*/, "");
 
-        if (output && !(call.name === "edit" && details?.diff && !result?.isError)) {
+        if (output && !(!readOnly && call.name === "edit" && details?.diff && !result?.isError)) {
             parts.push(
                 html`<pre class=${`output ${result?.isError ? "error" : ""}`}>${output}</pre>`,
             );
         }
 
         // A call still streaming has no stored entry to load yet.
-        if (clipped && entryId !== undefined) {
+        if (clipped && !readOnly && entryId !== undefined) {
             parts.push(html`<button class="link" onClick=${loadFull}>Load everything</button>`);
         }
 
-        body = html`<div class="step-body" data-part="step-detail">${parts}</div>`;
+        body = html`<div class="step-body" data-part="step-detail">
+            ${parts}
+            ${readOnly && clipped && html`<p class="small muted">Output clipped in this snapshot.</p>`}
+            ${readOnly && !result && html`<p class="small muted">No result in saved history yet. Check Terminal for live output.</p>`}
+        </div>`;
     }
 
-    const artifact = call.name === "artifact" && details?.id ? details : null;
+    const artifact = !readOnly && call.name === "artifact" && details?.id ? details : null;
     const artifactType = artifact
         ? view.artifacts.find((each) => each.id === artifact.id)?.type
         : undefined;
@@ -943,28 +972,32 @@ function ToolStep({
         ? `/a/${view.conversation.id}/${encodeURIComponent(artifact.id)}/${artifact.version}`
         : null;
     const child =
-        call.name === "subagent"
+        !readOnly && call.name === "subagent"
             ? (details?.conversationId ??
               view.subagents.find((agent) => agent.name === args.name)?.conversationId)
             : undefined;
     const { label, subject } = stepWords(call);
     // Counted from everything once it is loaded: a long write's lines, a long edit's whole diff.
-    const said = outcome({
-        call: full?.call ?? call,
-        result: full?.result ?? result,
-        details,
-        status,
-    });
-    const watch = call.name === "browser" && browserAvailable() && !store.state.browserOpen;
+    const said = readOnly
+        ? null
+        : outcome({
+              call: full?.call ?? call,
+              result: full?.result ?? result,
+              details,
+              status,
+          });
+    const watch =
+        !readOnly && call.name === "browser" && browserAvailable() && !store.state.browserOpen;
     // What a call made shows under its line, as on today's cards: what it returned as images, an artifact, the browser.
     // A lesson Pi saved, changed, or forgot: its state, and approving it where it happened.
     const lesson =
+        !readOnly &&
         call.name === "memory" &&
         typeof details?.lesson === "string" &&
         memoryAvailable(conversationId)
             ? details.lesson
             : null;
-    const extras = result?.images > 0 || artifact || watch || lesson;
+    const extras = !readOnly && (result?.images > 0 || artifact || watch || lesson);
 
     return html`<div
         class=${`step ${open ? "open" : ""} ${settled ? "settled" : ""}`}
@@ -1060,6 +1093,7 @@ function ToolStep({
                 }
             </div>`
         }
+        ${readOnly && html`<${SavedImages} count=${result?.images} />`}
         ${body}
     </div>`;
 }
@@ -1391,7 +1425,71 @@ function ApprovalCard({ approval }) {
     </div>`;
 }
 
-// ─── Pi's words ───────────────────────────────────────────────────────────────────────
+function AssistantBlocks({
+    blocks,
+    entryId,
+    results,
+    slots,
+    approvals,
+    streaming,
+    readOnly = false,
+}) {
+    return blocks.map((block, index) => {
+        if (block.type === "text") {
+            // The block still growing changes on every update: caching each version would only push out finished ones.
+            const growing = streaming && index === blocks.length - 1;
+
+            return html`<${Markdown}
+                text=${block.text}
+                class=${growing ? "streaming" : ""}
+                cache=${!growing}
+                readOnly=${readOnly}
+            />`;
+        }
+
+        if (block.type === "thinking") {
+            return html`<${ThoughtStep}
+                block=${block}
+                streaming=${streaming && index === blocks.length - 1}
+            />`;
+        }
+
+        if (block.type === "toolCall") {
+            const slot = slots.get(block.id);
+            const approval =
+                slot?.taskId === undefined
+                    ? undefined
+                    : approvals.find((each) => each.taskId === slot.taskId);
+
+            return html`<${ToolStep}
+                call=${block}
+                result=${results?.get(block.id)}
+                slot=${slot}
+                approval=${approval}
+                entryId=${entryId}
+                readOnly=${readOnly}
+            />`;
+        }
+
+        return null;
+    });
+}
+
+/** One saved assistant entry, sharing the live transcript's Markdown and step presentation. */
+function AssistantEntry({ entry, results, slots, approvals, readOnly = false }) {
+    return html`<div class="assistant" id=${`entry-${entry.id}`}>
+        <${AssistantBlocks}
+            blocks=${entry.blocks}
+            entryId=${entry.id}
+            results=${results}
+            slots=${slots}
+            approvals=${approvals}
+            readOnly=${readOnly}
+        />
+        ${readOnly && html`<${SavedImages} count=${entry.images} />`}
+        <${AnswerEnd} entry=${entry} readOnly=${readOnly} />
+    </div>`;
+}
 
 /** Under Pi's answers: reactions, and ways to talk about the answer with the people here. */
 function AnswerActions({ entry }) {
@@ -1474,9 +1572,10 @@ function AnswerActions({ entry }) {
 }
 
 /** How one of Pi's answers ended, under its last words: a failed request, a stop, or the answer's actions. */
-function AnswerEnd({ entry }) {
+function AnswerEnd({ entry, readOnly = false }) {
     // A final answer (not a step between tool calls) with something to say gets reactions and the discuss row.
-    const answer = collab() && entry.stopReason !== "toolUse" && entry.blocks.some(says);
+    const answer =
+        !readOnly && collab() && entry.stopReason !== "toolUse" && entry.blocks.some(says);
 
     return html`${
         entry.stopReason === "error" &&
@@ -1509,7 +1608,7 @@ function Reply({ item, conversationId }) {
     </div>`;
 }
 
-function Divider({ entry }) {
+function Divider({ entry, readOnly = false }) {
     const [open, setOpen] = useState(false);
 
     // A session continued from Pi in the terminal: what is above is Pi's, from that session's file.
@@ -1523,7 +1622,7 @@ function Divider({ entry }) {
     if (entry.kind === "reset") {
         return html`<div class="divider">
             <span>New context</span>
-            ${entry.text && html`<div class="divider-body"><${Markdown} text=${entry.text} /></div>`}
+            ${entry.text && html`<div class="divider-body"><${Markdown} text=${entry.text} readOnly=${readOnly} /></div>`}
         </div>`;
     }
 
@@ -1531,7 +1630,7 @@ function Divider({ entry }) {
         <button class="link" onClick=${() => setOpen(!open)}>
             Context compacted ${open ? "▾" : "▸"}
         </button>
-        ${open && html`<div class="divider-body"><${Markdown} text=${entry.summary} /></div>`}
+        ${open && html`<div class="divider-body"><${Markdown} text=${entry.summary} readOnly=${readOnly} /></div>`}
     </div>`;
 }
 
@@ -1583,14 +1682,23 @@ const SHELL_LINES = 12;
  * What a command printed, as a card: a `!` command's, or an extension command's card. A long output shows its last lines
  * until opened, and one the server cut short loads in full on a tap.
  */
-function OutputCard({ entry, command, meta, failed = false, longCommand = false, copy = false }) {
+function OutputCard({
+    entry,
+    command,
+    meta,
+    failed = false,
+    longCommand = false,
+    copy = false,
+    readOnly = false,
+}) {
     const [open, setOpen] = useState(false);
     const [full, setFull] = useState(null);
     const output = (full ?? entry.output).replace(/\s+$/, "");
     const lines = output.split("\n");
     const long = lines.length > SHELL_LINES;
     const whole = async () =>
-        full ?? (entry.truncated ? (await actions.fullEntry(entry.id)).output : entry.output);
+        full ??
+        (!readOnly && entry.truncated ? (await actions.fullEntry(entry.id)).output : entry.output);
 
     return html`<div class="shell-row" id=${`entry-${entry.id}`}>
         <div class=${`shell-card ${failed ? "failed" : ""} ${open ? "open" : ""}`}>
@@ -1611,6 +1719,7 @@ function OutputCard({ entry, command, meta, failed = false, longCommand = false,
                 </button>`
             }
             ${
+                !readOnly &&
                 entry.truncated &&
                 full === null &&
                 html`<button
@@ -1645,9 +1754,10 @@ function OutputCard({ entry, command, meta, failed = false, longCommand = false,
 }
 
 /** An extension command's card: text for the people here, never in Pi's context. */
-function CommandEntry({ entry }) {
+function CommandEntry({ entry, readOnly = false }) {
     return html`<${OutputCard}
         entry=${entry}
+        readOnly=${readOnly}
         command=${`/${entry.command}`}
         meta=${`${entry.name} · not shown to Pi${entry.clipped ? " · only the end is kept" : ""}`}
         copy=${true}
@@ -1655,7 +1765,7 @@ function CommandEntry({ entry }) {
 }
 
 /** A command someone ran with `!` (or `!!`, which Pi does not see): what it printed, and how it ended. */
-function ShellEntry({ entry }) {
+function ShellEntry({ entry, readOnly = false }) {
     // A long command (a paste in it, say) shows its first lines until opened.
     const longCommand = entry.command.split("\n").length > 3 || entry.command.length > 240;
     const end =
@@ -1667,6 +1777,7 @@ function ShellEntry({ entry }) {
 
     return html`<${OutputCard}
         entry=${entry}
+        readOnly=${readOnly}
         command=${`$ ${entry.command}`}
         meta=${`${entry.name}${end ? ` · ${end}` : ""}${entry.context ? "" : " · not shown to Pi"}`}
         failed=${Boolean(end)}
@@ -1739,31 +1850,64 @@ function PendingShells({ conversationId, rows }) {
     );
 }
 
-function EntryView({ entry }) {
-    const { view, users } = store.state;
+/** Shared entry rendering. Read-only journals never resolve IDs, images or actions through a Durable room. */
+export function TranscriptEntry({
+    entry,
+    results,
+    slots = NO_SLOTS,
+    approvals = NO_APPROVALS,
+    readOnly = false,
+}) {
+    const view = readOnly ? READ_ONLY_VIEW : store.state.view;
+    const users = readOnly ? [] : store.state.users;
 
     if (entry.kind === "shell") {
-        return html`<${ShellEntry} entry=${entry} />`;
+        return html`<${ShellEntry} entry=${entry} readOnly=${readOnly} />`;
     }
 
     if (entry.kind === "command") {
-        return html`<${CommandEntry} entry=${entry} />`;
+        return html`<${CommandEntry} entry=${entry} readOnly=${readOnly} />`;
     }
 
     if (entry.kind === "note") {
-        return html`<${NoteEntry} entry=${entry} />`;
+        return html`<${NoteEntry} entry=${readOnly ? { ...entry, imported: true } : entry} />`;
     }
 
     if (entry.kind === "user") {
-        return html`<${UserEntry} entry=${entry} view=${view} users=${users} />`;
+        return html`<${UserEntry} entry=${entry} view=${view} users=${users} readOnly=${readOnly} />`;
+    }
+
+    if (entry.kind === "assistant") {
+        return html`<${AssistantEntry}
+            entry=${entry}
+            results=${results}
+            slots=${slots}
+            approvals=${approvals}
+            readOnly=${readOnly}
+        />`;
+    }
+
+    // A bounded journal can start with a result whose call is no longer included.
+    if (readOnly && entry.kind === "toolResult") {
+        return html`<${ToolStep}
+            call=${{ id: entry.callId, name: entry.name, args: {} }}
+            result=${entry}
+            readOnly=${true}
+        />`;
     }
 
     if (entry.kind === "compaction" || entry.kind === "reset" || entry.kind === "fromPi") {
-        return html`<${Divider} entry=${entry} />`;
+        return html`<${Divider} entry=${entry} readOnly=${readOnly} />`;
     }
 
     return null;
 }
+
+function EntryView({ entry }) {
+    return html`<${TranscriptEntry} entry=${entry} />`;
+}
+
+const READ_ONLY_VIEW = { subagents: [] };
 
 const NO_SLOTS = new Map();
 

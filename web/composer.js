@@ -12,6 +12,7 @@ import {
 } from "./commands.js";
 import { loadFiles, mentionAt, mentionText, suggestFiles } from "./files.js";
 import { remember, searchHistory, sentHistory } from "./history.js";
+import { MessageBox, SendButton } from "./message-box.js";
 import {
     actions,
     attempt,
@@ -1536,9 +1537,27 @@ export function Composer() {
                         } <span class="muted">· ${template.skill ? "skill · Pi gets its instructions with your request" : "prompt template · Pi gets it filled in"}</span>
                     </div>`
                 }
-                <div
-                    class=${`composer ${busy ? "busy" : ""} ${filled ? "filled" : ""} ${editing ? "editing" : ""}`}
+                <${MessageBox}
+                    inputRef=${box}
+                    class=${`${busy ? "busy" : ""} ${filled ? "filled" : ""} ${editing ? "editing" : ""}`}
                     data-part="message-box"
+                    input=${{
+                        ref: setBox,
+                        value: text,
+                        placeholder,
+                        "aria-label": editing ? "Edit queued message" : "Message Pi",
+                        readOnly: editing && sending,
+                        onInput: (event) => {
+                            setBrowsing(null);
+                            update(event.currentTarget.value, event.currentTarget.selectionStart);
+                        },
+                        onKeyDown: onKey,
+                        onKeyUp: (event) => setCaret(event.currentTarget.selectionStart),
+                        onClick: (event) => setCaret(event.currentTarget.selectionStart),
+                        onFocus: () => loadFiles({ ifMissing: true }),
+                        onPaste,
+                        enterkeyhint: coarse ? "enter" : "send",
+                    }}
                     onKeyDown=${(event) => {
                         if (event.key === "Escape") {
                             cancelEdit(event);
@@ -1560,211 +1579,193 @@ export function Composer() {
                         event.preventDefault();
                         addFiles([...(event.dataTransfer?.files ?? [])]);
                     }}
-                >
-                    ${
-                        editing &&
-                        html`<div class="queue-edit-bar">
-                            <span class="grow" role="status">
-                                <${Icon} name="pencil" size=${14} />
-                                ${editing.mode === "steer" ? "Editing steer" : "Editing queued follow-up"}
-                            </span>
-                            <button
-                                class="icon-button small"
-                                aria-label="Cancel edit"
-                                title="Cancel edit (Esc)"
-                                disabled=${sending}
-                                onClick=${cancelEdit}
-                            >
-                                <${Icon} name="close" size=${14} />
-                            </button>
-                        </div>`
-                    }
-                    ${
-                        editing &&
-                        queuedItem === undefined &&
-                        html`<div class="queue-edit-warning" role="status">
-                            This message is no longer queued. Copy your changes before cancelling.
-                        </div>`
-                    }
-                    ${
-                        !editing &&
-                        files.length > 0 &&
-                        html`<div class="files">
-                            ${files.map(
-                                (
-                                    file,
-                                ) => html`<span class=${`chip ${file.preview ? "with-thumb" : ""}`}>
-                                    ${
-                                        file.preview &&
-                                        html`<img class="chip-thumb" src=${file.preview} alt="" />`
-                                    }
-                                    ${file.state === "uploading" ? html`<${Spinner} />` : file.preview ? "" : html`<${Icon} name="clip" size=${13} />`}
-                                    <span class="chip-name" title=${file.name}>${file.name}</span>
-                                    <span class="muted">${formatBytes(file.size)}</span>
-                                    <button
-                                        class="icon-button small"
-                                        aria-label=${`Remove ${file.name}`}
-                                        onClick=${() => {
-                                            forget([file]);
-                                            setFiles((current) =>
-                                                current.filter((each) => each.key !== file.key),
-                                            );
-                                        }}
-                                    >
-                                        <${Icon} name="close" size=${12} />
-                                    </button>
-                                </span>`,
-                            )}
-                        </div>`
-                    }
-                    <textarea
-                        ref=${setBox}
-                        rows="1"
-                        value=${text}
-                        placeholder=${placeholder}
-                        aria-label=${editing ? "Edit queued message" : "Message Pi"}
-                        readOnly=${editing && sending}
-                        onInput=${(event) => {
-                            setBrowsing(null);
-                            update(event.currentTarget.value, event.currentTarget.selectionStart);
-                        }}
-                        onKeyDown=${onKey}
-                        onKeyUp=${(event) => setCaret(event.currentTarget.selectionStart)}
-                        onClick=${(event) => setCaret(event.currentTarget.selectionStart)}
-                        onFocus=${() => loadFiles({ ifMissing: true })}
-                        onPaste=${onPaste}
-                        enterkeyhint=${coarse ? "enter" : "send"}
-                    ></textarea>
-                    <div class="composer-row" data-part="composer-tools">
+                    before=${html`
                         ${
                             editing &&
-                            html`<span class="queue-edit-help grow">Enter saves · Esc cancels</span>`
-                        }
-                        ${
-                            !editing &&
-                            html`<${PlacesButton} />
-                            <button
-                                class="icon-button attach-button"
-                                data-part="composer-button"
-                                aria-label="Attach files"
-                                title="Attach files"
-                                onClick=${() => picker.current?.click()}
-                            >
-                                <${Icon} name="clip" size=${17} />
-                            </button>
-                            <input
-                                ref=${picker}
-                                type="file"
-                                multiple
-                                hidden
-                                onChange=${(event) => {
-                                    addFiles([...event.currentTarget.files]);
-                                    event.currentTarget.value = "";
-                                }}
-                            />
-                            <button
-                                class=${`model-chip ${agent?.available === false ? "warn" : ""}`}
-                                data-part="model-chip"
-                                aria-label=${`Model: ${modelLabel(agent)}${level ? `, thinking ${level}` : ""}`}
-                                title=${`Model and thinking: ${modelLabel(agent)}${level ? `, ${level}` : ""}`}
-                                onClick=${() => openSheet({ type: "model" })}
-                            >
-                                <${Icon} name="sparkle" size=${12} class="model-spark" />
-                                <span class="model-name">${shortModel(agent)}</span>
-                                ${level && html`<span class="model-level">${level}</span>`}
-                                <${Icon} name="chevron" size=${12} stroke=${2.2} class="model-caret" />
-                            </button>
-                            ${
-                                planAvailable() &&
-                                view.conversation?.kind !== "subagent" &&
-                                html`<button
-                                    class=${`plan-chip ${view.plan?.on ? "on" : ""}`}
-                                    data-part="composer-button plan-chip"
-                                    aria-pressed=${view.plan?.on === true}
-                                    title="Plan mode: Pi reads and proposes, and changes nothing until you approve"
-                                    onMouseDown=${(event) => event.preventDefault()}
-                                    onClick=${() => attempt(() => actions.setPlan(!view.plan?.on))}
+                            html`<div class="queue-edit-bar">
+                                <span class="grow" role="status">
+                                    <${Icon} name="pencil" size=${14} />
+                                    ${editing.mode === "steer" ? "Editing steer" : "Editing queued follow-up"}
+                                </span>
+                                <button
+                                    class="icon-button small"
+                                    aria-label="Cancel edit"
+                                    title="Cancel edit (Esc)"
+                                    disabled=${sending}
+                                    onClick=${cancelEdit}
                                 >
-                                    Plan
-                                </button>`
-                            }`
-                        }
-                        <span class="grow"></span>
-                        ${
-                            !editing &&
-                            busy &&
-                            html`<div
-                                class="mode-switch"
-                                data-part="composer-button mode-switch"
-                                role="radiogroup"
-                                aria-label="Send as"
-                                onKeyDown=${(event) => {
-                                    // Arrows move between the two, as in any group of radio buttons.
-                                    if (/^Arrow(Left|Right|Up|Down)$/.test(event.key)) {
-                                        const group = event.currentTarget;
-
-                                        event.preventDefault();
-                                        setSteer(!steer);
-                                        requestAnimationFrame(() =>
-                                            group.querySelector('[aria-checked="true"]')?.focus(),
-                                        );
-                                    }
-                                }}
-                            >
-                                ${[
-                                    [true, "Steer", "Pi reads it now, between steps"],
-                                    [false, "Queue", "Pi reads it when this run ends"],
-                                ].map(
-                                    ([value, label, tip]) => html`<button
-                                        role="radio"
-                                        aria-checked=${steer === value ? "true" : "false"}
-                                        tabindex=${steer === value ? "0" : "-1"}
-                                        class=${steer === value ? "on" : ""}
-                                        title=${tip}
-                                        onMouseDown=${(event) => event.preventDefault()}
-                                        onClick=${() => setSteer(value)}
-                                    >
-                                        ${label}
-                                    </button>`,
-                                )}
+                                    <${Icon} name="close" size=${14} />
+                                </button>
                             </div>`
                         }
                         ${
-                            editing
-                                ? html`<button
-                                      class="round send"
-                                      aria-label="Save edit"
-                                      title="Save edit (Enter)"
+                            editing &&
+                            queuedItem === undefined &&
+                            html`<div class="queue-edit-warning" role="status">
+                                This message is no longer queued. Copy your changes before cancelling.
+                            </div>`
+                        }
+                        ${
+                            !editing &&
+                            files.length > 0 &&
+                            html`<div class="files">
+                                ${files.map(
+                                    (
+                                        file,
+                                    ) => html`<span class=${`chip ${file.preview ? "with-thumb" : ""}`}>
+                                        ${
+                                            file.preview &&
+                                            html`<img class="chip-thumb" src=${file.preview} alt="" />`
+                                        }
+                                        ${file.state === "uploading" ? html`<${Spinner} />` : file.preview ? "" : html`<${Icon} name="clip" size=${13} />`}
+                                        <span class="chip-name" title=${file.name}>${file.name}</span>
+                                        <span class="muted">${formatBytes(file.size)}</span>
+                                        <button
+                                            class="icon-button small"
+                                            aria-label=${`Remove ${file.name}`}
+                                            onClick=${() => {
+                                                forget([file]);
+                                                setFiles((current) =>
+                                                    current.filter((each) => each.key !== file.key),
+                                                );
+                                            }}
+                                        >
+                                            <${Icon} name="close" size=${12} />
+                                        </button>
+                                    </span>`,
+                                )}
+                            </div>`
+                        }
+                    `}
+                >
+                    ${
+                        editing &&
+                        html`<span class="queue-edit-help grow">Enter saves · Esc cancels</span>`
+                    }
+                    ${
+                        !editing &&
+                        html`<${PlacesButton} />
+                        <button
+                            class="icon-button attach-button"
+                            data-part="composer-button"
+                            aria-label="Attach files"
+                            title="Attach files"
+                            onClick=${() => picker.current?.click()}
+                        >
+                            <${Icon} name="clip" size=${17} />
+                        </button>
+                        <input
+                            ref=${picker}
+                            type="file"
+                            multiple
+                            hidden
+                            onChange=${(event) => {
+                                addFiles([...event.currentTarget.files]);
+                                event.currentTarget.value = "";
+                            }}
+                        />
+                        <button
+                            class=${`model-chip ${agent?.available === false ? "warn" : ""}`}
+                            data-part="model-chip"
+                            aria-label=${`Model: ${modelLabel(agent)}${level ? `, thinking ${level}` : ""}`}
+                            title=${`Model and thinking: ${modelLabel(agent)}${level ? `, ${level}` : ""}`}
+                            onClick=${() => openSheet({ type: "model" })}
+                        >
+                            <${Icon} name="sparkle" size=${12} class="model-spark" />
+                            <span class="model-name">${shortModel(agent)}</span>
+                            ${level && html`<span class="model-level">${level}</span>`}
+                            <${Icon} name="chevron" size=${12} stroke=${2.2} class="model-caret" />
+                        </button>
+                        ${
+                            planAvailable() &&
+                            view.conversation?.kind !== "subagent" &&
+                            html`<button
+                                class=${`plan-chip ${view.plan?.on ? "on" : ""}`}
+                                data-part="composer-button plan-chip"
+                                aria-pressed=${view.plan?.on === true}
+                                title="Plan mode: Pi reads and proposes, and changes nothing until you approve"
+                                onMouseDown=${(event) => event.preventDefault()}
+                                onClick=${() => attempt(() => actions.setPlan(!view.plan?.on))}
+                            >
+                                Plan
+                            </button>`
+                        }`
+                    }
+                    <span class="grow"></span>
+                    ${
+                        !editing &&
+                        busy &&
+                        html`<div
+                            class="mode-switch"
+                            data-part="composer-button mode-switch"
+                            role="radiogroup"
+                            aria-label="Send as"
+                            onKeyDown=${(event) => {
+                                // Arrows move between the two, as in any group of radio buttons.
+                                if (/^Arrow(Left|Right|Up|Down)$/.test(event.key)) {
+                                    const group = event.currentTarget;
+
+                                    event.preventDefault();
+                                    setSteer(!steer);
+                                    requestAnimationFrame(() =>
+                                        group.querySelector('[aria-checked="true"]')?.focus(),
+                                    );
+                                }
+                            }}
+                        >
+                            ${[
+                                [true, "Steer", "Pi reads it now, between steps"],
+                                [false, "Queue", "Pi reads it when this run ends"],
+                            ].map(
+                                ([value, label, tip]) => html`<button
+                                    role="radio"
+                                    aria-checked=${steer === value ? "true" : "false"}
+                                    tabindex=${steer === value ? "0" : "-1"}
+                                    class=${steer === value ? "on" : ""}
+                                    title=${tip}
+                                    onMouseDown=${(event) => event.preventDefault()}
+                                    onClick=${() => setSteer(value)}
+                                >
+                                    ${label}
+                                </button>`,
+                            )}
+                        </div>`
+                    }
+                    ${
+                        editing
+                            ? html`<${SendButton}
+                                  label="Save edit"
+                                  icon="check"
+                                  title="Save edit (Enter)"
+                                  disabled=${!canSend}
+                                  sending=${sending}
+                                  onClick=${send}
+                              />`
+                            : html`<${MicButton}
+                                      dictation=${dictation}
+                                      class="composer-mic"
+                                      part="composer-button"
+                                  />
+                                  <button
+                                      class=${`send-button ${canSend ? "ready" : ""}`}
+                                      data-part="send-button"
+                                      data-state=${canSend ? "ready" : undefined}
+                                      aria-label="Send"
+                                      title=${coarse ? "Send" : "Send (Enter)"}
                                       disabled=${!canSend}
                                       onClick=${send}
                                   >
-                                      ${sending ? html`<${Spinner} />` : html`<${Icon} name="check" size=${18} />`}
-                                  </button>`
-                                : html`<${MicButton}
-                                          dictation=${dictation}
-                                          class="composer-mic"
-                                          part="composer-button"
-                                      />
-                                      <button
-                                          class=${`send-button ${canSend ? "ready" : ""}`}
-                                          data-part="send-button"
-                                          data-state=${canSend ? "ready" : undefined}
-                                          aria-label="Send"
-                                          title=${coarse ? "Send" : "Send (Enter)"}
-                                          disabled=${!canSend}
-                                          onClick=${send}
-                                      >
-                                          ${
-                                              sending
-                                                  ? html`<${Spinner} />`
-                                                  : html`<${Icon} name="send" size=${16} stroke=${2.4} />`
-                                          }
-                                      </button>
-                                      ${busy && html`<${StopButton} />`}`
-                        }
-                    </div>
-                </div>`
+                                      ${
+                                          sending
+                                              ? html`<${Spinner} />`
+                                              : html`<${Icon} name="send" size=${16} stroke=${2.4} />`
+                                      }
+                                  </button>
+                                  ${busy && html`<${StopButton} />`}`
+                    }
+                </${MessageBox}>`
         }
+
         <${StatusLine} />
     </footer>`;
 }

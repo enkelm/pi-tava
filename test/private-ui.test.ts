@@ -1,5 +1,5 @@
 // Real Chromium against a throwaway app. Herdr and imports are HTTP fixtures, never live discovery.
-import { cleanUp, newSession, openApp, root, scriptedModel, until } from "./helpers.ts";
+import { cleanUp, newSession, openApp, root, say, scriptedModel, until } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -47,8 +47,32 @@ async function shot(page: BrowserPage, name: string) {
     }
 }
 
+/** Compare the visible Chat presentation against a real Durable conversation, not CSS source. */
+async function chatAppearance(page: BrowserPage) {
+    return value(
+        page,
+        `(() => {
+        const parts = {
+            transcript: ['.transcript', ['max-width', 'padding', 'gap']],
+            footer: ['footer.composer-wrap', ['max-width', 'padding']],
+            bubble: ['.user-row .bubble', ['max-width', 'border-radius', 'padding', 'background-color']],
+            box: ['.composer', ['border', 'border-radius', 'padding']],
+            input: ['.composer textarea', ['font-family', 'font-size', 'line-height', 'padding', 'max-height', 'resize', 'background-color']],
+            send: ['.round.send', ['width', 'height', 'border-radius']],
+        };
+        return {
+            ...Object.fromEntries(Object.entries(parts).map(([name, [selector, properties]]) => {
+                const style = getComputedStyle(document.querySelector(selector));
+                return [name, Object.fromEntries(properties.map(property => [property, style.getPropertyValue(property)]))];
+            })),
+            sendIcon: document.querySelector('.round.send svg').innerHTML,
+        };
+    })()`,
+    );
+}
+
 test(
-    "Private mirror: lazy owner-only tree, isolated routes, guarded prompt and explicit shared import",
+    "Private mirror: shared read-only Chat, lazy owner-only tree, guarded prompt and explicit shared import",
     {
         skip: chromium === undefined ? "no Chromium installed" : false,
         timeout: 90_000,
@@ -58,6 +82,8 @@ test(
 
         app.imports.active.local.sockets = async () => [];
         const durableId = await newSession(app);
+
+        await say(app, durableId, "Durable style reference");
         const handler = createHandler({
             app,
             listen: { host: "127.0.0.1", port: 0 },
@@ -67,11 +93,13 @@ test(
         const shellId = "opaque-shell";
         let revision = "session-a";
         let promptStatus = 200;
+        let promptReply: Promise<void> | null = null;
         let quarantined = false;
         let detailDelay = 0;
         let detailStatus = 200;
         let historyRows = 20;
         const requests: { path: string; method: string; body: Record<string, unknown> }[] = [];
+        const durableRequests: { path: string; method: string }[] = [];
         const inFlight = new Map<string, number>();
         let overlap = false;
         const overlaps: string[] = [];
@@ -93,6 +121,10 @@ test(
         };
         const server = createServer(async (request, response) => {
             const path = new URL(request.url!, "http://fixture").pathname;
+
+            if (path.startsWith("/api/c/")) {
+                durableRequests.push({ path, method: request.method! });
+            }
 
             if (
                 !path.startsWith("/api/private") &&
@@ -181,6 +213,7 @@ test(
             if (path.endsWith("/prompt")) {
                 response.statusCode = promptStatus;
                 quarantined ||= promptStatus === 503;
+                await promptReply;
                 response.end(
                     JSON.stringify(
                         promptStatus === 200 ? { sent: true } : { error: "uncertain fixture" },
@@ -269,11 +302,19 @@ test(
                 entries: shell
                     ? []
                     : [
-                          { id: 1, kind: "user", text: "PRIVATE_SAVED_MESSAGE", images: 0 },
+                          {
+                              id: 1,
+                              kind: "user",
+                              text: "PRIVATE_SAVED_MESSAGE @src/file.ts",
+                              files: ["src/attached.ts"],
+                              images: 1,
+                          },
                           {
                               id: 2,
                               kind: "assistant",
+                              stopReason: "stop",
                               blocks: [
+                                  { type: "thinking", text: "PRIVATE_SAVED_THOUGHT" },
                                   {
                                       type: "text",
                                       text: "Saved **answer**. `src/file.ts`\n\n![private](/api/c/1/file?path=secret)\n\n```html\n<h1>Do not run</h1>\n```",
@@ -293,6 +334,8 @@ test(
                               text: "PRIVATE_TOOL_RESULT",
                               callId: "tool-a",
                               isError: false,
+                              clipped: true,
+                              images: 1,
                           },
                           ...Array.from({ length: historyRows }, (_, index) => ({
                               id: index + 4,
@@ -323,6 +366,18 @@ test(
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
             await present(page, ".home-list .private-tabs");
             assert.equal(requests.length, 0, "Private is not fetched on Sessions");
+            await page.evaluate(`(await import('/store.js')).navigate(${durableId})`);
+            await present(page, ".user-row .bubble");
+            await present(page, ".round.send svg");
+            const mobileAppearance = await chatAppearance(page);
+
+            await page.setViewport(VIEWPORTS.desktop);
+            const desktopAppearance = await chatAppearance(page);
+
+            await page.setViewport(VIEWPORTS.mobile);
+            await page.evaluate(`(await import('/store.js')).navigate(null)`);
+            await present(page, ".home-list .private-tabs");
+            durableRequests.length = 0;
             await page.click({ selector: ".home-list .private-tabs button:last-child" });
             await present(page, ".home-list .private-pane-row");
             assert.match(
@@ -342,6 +397,14 @@ test(
             await page.evaluate(
                 `const field = document.querySelector('#private-prompt'); field.value = 'Do not persist private drafts'; field.dispatchEvent(new Event('input', { bubbles: true }));`,
             );
+            assert.equal(
+                await value(
+                    page,
+                    `[localStorage, sessionStorage].every(storage => !Object.values(storage).some(value => /Do not persist private drafts|PRIVATE_SAVED_MESSAGE|PRIVATE_TOOL_RESULT|PRIVATE_SAVED_THOUGHT/.test(value)))`,
+                ),
+                true,
+                "private drafts and saved history stay out of browser storage",
+            );
             await page.reload();
             await present(page, "#private-prompt");
             assert.equal(
@@ -353,6 +416,40 @@ test(
                 await value(page, "location.pathname"),
                 `/private/${encodeURIComponent(paneId)}`,
             );
+            assert.equal(
+                await value(
+                    page,
+                    `!!document.querySelector('.private-transcript .user-row .bubble')`,
+                ),
+                true,
+                "saved user messages use the Durable bubble layout",
+            );
+            assert.equal(
+                await value(page, `document.querySelector('.private-terminal').open`),
+                false,
+                "Chat opens with its read-only terminal snapshot collapsed",
+            );
+            assert.deepEqual(
+                await chatAppearance(page),
+                mobileAppearance,
+                "mobile private Chat shares Durable widths, bubbles, composer styling and arrow Send",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelector('#private-prompt').form.matches('footer.composer-wrap > form.private-composer')`,
+                ),
+                true,
+                "the private prompt remains a form inside the shared composer footer",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelector('.private-composer button[type=submit]').getAttribute('aria-label')`,
+                ),
+                "Send to Pi",
+            );
+            await click(page, ".private-terminal summary");
             const nearBottom = `['.private-transcript', '.private-terminal pre'].every(selector => { const box = document.querySelector(selector); return box.scrollHeight - box.clientHeight - box.scrollTop < 3; })`;
 
             await until(() => value(page, nearBottom), "initial latest message and terminal tail");
@@ -405,16 +502,83 @@ test(
                 null,
                 "private paths do not open Durable files",
             );
+            await click(page, ".private-transcript .user-row .bubble");
+            assert.equal(
+                await value(page, `(await import('/store.js')).store.state.sheet`),
+                null,
+                "private user bubbles do not open edit, resend or fork actions",
+            );
             assert.equal(
                 await value(
                     page,
-                    `[...document.querySelectorAll('.private-transcript button')].every(button => button.textContent === 'Copy')`,
+                    `document.querySelectorAll('.private-transcript .tool-head').length`,
                 ),
-                true,
-                "no rich run, retry, reaction or fork controls",
+                1,
+                "a saved tool call and its result form one card, not separate rows",
             );
-            await page.click({ selector: ".private-tool summary" });
-            await shot(page, "mobile-pane");
+            assert.equal(
+                await value(page, `!!document.querySelector('.private-transcript .tool-body')`),
+                false,
+                "tool details start collapsed",
+            );
+            await click(page, ".private-transcript .tool-head");
+            await present(page, ".private-transcript .tool-body");
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelector('.private-transcript .tool-body pre').textContent`,
+                ),
+                "PRIVATE_TOOL_RESULT",
+                "expanding the call reveals its associated saved result",
+            );
+            assert.match(
+                await value<string>(
+                    page,
+                    `document.querySelector('.private-transcript .tool-body').textContent`,
+                ),
+                /clipped/i,
+                "clipped results stay bounded snapshots instead of loading Durable entries",
+            );
+            assert.equal(
+                await value(page, `!!document.querySelector('.private-transcript .thought-body')`),
+                false,
+                "saved thinking starts collapsed",
+            );
+            await click(page, ".private-transcript .thought-head");
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelector('.private-transcript .thought-body').textContent`,
+                ),
+                "PRIVATE_SAVED_THOUGHT",
+                "saved thinking can be read locally",
+            );
+            // Copy, thought expansion and tool expansion are local controls, not Durable actions.
+            assert.deepEqual(
+                await value(
+                    page,
+                    `[...document.querySelectorAll('.private-transcript button')].filter(button => !button.matches('.tool-head, .thought-head') && button.textContent.trim() !== 'Copy').map(button => button.getAttribute('aria-label') || button.textContent.trim())`,
+                ),
+                [],
+                "no file, rich Run, full-entry load, reaction, retry, pin, discuss or fork controls",
+            );
+            await click(page, ".private-transcript .tool-head");
+            assert.equal(
+                await value(page, `!!document.querySelector('.private-transcript .tool-body')`),
+                false,
+            );
+            await click(page, ".private-transcript .thought-head");
+            assert.equal(
+                await value(page, `!!document.querySelector('.private-transcript .thought-body')`),
+                false,
+            );
+            await click(page, ".private-terminal summary");
+            assert.equal(
+                await value(page, `document.querySelector('.private-terminal').open`),
+                false,
+            );
+            await page.evaluate(`document.querySelector('.private-transcript').scrollTop = 0`);
+            await shot(page, "mobile-chat");
             await page.evaluate(`(await import('/store.js')).store.set({ drawer: true })`);
             await present(page, ".drawer .private-pane-row");
             await until(
@@ -444,15 +608,33 @@ test(
             await present(page, ".sidebar .private-pane-row");
             await click(page, ".private-view-switch button:last-child");
             await present(page, "#private-prompt");
-            await shot(page, "desktop-pane");
+            assert.deepEqual(
+                await chatAppearance(page),
+                desktopAppearance,
+                "desktop private Chat shares Durable widths and composer presentation",
+            );
+            assert.equal(
+                await value(page, `document.querySelector('.private-terminal').open`),
+                false,
+                "reopening Chat keeps the snapshot collapsed",
+            );
+            await page.evaluate(`document.querySelector('.private-transcript').scrollTop = 0`);
+            await shot(page, "desktop-chat");
             assert.equal(
                 await value(page, "document.documentElement.scrollWidth <= innerWidth"),
                 true,
             );
 
-            await page.evaluate(
-                `const field = document.querySelector('#private-prompt'); field.value = 'Keep this draft'; field.dispatchEvent(new Event('input', { bubbles: true }));`,
+            assert.equal(await value(page, `matchMedia('(pointer: coarse)').matches`), false);
+            await page.type({ selector: "#private-prompt" }, "Keep this draft");
+            await page.press("Shift+Enter");
+            assert.equal(
+                await value(page, `document.querySelector('#private-prompt').value`),
+                "Keep this draft\n",
+                "Shift+Enter inserts a newline without sending",
             );
+            assert.equal(requests.filter((item) => item.path.endsWith("/prompt")).length, 0);
+            await page.type({ selector: "#private-prompt" }, "Keep this draft");
             revision = "session-b";
             await until(
                 () =>
@@ -462,8 +644,13 @@ test(
                     ),
                 "stale revision",
             );
+            await page.press("Enter");
             await page.evaluate(`document.querySelector('.private-composer').requestSubmit()`);
-            assert.equal(requests.filter((item) => item.path.endsWith("/prompt")).length, 0);
+            assert.equal(
+                requests.filter((item) => item.path.endsWith("/prompt")).length,
+                0,
+                "both desktop Enter and form submission respect the stale-session guard",
+            );
             assert.equal(
                 await value(page, `document.querySelector('#private-prompt').value`),
                 "Keep this draft",
@@ -472,7 +659,8 @@ test(
                 `[...document.querySelectorAll('.private-composer button')].find(button => button.textContent.includes('Use draft')).click()`,
             );
             promptStatus = 409;
-            await page.evaluate(`document.querySelector('.private-composer').requestSubmit()`);
+            await page.click({ selector: "#private-prompt" });
+            await page.press("Enter");
             await until(
                 () =>
                     value(page, `document.body.textContent.includes('pane changed or Pi is busy')`),
@@ -483,12 +671,18 @@ test(
                 "Keep this draft",
             );
             promptStatus = 503;
-            await page.evaluate(`document.querySelector('.private-composer').requestSubmit()`);
+            await page.click({ selector: "#private-prompt" });
+            await page.press("Enter");
             await until(
                 () => value(page, `document.body.textContent.includes('Delivery is uncertain')`),
                 "uncertain delivery",
             );
             assert.equal(requests.filter((item) => item.path.endsWith("/prompt")).length, 2);
+            assert.equal(
+                await value(page, `document.querySelector('#private-prompt').value`),
+                "Keep this draft",
+                "uncertain delivery also retains the in-memory draft",
+            );
             assert.equal(
                 requests.find((item) => item.path.endsWith("/prompt"))?.body.revision,
                 "session-b",
@@ -535,7 +729,41 @@ test(
                 "explicit draft review after restart",
             );
             promptStatus = 200;
-            await page.evaluate(`document.querySelector('.private-composer').requestSubmit()`);
+
+            let acknowledge = () => {};
+
+            promptReply = new Promise<void>((resolve) => {
+                acknowledge = resolve;
+            });
+            await page.click({ selector: "#private-prompt" });
+            const sending = page.press("Enter");
+
+            try {
+                await until(
+                    () => requests.filter((item) => item.path.endsWith("/prompt")).length === 3,
+                    "desktop Enter reaches the guarded private endpoint",
+                );
+                await until(
+                    () => value(page, `document.querySelector('#private-prompt').disabled`),
+                    "pending private delivery disables the composer",
+                );
+                assert.equal(
+                    await value(page, `document.querySelector('#private-prompt').value`),
+                    "Keep this draft",
+                    "dispatch alone never clears a private draft",
+                );
+                await page.evaluate(`document.querySelector('.private-composer').requestSubmit()`);
+                assert.equal(
+                    requests.filter((item) => item.path.endsWith("/prompt")).length,
+                    3,
+                    "pending input is not duplicated by form submission",
+                );
+            } finally {
+                acknowledge();
+                promptReply = null;
+            }
+
+            await sending;
             await until(
                 () => value(page, `document.querySelector('#private-prompt').value === ''`),
                 "successful prompt",
@@ -544,6 +772,30 @@ test(
 
             assert.equal(prompts.length, 3);
             assert.equal(new Set(prompts.map((item) => item.body.requestId)).size, 3);
+            assert.deepEqual(
+                prompts.map((item) => ({
+                    path: item.path,
+                    method: item.method,
+                    text: item.body.text,
+                })),
+                Array.from({ length: 3 }, () => ({
+                    path: `/api/private/${encodeURIComponent(paneId)}/prompt`,
+                    method: "POST",
+                    text: "Keep this draft",
+                })),
+                "desktop Enter sends only to the selected private Pi, never Durable",
+            );
+            assert.equal(prompts.at(-1)?.body.revision, "session-after-restart");
+            assert.deepEqual(
+                durableRequests,
+                [],
+                "private rendering, local expansion and guarded sends make no Durable API requests",
+            );
+            assert.equal(
+                await value(page, `(await import('/store.js')).store.state.view.entries.size`),
+                0,
+                "private prompts never become Durable transcript entries",
+            );
             await click(page, ".sidebar .private-import");
             await present(page, "#import-share-consent");
             assert.equal(

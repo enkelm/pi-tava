@@ -6,7 +6,7 @@ Where things are in Pi Coop, for agents working on it. Internal Pocket names rem
 
 - `src/server/private-sessions.ts`: owner-only local Herdr hierarchy, pane views, guarded agent prompts and preview of import into a shared conversation. It shares transport, identity checks and the pane-operation lock with takeover.
 - `src/server/private-sessions/journal.ts`: bounded read-only display of the last persisted Pi branch, using Pocket projection and adapted Collie text helpers. Never used as executable import input.
-- `web/private.js`: owner-only Private navigation and Chat view, isolated from Durable rooms.
+- `web/private.js`: owner-only Private navigation and Chat view, isolated from Durable rooms. Chat reuses `transcript.js` read-only entries and the shared `message-box.js` presentation; private drafts and delivery stay separate.
 - `src/server/private-sessions/control.ts`: durable, opaque input admission and takeover restrictions; no private transcript storage.
 - `src/server/private-terminals.ts`: owner-authenticated one-use WebSocket tickets, native helper lifecycle, live authorization, command/queue bounds and terminal-use fencing.
 - `native/herdr-web/`, `scripts/build-herdr-web.mjs`: pinned Herdr GPUI client/protocol adapter, lockfile, notices and synthetic native tests. The helper speaks structured frames, not ANSI.
@@ -214,6 +214,8 @@ Manual refresh lives in `src/server/model-refresh.ts`, owned by `Providers.model
 PiP's `pip-window.js` handles pointer resize zones and the account/browser size preference.
 
 The menu in `sheets/menu.js` keeps `Sheet`'s focus, Escape, drag-to-close, and the sheet trail's Back behavior. Its `MenuFrame` positions it below the top bar's menu button at ≥700px, and adds arrow navigation and focus return; below that width it stays a bottom sheet. `PlacesSheet` uses the same three-column tiles.
+
+`message-box.js` provides the composer shell, auto-sizing field and send button for both Durable and Private Chat. `transcript.js` exports `TranscriptEntry`; its read-only mode shows journal entries without resolving private IDs or images through a Durable room.
 
 ## How a message travels
 

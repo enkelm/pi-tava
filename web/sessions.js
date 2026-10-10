@@ -1054,60 +1054,60 @@ export function SessionList({ compact = false, home = false }) {
                               value=${query}
                               onInput=${(event) => setQuery(event.currentTarget.value)}
                               onKeyDown=${(event) => {
-                    if (event.key !== "Escape" || query === "") {
-                        return;
-                    }
+                                  if (event.key !== "Escape" || query === "") {
+                                      return;
+                                  }
 
-                    // Taken: this Esc clears the search, not the selection.
-                    event.preventDefault();
-                    setQuery("");
-                }}
+                                  // Taken: this Esc clears the search, not the selection.
+                                  event.preventDefault();
+                                  setQuery("");
+                              }}
                           />
                           ${
-                query
-                    ? html`<button
-                          class="search-clear"
-                          aria-label="Clear"
-                          onClick=${() => setQuery("")}
-                      >
-                          <${Icon} name="close" size=${13} />
-                      </button>`
-                    : html`<span
-                              class="search-keys"
-                              title="Launcher"
-                              aria-hidden="true"
-                              onClick=${(event) => {
-                                event.preventDefault();
-                                store.set({ launcher: true, drawer: false });
-                            }}
-                          >
-                              ${APPLE ? "⌘K" : "Ctrl K"}
-                          </span>
-                          <button
-                              class="search-launcher"
-                              title="Launcher"
-                              aria-label="Open the launcher"
-                              onClick=${(event) => {
-                                event.preventDefault();
-                                store.set({ launcher: true, drawer: false });
-                            }}
-                          >
-                              <${Icon} name="command" size=${14} />
-                          </button>`
-            }
+                              query
+                                  ? html`<button
+                                        class="search-clear"
+                                        aria-label="Clear"
+                                        onClick=${() => setQuery("")}
+                                    >
+                                        <${Icon} name="close" size=${13} />
+                                    </button>`
+                                  : html`<span
+                                            class="search-keys"
+                                            title="Launcher"
+                                            aria-hidden="true"
+                                            onClick=${(event) => {
+                                                event.preventDefault();
+                                                store.set({ launcher: true, drawer: false });
+                                            }}
+                                        >
+                                            ${APPLE ? "⌘K" : "Ctrl K"}
+                                        </span>
+                                        <button
+                                            class="search-launcher"
+                                            title="Launcher"
+                                            aria-label="Open the launcher"
+                                            onClick=${(event) => {
+                                                event.preventDefault();
+                                                store.set({ launcher: true, drawer: false });
+                                            }}
+                                        >
+                                            <${Icon} name="command" size=${14} />
+                                        </button>`
+                          }
                       </label>
                       <div class="session-tabs" data-part="session-tabs" role="tablist" ref=${tabs}>
                           ${TABS.map(
-                ([key, label]) =>
-                    html`<button
-                        role="tab"
-                        aria-selected=${tab === key}
-                        class=${tab === key ? "on" : ""}
-                        onClick=${() => setTab(key)}
-                    >
-                        ${label}
-                    </button>`,
-            )}
+                              ([key, label]) =>
+                                  html`<button
+                                      role="tab"
+                                      aria-selected=${tab === key}
+                                      class=${tab === key ? "on" : ""}
+                                      onClick=${() => setTab(key)}
+                                  >
+                                      ${label}
+                                  </button>`,
+                          )}
                           <${Slide} box=${tabBar} axis="x" />
                       </div>
                       <div
@@ -1117,79 +1117,85 @@ export function SessionList({ compact = false, home = false }) {
                       >
                           ${!sessionsLoaded && html`<${LoadingSessions} />`}
                           ${
-                sessionsLoaded &&
-                shown.length === 0 &&
-                html`<div class="sessions-empty">
-                    ${archived ? "No archived sessions." : needle ? "No matches." : "No sessions yet. Start one with New."}
-                </div>`
-            }
+                              sessionsLoaded &&
+                              shown.length === 0 &&
+                              html`<div class="sessions-empty">
+                                  ${archived ? "No archived sessions." : needle ? "No matches." : "No sessions yet. Start one with New."}
+                              </div>`
+                          }
                           ${groups.map((group) => {
-                const isClosed = closed.has(group.key) && group.key !== "flat";
-                // A folded group hides its rows' marks: say when one waits for you or its run failed.
-                const trouble = isClosed
-                    ? group.rows
-                          .map((row) => sessionMark(row.session).shape)
-                          .find((shape) => shape === "waiting" || shape === "failed")
-                    : undefined;
+                              const isClosed = closed.has(group.key) && group.key !== "flat";
+                              // A folded group hides its rows' marks: say when one waits for you or its run failed.
+                              const trouble = isClosed
+                                  ? group.rows
+                                        .map((row) => sessionMark(row.session).shape)
+                                        .find((shape) => shape === "waiting" || shape === "failed")
+                                  : undefined;
 
-                return html`<section
-                    class=${`session-group ${isClosed ? "closed" : ""}`}
-                    data-part="session-group"
-                    key=${`${tab}:${group.key}`}
-                >
-                    ${
-                        group.key !== "flat" || needle
-                            ? html`<button
-                                  class="group-head"
-                                  data-part="session-group-head"
-                                  onClick=${() => group.key !== "flat" && toggleGroup(group.key)}
-                                  aria-expanded=${!isClosed}
+                              return html`<section
+                                  class=${`session-group ${isClosed ? "closed" : ""}`}
+                                  data-part="session-group"
+                                  key=${`${tab}:${group.key}`}
                               >
-                                  <span class="group-name" data-part="session-group-name">
-                                      ${
-                                        typeof group.label === "string"
-                                            ? html`<b>${group.label}</b>`
-                                            : group.label
-                                    }
-                                  </span>
                                   ${
-                                    trouble &&
-                                    html`<span
-                                        class=${`group-trouble ${trouble}`}
-                                        role="img"
-                                        aria-label=${trouble === "waiting" ? "A session needs you" : "A session failed"}
-                                        title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
-                                    ></span>`
-                                }
-                                  <span class="group-count" data-part="session-group-count">
-                                      ${group.rows.length}
-                                  </span>
-                                  ${group.key !== "flat" && html`<${Icon} name="down" size=${11} />`}
-                              </button>`
-                            : null
-                    }
-                    <div class="group-body" inert=${isClosed}>
-                        <div>
-                            ${group.rows.map(
-                                ({ session, branches }) =>
-                                    html`<${SessionRow}
-                                        key=${session.id}
-                                        session=${session}
-                                        branches=${branches}
-                                        index=${index++}
-                                        number=${numbers.get(session.id)}
-                                        needle=${needle}
-                                        selected=${selected.has(session.id)}
-                                        pressing=${pressing === session.id}
-                                        folders=${tab === "folders" && needle === ""}
-                                        onPick=${pick}
-                                        onSelect=${select}
-                                    />`,
-                            )}
-                        </div>
-                    </div>
-                </section>`;
-            })}
+                                      group.key !== "flat" || needle
+                                          ? html`<button
+                                                class="group-head"
+                                                data-part="session-group-head"
+                                                onClick=${() => group.key !== "flat" && toggleGroup(group.key)}
+                                                aria-expanded=${!isClosed}
+                                            >
+                                                <span
+                                                    class="group-name"
+                                                    data-part="session-group-name"
+                                                >
+                                                    ${
+                                          typeof group.label === "string"
+                                              ? html`<b>${group.label}</b>`
+                                              : group.label
+                                      }
+                                                </span>
+                                                ${
+                                      trouble &&
+                                      html`<span
+                                          class=${`group-trouble ${trouble}`}
+                                          role="img"
+                                          aria-label=${trouble === "waiting" ? "A session needs you" : "A session failed"}
+                                          title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
+                                      ></span>`
+                                  }
+                                                <span
+                                                    class="group-count"
+                                                    data-part="session-group-count"
+                                                >
+                                                    ${group.rows.length}
+                                                </span>
+                                                ${group.key !== "flat" && html`<${Icon} name="down" size=${11} />`}
+                                            </button>`
+                                          : null
+                                  }
+                                  <div class="group-body" inert=${isClosed}>
+                                      <div>
+                                          ${group.rows.map(
+                                              ({ session, branches }) =>
+                                                  html`<${SessionRow}
+                                                      key=${session.id}
+                                                      session=${session}
+                                                      branches=${branches}
+                                                      index=${index++}
+                                                      number=${numbers.get(session.id)}
+                                                      needle=${needle}
+                                                      selected=${selected.has(session.id)}
+                                                      pressing=${pressing === session.id}
+                                                      folders=${tab === "folders" && needle === ""}
+                                                      onPick=${pick}
+                                                      onSelect=${select}
+                                                  />`,
+                                          )}
+                                      </div>
+                                  </div>
+                              </section>`;
+                          })}
                       </div>
                   `
         }
@@ -1350,9 +1356,9 @@ export function Rail() {
                 aria-label="Private Herdr panes"
                 title="Private Herdr panes"
                 onClick=${() => {
-                store.set({ sidebarTab: "private" });
-                setPrefs({ sidebar: "open" });
-            }}
+                    store.set({ sidebarTab: "private" });
+                    setPrefs({ sidebar: "open" });
+                }}
             >
                 <${Icon} name="terminal" size=${18} />
             </button>`
@@ -1433,10 +1439,10 @@ function RailTiles() {
                 >
                     ${index < 9 ? index + 1 : initials(session.title ?? "New session")}
                     ${
-                    ((collab() && sessionUnread(session)) || isUnread(session.id)) &&
-                    session.id !== conversationId &&
-                    html`<span class="unread-dot"></span>`
-                }
+                        ((collab() && sessionUnread(session)) || isUnread(session.id)) &&
+                        session.id !== conversationId &&
+                        html`<span class="unread-dot"></span>`
+                    }
                 </button>`,
         )}
     </div>`;
@@ -1601,12 +1607,12 @@ export function RailNav({ foldable = false, folded = false }) {
     </nav>`;
 }
 
-/** The sidebar's list is this wide at least and at most; the rail beside it stays 56px. */
-const LIST_MIN = 204;
-const LIST_MAX = 464;
+/** Coop shows either its standalone session list or its folded rail, never a rail beside the list. */
+const LIST_MIN = 260;
+const LIST_MAX = 520;
 
-/** The sidebar's usual width, the rail and its list together: the one a new browser starts with (theme.js). */
-export const SIDEBAR_WIDTH = 312;
+/** The standalone sidebar's usual width. */
+export const SIDEBAR_WIDTH = 300;
 
 /** Drag the sidebar's right edge to resize its list; a double click puts it back to its usual width. */
 export function ResizeHandle() {
@@ -1623,19 +1629,14 @@ export function ResizeHandle() {
         const root = document.documentElement;
         const sidebar = event.currentTarget.parentElement;
         const box = sidebar.getBoundingClientRect();
-        // The rail and the borders, which keep their width.
-        const rest = sidebar.offsetWidth - (sidebar.querySelector(".sessions")?.offsetWidth ?? 0);
         let width = prefs().sidebarWidth;
 
         root.classList.add("resizing");
 
-        // No wider than the stylesheet lets it be: 40% of the screen.
-        const max = Math.min(LIST_MAX + rest, Math.max(SIDEBAR_WIDTH, innerWidth * 0.4));
-
         const move = (each) => {
             const across = side === "right" ? box.right - each.clientX : each.clientX - box.left;
 
-            width = Math.round(Math.min(max, Math.max(LIST_MIN + rest, across)));
+            width = Math.round(Math.min(LIST_MAX, Math.max(LIST_MIN, across)));
             root.style.setProperty("--sidebar-w", `${width}px`);
         };
 

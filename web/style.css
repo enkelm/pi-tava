@@ -689,13 +689,12 @@ kbd {
     background: var(--bg);
 }
 
-/* The sidebar: the rail and the session list beside it, cut off rather than squeezed while it folds and unfolds. Wider
- * than usual, it takes 40% of the screen at most (`sessions.js` drags to the same), so the conversation keeps room. */
+/* Coop's sidebar is a standalone list, or its folded rail. Its resize handle uses the same 260–520px bounds. */
 .sidebar {
     display: none;
-    width: min(var(--sidebar-w, 312px), max(312px, 40vw));
+    width: clamp(260px, var(--sidebar-w, 300px), 520px);
     flex: none;
-    flex-direction: row;
+    flex-direction: column;
     border-right: 1px solid var(--hair);
     background: var(--panel);
     transition: width var(--t-in) var(--ease-out);
@@ -740,7 +739,7 @@ kbd {
 
 /* The rail at the screen's edge, as the sidebar's is; the list beside it no wider than reads well, centered. */
 .home-list > .sessions {
-    max-width: 584px;
+    max-width: 640px;
     margin: 0 auto;
 }
 
@@ -792,12 +791,9 @@ kbd {
     .topbar > .icon-button:first-child {
         display: none;
     }
-    /* Folded: the rail alone, and the sidebar's border. */
+    /* Coop's numbered rail occupies the sidebar on its own. */
     :root[data-rail="on"] .sidebar {
-        width: 57px;
-    }
-    :root[data-tiling="on"][data-rail="on"] .sidebar {
-        width: calc(56px + 2 * var(--border));
+        width: 64px;
     }
 
     :root[data-tiling="on"] .layout {
@@ -3968,26 +3964,126 @@ pre.diff .del {
     border-radius: 50%;
 }
 
-/* ─── Sessions: the list beside the rail ───────────────────────── */
+/* Coop's standalone rail keeps its numbered list and footer layout. */
+.rail:not([data-part="rail"]) {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding: 0.6rem 0 0.55rem;
+    overflow-y: auto;
+    animation: fade var(--t-in) var(--ease-out);
+}
+
+.rail:not([data-part="rail"]) .rail-brand {
+    font:
+        1.7rem/1 Georgia,
+        serif;
+    color: var(--brand);
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    transition: transform var(--t-in) var(--ease-out);
+}
+
+.rail:not([data-part="rail"]) .rail-brand:hover {
+    transform: rotate(-8deg) scale(1.08);
+}
+
+.rail:not([data-part="rail"]) .rail-items {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 0.4rem 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: none;
+}
+
+.rail:not([data-part="rail"]) .rail-items .slide-y {
+    left: 0;
+    width: 2px;
+    margin-left: 0;
+    background: var(--accent);
+}
+
+.rail-foot {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    flex: none;
+}
+
+/* ─── Sessions: the standalone sidebar list ─────────────────────── */
 
 .sessions {
     flex: 1;
-    /* Narrower, as the sidebar unfolds, it is cut off rather than squeezed. */
-    min-width: 204px;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    padding: calc(env(safe-area-inset-top) + 14px) 12px calc(env(safe-area-inset-bottom) + 10px);
+    padding: calc(env(safe-area-inset-top) + 0.6rem) 0.6rem
+        calc(env(safe-area-inset-bottom) + 0.55rem);
+    gap: 0.55rem;
     container: sessions / inline-size;
 }
 
 .sessions-head {
     display: flex;
     align-items: center;
-    gap: 8px;
-    height: 32px;
-    padding-left: 4px;
+    gap: 0.15rem;
+    min-height: 40px;
+    padding: 0 0 0 0.2rem;
     flex: none;
+}
+
+.brand {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    font:
+        1.6rem/1 Georgia,
+        serif;
+    color: var(--brand);
+    margin-right: auto;
+    white-space: nowrap;
+}
+
+.brand span {
+    font: 700 1rem var(--mono);
+    color: var(--text);
+}
+
+.brand small {
+    font: 500 0.62rem var(--mono);
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: lowercase;
+}
+
+.sessions-head .new-button {
+    margin-left: 0.25rem;
+}
+
+@media (max-width: 959px) {
+    /* The list fills the screen here, so there is no sidebar to fold. */
+    .sidebar-fold {
+        display: none !important;
+    }
 }
 
 .sessions-name {
@@ -4961,6 +5057,116 @@ pre.diff .del {
     color: var(--muted);
     font-size: 0.85rem;
     animation: fade var(--t-fade) var(--ease-almost);
+}
+
+/* What to do with the selected sessions: in the tiles' place, so the list keeps its height while a drag is on. */
+.foot-top {
+    display: grid;
+}
+
+.foot-top > * {
+    grid-area: 1 / 1;
+}
+
+.foot-tiles.covered {
+    visibility: hidden;
+}
+
+.foot-top > .select-bar {
+    margin-top: 0;
+}
+
+/* The sidebar's foot: tiles for what is beside the sessions, then who is signed in. */
+.sessions-foot {
+    border-top: 1px solid var(--line);
+    padding-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    flex: none;
+}
+
+.foot-tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+}
+
+.foot-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.45rem 0.2rem 0.35rem;
+    font-size: 0.62rem;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    background: var(--card);
+    transition:
+        background-color var(--t-hover) var(--ease-out),
+        border-color var(--t-hover) var(--ease-out),
+        color var(--t-hover) var(--ease-out),
+        transform 90ms var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .foot-tile:hover {
+        color: var(--text);
+        border-color: var(--edge);
+        background: var(--card-2);
+    }
+}
+
+.foot-tile:active {
+    transform: scale(0.96);
+}
+
+.foot-tile .tile-count {
+    position: absolute;
+    top: 3px;
+    right: 4px;
+    font-size: 0.6rem;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.foot-tile.lit {
+    color: var(--accent);
+    border-color: var(--accent-line);
+}
+
+.me-row {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.35rem 0.4rem;
+    text-align: left;
+    font-size: 0.8rem;
+    color: var(--body);
+    transition: background-color var(--t-hover) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .me-row:hover {
+        background: var(--hover);
+    }
+}
+
+.me-row .me-name {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.me-row .me-role {
+    font-size: 0.66rem;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    padding: 0 0.35rem;
 }
 
 /* A session row's shape while the list loads: a title bar, pulsing one row after another. */
@@ -15213,12 +15419,6 @@ pre.gallery-code {
     border-top: 1px solid var(--line);
 }
 
-.private-cwd {
-    font-size: 11px;
-    overflow-wrap: anywhere;
-    white-space: normal;
-}
-
 .private-workspace-bar > .icon-button:first-child {
     display: inline-flex;
 }
@@ -15281,48 +15481,10 @@ pre.gallery-code {
 }
 
 .private-transcript {
-    flex: 1;
     min-height: 0;
-    overflow-y: auto;
     overflow-x: hidden;
-    padding: 16px clamp(16px, 3vw, 40px) 28px;
-    overscroll-behavior: contain;
 }
 
-.private-transcript > * {
-    max-width: 680px;
-    margin-inline: auto;
-}
-
-.private-entry {
-    padding-block: 16px;
-    border-bottom: 1px solid var(--line);
-    overflow-wrap: anywhere;
-}
-
-.private-speaker {
-    margin-bottom: 8px;
-    font-size: 11px;
-}
-
-.private-user .private-speaker {
-    color: var(--accent);
-}
-
-.private-tool {
-    margin-block: 8px;
-    border: 1px solid var(--line);
-    background: var(--card);
-}
-
-.private-tool summary {
-    min-height: 40px;
-    padding: 10px 12px;
-    cursor: pointer;
-    overflow-wrap: anywhere;
-}
-
-.private-tool pre,
 .private-terminal pre {
     padding: 12px;
     margin: 0;
@@ -15336,32 +15498,20 @@ pre.gallery-code {
 }
 
 .private-terminal {
-    margin-top: 24px;
-}
-
-.private-terminal h3 {
-    font-size: 13px;
-    margin-bottom: 6px;
-}
-
-.private-composer {
-    flex: none;
+    margin-top: 0.5rem;
     border-top: 1px solid var(--line);
-    padding: 12px 16px max(12px, env(safe-area-inset-bottom));
-    max-height: 45dvh;
-    overflow-y: auto;
 }
 
-.private-composer textarea {
-    width: 100%;
-    min-height: 68px;
-    max-height: 180px;
-    resize: vertical;
-    margin-block: 6px 8px;
-}
-
-.private-composer .button {
+.private-terminal summary {
     min-height: 40px;
+    padding-block: 0.6rem;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+    font-size: 0.8rem;
+}
+
+.private-terminal summary .muted {
+    margin-left: 0.4rem;
 }
 
 .private-composer p {

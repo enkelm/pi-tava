@@ -4,7 +4,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { goHome } from "./back.js";
 import { api, navigate, openSheet, store, uid } from "./store.js";
-import { html, Icon, Loader, Markdown } from "./ui.js";
+import { html, Icon, Loader } from "./ui.js";
+import { MessageBox, SendButton } from "./message-box.js";
+import { TranscriptEntry } from "./transcript.js";
 import {
     PrivateTerminal,
     useLiveTerminal,
@@ -493,37 +495,6 @@ export function PrivateList({ compact = false, home = false }) {
     </div>`;
 }
 
-function Entry({ entry }) {
-    if (entry.kind === "assistant") {
-        return html`<article class="private-entry">
-            <div class="private-speaker muted">Pi</div>
-            ${entry.blocks.map((block, index) =>
-                block.type === "text"
-                    ? html`<${Markdown} key=${index} text=${block.text} readOnly=${true} />`
-                    : html`<details key=${index} class="private-tool">
-                    <summary>${block.type === "thinking" ? "Thinking" : block.name}</summary>
-                    <pre>${block.type === "thinking" ? block.text : JSON.stringify(block.args, null, 2)}</pre>
-                </details>`,
-            )}
-            ${entry.error && html`<p class="error-box">${entry.error}</p>`}
-        </article>`;
-    }
-
-    if (entry.kind === "toolResult") {
-        return html`<details class="private-tool">
-            <summary>${entry.name}${entry.isError ? " · failed" : " · result"}</summary>
-            <pre>${entry.text}</pre>
-            ${entry.clipped && html`<p class="small muted">Output clipped in this snapshot.</p>`}
-        </details>`;
-    }
-
-    return html`<article class=${`private-entry ${entry.kind === "user" ? "private-user" : ""}`}>
-        <div class="private-speaker muted">${entry.kind === "user" ? entry.from || "You" : entry.name || entry.kind}</div>
-        <${Markdown} text=${entry.text || entry.summary || ""} readOnly=${true} />
-        ${entry.images > 0 && html`<p class="small muted">${entry.images} image(s) in saved history, not shown in this mirror.</p>`}
-    </article>`;
-}
-
 export function PrivatePane({ id }) {
     const wide = useDesktop();
     const { data } = useSnapshots(listing);
@@ -595,10 +566,10 @@ export function PrivatePane({ id }) {
         ${panes.map((pane) => html`<button aria-current=${pane.id === id ? "page" : undefined} onClick=${() => navigate(null, { privateId: pane.id })}>${shortLabel(pane.title, pane.agent || "Shell")}</button>`)}
     </nav>`
     }
-    ${place && html`<${PrivatePaneView} key=${place.instance.id} id=${id} nativeId=${selected?.pane.nativeId} instanceId=${place.instance.id} mode=${mode} />`}`;
+    ${place && html`<${PrivatePaneView} key=${place.instance.id} id=${id} nativeId=${selected?.pane.nativeId} instanceId=${place.instance.id} mode=${mode} onTerminal=${() => setChoice("terminal")} />`}`;
 }
 
-function PrivatePaneView({ id, mode, instanceId, nativeId }) {
+function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
     const resource = useMemo(() => snapshots(`private/${encodeURIComponent(id)}`, 2000), [id]);
     const { data, error, paused } = useSnapshots(resource);
     const [draft, setDraft] = useState("");
@@ -611,6 +582,7 @@ function PrivatePaneView({ id, mode, instanceId, nativeId }) {
     const mounted = useRef(true);
     const transcript = useRef(null);
     const terminal = useRef(null);
+    const prompt = useRef(null);
     const followTranscript = useRef(true);
     const followTerminal = useRef(true);
     const stale = Boolean(
@@ -767,68 +739,137 @@ function PrivatePaneView({ id, mode, instanceId, nativeId }) {
         }
     };
 
-    return html`    ${
-        mode === "terminal"
-            ? html`<${PrivateTerminal} id=${id} nativeId=${nativeId} instanceId=${instanceId} statusError=${error} fallback=${data?.terminal || ""} available=${Boolean(usable)} />`
-            : html`<div
+    if (mode === "terminal") {
+        return html`<${PrivateTerminal}
+            id=${id}
+            nativeId=${nativeId}
+            instanceId=${instanceId}
+            statusError=${error}
+            fallback=${data?.terminal || ""}
+            available=${Boolean(usable)}
+        />`;
+    }
+
+    const entries = data?.entries || [];
+    const results = new Map(
+        entries
+            .filter((entry) => entry.kind === "toolResult")
+            .map((entry) => [entry.callId, entry]),
+    );
+    const calls = new Set(
+        entries
+            .flatMap((entry) => entry.blocks || [])
+            .filter((block) => block.type === "toolCall")
+            .map((block) => block.id),
+    );
+    const rows = entries.filter((entry) => entry.kind !== "toolResult" || !calls.has(entry.callId));
+
+    return html`<main
         class="scroller private-transcript"
         aria-label="Private pane mirror"
         ref=${transcript}
         onScroll=${trackScroll(followTranscript)}
     >
-        ${error && html`<p class="error-box" role="alert">${error} Reconnecting to Herdr…</p>`}
-        ${paused && html`<p class="error-box" role="status">Snapshot paused. Updates resume when this page is visible and online.</p>`}
-        ${!data && !error && !paused && html`<${Loader} label="Reading private pane" />`}
-        ${
-            data &&
-            html`
-            <p class="small muted private-cwd">${data.pane.cwd}</p>
-            <p class="small muted">Saved messages from Pi's session file. The terminal snapshot below shows live output.</p>
-            ${data.warnings?.map((warning) => html`<p class="error-box small">${warning}</p>`)}
-            ${data.entries.map((entry) => html`<${Entry} key=${`${data.revision}:${entry.id}`} entry=${entry} />`)}
-            ${data.entries.length === 0 && html`<p class="muted">No saved messages. This pane is shown through its terminal snapshot.</p>`}
-            <section class="private-terminal" aria-label="Terminal snapshot">
-                <h3>Terminal snapshot</h3>
-                <p class="small muted">Captured ${new Date(data.capturedAt).toLocaleTimeString()}. Read-only.</p>
-                <pre
-                    tabindex="0"
-                    ref=${terminal}
-                    onScroll=${trackScroll(followTerminal)}
-                >${data.terminal || "No terminal output in this snapshot."}</pre>
-            </section>
-        `
-        }
-    </div>
-    <form class="private-composer" onSubmit=${(event) => {
-        event.preventDefault();
-        act("prompt");
-    }}>
-        ${data && !data.canPrompt && html`<p class="small muted">${data.reason || "This pane is read-only. Prompting is available only for a verified idle Pi."}</p>`}
-        ${
-            stale &&
-            html`<p class="error-box" role="alert">The Pi session in this pane changed. Your draft has not been sent.</p>
-            <button class="button small" type="button" onClick=${() => {
-                setDraftRevision(data.revision);
-                setMessage("Draft kept for the current session. Review it before sending.");
-            }}>Use draft for current session</button>`
-        }
-        ${
-            (data?.canPrompt || draft) &&
-            html`<label class="label" for="private-prompt">Prompt Pi in Herdr</label>
-            <textarea id="private-prompt" rows="2" value=${draft} disabled=${Boolean(pending)}
-                placeholder="Send to this Pi, not Durable"
-                onInput=${(event) => {
-                    const text = event.currentTarget.value;
-
-                    if (!draft || !text) {
-                        setDraftRevision(data?.revision ?? null);
+        <div class="transcript">
+            ${error && html`<p class="error-box" role="alert">${error} Reconnecting to Herdr…</p>`}
+            ${paused && html`<p class="error-box" role="status">Snapshot paused. Updates resume when this page is visible and online.</p>`}
+            ${!data && !error && !paused && html`<${Loader} label="Reading private pane" />`}
+            ${
+                data &&
+                html`
+                ${data.warnings?.map((warning) => html`<p class="error-box small">${warning}</p>`)}
+                ${rows.map(
+                    (entry) => html`<${TranscriptEntry}
+                    key=${`${data.revision}:${entry.id}`}
+                    entry=${entry}
+                    results=${results}
+                    readOnly=${true}
+                />`,
+                )}
+                ${entries.length === 0 && html`<p class="muted">No saved messages. Open the terminal snapshot for live output.</p>`}
+                <details class="private-terminal" onToggle=${(event) => {
+                    if (event.currentTarget.open && followTerminal.current && terminal.current) {
+                        terminal.current.scrollTop = terminal.current.scrollHeight;
                     }
 
-                    setDraft(text);
-                }}></textarea>
-            <button class="button primary small" type="submit" disabled=${!canSend}>${pending === "prompt" ? "Sending…" : "Send to Pi"}</button>`
-        }
-        ${message && html`<p class=${`small ${uncertain ? "error-box" : "muted"}`} role="status">${message}</p>`}
-    </form>`
-    }`;
+                    if (followTranscript.current && transcript.current) {
+                        transcript.current.scrollTop = transcript.current.scrollHeight;
+                    }
+                }}>
+                    <summary>Terminal snapshot <span class="small muted">Read-only · ${new Date(data.capturedAt).toLocaleTimeString()}</span></summary>
+                    <pre
+                        tabindex="0"
+                        ref=${terminal}
+                        onScroll=${trackScroll(followTerminal)}
+                    >${data.terminal || "No terminal output in this snapshot."}</pre>
+                </details>
+            `
+            }
+        </div>
+    </main>
+    <footer class="composer-wrap">
+        <form class="private-composer" onSubmit=${(event) => {
+            event.preventDefault();
+            act("prompt");
+        }}>
+            ${data && !data.canPrompt && html`<p class="small muted">${data.reason || "This pane is read-only. Prompting is available only for a verified idle Pi."}</p>`}
+            ${
+                stale &&
+                html`
+                <p class="error-box" role="alert">The Pi session in this pane changed. Your draft has not been sent.</p>
+                <button class="button small" type="button" onClick=${() => {
+                    setDraftRevision(data.revision);
+                    setMessage("Draft kept for the current session. Review it before sending.");
+                }}>Use draft for current session</button>
+            `
+            }
+            ${
+                (data?.canPrompt || draft) &&
+                html`<${MessageBox}
+                inputRef=${prompt}
+                input=${{
+                    id: "private-prompt",
+                    value: draft,
+                    disabled: Boolean(pending),
+                    placeholder: "Message this Pi…",
+                    "aria-label": "Message private Pi in Herdr",
+                    enterkeyhint: matchMedia("(pointer: coarse)").matches ? "enter" : "send",
+                    onInput: (event) => {
+                        const text = event.currentTarget.value;
+
+                        if (!draft || !text) {
+                            setDraftRevision(data?.revision ?? null);
+                        }
+
+                        setDraft(text);
+                    },
+                    onKeyDown: (event) => {
+                        if (
+                            event.key === "Enter" &&
+                            !event.shiftKey &&
+                            !event.isComposing &&
+                            !matchMedia("(pointer: coarse)").matches
+                        ) {
+                            event.preventDefault();
+                            act("prompt");
+                        }
+                    },
+                }}
+            >
+                <button class="chip" type="button" onClick=${onTerminal}>
+                    <${Icon} name="terminal" size=${14} /> Terminal
+                </button>
+                <span class="grow"></span>
+                <${SendButton}
+                    type="submit"
+                    label="Send to Pi"
+                    disabled=${!canSend}
+                    sending=${pending === "prompt"}
+                />
+            </${MessageBox}>`
+            }
+            ${message && html`<p class=${`small ${uncertain ? "error-box" : "muted"}`} role="status">${message}</p>`}
+        </form>
+        <div class="status-line" title=${data?.pane.cwd}>Only you · Herdr · Saved history</div>
+    </footer>`;
 }
