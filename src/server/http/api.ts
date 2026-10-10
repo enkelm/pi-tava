@@ -21,6 +21,8 @@ import {
 } from "../auth.ts";
 import type { User } from "../config.ts";
 import { HttpError } from "../errors.ts";
+import type { ImportRequest } from "../imports.ts";
+import type { PrivateRequest } from "../private-sessions.ts";
 import { desktopTheme, wallpaperFile } from "../omarchy.ts";
 import { runningNow } from "../running.ts";
 import { serveImage } from "./assets.ts";
@@ -441,6 +443,111 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return json(response, 200, app.spend.summary(user));
         }
 
+        if (first === "private") {
+            // Auth and CSRF apply before any socket/process/file access. No private data enters shared room events.
+            requireOwner(user);
+
+            if (second === undefined && method === "GET") {
+                return json(response, 200, await app.privateSessions.list(user));
+            }
+
+            if (second !== undefined && third === undefined && method === "GET") {
+                return json(response, 200, await app.privateSessions.pane(user, second));
+            }
+
+            if (second !== undefined && fourth === undefined && method === "POST") {
+                if (third === "terminal") {
+                    return json(
+                        response,
+                        200,
+                        await app.privateTerminals.ticket(request, second, await readJson(request)),
+                    );
+                }
+
+                if (third === "prompt") {
+                    return json(
+                        response,
+                        200,
+                        await app.privateSessions.prompt(
+                            user,
+                            second,
+                            await readJson<PrivateRequest>(request),
+                        ),
+                    );
+                }
+
+                if (third === "import-preview") {
+                    return json(
+                        response,
+                        200,
+                        await app.privateSessions.importPreview(
+                            user,
+                            second,
+                            await readJson<PrivateRequest>(request),
+                        ),
+                    );
+                }
+            }
+
+            throw new HttpError(404, "No such private session action");
+        }
+
+        if (first === "imports" && second === "active") {
+            if (third === undefined && method === "GET") {
+                return json(response, 200, await app.imports.active.list(user));
+            }
+
+            if (third === "preview" && method === "POST") {
+                return json(
+                    response,
+                    200,
+                    await app.imports.active.preview(user, await readJson(request)),
+                );
+            }
+
+            if (third === undefined && method === "POST") {
+                return json(
+                    response,
+                    200,
+                    await app.imports.active.move(user, await readJson(request)),
+                );
+            }
+        }
+
+        if (first === "imports" && second === "preview" && method === "POST") {
+            return json(
+                response,
+                200,
+                await app.imports.preview(user, await readJson<ImportRequest>(request)),
+            );
+        }
+
+        if (first === "imports" && second === undefined && method === "POST") {
+            return json(
+                response,
+                200,
+                await app.imports.create(user, await readJson<ImportRequest>(request)),
+            );
+        }
+
+        if (
+            first === "imports" &&
+            second !== undefined &&
+            third === "archive" &&
+            method === "GET"
+        ) {
+            const archive = await app.imports.archive(user, conversationId(second));
+
+            response.writeHead(200, {
+                "content-type": "application/x-ndjson; charset=utf-8",
+                "content-disposition": 'attachment; filename="original-pi-session.jsonl"',
+                "cache-control": "no-store",
+            });
+            response.end(archive);
+
+            return;
+        }
+
         if (first === "sessions" && second === undefined && method === "GET") {
             return json(response, 200, app.sessions(user));
         }
@@ -795,7 +902,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
             if (!app.supervised) {
                 throw new HttpError(
                     409,
-                    "Start Pi Pocket with bin/pi-pocket.js to restart from the app.",
+                    "Start Pi Coop with bin/pi-coop.js to restart from the app.",
                 );
             }
 

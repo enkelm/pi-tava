@@ -75,6 +75,18 @@ export async function conversationRoutes(
         return json(response, 200, { ok: true });
     }
 
+    if (third === "edit-queued" && method === "POST") {
+        const body = await readJson<{
+            submissionId?: unknown;
+            text?: unknown;
+            expectedText?: unknown;
+        } | null>(request);
+
+        await app.commands.editQueued(id, user, body?.submissionId, body?.text, body?.expectedText);
+
+        return json(response, 200, { ok: true });
+    }
+
     if (third === "chat" && method === "POST") {
         const body = await readJson<{
             text?: unknown;

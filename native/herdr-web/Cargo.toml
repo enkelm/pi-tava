@@ -1,0 +1,26 @@
+[package]
+name = "herdr-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+license = "Apache-2.0"
+description = "Bounded JSON-lines adapter for the pinned Herdr native endpoint client"
+
+[dependencies]
+herdr-client = { git = "https://github.com/penso/herdr-gpui.git", rev = "e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf" }
+herdr-protocol = { git = "https://github.com/penso/herdr-gpui.git", rev = "e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf" }
+base64 = "0.23.1"
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+strip = true
+lto = "thin"

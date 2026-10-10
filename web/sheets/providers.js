@@ -186,7 +186,7 @@ export function ProvidersSheet() {
 
     return html`<${Sheet} title="Providers" onClose=${closeSheet}>
         <p class="muted small">
-            Pi Pocket shares Pi's sign-ins (<span class="mono">~/.pi/agent/auth.json</span>). ${owner ? "" : "Only the owner can change them."}
+            Pi Coop shares Pi's sign-ins (<span class="mono">~/.pi/agent/auth.json</span>). ${owner ? "" : "Only the owner can change them."}
         </p>
         <${RefreshModels} />
         ${

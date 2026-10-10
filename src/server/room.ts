@@ -55,6 +55,7 @@ import {
     projectLive,
     projectStats,
 } from "./projection.ts";
+import { queuedInputText } from "./queued-input.ts";
 import { describeRepeat } from "./when.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -669,11 +670,11 @@ export class Room {
                 };
             }
 
+            const main = queuedInputText(item.content);
+            const text = main.text.trim() === "" ? queuedText(item.content) : main.text;
             let queued = this.#queued.get(id);
 
-            if (queued === undefined) {
-                const text = queuedText(item.content);
-
+            if (queued === undefined || queued.text !== cutQueued(text)) {
                 queued = { text: cutQueued(text), reports: reportNames(text) };
                 this.#queued.set(id, queued);
             }
@@ -683,7 +684,9 @@ export class Room {
             return {
                 id,
                 mode: item.mode,
-                text: queued.text,
+                text,
+                editableText: main.editableText,
+                hasAttachments: main.hasAttachments,
                 ...submitter,
                 // A person's message is not one of reports, whatever it starts with.
                 ...(submitter.by === undefined && queued.reports !== undefined

@@ -1,4 +1,4 @@
-// Pi Pocket web app. No build step: edit a file under web/ and every open browser reloads.
+// Pi Coop web app. No build step: edit a file under web/ and every open browser reloads.
 import { render } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { folderColor } from "./avatar.js";
@@ -30,7 +30,8 @@ import {
     togglePeeks,
 } from "./peeks.js";
 import { closePip, openPip, PipHost, pipAvailable, togglePip } from "./pip.js";
-import { Drawer, RailNav, ResizeHandle, SessionList, toSessions } from "./sessions.js";
+import { Drawer, Rail, ResizeHandle, SessionList, toSessions } from "./sessions.js";
+import { PrivatePane } from "./private.js";
 // Loaded for what it does: it gives replies' Markdown the component for pages, images, and diffs in code blocks.
 import "./rich.js";
 import { takeShare } from "./share.js";
@@ -169,10 +170,16 @@ function Topbar() {
                                         title=${view.branch?.detached ? "No branch: switch to one" : "Switch or make a branch"}
                                         onClick=${() => openSheet({ type: "branch" })}
                                     >
-                                        <${Icon} name="fork" size=${10} /><span class="title-branch-name">${branch}</span>
+                                        <${Icon} name="fork" size=${10} /><span
+                                            class="title-branch-name"
+                                            >${branch}</span
+                                        >
                                     </button>`
                                   : html`<span class="title-branch" title="The git branch">
-                                        <${Icon} name="fork" size=${10} /><span class="title-branch-name">${branch}</span>
+                                        <${Icon} name="fork" size=${10} /><span
+                                            class="title-branch-name"
+                                            >${branch}</span
+                                        >
                                     </span>`)
                           }
                           ${
@@ -410,15 +417,15 @@ function App() {
 
     useEffect(() => {
         document.title = state.view.conversation?.title
-            ? `${state.view.conversation.title} · Pi Pocket`
-            : "Pi Pocket";
+            ? `${state.view.conversation.title} · Pi Coop`
+            : "Pi Coop";
     }, [state.view.conversation?.title]);
 
     if (state.me === undefined) {
         return html`<${Boot}
-            caption=${state.notices.some((notice) => notice.level === "error") ? "waiting for the server" : "starting"}
-        />
-        <${Notices} />`;
+                caption=${state.notices.some((notice) => notice.level === "error") ? "waiting for the server" : "starting"}
+            />
+            <${Notices} />`;
     }
 
     if (state.me === null) {
@@ -426,11 +433,12 @@ function App() {
     }
 
     const inConversation = state.conversationId !== null;
+    const inPrivate = state.privateId !== null;
     const rail = prefs().sidebar === "rail";
     // The subagents board, or an extension's page, takes the conversation's place, and the panels beside it give it
     // their room.
-    const board = state.board;
-    const page = !board && state.page !== null;
+    const board = !inPrivate && state.board;
+    const page = !inPrivate && !board && state.page !== null;
     const placed = board || page;
     const browsing =
         inConversation && !placed && state.browserOpen && browserAvailable() && !state.missing;
@@ -443,41 +451,48 @@ function App() {
     const peekColumn = peeking && PEEK_WIDE.matches && !browsing && !filing && !people;
 
     return html`<div
-        class=${`layout ${inConversation || placed ? "" : "home"} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
+        class=${`layout ${inConversation || inPrivate || placed ? "" : "home"} ${inPrivate ? "private-layout" : ""} ${state.me.role === "owner" && state.sidebarTab === "private" ? "private-sidebar" : ""} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
         data-part="app"
     >
         <aside class="sidebar window" data-part="sidebar">
-            <div class="sidebar-clip">
-                <${RailNav} foldable=${true} folded=${rail} />
-                ${!rail && html`<${SessionList} />`}
-            </div>
+            ${rail ? html`<${Rail} />` : html`<${SessionList} />`}
             ${!rail && html`<${ResizeHandle} />`}
         </aside>
         <div class=${`pane window ${placed ? "boarded" : ""}`} data-part="pane">
             ${
-                board
-                    ? html`<${SubagentsBoard} />`
-                    : page
-                      ? html`<${ExtensionPage} key=${`${state.page.module}:${state.page.id}`} />`
-                      : inConversation
-                        ? html`<${Topbar} />
-                    ${
+                inPrivate
+                    ? state.me.role === "owner"
+                        ? html`<${PrivatePane} key=${state.me.id} id=${state.privateId} />`
+                        : html`<header class="topbar private-topbar">
+                              <button
+                                  class="icon-button"
+                                  aria-label="Back to sessions"
+                                  onClick=${toSessions}
+                              >
+                                  <${Icon} name="back" />
+                              </button>
+                              <span>Private panes are owner-only.</span>
+                          </header>`
+                    : board
+                      ? html`<${SubagentsBoard} />`
+                      : page
+                        ? html`<${ExtensionPage} key=${`${state.page.module}:${state.page.id}`} />`
+                        : inConversation
+                          ? html`<${Topbar} />
+                                ${
                         peeking &&
                         tiles.length > 0 &&
                         !peekColumn &&
                         html`<${PeekStrip} tiles=${tiles} />`
                     }
-                    <${Transcript} key=${state.conversationId} />
-                    ${
+                                <${Transcript} key=${state.conversationId} />
+                                ${
                         state.view.conversation &&
                         !state.missing &&
                         html`<${Composer} key=${state.conversationId} />`
                     }`
-                        : html`<div class="home-list" data-part="home-list">
-                          <${RailNav} />
-                          <${SessionList} />
-                      </div>
-                      <${Splash} />`
+                          : html`<div class="home-list"><${SessionList} home=${true} /></div>
+                                <${Splash} />`
             }
         </div>
         ${
@@ -556,7 +571,12 @@ function step(by) {
 }
 
 addEventListener("keydown", (event) => {
-    if (event.isComposing) {
+    if (event.isComposing || event.defaultPrevented) {
+        return;
+    }
+
+    // Private owns Herdr's keys. Never turn terminal input into a Durable action.
+    if (store.state.privateId !== null) {
         return;
     }
 
@@ -798,7 +818,11 @@ startEdgeBack();
 // One hand on a phone: on the conversation, swipe right to go back and left for the Files tile; swipe up from the
 // message box for the places.
 startSwipes((where) => {
-    const { conversationId, view, missing } = store.state;
+    const { conversationId, privateId, view, missing } = store.state;
+
+    if (privateId !== null) {
+        return { right: { path: iconPath("back"), label: "Private panes", run: toSessions } };
+    }
 
     // The subagents board or an extension's page in the conversation's place (or the home screen's): right goes back,
     // as its × does.

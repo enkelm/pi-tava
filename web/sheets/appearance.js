@@ -34,7 +34,7 @@ import { galleryAvailable } from "./gallery.js";
 const touch = matchMedia("(pointer: coarse)").matches;
 
 /** A theme as a card: a tiny Hyprland desktop drawn in its own colors. */
-function ThemeCard({ id, desktop = false }) {
+function ThemeCard({ id, desktop = false, index = 0 }) {
     const palette = paletteOf(id);
     const vars = varsStyle(themeVars(palette));
     // "Desktop" on a server without an Omarchy desktop shows Tokyo Night.
@@ -54,8 +54,8 @@ function ThemeCard({ id, desktop = false }) {
     return html`<button
         class=${`theme-card ${on ? "on" : ""} ${desktop ? "theme-desktop" : ""}`}
         aria-pressed=${on}
-        style=${vars}
-        title=${desktop ? "Follow the Omarchy theme of the machine Pi Pocket runs on" : palette.name}
+        style=${`${vars};--i:${index}`}
+        title=${desktop ? "Follow the Omarchy theme of the machine Pi Coop runs on" : palette.name}
         onMouseEnter=${() => matchMedia("(hover: hover)").matches && preview(id)}
         onMouseLeave=${() => preview(null)}
         onFocus=${() => preview(id)}
@@ -66,18 +66,19 @@ function ThemeCard({ id, desktop = false }) {
         ${
             desktop
                 ? html`<div class="tc-text">
-                    ${name}
-                    <div class="tc-note">
-                        Follows your desktop: change the Omarchy theme and Pi Pocket changes with it.
-                    </div>
-                    <div class="tc-dots">
-                        ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
-                    </div>
-                </div>`
+                      ${name}
+                      <div class="tc-note">
+                          Follows your desktop: change the Omarchy theme and Pi Coop changes with
+                          it.
+                      </div>
+                      <div class="tc-dots">
+                          ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
+                      </div>
+                  </div>`
                 : html`${name}
-                <div class="tc-dots">
-                    ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
-                </div>`
+                      <div class="tc-dots">
+                          ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
+                      </div>`
         }
     </button>`;
 }
@@ -103,8 +104,7 @@ function LookCard({ id }) {
         onClick=${(event) => chooseLook(id, event)}
     >
         <span class="look-name">
-            ${look.name}
-            ${look.builtIn && html`<small>built in</small>`}
+            ${look.name} ${look.builtIn && html`<small>built in</small>`}
             ${look.colors && html`<small>own colors</small>`}
         </span>
         ${look.description && html`<span class="look-detail">${look.description}</span>`}
@@ -226,9 +226,9 @@ function LookTools() {
         ${
             look && !look.builtIn
                 ? html`<button class="button" onClick=${() => attempt(() => editWithPi(id))}>
-                        <${Icon} name="sparkle" size=${14} /> Edit with Pi
-                    </button>
-                    ${
+                          <${Icon} name="sparkle" size=${14} /> Edit with Pi
+                      </button>
+                      ${
                         galleryAvailable() &&
                         html`<button
                             class="button"
@@ -237,7 +237,7 @@ function LookTools() {
                             Share…
                         </button>`
                     }
-                    <button class="button ghost" onClick=${remove}>Remove</button>`
+                      <button class="button ghost" onClick=${remove}>Remove</button>`
                 : html`<span class="muted small">Duplicate it to make a theme of your own.</span>`
         }
     </div>`;
@@ -383,9 +383,9 @@ export function AppearanceSheet() {
         ${store.state.me?.role === "owner" && html`<${LookTools} />`}
         <div class="label">Colors</div>
         <div class="theme-grid">
-            ${desktop && html`<${ThemeCard} id="desktop" desktop=${true} />`}
+            ${desktop && html`<${ThemeCard} id="desktop" desktop=${true} index=${0} />`}
             ${[...themeIds(), ...folderPaletteIds()].map(
-                (id) => html`<${ThemeCard} key=${id} id=${id} />`,
+                (id, index) => html`<${ThemeCard} key=${id} id=${id} index=${index + 1} />`,
             )}
         </div>
         ${store.state.me?.role === "owner" && html`<${ColorsTools} />`}
@@ -393,7 +393,8 @@ export function AppearanceSheet() {
         ${
             !desktop &&
             html`<p class="muted small">
-                Running Pi Pocket on an Omarchy desktop adds “Desktop”: the app follows the theme the desktop uses.
+                Running Pi Coop on an Omarchy desktop adds “Desktop”: the app follows the theme the
+                desktop uses.
             </p>`
         }
         <div class="label">Layout and motion</div>
@@ -476,13 +477,14 @@ export function AppearanceSheet() {
             <${SettingRow} title="Text size">
                 <div class="segmented">
                     ${[13, 14, 15, 16, 17].map(
-                        (size) => html`<button
-                            class=${p.text === size ? "on" : ""}
-                            aria-pressed=${p.text === size}
-                            onClick=${() => setPrefs({ text: size })}
-                        >
-                            ${size}
-                        </button>`,
+                        (size) =>
+                            html`<button
+                                class=${p.text === size ? "on" : ""}
+                                aria-pressed=${p.text === size}
+                                onClick=${() => setPrefs({ text: size })}
+                            >
+                                ${size}
+                            </button>`,
                     )}
                 </div>
             <//>

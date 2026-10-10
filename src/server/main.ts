@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Pi Pocket server. Run it through `bin/pi-pocket.js`, which restarts it when the app asks to (exit code 75).
+ * Pi Coop server. Run it through `bin/pi-coop.js`, which restarts it when the app asks to (exit code 75).
  *
- *   node bin/pi-pocket.js [--host 127.0.0.1] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
+ *   node bin/pi-coop.js [--host 127.0.0.1] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
  *
  * Under the launcher (PI_POCKET_LAUNCHER=1 with an IPC channel) the server reports `ready` instead of printing its
  * sign-in links, and takes `access` messages that say how other devices reach it (a tunnel's public URL).
@@ -58,7 +58,7 @@ function parseArgs(argv: string[]) {
             options.rotateToken = true;
         } else if (arg === "--help" || arg === "-h") {
             console.log(
-                "pi-pocket [--host 127.0.0.1] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]",
+                "pi-coop [--host 127.0.0.1] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]",
             );
             process.exit(0);
         } else {
@@ -152,7 +152,15 @@ const server = createServer((request, response) => {
         "retry-after": "2",
         "cache-control": "no-store",
     });
-    response.end("Pi Pocket is starting…");
+    response.end("Pi Coop is starting…");
+});
+
+server.on("upgrade", (request, socket, head) => {
+    if (app === undefined) {
+        socket.destroy();
+    } else {
+        app.privateTerminals.upgrade(request, socket, head);
+    }
 });
 
 // The whole request must arrive within this: long enough for a 50 MB upload on a slow phone connection. Event streams
@@ -175,7 +183,7 @@ try {
 
     console.error(
         code === "EADDRINUSE"
-            ? `Port ${options.port} is already in use on ${options.host}. Is Pi Pocket already running? Pick another with --port.`
+            ? `Port ${options.port} is already in use on ${options.host}. Is Pi Coop already running? Pick another with --port.`
             : `Could not listen on ${options.host}:${options.port}: ${(error as Error).message}`,
     );
     process.exit(CONFIG_ERROR_CODE);
@@ -243,7 +251,7 @@ if (launcher) {
         }
     }
 
-    console.log("\nPi Pocket is running.");
+    console.log("\nPi Coop is running.");
     console.log(`  data:     ${options.data}`);
     console.log(`  sessions: new sessions start in ${options.cwd}`);
     console.log(

@@ -434,9 +434,41 @@ test("long polling delivers the stream's events, resends until acknowledged, and
 test("the owner turns extensions off and on, the guard follows its switch, and the choice survives a restart", async () => {
     const module = (file: string) => app.loader.list().find((each) => each.file === file)!;
 
+    assert.deepEqual(
+        app.loader.list().map((each) => each.file),
+        [
+            "prompt.ts",
+            "artifacts.ts",
+            "browser.ts",
+            "subagents.ts",
+            "agent-teams.ts",
+            "schedules.ts",
+            "goals.ts",
+            "plan.ts",
+            "guard.ts",
+            "codemode.ts",
+            "memory.ts",
+            "pip.ts",
+            "triggers.ts",
+            "gallery.ts",
+        ],
+    );
+    assert.equal(module("browser.ts").title, "Browser");
+    assert.deepEqual(module("browser.ts").extensions[0]?.tools, ["browser"]);
+    assert.equal(module("prompt.ts").required, true);
+    assert.equal(module("codemode.ts").title, "Codemode");
+    assert.match(
+        module("codemode.ts").summary,
+        /^Codemode lets the agent write JavaScript that calls its other tools/,
+    );
+    assert.deepEqual(module("codemode.ts").extensions[0]?.tools, ["codemode"]);
+    assert.match(module("guard.ts").summary, /^Lancet Guard for Pi Coop's tools\.$/);
+    assert.deepEqual(module("subagents.ts").extensions[0]?.tools, ["subagent"]);
+
     // Lancet Guard is off until the owner turns it on.
     assert.equal(module("guard.ts").enabled, false);
     assert.ok(!app.loader.extensionNames().includes("pocket-guard"));
+    assert.match((await app.guardStatus()).detail, /off in Pi Coop/);
     await app.setExtensionEnabled(owner(), "guard.ts", true);
     assert.ok(app.loader.extensionNames().includes("pocket-guard"));
 
@@ -446,7 +478,13 @@ test("the owner turns extensions off and on, the guard follows its switch, and t
     assert.ok(!app.loader.extensionNames().includes("pocket-subagents"));
 
     await app.setExtensionEnabled(owner(), "guard.ts", false);
-    assert.equal((await app.guardStatus()).enabled, false);
+    const guard = await app.guardStatus();
+
+    assert.equal(guard.enabled, false);
+    assert.match(guard.detail, /off in Pi Coop/);
+
+    await assert.rejects(app.setExtensionEnabled(owner(), "prompt.ts", false), /required/);
+    await assert.rejects(app.setExtensionEnabled(owner(), "nope.ts", false), /no extension module/);
 
     await app.close();
     app = await open();
@@ -1069,6 +1107,21 @@ test("the owner signs another device in as the owner: owner only, once, no one n
             ).grant,
             { role: "owner" },
         );
+
+        // Its page says what it gives, asks no name, and says whom this browser stops being.
+        const page = await (
+            await fetch(`${base}/join/${invite.code}`, {
+                headers: { cookie: `pocket_auth=${guest.token}` },
+            })
+        ).text();
+
+        assert.match(
+            page,
+            /This device will sign in as you, the owner\. It gets full control of Pi Coop and of this machine\./,
+        );
+        assert.match(page, /signed in as Gwen\. It will change to the owner/);
+        assert.match(page, />Sign in as owner<\/button>/);
+        assert.doesNotMatch(page, /name="name"/);
 
         // Another site cannot spend it.
         assert.equal((await signIn(invite.code, "cross-site")).status, 403);

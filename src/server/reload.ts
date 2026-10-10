@@ -791,7 +791,7 @@ export class ExtensionLoader {
         for (const extension of extensions) {
             if (RESERVED_EXTENSIONS.test(extension.name)) {
                 throw new Error(
-                    `the extension name ${extension.name} is Pi Pocket's own: give it a name of your own`,
+                    `the extension name ${extension.name} is Pi Coop's own: give it a name of your own`,
                 );
             }
 

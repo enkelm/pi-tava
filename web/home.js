@@ -18,7 +18,7 @@ const LOGO = [
     "  ▝▀▀          ▀▀▀▘",
 ].join("\n");
 
-/** The home screen on wide screens: what fastfetch shows for a machine, for this Pi Pocket. */
+/** The home screen on wide screens: what fastfetch shows for a machine, for this Pi Coop. */
 export function Splash() {
     const { me, sessions, models, server, guard } = store.state;
     const p = prefs();
@@ -102,22 +102,22 @@ export function Splash() {
             <pre class="fetch-logo" data-part="home-logo" aria-hidden="true">${LOGO}</pre>
             <div class="fetch-info">
                 <div class="fetch-title" data-part="home-title" style=${`--i:${line++}`}>
-                    <b>${(me?.name ?? "you").toLowerCase().replace(/\s+/g, "-")}</b>@<b>pi-pocket</b>
+                    <b>${(me?.name ?? "you").toLowerCase().replace(/\s+/g, "-")}</b>@<b>pi-coop</b>
                 </div>
                 ${rows.map(
-                    ([key, value]) => html`<dl
-                        class="fetch-row"
-                        data-part="home-fact"
-                        style=${`--i:${line++}`}
-                    >
-                        <dt>${key}</dt>
-                        <dd>${value}</dd>
-                    </dl>`,
+                    ([key, value]) =>
+                        html`<dl class="fetch-row" data-part="home-fact" style=${`--i:${line++}`}>
+                            <dt>${key}</dt>
+                            <dd>${value}</dd>
+                        </dl>`,
                 )}
                 <div class="fetch-colors" data-part="home-colors" style=${`--i:${line++}`}>
                     ${colors.map(
                         (name) =>
-                            html`<span data-part="home-color" style=${`background:var(${name})`}></span>`,
+                            html`<span
+                                data-part="home-color"
+                                style=${`background:var(${name})`}
+                            ></span>`,
                     )}
                 </div>
             </div>
@@ -132,6 +132,12 @@ export function Splash() {
                     <${Icon} name="plus" size=${16} /> New session <${Keys} keys="Alt N" />
                 </button>`
             }
+            ${
+                me?.role === "owner" &&
+                html`<button class="button" onClick=${() => openSheet({ type: "import" })}>
+                    Import Pi session
+                </button>`
+            }
             <button class="button" onClick=${() => store.set({ launcher: true })}>
                 <${Icon} name="command" size=${16} /> Launcher <${Keys} keys="Mod K" />
             </button>
@@ -144,24 +150,25 @@ export function Splash() {
             html`<div class="splash-recent" data-part="home-recent">
                 <div class="splash-heading" data-part="home-heading">Jump back in</div>
                 ${recent.map(
-                    (session, index) => html`<button
-                        class="splash-row"
-                        data-part="home-recent-row"
-                        onClick=${() => navigate(session.id)}
-                    >
-                        <span class="splash-key" data-part="home-recent-key">${index + 1}</span>
-                        <span
-                            class=${`state-mark ${sessionMark(session).shape}`}
-                            data-part="session-mark"
-                            style=${`--folder:${folderColor(session.cwd)}`}
-                            aria-hidden="true"
-                        ></span>
-                        <span class="splash-title">${session.title ?? "New session"}</span>
-                        <span class="splash-meta">
-                            ${session.waiting ? html`<span class="session-needs">${canSteer() ? "needs you" : "waiting"}</span>` : session.busy ? "working · " : ""}
-                            ${!session.waiting && timeAgo(session.updatedAt)}
-                        </span>
-                    </button>`,
+                    (session, index) =>
+                        html`<button
+                            class="splash-row"
+                            data-part="home-recent-row"
+                            onClick=${() => navigate(session.id)}
+                        >
+                            <span class="splash-key" data-part="home-recent-key">${index + 1}</span>
+                            <span
+                                class=${`state-mark ${sessionMark(session).shape}`}
+                                data-part="session-mark"
+                                style=${`--folder:${folderColor(session.cwd)}`}
+                                aria-hidden="true"
+                            ></span>
+                            <span class="splash-title">${session.title ?? "New session"}</span>
+                            <span class="splash-meta">
+                                ${session.waiting ? html`<span class="session-needs">${canSteer() ? "needs you" : "waiting"}</span>` : session.busy ? "working · " : ""}
+                                ${!session.waiting && timeAgo(session.updatedAt)}
+                            </span>
+                        </button>`,
                 )}
             </div>`
         }

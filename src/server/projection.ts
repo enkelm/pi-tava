@@ -11,6 +11,8 @@ import {
     FROM_PI_ENTRY,
     FROM_PREFIX,
     type FromPiData,
+    IMPORT_META_ENTRY,
+    IMPORT_NOTE_ENTRY,
     NOTE_ENTRY,
     SHELL_ENTRY,
     type ShellData,
@@ -70,7 +72,7 @@ export type ClientEntry =
     | { id: number; kind: "reset"; text?: string }
     | ({ id: number; kind: "shell"; truncated?: number } & ShellData)
     | ({ id: number; kind: "command"; truncated?: number } & CommandData)
-    | { id: number; kind: "note"; text: string; name: string }
+    | { id: number; kind: "note"; text: string; name: string; imported?: boolean }
     | { id: number; kind: "fromPi"; title: string; file: string }
     | { id: number; kind: "other"; entryKind: string };
 
@@ -296,6 +298,10 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
             const named = files.length === 0 ? {} : { files };
             const prefixed = FROM_PREFIX.exec(text);
 
+            if ((entry.data as { imported?: boolean } | undefined)?.imported === true) {
+                return { id, kind: "user", text, images, ...named, from: "Imported user" };
+            }
+
             return prefixed === null
                 ? { id, kind: "user", text, images, ...named, ...madeAt(message) }
                 : {
@@ -310,9 +316,26 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
         }
 
         case "pi.assistant": {
-            const blocks = projectBlocks(message?.content, full);
+            let blocks = projectBlocks(message?.content, full);
             const stopReason =
                 typeof message?.stopReason === "string" ? message.stopReason : undefined;
+
+            if (
+                (entry.data as { imported?: boolean } | undefined)?.imported === true &&
+                (stopReason === "error" || stopReason === "aborted")
+            ) {
+                const partialCalls = blocks.filter((block) => block.type === "toolCall").length;
+
+                if (partialCalls > 0) {
+                    // Pi never dispatched calls from a failed generation. Do not render them as pending/running tools.
+                    blocks = blocks.filter((block) => block.type !== "toolCall");
+                    blocks.push({
+                        type: "text",
+                        text: `${partialCalls} partial tool call${partialCalls === 1 ? " was" : "s were"} not executed because this response failed or was cancelled. The original details are in the source archive.`,
+                    });
+                }
+            }
+
             const error =
                 typeof message?.errorMessage === "string" ? message.errorMessage : undefined;
 
@@ -359,6 +382,7 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
         }
 
         case "pi.system":
+        case IMPORT_META_ENTRY:
             return undefined;
 
         case FROM_PI_ENTRY: {
@@ -374,6 +398,17 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
                     .pop()!,
             };
         }
+
+        case IMPORT_NOTE_ENTRY:
+            return {
+                id,
+                kind: "note",
+                name: "Imported context",
+                imported: true,
+                text:
+                    textOfContent(message?.content) ||
+                    String((entry.data as { text?: string } | undefined)?.text ?? ""),
+            };
 
         case NOTE_ENTRY: {
             const data = entry.data as { text?: unknown; name?: unknown } | undefined;

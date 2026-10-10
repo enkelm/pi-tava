@@ -1,6 +1,6 @@
 {
-    "name": "Pi Pocket",
-    "short_name": "Pi Pocket",
+    "name": "Pi Coop",
+    "short_name": "Pi Coop",
     "description": "Durable, multiplayer Pi agents in your browser",
     "start_url": "/",
     "scope": "/",

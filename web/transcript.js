@@ -1677,7 +1677,7 @@ function ShellEntry({ entry }) {
 /** Something a person did that Pi was told about, such as undoing a file. */
 function NoteEntry({ entry }) {
     return html`<div class="note-line" id=${`entry-${entry.id}`}>
-        ${entry.name} ${entry.text}. <span class="muted">Pi was told.</span>
+        ${entry.name} ${entry.text}${entry.imported ? "" : html`. <span class="muted">Pi was told.</span>`}
     </div>`;
 }
 

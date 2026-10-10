@@ -1,5 +1,5 @@
 /**
- * Lancet Guard for Pi Pocket's tools. Before a bash, write, or edit call, the guard from the user's Pi install judges
+ * Lancet Guard for Pi Coop's tools. Before a bash, write, or edit call, the guard from the user's Pi install judges
  * it. Blocks become error results for the model. "Ask" verdicts wait for anyone in the conversation to approve or deny
  * the call in the app. The answer is stored in the call's memo, so a restart after the answer never asks twice.
  */

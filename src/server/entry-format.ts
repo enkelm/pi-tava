@@ -8,6 +8,10 @@ export const FILE_BLOCK = '<file name="';
 /** The entry kind of a note about what a person did (`Commands.note`). */
 export const NOTE_ENTRY = "pocket.note";
 
+/** Imported context notes have no asserted human author. Metadata is not a visible transcript card. */
+export const IMPORT_NOTE_ENTRY = "pocket.import-note";
+export const IMPORT_META_ENTRY = "pocket.import-meta";
+
 /** The speaker prefix Pi Pocket adds to messages when several people share the server. */
 export const FROM_PREFIX = /^\[from: ([^\]\n]{1,60})\] /;
 

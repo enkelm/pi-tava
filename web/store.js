@@ -83,6 +83,8 @@ export const store = {
         /** Sessions marked unread in this browser: an id each, until opened again. */
         unread: unreadOf(),
         conversationId: routeConversation(),
+        privateId: routePrivate(),
+        sidebarTab: location.pathname.startsWith("/private") ? "private" : "sessions",
         view: emptyView(),
         ...peopleFor(routeConversation()),
         history: null,
@@ -184,9 +186,20 @@ function opened(id) {
 opened(store.state.conversationId);
 
 function routeConversation() {
-    const match = /^\/s\/(\d+)/.exec(location.pathname);
+    const match = /^\/s\/(\d+)\/?$/.exec(location.pathname);
 
     return match ? Number(match[1]) : null;
+}
+
+/** Private pane ids are opaque and never enter a Durable room. */
+function routePrivate() {
+    const match = /^\/private\/([^/]+)\/?$/.exec(location.pathname);
+
+    try {
+        return match ? decodeURIComponent(match[1]) : null;
+    } catch {
+        return null;
+    }
 }
 
 // ─── People: presence, typing, and the side chat ───────────────────────────────────
@@ -468,6 +481,10 @@ export function signOut() {
 let source;
 
 function applyView(data) {
+    if (store.state.privateId !== null || data.conversation.id !== store.state.conversationId) {
+        return;
+    }
+
     store.set((state) => ({ view: mergeView(state.view, data), missing: null }));
 }
 
@@ -922,8 +939,13 @@ export function closeSignIn(flowId) {
     store.set((state) => (state.auth?.flowId === flowId ? { auth: null } : {}));
 }
 
-export function navigate(conversationId, { replace = false, sheet = null } = {}) {
-    const path = conversationId === null ? "/" : `/s/${conversationId}`;
+export function navigate(conversationId, { replace = false, sheet = null, privateId = null } = {}) {
+    const path =
+        privateId !== null
+            ? `/private/${encodeURIComponent(privateId)}`
+            : conversationId === null
+              ? "/"
+              : `/s/${conversationId}`;
 
     if (location.pathname !== path || store.state.conversationId !== conversationId) {
         pushRoute(path, { replace });
@@ -938,7 +960,11 @@ export function navigate(conversationId, { replace = false, sheet = null } = {})
     // Its row tapped again counts too.
     opened(conversationId);
 
-    if (store.state.conversationId === conversationId && source) {
+    if (
+        store.state.conversationId === conversationId &&
+        store.state.privateId === privateId &&
+        source
+    ) {
         if (sheet) {
             openSheet(sheet);
         }
@@ -948,6 +974,12 @@ export function navigate(conversationId, { replace = false, sheet = null } = {})
 
     store.set((state) => ({
         conversationId,
+        privateId,
+        ...(privateId !== null
+            ? { sidebarTab: "private" }
+            : conversationId !== null
+              ? { sidebarTab: "sessions" }
+              : {}),
         view: emptyView(),
         ...peopleFor(conversationId),
         browser: null,
@@ -963,11 +995,18 @@ export function navigate(conversationId, { replace = false, sheet = null } = {})
 // Back or forward to another route. Back that only closes a layer (a sheet, a panel) is back.js's.
 onRoute(() => {
     const id = routeConversation();
+    const privateId = routePrivate();
 
-    if (id !== store.state.conversationId) {
+    if (id !== store.state.conversationId || privateId !== store.state.privateId) {
         opened(id);
         store.set({
             conversationId: id,
+            privateId,
+            ...(privateId !== null
+                ? { sidebarTab: "private" }
+                : id !== null
+                  ? { sidebarTab: "sessions" }
+                  : {}),
             view: emptyView(),
             ...peopleFor(id),
             browser: null,
@@ -1046,6 +1085,8 @@ export const actions = {
     turns: (action, to) => api(`c/${current()}/turns`, { action, ...(to ? { to } : {}) }),
     setAccess: (userId, patch) => api(`users/${encodeURIComponent(userId)}`, patch),
     withdraw: (submissionId) => api(`c/${current()}/withdraw`, { submissionId }),
+    editQueued: (submissionId, text, expectedText) =>
+        api(`c/${current()}/edit-queued`, { submissionId, text, expectedText }),
     configure: (change) => api(`c/${current()}/configure`, change),
     /** The owner's model and thinking level for new sessions, `{ provider, modelId, thinkingLevel }`; null clears it. */
     setDefaultModel: (choice) => api("settings", { defaultModel: choice }),

@@ -1,10 +1,10 @@
 # Architecture
 
-How Pi Pocket's parts depend on each other, and the orderings the code relies on. [map.md](map.md) says where things are; this says what to keep when changing them.
+How Pi Coop's parts depend on each other, and the orderings the code relies on. [map.md](map.md) says where things are; this says what to keep when changing them.
 
 ## Durable truth and what memory keeps
 
-Pi Durable owns the lasting state of conversations: conversations, entries, tasks, and Pi Pocket's documents (`docs.ts`), in `pocket.sqlite`. People and settings, push subscriptions, uploads, and worktrees are files beside it ([map.md](map.md#data-pi-pocket-or-pi_pocket_dir)). What `PocketApp` keeps in memory about conversations is read back from storage:
+Pi Durable owns the lasting state of conversations: conversations, entries, tasks, and Pi Pocket's documents (`docs.ts`), in `pocket.sqlite`. People and settings, push subscriptions, uploads, and worktrees are files beside it ([map.md](map.md#data-pi-durable-app-or-pi_pocket_dir)). What `PocketApp` keeps in memory about conversations is read back from storage:
 
 - At startup, `#recover` reads each conversation's run, agent, chat, subagents, and who Pi works for in it.
 - After that, every commit goes through `#committed`, which keeps the memory up to date.
@@ -16,6 +16,38 @@ Some state lives in this process alone, and a restart forgets it. For example:
 - the browser's pages;
 - when each run ended, which peek tiles and session-list squares use, and whether its last run failed;
 - provider sign-ins in progress.
+
+## Private Herdr mirror
+
+The owner-only Private tab is a separate view of existing local Herdr processes. This is an explicit change from the earlier Durable-only plan: private work remains ordinary Pi until imported. `PrivateSessions` discovers instance/workspace/tab/pane snapshots and reads the selected pane's terminal and last persisted Pi branch. It never writes the source journal, creates a Durable conversation, or sends private content through shared room events.
+
+Private HTTP routes require the app owner before any socket/process/file access and return `no-store` responses. Browsers only poll while the private tree or pane is visible; leaving or losing owner access clears its in-memory data. The private route and draft are separate from numeric Durable conversation IDs and the shared view. Private Markdown disables Durable file/artifact actions.
+
+Prompting uses Herdr's agent-aware `agent.prompt`, not raw pane input. The server rechecks the session reference and OS foreground identity against a revision that changes on process/session replacement and app restart. Only verified idle Pi panes accept text. Requests have bounded, in-memory deduplication; uncertain sends are never automatically retried. A shared pane-operation lock prevents bridge input from overlapping an app-initiated takeover. Neither that lock nor PID checks are an atomic OS process lease, and external terminal activity remains outside the app's control.
+
+The selected conversation can become shared only after **Import & share** confirmation. This publishes under Pocket's existing authenticated/scoped access rules, not anonymously. Its full source archive remains owner-only. Chat remains Pi-specific. The separate structured Terminal mode controls shells and other agents through Herdr's native client protocol. See [private-sessions.md](private-sessions.md) and [terminal-mode.md](terminal-mode.md).
+
+### Structured terminal connections
+
+`PrivateTerminals` issues short-lived, one-use WebSocket tickets after owner, origin and an acknowledged Terminal-open request. The upgrade repeats authentication, verifies the selected terminal identity, and launches an owned native helper against a server-resolved `herdr-client.sock`. The helper uses pinned, unmodified Herdr GPUI client/protocol crates to decode and reconstruct native frames. The browser renders cells and sends semantic input; it does not run a VT parser or a second shell.
+
+A terminal connection owns an instance lease that excludes automatic takeover while attached. It does not disable guarded Chat. Chat admissions and native writes take a shared operation reservation before asynchronous checks and dispatch. This coordinates Pocket operations, not Herdr's queues or other terminal clients. Durable opaque receipts precede external input. Unknown Chat delivery remains blocked across app restart. Terminal input leaves an automatic-import restriction because a clean detach does not prove Herdr's PTY queue has drained. No terminal transcript or prompt text is stored in these receipts. The helper may be terminated during cleanup; Herdr and its pane processes are never signalled by connection cleanup.
+
+The gateway bounds frames, queues, command batches and connections and checks live owner access. The browser keeps instance connections across Private navigation and may reconnect to fresh state after a transport failure. It never replays input or pending requests. Explicit disconnect and owner-access loss suppress reconnection. Native layout operations travel over the connection-associated endpoint, not a global focus-stealing JSON request. Private WS traffic remains separate from shared room events.
+
+## Importing ordinary Pi history
+
+`app.imports.active` discovers local Herdr Pi sessions through its socket API and matches foreground PIDs to the local OS process table. Selection only previews. A confirmed move validates source compatibility and destination settings, persists a `pocket.takeovers` reservation, then rechecks the process before sending SIGTERM to that PID alone. Busy, ambiguous and child-process cases are refused. It never closes a pane, sends terminal keystrokes or escalates to SIGKILL.
+
+A browser disconnect does not cancel the move. The import transaction also commits its takeover result, so completed retries reuse that conversation. Pending retries revalidate process identity before any stop. A failed or interrupted move stays available for explicit preview/retry after reopening the app. No automatic stop is issued during daemon startup. Imported history comes from the last persisted branch, not unsaved terminal state. Discovery outside local Herdr is not implemented.
+
+`app.imports` validates a stable, bounded read of a stopped source file without opening it through Pi's mutating file loader. It converts one selected branch using the pinned Pi projection helpers. Historical entries are appended directly, never submitted as new user inputs, so they create no tasks or new usage totals. Failed and cancelled assistant attempts stay in history but are excluded from model context. Their partial tool calls were not dispatched by Pi and are shown as an explanatory note rather than pending tool cards. Missing results from actual tool rounds still block import.
+
+One harness commit creates the conversation and agent configuration, appends history, stores the complete UTF-8 source in `pocket.imported-session`, writes the session catalogue and adds a source-hash/leaf key to `pocket.imports`. A failed commit publishes none of them. A retry finds the same conversation, even after restart.
+
+These new document kinds do not alter existing stored kinds. The archive document is not in `ROOM_DOCS`; clients retrieve it through an owner-only download route. Imported user entries carry a display label rather than an invented author mapping, so the first new submission establishes whose work Pi does through the usual attribution path.
+
+Imports default to `SessionMeta.ownerOnly` for compatibility. Explicit `visibility: "shared"` publishes the selected conversation using existing Pocket access rules. `canSee` checks the owner-only flag on the root session, session lists use the same check, and app-created forks propagate it. Scoped users retain their session restrictions. The source archive remains owner-only after sharing. General membership editing remains separate work.
 
 ## Who owns what
 
@@ -215,6 +247,7 @@ What a browser shows is its person's choice of theme (`look`) and colors (`theme
 **Contracts with the server.**
 
 - Event names and shapes (`hello`, `view`, `chat`, `peek`, `subagents`, `ext`, …) and the sheet types the server names (`sheet: "chat"`).
+- Queued input edits use `edit-queued` with the submission ID, new text and expected previous text. The server checks access and edits `pi.inbox` in one commit, retaining the submission, order, mode and non-text content. A boundary that already placed the message or a conflicting edit rejects the save. The composer keeps edits separate from its persisted draft and restores that draft after saving or cancelling. Queue disclosure is local UI state; collapsing the list does not pause or change pending submissions.
 - The `pocket.*` keys in local and session storage.
 - Extensions' API: `web` on the server and `pocket` in the browser, at `POCKET_API`. Modules outside this repository depend on them: add to them freely, and change what they do only with a new version.
 - `ATTACHMENTS_HEADING` and `splitAttachments` (which also reads the form sent before 0.14.0), which `ui.js` repeats from `entry-format.ts`.

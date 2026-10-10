@@ -85,7 +85,7 @@ export function createHandler(options: HttpOptions) {
             }
 
             // The web app: index.html for app routes, files from web/ otherwise.
-            if (parts.length === 0 || parts[0] === "s") {
+            if (parts.length === 0 || parts[0] === "s" || parts[0] === "private") {
                 return serveApp(response);
             }
 

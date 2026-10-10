@@ -1,8 +1,8 @@
 /**
- * What people ask of Pi: start and rename sessions, send messages (steer or queue), stop, withdraw, and change the
- * model, thinking level, or folder of a conversation; compact or reset its context and set its instructions; fork it,
- * or send a message again; set plan mode, a goal, or scheduled messages; and remove a session's worktree. Every
- * command checks who may do it, and changes others should know about become activity lines in the session's chat.
+ * What people ask of Pi: start and rename sessions, send messages (steer or queue), edit queued input, stop, withdraw,
+ * and change a conversation's model, thinking level, or folder; compact or reset its context and set its instructions;
+ * fork it or send a message again; set plan mode, a goal, or scheduled messages; and remove a session's worktree.
+ * Every command checks access; changes others should know about become activity lines in the session's chat.
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
@@ -23,12 +23,15 @@ import {
     type ConversationId,
     defineTask,
     type EntryId,
+    InboxDoc,
     LiveDoc,
     type ModelRef,
     type SettledSubmissionRecord,
     type SubmissionId,
+    type SubmissionRecord,
     type Task,
     type TaskRuntime,
+    type Tx,
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
@@ -59,6 +62,7 @@ import { writePiSession } from "./pi-sessions.ts";
 import { snippet } from "./projection.ts";
 import { globalModelSettings, projectModelDefault } from "./project-model.ts";
 import { expandPromptTemplate, expandSkillCommand, unwrapSkill } from "./prompts.ts";
+import { queuedInputText } from "./queued-input.ts";
 import { clientKey, ownRequest, requestFor } from "./requests.ts";
 import { type Resend, resendContent, resendRequest, ResendTask, userContent } from "./resend.ts";
 import { whyUnanswered } from "./subagent-runs.ts";
@@ -139,6 +143,11 @@ const MAX_INSTRUCTIONS = 8000;
 
 /** Where a new session works: a folder, and the worktree it is in when the session has one of its own. */
 type Place = { cwd: string; worktree?: Worktree; skipped: string[] };
+
+/** Pi Durable 1.0.2 exposes this transaction read at runtime but omits it from the public Tx type. */
+type SubmissionTx = Tx & {
+    submission(id: SubmissionId): Promise<SubmissionRecord | undefined>;
+};
 
 /** An entry id from a request, or a 400. */
 function entryIdOf(value: unknown): number {
@@ -239,6 +248,8 @@ async function followed(
                         ? "left"
                         : "sent";
             }
+
+            return undefined;
         }, context);
 
         return found;
@@ -1124,6 +1135,90 @@ export class Commands {
         }, context);
     }
 
+    /** Edit a queued input in place; a stale save conflicts unless its text is already the saved text. */
+    async editQueued(
+        id: ConversationId,
+        user: User,
+        submissionId: unknown,
+        text: unknown,
+        expectedText: unknown,
+    ): Promise<void> {
+        const app = this.#app;
+
+        app.requireSee(user, id);
+        await app.requireDriver(id, user);
+
+        if (
+            typeof submissionId !== "number" ||
+            !Number.isSafeInteger(submissionId) ||
+            submissionId < 0
+        ) {
+            throw new HttpError(400, "submissionId must be a submission id");
+        }
+
+        if (typeof text !== "string" || typeof expectedText !== "string") {
+            throw new HttpError(400, "text and expectedText are required");
+        }
+
+        if (text.includes(ATTACHMENTS_HEADING)) {
+            throw new HttpError(400, "text must not contain the attached files heading");
+        }
+
+        const queuedId = submissionId as unknown as SubmissionId;
+
+        await app.harness.commit(async (tx) => {
+            const record = await (tx as SubmissionTx).submission(queuedId);
+
+            if (record === undefined || record.conversationId !== id) {
+                throw new HttpError(404, "No such queued input");
+            }
+
+            if (record.status !== "queued") {
+                throw new HttpError(409, "This input is no longer queued");
+            }
+
+            if (record.type !== "input") {
+                throw new HttpError(409, "Only queued input can be edited");
+            }
+
+            const inbox = await tx.doc(InboxDoc, id);
+            const item = inbox.items.find((each) => each.id === queuedId);
+
+            if (item === undefined) {
+                throw new HttpError(409, "This input is no longer queued");
+            }
+
+            if (item.mode === "write") {
+                throw new HttpError(409, "Only queued input can be edited");
+            }
+
+            const main = queuedInputText(item.content);
+
+            if (text.trim() === "" && !main.hasAttachments) {
+                throw new HttpError(400, "Nothing to send");
+            }
+
+            if (main.editableText === text) {
+                return;
+            }
+
+            if (main.editableText !== expectedText) {
+                throw new HttpError(
+                    409,
+                    "This queued input was edited. Open it again before saving.",
+                );
+            }
+
+            const content = main.replace(text);
+
+            if (queuedInputText(content).editableText !== text) {
+                throw new HttpError(400, "text must not be interpreted as stored message metadata");
+            }
+
+            item.content = content;
+        }, context);
+    }
+
     /** Take back a queued message. Anyone may take back their own; someone else's needs the right to drive. */
     async withdraw(id: ConversationId, user: User, submissionId: number): Promise<string> {
         const app = this.#app;
@@ -1876,6 +1971,7 @@ export class Commands {
                 updatedAt: now,
                 createdBy: user.id,
                 forkedFrom: { id: Number(id), ...(at === undefined ? {} : { entryId: at }) },
+                ...(app.sessionMeta(app.rootOf(id))?.ownerOnly === true ? { ownerOnly: true } : {}),
                 ...(place.worktree === undefined ? {} : { worktree: place.worktree }),
             };
 

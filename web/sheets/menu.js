@@ -152,22 +152,23 @@ function PlacesGrid({ changes = null }) {
 
     return html`<nav class="places" aria-label="Places">
         ${places.map(
-            (place) => html`<button
-                key=${place.id}
-                type="button"
-                class=${`place ${place.on ? "on" : ""}`}
-                data-place=${place.id}
-                aria-label=${place.count > 0 ? `${place.label}, ${place.count} ${place.counted ?? ""}`.trim() : place.dot ? `${place.label}, ${place.dotLabel ?? "a page open"}` : place.label}
-                aria-pressed=${place.on === undefined ? undefined : place.on ? "true" : "false"}
-                onClick=${place.run}
-            >
-                <span class="place-icon badge-host">
-                    <${Icon} name=${place.icon} size=${20} />
-                    ${place.count > 0 && html`<span class="badge">${place.count}</span>`}
-                    ${place.dot && html`<span class="browser-dot" aria-hidden="true"></span>`}
-                </span>
-                <span class="place-label">${place.label}</span>
-            </button>`,
+            (place) =>
+                html`<button
+                    key=${place.id}
+                    type="button"
+                    class=${`place ${place.on ? "on" : ""}`}
+                    data-place=${place.id}
+                    aria-label=${place.count > 0 ? `${place.label}, ${place.count} ${place.counted ?? ""}`.trim() : place.dot ? `${place.label}, ${place.dotLabel ?? "a page open"}` : place.label}
+                    aria-pressed=${place.on === undefined ? undefined : place.on ? "true" : "false"}
+                    onClick=${place.run}
+                >
+                    <span class="place-icon badge-host">
+                        <${Icon} name=${place.icon} size=${20} />
+                        ${place.count > 0 && html`<span class="badge">${place.count}</span>`}
+                        ${place.dot && html`<span class="browser-dot" aria-hidden="true"></span>`}
+                    </span>
+                    <span class="place-label">${place.label}</span>
+                </button>`,
         )}
     </nav>`;
 }
@@ -308,9 +309,7 @@ function MenuFrame({ title, children }) {
     };
 
     return html`<div class="nav-menu-host" data-part="menu" ref=${host} onKeyDown=${onKey}>
-        <${Sheet} title=${title} onClose=${closeSheet} className="nav-menu">
-            ${children}
-        <//>
+        <${Sheet} title=${title} onClose=${closeSheet} className="nav-menu"> ${children} <//>
     </div>`;
 }
 
@@ -473,6 +472,15 @@ export function MenuSheet({ places = true }) {
             }
         </div>
         ${
+            session &&
+            conversation.imported &&
+            me?.role === "owner" &&
+            html`<a class="list-item" href=${`/api/imports/${conversation.id}/archive`} download>
+                <span>Download original Pi session</span>
+                <span class="muted small">owner-only source archive</span>
+            </a>`
+        }
+        ${
             view.subagents.length > 0 &&
             html`<div class="group">
                 <div class="group-title">Subagents</div>
@@ -487,6 +495,7 @@ export function MenuSheet({ places = true }) {
         }
         <div class="group">
             <div class="group-title">App</div>
+            ${me?.role === "owner" && item("Import Pi session", () => openSheet({ type: "import" }), "a stopped session on this server")}
             ${item("Appearance", () => openSheet({ type: "appearance" }), lookLabel())}
             ${!touch && item("Keyboard shortcuts", () => openSheet({ type: "shortcuts" }), "?")}
             ${

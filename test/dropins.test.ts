@@ -213,6 +213,7 @@ test("a drop-in cannot take a name Pi Pocket keeps: it is refused", async () => 
 
     // Lancet Guard's name, while the guard is off: turning it on later would replace the drop-in, and the drop-in
     // turned off would remove the guard.
-    await refused("guard-twin.ts", named("pocket-guard"), /pocket-guard is Pi Pocket's own/);
+    await refused("guard-twin.ts", named("pocket-guard"), /pocket-guard is Pi Coop's own/);
+    await refused("my-tools.ts", named("coding-tools"), /coding-tools is Pi Coop's own/);
     await refused("my-bash.ts", named("my-bash", "bash"), /bash is a built-in tool's/);
 });

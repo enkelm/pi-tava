@@ -1,0 +1,81 @@
+# Structured Herdr Terminal mode
+
+Structured Terminal is implemented, with the parity limits listed below. The goal is Herdr GPUI's terminal and navigation behavior in the browser, not a claim that every native feature already works. The user chose this approach over the smaller ANSI/xterm bridge.
+
+## Desktop and mobile
+
+Private desktop views default to Terminal. The sidebar follows GPUI's compact Spaces/workspaces and Agents lists; tabs belong above the terminal area. Desktop operation is keyboard-first. An action dropdown must not replace Herdr's bindings. A shortcuts reference can explain bindings and browser limits.
+
+Mobile defaults to agent Chat. Terminal remains available, with a mobile-only bottom helper bar. Do not squeeze a desktop split layout into a phone or make a mobile user operate every agent through terminal keystrokes. Public sessions keep Pocket's existing interface.
+
+Opening Terminal connects automatically. The user chose this persistent behavior over the initial Connect confirmation screen. Keep one connection per opened Herdr instance across pane, tab and Chat navigation. Background views retain the connection and use `client_shell.surface.set` to suspend unnecessary frames. Wait for its response before considering surface interest changed. Transport loss can reconnect to fresh state, never replay old keystrokes or requests. Explicit disconnect and owner-access loss stop reconnection. Browsers, especially iOS in the background, can still suspend or close a socket.
+
+Connecting can resize shared panes or resume a pending agent. Explain this in compact status/help text rather than a blocking banner. Closing the connection detaches the web client; it does not stop the shell or Pi. Closing a pane, tab or workspace is a separate, confirmed operation and is never an import side effect.
+
+## Implementation
+
+```text
+owner browser
+  -> authenticated, origin-bound one-use WebSocket ticket
+  -> Node private terminal gateway
+  -> owned native helper child with JSON-line stdin/stdout
+  -> pinned Herdr GPUI client and structured binary endpoint
+  -> existing Herdr daemon and PTYs
+```
+
+`src/server/private-terminals.ts` owns connection tickets, live authorization, target validation, queue bounds and helper lifetimes. `POST /api/private/:id/terminal` requires the owner, `X-Pocket: 1`, valid geometry and `acknowledged: true`. It returns a 30-second ticket for `/api/private-terminal`. The upgrade checks the current owner credential, exact origin and the ticket before touching an endpoint. Tickets are consumed once. A selected pane's terminal identity is checked again before launch.
+
+The server derives `herdr-client.sock` from its own discovery result. A browser cannot choose a filesystem socket or executable. The endpoint must be a same-owner socket. The gateway launches the helper with an argument array, never a shell command.
+
+`native/herdr-web` reuses `herdr-client` and `herdr-protocol` from Herdr GPUI revision `e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf`. Cargo.lock pins transitive dependencies. The native client owns binary framing, handshake, boot/projection checks, patch reconstruction, graphics decoding and ordered writes. See its [README](../native/herdr-web/README.md) and [JSON contract](../native/herdr-web/interface.ts).
+
+`web/terminal-grid.js` renders structured cells, cursor and graphics using browser APIs. It sends semantic keys, committed text, paste and mouse events. There is no browser VT parser, xterm.js or libghostty dependency. Private frame data never enters a shared Durable room or browser storage.
+
+## Build
+
+The pinned Rust crates require Rust 1.96. With the named toolchain installed:
+
+```sh
+npm run build:terminal
+npm run test:terminal-native
+```
+
+The script uses the named toolchain without changing the global default. The result is `native/herdr-web/target/release/herdr-web`. A missing helper produces a build instruction rather than falling back to raw shell commands or a different transport. Production server changes still require an owner-requested restart after validation. Do not restart the server during an agent's tool call.
+
+## Safety and input semantics
+
+- At most four terminal connections and sixteen pending tickets. Input/output have explicit size and queue bounds; a slow connection closes rather than skipping dependent protocol data or replaying input.
+- Owner access is checked for every command/event and on a periodic heartbeat. Token rotation closes a live connection.
+- Only supported native methods are forwarded. Targets must belong to the connection's current snapshot. Configured commands must be advertised by that Herdr instance.
+- Terminal mode intentionally controls shells and non-Pi applications. It does not promise that input reaches one previously identified Pi PID.
+- A helper queue admission is not an acknowledgement that a foreground process consumed input. No command is automatically retried or replayed after reconnect.
+- The app holds an instance lease against automatic takeover while its terminal client lives. This does not prevent guarded Chat. Native writes and active Chat submissions use a shared operation lock, but separate Herdr transports still provide no atomic PTY-delivery guarantee. It persists an import restriction before input-capable commands because native keyboard input has no PTY-drain acknowledgement. Disconnecting or restarting Pocket cannot clear that restriction. Exit Pi directly and use stopped-file import when automatic takeover is blocked.
+- Unknown Chat prompt delivery has a separate durable receipt and blocks further Chat sends as well as takeover. Receipts store opaque identifiers and timestamps, never transcript or prompt text.
+- Clipboard writes and links require an explicit user action. Never open URLs, read local paths or execute instructions from terminal output. PNG clipboard input is bounded to 8 MiB and 4096 by 4096 pixels in the gateway.
+
+## Parity and verification
+
+| Area               | Current implementation and limits                                                                                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Transport          | Pinned structured client, full/patch reconstruction, exact large identifiers, images and popup frames. Synthetic binary tests cover these separately from the browser gateway.     |
+| Desktop navigation | Keyboard bindings, native workspace/tab/pane navigation and a retained instance connection. HTTP discovery includes native navigation IDs alongside opaque route IDs.              |
+| Focus and mouse    | Navigation retains typing focus. First-click input does not need an activation click. Browser-side activation borders are removed; Chat, dialogs and IME retain their focus rules. |
+| Recovery           | Fresh authenticated connection after transport failure. No old keys, requests, composition or pending image paste may cross the connection epoch.                                  |
+| Rendering          | Structured colors, styles, cursors, selection, wide cells and bounded graphics. Browser font shaping differs from GPUI; native exact `cell_widths` are not currently emitted.      |
+| Graphics controls  | RGB/RGBA/PNG display and explicit PNG paste. Inline graphics controls remain unsupported.                                                                                          |
+| Layout controls    | Native focus, split, zoom and tab/workspace actions. Dragging split dividers and scrollbars is not implemented.                                                                    |
+| Key profiles       | GPUI defaults and the supported normalized server profile, including prefix chords. Arbitrary TOML and GPUI-local configuration files are not imported.                            |
+| Native-only UI     | Browser-reserved keys, native windows and native search/worktree dialogs do not have full parity.                                                                                  |
+| Mobile             | Chat-first Pi workflow and a Terminal helper bar. Chromium phone-size checks pass; real iOS Safari remains unverified.                                                             |
+
+The implementation needs separate checks for terminal cells and styles, wide/combining text, cursor shapes, splits and tabs, popup input, mouse-aware TUIs, selection/search, graphics placement, clipboard, configured chord bindings, theme changes, geometry ownership and disconnect behavior. Passing transport tests alone does not prove those interactions.
+
+Browser-reserved shortcuts cannot be guaranteed. In particular, a web client must not silently replace Cmd bindings with Ctrl bindings on Linux and steal terminal Ctrl+C/Ctrl+D behavior. Match the published Herdr key profile where supported, preserve terminal keys, and disclose unsupported commands.
+
+iOS Safari is a target. Canvas, WebSockets and normal text input avoid a WebGPU or WASM-thread requirement, but IME, touch selection, hardware keyboards, clipboard permissions and keyboard viewport changes still need real iPhone/iPad testing. Mobile-sized Chromium is not Safari verification.
+
+Tests use generated frames, synthetic Unix endpoints, mock models and isolated browser profiles. Development tests have not attached to, typed into, stopped or imported personal Herdr panes. User-provided live screenshots are visual evidence, not synthetic test fixtures, and must not be copied into the repository when they contain credentials. After connection coordination, native navigation IDs and rejected-upgrade socket cleanup, 79 focused backend/import tests passed. The native helper passed 19 tests. A completed full run had 361 tests: 353 passed and eight failed. Six failures were inherited; the two new failures concerned navigation focus and overlapping Private reads. The combined browser/renderer run passed all 20 tests after those fixes.
+
+The final full regression run completed with **372 tests, 365 passed, seven failed, zero skips or cancellations**. Every Private/terminal test passed. The seven failures consist of the six previously reproduced upstream failures and an additional schedule-attribution ordering failure. That ordering failure also reproduced in the untouched `d01f763b02f06ff6144d4366eb966a76dbb35577` baseline when running its full `schedules.test.ts`; it passed in isolation. Do not report the full suite as green.
+
+Evidence: `/tmp/pi-terminal-all-tests-verified.log`, `/tmp/pi-terminal-native-verified.log`, `/tmp/pi-terminal-backend-final.log`, and `/tmp/pi-upstream-schedule-full.log`. The design detector found nine existing public-style warnings and none in the changed Private UI. Browser captures use synthetic data. A subsequent test-fixture correction clips generated demo text to each split before composing the root frame; it does not change production code. After that correction, the final combined import, Private, terminal, renderer and documentation checks passed **107/107**, with no skips or cancellations. TypeScript, repository ESLint, edited browser-JS syntax checks and `git diff --check` also passed. Final synthetic captures are in `/tmp/private-terminal-final/`; the focused log is `/tmp/pi-terminal-focused-verified.log`.

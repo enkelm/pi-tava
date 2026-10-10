@@ -347,15 +347,175 @@ function WatchBar() {
     </div>`;
 }
 
+/** Long queues stay out of the way until hovered, opened, or used from the keyboard. */
+function QueuedMessages({ inbox, editing, sending, blocked, onEdit, conversationId }) {
+    // The queue holds only the start of a message; tap its preview to wrap it.
+    const [reading, setReading] = useState(null);
+    const [pinned, setPinned] = useState(false);
+    const [hovered, setHovered] = useState(false);
+    const [focused, setFocused] = useState(false);
+    const root = useRef(null);
+    const toggle = useRef(null);
+    const collapsible = inbox.length >= 3;
+    const expanded = !collapsible || editing !== null || pinned || hovered || focused;
+    const listId = `queued-inbox-${conversationId ?? "home"}`;
+    const { me, users } = store.state;
+    const queuedBy = (item) =>
+        item.by === undefined
+            ? ""
+            : item.by === me?.id
+              ? " · you"
+              : ` · ${users.find((user) => user.id === item.by)?.name ?? "someone"}`;
+
+    useEffect(() => {
+        if (!collapsible) {
+            setPinned(false);
+        }
+    }, [collapsible]);
+    // Removing a focused row does not always fire blur, so don't leave the queue stuck open afterward.
+    useEffect(() => {
+        if (!root.current?.querySelector(".inbox")?.contains(document.activeElement)) {
+            setFocused(false);
+        }
+    }, [inbox]);
+    useEffect(() => {
+        if (!pinned || editing !== null) {
+            return;
+        }
+
+        const outside = (event) => {
+            if (!root.current?.contains(event.target)) {
+                setPinned(false);
+                setHovered(false);
+                setFocused(false);
+            }
+        };
+
+        document.addEventListener("pointerdown", outside, true);
+
+        return () => document.removeEventListener("pointerdown", outside, true);
+    }, [pinned, editing]);
+
+    const close = () => {
+        setPinned(false);
+        setHovered(false);
+        setFocused(false);
+    };
+
+    const keyDown = (event) => {
+        if (
+            event.key === "Escape" &&
+            !event.isComposing &&
+            event.keyCode !== 229 &&
+            collapsible &&
+            expanded &&
+            editing === null
+        ) {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+            toggle.current?.focus();
+        }
+    };
+
+    return html`<div
+        class="queue"
+        ref=${root}
+        onPointerEnter=${(event) => {
+            if (event.pointerType === "mouse" && matchMedia("(hover: hover)").matches) {
+                setHovered(true);
+            }
+        }}
+        onPointerLeave=${() => setHovered(false)}
+        onKeyDown=${keyDown}
+    >
+        <div
+            class="inbox"
+            id=${listId}
+            hidden=${!expanded}
+            onFocusIn=${() => setFocused(true)}
+            onFocusOut=${(event) => setFocused(event.currentTarget.contains(event.relatedTarget))}
+        >
+            ${inbox.map(
+                (item) => html`<div
+                    class=${`queued ${editing?.id === item.id ? "editing" : ""}`}
+                    key=${item.id}
+                >
+                    <span class="queued-mode">
+                        ${queuedReports(item) ? queuedMode(item) : item.mode === "steer" ? "Steer" : item.mode === "followUp" ? "Queued" : "Note"}
+                        <span class="muted">${queuedBy(item)}</span>
+                    </span>
+                    <button
+                        class=${`queued-text ${reading === item.id ? "open" : ""}`}
+                        aria-expanded=${reading === item.id}
+                        onClick=${() => setReading(reading === item.id ? null : item.id)}
+                    >
+                        ${queuedText(item)}
+                    </button>
+                    ${
+                        canSteer() &&
+                        !blocked &&
+                        typeof item.editableText === "string" &&
+                        html`<button
+                            class="icon-button small"
+                            aria-label="Edit queued message"
+                            title="Edit queued message"
+                            disabled=${sending || editing !== null}
+                            onClick=${() => onEdit(item)}
+                        >
+                            <${Icon} name="pencil" size=${14} />
+                        </button>`
+                    }
+                    ${
+                        canSteer() &&
+                        (!blocked || item.by === me?.id) &&
+                        html`<button
+                            class="icon-button small"
+                            aria-label=${queuedReports(item) ? "Discard these reports" : "Withdraw"}
+                            title=${queuedReports(item) ? "Discard these reports: Pi will not get them" : "Withdraw queued message"}
+                            disabled=${sending || editing?.id === item.id}
+                            onClick=${() => attempt(() => actions.withdraw(item.id))}
+                        >
+                            <${Icon} name="close" size=${14} />
+                        </button>`
+                    }
+                </div>`,
+            )}
+        </div>
+        ${
+            collapsible &&
+            html`<button
+                class="queue-toggle"
+                ref=${toggle}
+                aria-label=${`${expanded ? "Hide" : "Show"} ${inbox.length} queued messages`}
+                aria-expanded=${expanded}
+                aria-controls=${listId}
+                disabled=${editing !== null}
+                onClick=${() => {
+                    if (expanded) {
+                        close();
+                    } else {
+                        setPinned(true);
+                    }
+                }}
+            >
+                <span class="grow">${inbox.length} queued messages</span>
+                <span>${expanded ? "Hide" : "Show"}</span>
+                <${Icon} name="chevron" size=${14} />
+            </button>`
+        }
+    </div>`;
+}
+
 export function Composer() {
     const { view, conversationId } = store.state;
     const historyScope = { person: store.state.me?.id, conversation: conversationId };
     const [text, setText] = useState(() => drafts.get(conversationId));
     const [files, setFiles] = useState([]);
     const [steer, setSteer] = useState(true);
-    // The queued message tapped open, wrapped: one line each until then. The queue holds only a message's start.
-    const [reading, setReading] = useState(null);
     const [sending, setSending] = useState(false);
+    // Queued edits never replace the persisted draft or its files and paste placeholders.
+    const [editing, setEditing] = useState(null);
     // Slash command suggestions: the highlighted one, and whether Escape hid the list.
     const [pick, setPick] = useState(0);
     const [hideCommands, setHideCommands] = useState(false);
@@ -440,7 +600,7 @@ export function Composer() {
     const insert = store.state.composerInsert;
 
     useEffect(() => {
-        if (!insert || insert.n <= insertedUpTo) {
+        if (editing || !insert || insert.n <= insertedUpTo) {
             return;
         }
 
@@ -471,7 +631,7 @@ export function Composer() {
             element.focus();
             element.setSelectionRange(element.value.length, element.value.length);
         });
-    }, [insert?.n]);
+    }, [insert?.n, editing !== null]);
     useEffect(() => {
         const fit = () => fitBox(box.current);
 
@@ -484,38 +644,46 @@ export function Composer() {
     const update = (value, at = value.length) => {
         setText(value);
         setCaret(at);
-        drafts.set(conversationId, value);
+
+        if (!editing) {
+            drafts.set(conversationId, value);
+        }
+
         setPick(0);
 
         if (!value.startsWith("/") || value === "/") {
             setHideCommands(false);
         }
 
-        if (value.startsWith("/")) {
+        if (!editing && value.startsWith("/")) {
             loadTemplates();
         }
 
-        // A command is not a message to Pi: no "typing to Pi" for it.
-        typing(value.trim() === "" || value.startsWith("/") ? null : "pi");
+        // A queued edit is not a new message to Pi, and neither is a command.
+        typing(editing || value.trim() === "" || value.startsWith("/") ? null : "pi");
     };
 
     // Ctrl+R: what was sent before that has the words in the box.
     const recalled = searching ? searchHistory(text, historyScope) : [];
     const chosenRecall = recalled[Math.min(pick, recalled.length - 1)];
-    const suggestions = hideCommands || searching ? [] : suggestCommands(text);
+    const suggestions = editing || hideCommands || searching ? [] : suggestCommands(text);
     const chosen = suggestions[Math.min(pick, suggestions.length - 1)];
-    const parsed = parseCommand(text);
-    const template = parsed ? null : parseTemplate(text);
+    const parsed = editing ? null : parseCommand(text);
+    const template = editing || parsed ? null : parseTemplate(text);
     // `!command` runs in the session's folder and Pi sees it; `!!command`, only the people here.
-    const shell = text.startsWith("!")
-        ? { context: !text.startsWith("!!"), command: text.replace(/^!!?/, "").trim() }
-        : null;
-    const mentionsFiles = !shell && !parsed && MENTIONS_FILE.test(text);
+    const shell =
+        !editing && text.startsWith("!")
+            ? { context: !text.startsWith("!!"), command: text.replace(/^!!?/, "").trim() }
+            : null;
+    const mentionsFiles = !editing && !shell && !parsed && MENTIONS_FILE.test(text);
     const pasted = PASTED.test(text);
 
     PASTED.lastIndex = 0;
     // The @path being typed at the caret, and the files that match it. Slash command names come first.
-    const typed = suggestions.length === 0 && !searching && !shell ? mentionAt(text, caret) : null;
+    const typed =
+        !editing && suggestions.length === 0 && !searching && !shell
+            ? mentionAt(text, caret)
+            : null;
     const mention = typed && typed.start !== hiddenMention ? typed : null;
     const found = mention ? suggestFiles(mention.query) : null;
     const matches = found?.items ?? [];
@@ -635,10 +803,106 @@ export function Composer() {
     // Something in the box: on a phone while Pi works, Send takes the mic's place (style.css).
     const filled = text.trim() !== "" || files.length > 0;
     const uploading = files.some((file) => file.state === "uploading");
+    const queuedItem = editing ? (view.inbox ?? []).find((item) => item.id === editing.id) : null;
     const canSend =
         !sending &&
-        !uploading &&
-        (text.trim() !== "" || files.some((file) => file.state === "done"));
+        (editing
+            ? queuedItem !== undefined && (text.trim() !== "" || queuedItem.hasAttachments)
+            : !uploading && (text.trim() !== "" || files.some((file) => file.state === "done")));
+
+    const beginEdit = (item) => {
+        if (sending || editing || typeof item.editableText !== "string") {
+            return;
+        }
+
+        // Words still arriving belong to the draft, never to an existing queued message.
+        dictation.stop(true);
+        const element = box.current;
+
+        setEditing({
+            id: item.id,
+            mode: item.mode,
+            expectedText: item.editableText,
+            previous: {
+                text,
+                caret,
+                start: element?.selectionStart ?? caret,
+                end: element?.selectionEnd ?? caret,
+                direction: element?.selectionDirection ?? "none",
+                scrollTop: element?.scrollTop ?? 0,
+                pastes,
+                browsing,
+                searching,
+                pick,
+                hideCommands,
+                hiddenMention,
+            },
+        });
+        setText(item.editableText);
+        setCaret(item.editableText.length);
+        setPastes({});
+        setBrowsing(null);
+        setSearching(false);
+        setPick(0);
+        typing(null);
+        focusEnd();
+    };
+
+    const finishEdit = () => {
+        const previous = editing.previous;
+
+        setEditing(null);
+        setText(previous.text);
+        setCaret(previous.caret);
+        setPastes(previous.pastes);
+        setBrowsing(previous.browsing);
+        setSearching(previous.searching);
+        setPick(previous.pick);
+        setHideCommands(previous.hideCommands);
+        setHiddenMention(previous.hiddenMention);
+        requestAnimationFrame(() => {
+            box.current?.focus();
+            box.current?.setSelectionRange(previous.start, previous.end, previous.direction);
+
+            if (box.current) {
+                box.current.scrollTop = previous.scrollTop;
+            }
+        });
+    };
+
+    const cancelEdit = (event) => {
+        if (!editing || event?.isComposing || event?.keyCode === 229) {
+            return;
+        }
+
+        event?.preventDefault();
+        event?.stopPropagation();
+
+        if (!sending) {
+            finishEdit();
+        }
+    };
+
+    useEffect(() => {
+        if (!editing) {
+            return;
+        }
+
+        const onEscape = (event) => {
+            if (
+                event.key === "Escape" &&
+                !store.state.sheet &&
+                !store.state.drawer &&
+                !document.querySelector(".sheet:not(.leaving)")
+            ) {
+                cancelEdit(event);
+            }
+        };
+
+        document.addEventListener("keydown", onEscape, true);
+
+        return () => document.removeEventListener("keydown", onEscape, true);
+    }, [editing, sending]);
 
     /** What went out stays for ↑; its pastes are done with. */
     const sent = (full) => {
@@ -688,6 +952,22 @@ export function Composer() {
 
         // What shows is what goes: words still coming would land in the emptied box.
         dictation.stop(true);
+
+        if (editing) {
+            setSending(true);
+            const ok = await attempt(() =>
+                actions.editQueued(editing.id, text, editing.expectedText),
+            );
+
+            setSending(false);
+
+            if (ok) {
+                finishEdit();
+            }
+
+            return;
+        }
+
         const full = expandPastes(text, pastes);
 
         if (parsed) {
@@ -788,6 +1068,22 @@ export function Composer() {
     };
 
     const onKey = (event) => {
+        if (editing) {
+            if (event.key === "Escape") {
+                cancelEdit(event);
+            } else if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.isComposing &&
+                event.keyCode !== 229
+            ) {
+                event.preventDefault();
+                send();
+            }
+
+            return;
+        }
+
         if (
             event.ctrlKey &&
             !event.metaKey &&
@@ -929,6 +1225,15 @@ export function Composer() {
     };
 
     const addFiles = (list) => {
+        if (editing) {
+            notify(
+                "info",
+                "Save or cancel this edit before attaching files. Existing attachments stay with the queued message.",
+            );
+
+            return;
+        }
+
         for (const file of list) {
             const key = uid();
             const preview = file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
@@ -967,6 +1272,10 @@ export function Composer() {
             return;
         }
 
+        if (editing) {
+            return;
+        }
+
         // A long paste goes in as a placeholder, so the box stays readable; the message goes out with the text.
         const value = event.clipboardData?.getData("text/plain") ?? "";
         const lines = value.replace(/\n$/, "").split("\n").length;
@@ -991,21 +1300,19 @@ export function Composer() {
         );
     };
 
-    const placeholder = dictation.listening
-        ? "Listening…"
-        : busy
-          ? steer
-              ? "Steer the current run…"
-              : "Queue a message for after this run…"
-          : "Ask Pi anything…";
+    const placeholder = editing
+        ? "Edit queued message…"
+        : dictation.listening
+          ? "Listening…"
+          : busy
+            ? steer
+                ? "Steer the current run…"
+                : "Queue a follow-up…"
+            : coarse
+              ? "Message Pi…"
+              : "Message Pi… (/ commands · @ files · ! shell)";
     const inbox = view.inbox ?? [];
-    const { me, users } = store.state;
-    const queuedBy = (item) =>
-        item.by === undefined
-            ? ""
-            : item.by === me?.id
-              ? " · you"
-              : ` · ${users.find((user) => user.id === item.by)?.name ?? "someone"}`;
+    const { me } = store.state;
 
     useDock(dock);
     // View only now, or someone else took the wheel: the box goes, and dictation with it.
@@ -1047,43 +1354,16 @@ export function Composer() {
         <div class="dock" data-part="dock" ref=${dock}>
             <${TypingLine} where="pi" />
             ${
-                // How many wait: shown when the queue does not show them all (`dock.js`).
                 inbox.length > 0 &&
-                html`<div class="inbox-count">
-                    ${inbox.length} ${inbox.length === 1 ? "message" : "messages"} waiting for Pi
-                </div>`
-            }
-            ${
-                inbox.length > 0 &&
-                html`<div class="inbox">
-                    ${inbox.map(
-                        (item) => html`<div class="queued">
-                            <span class="queued-mode">
-                                ${queuedMode(item)}
-                                <span class="muted">${queuedBy(item)}</span>
-                            </span>
-                            <button
-                                class=${`queued-text ${reading === item.id ? "open" : ""}`}
-                                aria-expanded=${reading === item.id}
-                                onClick=${() => setReading(reading === item.id ? null : item.id)}
-                            >
-                                ${queuedText(item)}
-                            </button>
-                            ${
-                                canSteer() &&
-                                (!blocked || item.by === me?.id) &&
-                                html`<button
-                                    class="icon-button small queued-remove"
-                                    aria-label=${queuedReports(item) ? "Discard these reports" : "Withdraw"}
-                                    title=${queuedReports(item) ? "Discard these reports: Pi will not get them" : "Withdraw"}
-                                    onClick=${() => attempt(() => actions.withdraw(item.id))}
-                                >
-                                    <${Icon} name="close" size=${13} />
-                                </button>`
-                            }
-                        </div>`,
-                    )}
-                </div>`
+                html`<${QueuedMessages}
+                    key=${conversationId}
+                    conversationId=${conversationId}
+                    inbox=${inbox}
+                    editing=${editing}
+                    sending=${sending}
+                    blocked=${blocked}
+                    onEdit=${beginEdit}
+                />`
             }
             ${collab() && html`<${DriverBar} />`}
             <${PlanBar} blocked=${blocked} />
@@ -1145,6 +1425,7 @@ export function Composer() {
                 }
                 ${
                     pasted &&
+                    !editing &&
                     !shell &&
                     html`<div class="command-hint muted">
                         Pasted text goes out in full where its placeholder is.
@@ -1256,8 +1537,13 @@ export function Composer() {
                     </div>`
                 }
                 <div
-                    class=${`composer ${busy ? "busy" : ""} ${filled ? "filled" : ""}`}
+                    class=${`composer ${busy ? "busy" : ""} ${filled ? "filled" : ""} ${editing ? "editing" : ""}`}
                     data-part="message-box"
+                    onKeyDown=${(event) => {
+                        if (event.key === "Escape") {
+                            cancelEdit(event);
+                        }
+                    }}
                     onClick=${(event) => {
                         // The box is one target: a tap on its edge, around the files sent along, between its buttons,
                         // or on Send with nothing to send (a disabled button takes no taps), goes to the text.
@@ -1276,6 +1562,32 @@ export function Composer() {
                     }}
                 >
                     ${
+                        editing &&
+                        html`<div class="queue-edit-bar">
+                            <span class="grow" role="status">
+                                <${Icon} name="pencil" size=${14} />
+                                ${editing.mode === "steer" ? "Editing steer" : "Editing queued follow-up"}
+                            </span>
+                            <button
+                                class="icon-button small"
+                                aria-label="Cancel edit"
+                                title="Cancel edit (Esc)"
+                                disabled=${sending}
+                                onClick=${cancelEdit}
+                            >
+                                <${Icon} name="close" size=${14} />
+                            </button>
+                        </div>`
+                    }
+                    ${
+                        editing &&
+                        queuedItem === undefined &&
+                        html`<div class="queue-edit-warning" role="status">
+                            This message is no longer queued. Copy your changes before cancelling.
+                        </div>`
+                    }
+                    ${
+                        !editing &&
                         files.length > 0 &&
                         html`<div class="files">
                             ${files.map(
@@ -1310,6 +1622,8 @@ export function Composer() {
                         rows="1"
                         value=${text}
                         placeholder=${placeholder}
+                        aria-label=${editing ? "Edit queued message" : "Message Pi"}
+                        readOnly=${editing && sending}
                         onInput=${(event) => {
                             setBrowsing(null);
                             update(event.currentTarget.value, event.currentTarget.selectionStart);
@@ -1322,54 +1636,62 @@ export function Composer() {
                         enterkeyhint=${coarse ? "enter" : "send"}
                     ></textarea>
                     <div class="composer-row" data-part="composer-tools">
-                        <${PlacesButton} />
-                        <button
-                            class="icon-button attach-button"
-                            data-part="composer-button"
-                            aria-label="Attach files"
-                            title="Attach files"
-                            onClick=${() => picker.current?.click()}
-                        >
-                            <${Icon} name="clip" size=${17} />
-                        </button>
-                        <input
-                            ref=${picker}
-                            type="file"
-                            multiple
-                            hidden
-                            onChange=${(event) => {
-                                addFiles([...event.currentTarget.files]);
-                                event.currentTarget.value = "";
-                            }}
-                        />
-                        <button
-                            class=${`model-chip ${agent?.available === false ? "warn" : ""}`}
-                            data-part="model-chip"
-                            aria-label=${`Model: ${modelLabel(agent)}${level ? `, thinking ${level}` : ""}`}
-                            title=${`Model and thinking: ${modelLabel(agent)}${level ? `, ${level}` : ""}`}
-                            onClick=${() => openSheet({ type: "model" })}
-                        >
-                            <${Icon} name="sparkle" size=${12} class="model-spark" />
-                            <span class="model-name">${shortModel(agent)}</span>
-                            ${level && html`<span class="model-level">${level}</span>`}
-                            <${Icon} name="chevron" size=${12} stroke=${2.2} class="model-caret" />
-                        </button>
                         ${
-                            planAvailable() &&
-                            view.conversation?.kind !== "subagent" &&
-                            html`<button
-                                class=${`plan-chip ${view.plan?.on ? "on" : ""}`}
-                                data-part="composer-button plan-chip"
-                                aria-pressed=${view.plan?.on === true}
-                                title="Plan mode: Pi reads and proposes, and changes nothing until you approve"
-                                onMouseDown=${(event) => event.preventDefault()}
-                                onClick=${() => attempt(() => actions.setPlan(!view.plan?.on))}
+                            editing &&
+                            html`<span class="queue-edit-help grow">Enter saves · Esc cancels</span>`
+                        }
+                        ${
+                            !editing &&
+                            html`<${PlacesButton} />
+                            <button
+                                class="icon-button attach-button"
+                                data-part="composer-button"
+                                aria-label="Attach files"
+                                title="Attach files"
+                                onClick=${() => picker.current?.click()}
                             >
-                                Plan
-                            </button>`
+                                <${Icon} name="clip" size=${17} />
+                            </button>
+                            <input
+                                ref=${picker}
+                                type="file"
+                                multiple
+                                hidden
+                                onChange=${(event) => {
+                                    addFiles([...event.currentTarget.files]);
+                                    event.currentTarget.value = "";
+                                }}
+                            />
+                            <button
+                                class=${`model-chip ${agent?.available === false ? "warn" : ""}`}
+                                data-part="model-chip"
+                                aria-label=${`Model: ${modelLabel(agent)}${level ? `, thinking ${level}` : ""}`}
+                                title=${`Model and thinking: ${modelLabel(agent)}${level ? `, ${level}` : ""}`}
+                                onClick=${() => openSheet({ type: "model" })}
+                            >
+                                <${Icon} name="sparkle" size=${12} class="model-spark" />
+                                <span class="model-name">${shortModel(agent)}</span>
+                                ${level && html`<span class="model-level">${level}</span>`}
+                                <${Icon} name="chevron" size=${12} stroke=${2.2} class="model-caret" />
+                            </button>
+                            ${
+                                planAvailable() &&
+                                view.conversation?.kind !== "subagent" &&
+                                html`<button
+                                    class=${`plan-chip ${view.plan?.on ? "on" : ""}`}
+                                    data-part="composer-button plan-chip"
+                                    aria-pressed=${view.plan?.on === true}
+                                    title="Plan mode: Pi reads and proposes, and changes nothing until you approve"
+                                    onMouseDown=${(event) => event.preventDefault()}
+                                    onClick=${() => attempt(() => actions.setPlan(!view.plan?.on))}
+                                >
+                                    Plan
+                                </button>`
+                            }`
                         }
                         <span class="grow"></span>
                         ${
+                            !editing &&
                             busy &&
                             html`<div
                                 class="mode-switch"
@@ -1407,27 +1729,39 @@ export function Composer() {
                                 )}
                             </div>`
                         }
-                        <${MicButton}
-                            dictation=${dictation}
-                            class="composer-mic"
-                            part="composer-button"
-                        />
-                        <button
-                            class=${`send-button ${canSend ? "ready" : ""}`}
-                            data-part="send-button"
-                            data-state=${canSend ? "ready" : undefined}
-                            aria-label="Send"
-                            title=${coarse ? "Send" : "Send (Enter)"}
-                            disabled=${!canSend}
-                            onClick=${send}
-                        >
-                            ${
-                                sending
-                                    ? html`<${Spinner} />`
-                                    : html`<${Icon} name="send" size=${16} stroke=${2.4} />`
-                            }
-                        </button>
-                        ${busy && html`<${StopButton} />`}
+                        ${
+                            editing
+                                ? html`<button
+                                      class="round send"
+                                      aria-label="Save edit"
+                                      title="Save edit (Enter)"
+                                      disabled=${!canSend}
+                                      onClick=${send}
+                                  >
+                                      ${sending ? html`<${Spinner} />` : html`<${Icon} name="check" size=${18} />`}
+                                  </button>`
+                                : html`<${MicButton}
+                                          dictation=${dictation}
+                                          class="composer-mic"
+                                          part="composer-button"
+                                      />
+                                      <button
+                                          class=${`send-button ${canSend ? "ready" : ""}`}
+                                          data-part="send-button"
+                                          data-state=${canSend ? "ready" : undefined}
+                                          aria-label="Send"
+                                          title=${coarse ? "Send" : "Send (Enter)"}
+                                          disabled=${!canSend}
+                                          onClick=${send}
+                                      >
+                                          ${
+                                              sending
+                                                  ? html`<${Spinner} />`
+                                                  : html`<${Icon} name="send" size=${16} stroke=${2.4} />`
+                                          }
+                                      </button>
+                                      ${busy && html`<${StopButton} />`}`
+                        }
                     </div>
                 </div>`
         }

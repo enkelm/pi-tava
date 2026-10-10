@@ -1,4 +1,6 @@
 node_modules/
+native/herdr-web/target/
+.impeccable/review/
 *.log
 .env
 .env.*

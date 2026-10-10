@@ -36,9 +36,9 @@ export function SignIn() {
 
     return html`<div class="signin" data-part="sign-in">
         <div class="pi big">π</div>
-        <h1>Pi Pocket</h1>
+        <h1>Pi Coop</h1>
         <p class="muted">
-            Open the sign-in link Pi Pocket printed when it started, or an invite from a signed-in device. You can also paste the link, the token, or an invite code here.
+            Open the sign-in link Pi Coop printed when it started, or an invite from a signed-in device. You can also paste the link, the token, or an invite code here.
         </p>
         <div class="row">
             <input

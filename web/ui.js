@@ -244,8 +244,21 @@ function codeBlock(pre, fold) {
  * attribute into markup. An image from another site becomes a link, since its address could carry data out the moment
  * it loads, and code blocks are drawn by `codeBlock` (folded when long, if `fold`). Returns the element holding it.
  */
-function sanitize(html, fold) {
+function sanitize(html, fold, readOnly = false) {
     const fragment = DOMPurify.sanitize(html, PURIFY);
+
+    // Private mirrors have no Durable file/image routes or executable rich blocks.
+    if (readOnly) {
+        for (const image of fragment.querySelectorAll("img")) {
+            image.replaceWith(`[${image.getAttribute("alt") || "Image"}: not shown in mirror]`);
+        }
+
+        for (const link of fragment.querySelectorAll("a")) {
+            if (!/^https?:\/\//i.test(link.getAttribute("href") ?? "")) {
+                link.replaceWith(link.textContent);
+            }
+        }
+    }
 
     // `src/app.ts` in a reply opens the file: inline code that is a path, not code blocks.
     for (const code of fragment.querySelectorAll("code")) {
@@ -254,7 +267,7 @@ function sanitize(html, fold) {
             code.dataset.part = "inline-code";
         }
 
-        if (!code.closest("pre, a") && looksLikePath(code.textContent ?? "")) {
+        if (!readOnly && !code.closest("pre, a") && looksLikePath(code.textContent ?? "")) {
             code.dataset.path = code.textContent;
             // Keys open it too (`openFile` below).
             code.tabIndex = 0;
@@ -266,7 +279,7 @@ function sanitize(html, fold) {
     for (const link of fragment.querySelectorAll("a[href]")) {
         const path = linkedPath(link.getAttribute("href") ?? "");
 
-        if (path !== null) {
+        if (!readOnly && path !== null) {
             link.dataset.path = fromBase(path);
             link.removeAttribute("target");
         }
@@ -405,9 +418,10 @@ function markdownParts(
     cache = true,
     base = null,
     breaks = true,
+    readOnly = false,
 ) {
     const key = `${conversationId ?? ""}\u0000${base ?? ""}\u0000${breaks ? "br" : ""}\u0000${text}`;
-    let out = markdownCache.get(key);
+    let out = readOnly ? undefined : markdownCache.get(key);
 
     if (out !== undefined) {
         markdownCache.delete(key);
@@ -417,12 +431,14 @@ function markdownParts(
     }
 
     rendering = conversationId ?? null;
-    linkBase = base;
-    out = partsOf(sanitize(marked.parse(fencePage(text), { async: false, breaks }), cache));
+    linkBase = readOnly ? null : base;
+    out = partsOf(
+        sanitize(marked.parse(fencePage(text), { async: false, breaks }), cache, readOnly),
+    );
     rendering = null;
     linkBase = null;
 
-    if (cache) {
+    if (cache && !readOnly) {
         if (markdownCache.size >= MARKDOWN_CACHE) {
             markdownCache.delete(markdownCache.keys().next().value);
         }
@@ -453,8 +469,16 @@ export function Markdown({
     base = null,
     breaks = true,
     conversationId,
+    readOnly = false,
 }) {
-    const parts = markdownParts(text, conversationId, cache, base, breaks);
+    const parts = markdownParts(
+        text,
+        readOnly ? null : conversationId,
+        cache,
+        base,
+        breaks,
+        readOnly,
+    );
 
     if (parts.length === 1 && parts[0].kind === undefined) {
         return html`<div
@@ -465,7 +489,7 @@ export function Markdown({
 
     return html`<div class=${`md ${className}`}>
         ${parts.map((part, index) =>
-            part.kind === undefined || RichBlock === null
+            part.kind === undefined || RichBlock === null || readOnly
                 ? html`<div
                       key=${index}
                       class="md-part"
@@ -873,6 +897,7 @@ const ICONS = {
     unarchive: "M3 4h18v4H3zM5 8v12h14V8M12 18v-6M9 15l3-3 3 3",
     unread: "M3 6h18v12H3zM3 7l9 5 9-5M20.5 3.5h.01",
     check: "M5 12l5 5L20 7",
+    pencil: "M16 3l5 5L9 20l-6 1 1-6L16 3zM13 6l5 5",
     logout: "M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10",
     globe: "M12 21a9 9 0 100-18 9 9 0 000 18zM3.5 9h17M3.5 15h17M12 3a14 14 0 010 18M12 3a14 14 0 000 18",
     reload: "M20 12a8 8 0 11-2.3-5.7M20 4v5h-5",

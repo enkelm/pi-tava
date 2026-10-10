@@ -1,6 +1,9 @@
 node_modules/
 docs-site/dist/
 docs-site/.astro/
+native/herdr-web/target/
+native/herdr-web/tests/fixtures/
+.impeccable/review/
 package-lock.json
 flake.lock
 

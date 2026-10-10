@@ -17,6 +17,7 @@ import {
     GallerySourceSheet,
     GalleryUpdateSheet,
 } from "./sheets/gallery.js";
+import { ImportSheet } from "./sheets/import.js";
 import { CwdSheet } from "./sheets/folder.js";
 import { MemorySheet } from "./sheets/memory.js";
 import { MenuSheet, PlacesSheet } from "./sheets/menu.js";
@@ -159,13 +160,13 @@ export function Sheets() {
     const key = `${sheet.type}:${sheet.entryId ?? sheet.id ?? sheet.pipId ?? ""}`;
 
     return html`<div class=${`sheet-host ${leaving ? "leaving" : ""}`} inert=${leaving}>
-        <${SheetBack.Provider} value=${trail.length > 1 ? goBack : null}>
-            <${SheetInfo.Provider} value=${{ type: sheet.type, closing: Boolean(leaving) }}>
-                <${Boundary} key=${key} reset=${sheet}>${sheetBody(sheet)}<//>
+            <${SheetBack.Provider} value=${trail.length > 1 ? goBack : null}>
+                <${SheetInfo.Provider} value=${{ type: sheet.type, closing: Boolean(leaving) }}>
+                    <${Boundary} key=${key} reset=${sheet}>${sheetBody(sheet)}<//>
+                <//>
             <//>
-        <//>
-    </div>
-    ${auth}`;
+        </div>
+        ${auth}`;
 }
 
 function sheetBody(sheet) {
@@ -173,6 +174,15 @@ function sheetBody(sheet) {
     let body = null;
 
     switch (sheet.type) {
+        case "import":
+            body =
+                me?.role === "owner"
+                    ? html`<${ImportSheet}
+                          initialPreview=${sheet.initialPreview}
+                          fromPrivate=${sheet.fromPrivate}
+                      />`
+                    : null;
+            break;
         case "appearance":
             body = html`<${AppearanceSheet} />`;
             break;
@@ -358,7 +368,10 @@ function sheetBody(sheet) {
                 title="Your name"
                 label="Shown on your messages to others"
                 initial=${me?.name ?? ""}
-                footer=${html`<button class="button ghost wide sheet-footer signout" onClick=${signOut}>
+                footer=${html`<button
+                    class="button ghost wide sheet-footer signout"
+                    onClick=${signOut}
+                >
                     <${Icon} name="logout" size=${16} /> Sign out
                 </button>`}
                 submit=${async (value) => {

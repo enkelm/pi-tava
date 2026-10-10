@@ -1,5 +1,5 @@
 /**
- * The Pi Pocket server core: one durable Harness over one SQLite file, shared by every session, every subagent, and
+ * The Pi Coop server core: one durable Harness over one SQLite file, shared by every session, every subagent, and
  * every connected browser. Browsers attach to a conversation's committed view; nothing a browser sees exists only in
  * memory, except who is connected, who is typing, and which tool calls wait for approval.
  *
@@ -73,6 +73,9 @@ import { FolderFavorites } from "./folder-favorites.ts";
 import { Gallery } from "./gallery.ts";
 import { Goals } from "./goals.ts";
 import { type ApprovalRequest, Approvals, type PocketHost, type WebAccess } from "./host.ts";
+import { Imports } from "./imports.ts";
+import { PrivateSessions } from "./private-sessions.ts";
+import { PrivateTerminals } from "./private-terminals.ts";
 import { type GuardStatus, LancetGuard } from "./lancet.ts";
 import { takeLock } from "./lock.ts";
 import { Memory } from "./memory.ts";
@@ -111,7 +114,7 @@ import { Workspace } from "./workspace.ts";
 
 const context = BACKGROUND_CONTEXT;
 
-/** How other devices reach this server, as reported by the launcher (`bin/pi-pocket.js`). */
+/** How other devices reach this server, as reported by the launcher (`bin/pi-coop.js`). */
 export type AccessInfo = {
     mode: string;
     label: string;
@@ -260,6 +263,9 @@ export class PocketApp {
     readonly commands = new Commands(this);
     readonly extensionCommands = new ExtensionCommands(this);
     readonly linkedSessions = new LinkedSessions(this);
+    readonly imports = new Imports(this);
+    readonly privateSessions = new PrivateSessions(this);
+    readonly privateTerminals = new PrivateTerminals(this);
     readonly collab = new Collab(this);
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
@@ -544,7 +550,7 @@ export class PocketApp {
         try {
             prepareDropInFolder(dropIn, join(APP_ROOT, "node_modules"));
         } catch (error) {
-            this.#log(`Drop-in extensions cannot import Pi Pocket's packages: ${describe(error)}`);
+            this.#log(`Drop-in extensions cannot import Pi Coop's packages: ${describe(error)}`);
         }
 
         try {
@@ -1466,15 +1472,15 @@ export class PocketApp {
         return current;
     }
 
-    /**
-     * People invited to one session see only that session and its subagents. A PiP is its own person's alone: its tools
-     * act as them, so anyone else who could write to it would act as them too.
-     */
+    /** Scoped invites, private PiP assistants and owner-only imports each retain their access restriction. */
     canSee(user: User, id: ConversationId): boolean {
         const root = this.rootOf(id);
-        const pip = this.#sessions[String(root)]?.pip;
+        const meta = this.#sessions[String(root)];
 
-        if (pip !== undefined && pip !== user.id) {
+        if (
+            (meta?.pip !== undefined && meta.pip !== user.id) ||
+            (meta?.ownerOnly === true && user.role !== "owner")
+        ) {
             return false;
         }
 
@@ -1800,16 +1806,13 @@ export class PocketApp {
 
         this.#sessionsTimer = setTimeout(() => {
             this.#sessionsTimer = undefined;
-            const all = this.sessions();
             let board: SubagentEntry[] | undefined;
 
             for (const client of this.#clients) {
-                const scope = client.user.sessions;
-
                 client.send(
                     "sessions",
-                    // Scoped lists need their own metadata projection, not just a filter over the global list.
-                    scope === undefined ? all : this.sessions(client.user),
+                    // Project metadata and owner-only imports need each person's own projection.
+                    this.sessions(client.user),
                 );
                 this.#sendPip(client);
 
@@ -1817,9 +1820,9 @@ export class PocketApp {
                     board ??= this.subagents();
                     this.#sendBoard(
                         client,
-                        scope === undefined
-                            ? board
-                            : board.filter((entry) => scope.includes(String(entry.id))),
+                        board.filter((entry) =>
+                            this.canSee(client.user, entry.id as ConversationId),
+                        ),
                     );
                 }
             }
@@ -1849,9 +1852,8 @@ export class PocketApp {
         return Object.entries(this.#sessions)
             .filter(
                 ([id, meta]) =>
-                    // PiP is not a session people pick: it shows in its own panel (`pip.ts`).
                     meta.pip === undefined &&
-                    (user?.sessions === undefined || user.sessions.includes(id)),
+                    (user === undefined || this.canSee(user, Number(id) as ConversationId)),
             )
             .map(([id, meta]) => {
                 const model = this.#agents.get(Number(id) as unknown as ConversationId)?.model;
@@ -1956,6 +1958,8 @@ export class PocketApp {
             archived: meta?.archived === true,
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
+            ...(meta?.imported === true ? { imported: true } : {}),
+            ...(meta?.ownerOnly === true ? { ownerOnly: true } : {}),
             ...(room.parent === undefined ? {} : { parent: room.parent }),
             ...(room.subagentName === undefined ? {} : { subagentName: room.subagentName }),
             // Each browser finds the source's title in its own session list, so only people who can open it get a link.
@@ -2358,7 +2362,7 @@ export class PocketApp {
         return this.loader.enabled(GUARD_FILE);
     }
 
-    /** Lancet Guard as it applies here: Pi's own setting, unless the guard extension is off in Pi Pocket. */
+    /** Lancet Guard as it applies here: Pi's own setting, unless the guard extension is off in Pi Coop. */
     async guardStatus(): Promise<GuardStatus> {
         const status = await this.guard.status();
 
@@ -2369,7 +2373,7 @@ export class PocketApp {
         return {
             available: status.available,
             enabled: false,
-            detail: "Lancet Guard is off in Pi Pocket: bash, write, and edit calls run unchecked here.",
+            detail: "Lancet Guard is off in Pi Coop: bash, write, and edit calls run unchecked here.",
         };
     }
 
@@ -2849,6 +2853,7 @@ export class PocketApp {
             }
 
             this.providers.close();
+            await this.privateTerminals.close();
 
             // A timer that holds the process: with nothing else to do, Node would end it here, before the rest closed.
             let limit: NodeJS.Timeout | undefined;

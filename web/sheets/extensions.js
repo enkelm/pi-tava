@@ -25,7 +25,7 @@ function guardNote(module, guard) {
     if (!module.enabled) {
         return {
             warn: true,
-            text: "Off in Pi Pocket: bash, write, and edit calls run unchecked here. Pi itself still uses it.",
+            text: "Off in Pi Coop: bash, write, and edit calls run unchecked here. Pi itself still uses it.",
         };
     }
 
@@ -93,7 +93,9 @@ function SafeMode() {
     }
 
     return html`<div class="setting wrap safe-mode">
-        <div class="grow small">Extensions' browser parts are off in this tab, and so is the theme.</div>
+        <div class="grow small">
+            Extensions' browser parts are off in this tab, and so is the theme.
+        </div>
         <button class="button" onClick=${leaveSafeMode}>Turn them back on</button>
     </div>`;
 }
@@ -119,10 +121,10 @@ function GalleryPart({ module, installed, busy, turnOff }) {
     }
 
     return html`${
-        installed.revoked !== null &&
-        html`<div class="error-box small">
-            The gallery revoked this version: ${installed.revoked}
-            ${
+            installed.revoked !== null &&
+            html`<div class="error-box small">
+                The gallery revoked this version: ${installed.revoked}
+                ${
                 module.enabled &&
                 html`<div class="sheet-actions">
                     <button class="button small primary" disabled=${busy} onClick=${turnOff}>
@@ -130,18 +132,18 @@ function GalleryPart({ module, installed, busy, turnOff }) {
                     </button>
                 </div>`
             }
-        </div>`
-    }
-    <div class="extension-gallery">
-        <span class="pi-tag gallery-plain">from the gallery · ${installed.version}</span>
-        ${installed.update && html`<span class="pi-tag behind">update available</span>`}
-        <button
-            class="link small"
-            onClick=${() => openSheet({ type: "gallery-entry", id: installed.name })}
-        >
-            Details
-        </button>
-    </div>`;
+            </div>`
+        }
+        <div class="extension-gallery">
+            <span class="pi-tag gallery-plain">from the gallery · ${installed.version}</span>
+            ${installed.update && html`<span class="pi-tag behind">update available</span>`}
+            <button
+                class="link small"
+                onClick=${() => openSheet({ type: "gallery-entry", id: installed.name })}
+            >
+                Details
+            </button>
+        </div>`;
 }
 
 /** When PiP compacts its own context: once idle above so many tokens (`pip-compact.ts`), or only as sessions do. */
@@ -165,14 +167,15 @@ function PipCompactAt({ owner }) {
         </div>
         <div class="segmented" role="group" aria-label="Compact PiP's context">
             ${PIP_COMPACT.map(
-                ([value, label]) => html`<button
-                    class=${at === value ? "on" : ""}
-                    aria-pressed=${at === value}
-                    disabled=${!owner}
-                    onClick=${() => change(value)}
-                >
-                    ${label}
-                </button>`,
+                ([value, label]) =>
+                    html`<button
+                        class=${at === value ? "on" : ""}
+                        aria-pressed=${at === value}
+                        disabled=${!owner}
+                        onClick=${() => change(value)}
+                    >
+                        ${label}
+                    </button>`,
             )}
         </div>
     </div>`;
@@ -262,7 +265,9 @@ export function ExtensionsSheet() {
 
     return html`<${Sheet} title="Extensions" onClose=${closeSheet} wide=${true}>
         <p class="muted small">
-            Extensions give Pi its tools and checks in Pi Pocket, and can add pages and buttons to the app. A change applies to every session right away and stays after restarts.${owner ? "" : " Only the owner can change them."}
+            Extensions give Pi its tools and checks in Pi Coop, and can add pages and buttons to the
+            app. A change applies to every session right away and stays after
+            restarts.${owner ? "" : " Only the owner can change them."}
         </p>
         <${SafeMode} />
         ${
@@ -291,10 +296,11 @@ export function ExtensionsSheet() {
             ]
                 .filter(([, modules]) => modules.length > 0)
                 .map(
-                    ([title, modules]) => html`<div class="group">
-                        <div class="group-title">${title}</div>
-                        <div class="sheet-list">
-                            ${modules.map((module) => {
+                    ([title, modules]) =>
+                        html`<div class="group">
+                            <div class="group-title">${title}</div>
+                            <div class="sheet-list">
+                                ${modules.map((module) => {
                                 const tools = module.extensions.flatMap(
                                     (extension) => extension.tools,
                                 );
@@ -303,7 +309,9 @@ export function ExtensionsSheet() {
                                         ? guardNote(module, data.guard)
                                         : null;
 
-                                return html`<div class=${`extension ${module.enabled ? "" : "off"}`}>
+                                return html`<div
+                                    class=${`extension ${module.enabled ? "" : "off"}`}
+                                >
                                     <div class="extension-main">
                                         <div class="extension-title">
                                             ${module.title}
@@ -312,7 +320,9 @@ export function ExtensionsSheet() {
                                         ${module.summary && html`<div class="muted small">${module.summary}</div>`}
                                         ${
                                             note &&
-                                            html`<div class=${`small ${note.warn ? "warn" : "ok"}`}>${note.text}</div>`
+                                            html`<div class=${`small ${note.warn ? "warn" : "ok"}`}>
+                                                ${note.text}
+                                            </div>`
                                         }
                                         ${
                                             module.file === "guard.ts" &&
@@ -345,7 +355,11 @@ export function ExtensionsSheet() {
                                                     }
                                                 }}
                                             >
-                                                <span id="guard-confirm-warning">bash, write, and edit calls will run without checks in every session here. Pi's own setting stays as it is.</span>
+                                                <span id="guard-confirm-warning"
+                                                    >bash, write, and edit calls will run without
+                                                    checks in every session here. Pi's own setting
+                                                    stays as it is.</span
+                                                >
                                                 <div class="sheet-actions">
                                                     <button
                                                         class="button small"
@@ -402,14 +416,17 @@ export function ExtensionsSheet() {
                                     </div>
                                 </div>`;
                             })}
-                        </div>
-                    </div>`,
+                            </div>
+                        </div>`,
                 )
         }
         ${
             data?.dropIns &&
             html`<p class="muted small">
-                Add your own: put a <span class="mono">.ts</span> extension module in <span class="mono">${shortPath(data.dropIns, store.state.server?.home)}</span>. Drop-ins stay off until the owner turns them on, and run inside the server with the owner's rights.
+                Add your own: put a <span class="mono">.ts</span> extension module in
+                <span class="mono">${shortPath(data.dropIns, store.state.server?.home)}</span>.
+                Drop-ins stay off until the owner turns them on, and run inside the server with the
+                owner's rights.
             </p>`
         }
     <//>`;

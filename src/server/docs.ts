@@ -13,6 +13,7 @@ import {
     type TaskId,
 } from "@earendil-works/pi-durable";
 import type { Repeat } from "./when.ts";
+import type { ActivePi } from "./imports/herdr.ts";
 import type { Worktree } from "./worktrees.ts";
 
 export type SessionMeta = {
@@ -22,6 +23,9 @@ export type SessionMeta = {
     updatedAt: number;
     createdBy?: string;
     archived?: boolean;
+    /** The initial import slice is restricted to the owner, including forks and subagents. */
+    ownerOnly?: boolean;
+    imported?: boolean;
     /** The session this one was forked from, and the last entry it inherited; no entry: forked before the first message. */
     forkedFrom?: { id: number; entryId?: number };
     /** The session that started this one (`linked-sessions.ts`): a link only, which gives no access and owns nothing. */
@@ -95,6 +99,77 @@ export const LinkedSessionCallsDoc = defineDoc<{
     history: "latest",
     fork: "initial",
     initial: () => ({ items: {} }),
+});
+
+/** A source fingerprint and branch identify one import, independently of prompt request IDs. */
+export const ImportsDoc = defineDoc<{ items: Record<string, ConversationId> }>({
+    kind: "pocket.imports",
+    version: 1,
+    scope: "session",
+    initial: () => ({ items: {} }),
+});
+
+/** A takeover is reserved before stopping Pi. Its result commits with the import, so retries survive restart. */
+export const TakeoversDoc = defineDoc<{
+    items: Record<
+        string,
+        {
+            session: ActivePi;
+            startedAt: number;
+            /** Confirmed publication intent survives an interrupted move; absent on older owner-only reservations. */
+            visibility?: "owner" | "shared";
+            result?: ConversationId;
+        }
+    >;
+}>({
+    kind: "pocket.takeovers",
+    version: 1,
+    scope: "session",
+    initial: () => ({ items: {} }),
+});
+
+/** Private input admissions, not transcripts. Hashes identify targets; no text, commands or prompt digests are stored.
+ * Prompt receipts mean possibly delivered, even after a crash, and block prompts plus automatic takeover.
+ * Terminal receipts record known raw input and block automatic takeover only, not fresh guarded Chat.
+ * Neither kind expires or resets on a fresh snapshot/restart. This document must stay out of ROOM_DOCS.
+ */
+export const PrivateControlDoc = defineDoc<{
+    items: Record<
+        string,
+        {
+            id: string;
+            instance: string;
+            pane?: string;
+            kind: "prompt" | "terminal";
+            admittedAt: number;
+        }
+    >;
+}>({
+    kind: "pocket.private-control",
+    version: 1,
+    scope: "session",
+    initial: () => ({ items: {} }),
+});
+
+/** Full source bytes and provenance. Not a room document; full archives are owner-only. */
+export const ImportedSessionDoc = defineDoc<{
+    archive: string;
+    source?: {
+        path: string;
+        sha256: string;
+        sessionId: string;
+        leafId: string;
+        importedBy: string;
+        importedAt: number;
+        entryIds: Record<string, number>;
+    };
+}>({
+    kind: "pocket.imported-session",
+    version: 1,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ archive: "" }),
 });
 
 /**

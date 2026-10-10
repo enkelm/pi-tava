@@ -4,9 +4,9 @@ import { join, resolve } from "node:path";
 import { ACCESS_MODES, type AccessMode, isAccessMode } from "./access.ts";
 import { restoreTerminal } from "./term.ts";
 
-const HELP = `Pi Pocket: a durable, multiplayer, mobile-first web app for Pi agents.
+const HELP = `Pi Coop: a durable, multiplayer, mobile-first web app for Pi agents.
 
-Usage: pi-pocket [options]
+Usage: pi-coop [options]
 
   -a, --access MODE   How other devices reach this server:
                         local       this device only
@@ -17,7 +17,7 @@ Usage: pi-pocket [options]
   -y, --yes           Use the last choice without asking
   -p, --port N        Port (default 8787)
       --cwd DIR       Folder for new sessions (default: the current folder)
-      --data DIR      Data folder (default ~/.pi-pocket)
+      --data DIR      Data folder (default ~/.pi-durable-app for this fork)
       --host HOST     Listen on this address instead of choosing an access mode
       --rotate-token  Replace the owner sign-in link, signing out the devices that used it
   -h, --help          Show this help
@@ -42,7 +42,7 @@ export function parseArgs(argv: string[]): Options {
         host: process.env.PI_POCKET_HOST || undefined,
         port: Number(process.env.PI_POCKET_PORT ?? 8787),
         cwd: process.cwd(),
-        data: resolve(process.env.PI_POCKET_DIR ?? join(homedir(), ".pi-pocket")),
+        data: resolve(process.env.PI_POCKET_DIR ?? join(homedir(), ".pi-durable-app")),
         rotateToken: false,
     };
 

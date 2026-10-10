@@ -1,6 +1,6 @@
-# Changing Pi Pocket's code while it runs
+# Changing Pi Coop's code while it runs
 
-People often change Pi Pocket from inside itself. You can run on the server that you change, and so can all the other people who use it. [AGENTS.md](../AGENTS.md) gives the rules in short; this page gives all of them.
+Pi Coop is often changed from inside itself: you may be running on the very server you edit, and so may everyone else using it. [AGENTS.md](../AGENTS.md) has the rules in short; this page is the whole of it.
 
 Before you start, read [map.md](map.md) to find the code that you need, and the part of [architecture.md](architecture.md) about it. Say what you will change. Then wait for a yes, unless the person asked for exactly that change.
 
@@ -57,7 +57,7 @@ The copy listens on `127.0.0.2:8899`. Browsers keep cookies for each host, not f
 
 ## Restarting
 
-Server changes outside `extensions/` need a restart. Only the owner can restart, from Menu → **Restart server**. This menu item shows when Pi Pocket runs under its launcher, as `pi-pocket` does.
+Server changes outside `extensions/` need a restart. Only the owner can, from Menu → **Restart server** (shown when Pi Coop runs under its launcher, as `pi-coop` does).
 
 - **Never restart while your own tool call runs**, and never on your own. Finish the edit, run `npm run check` and `npm test`, and then ask the person to restart.
 - Work that runs continues after a restart. A tool call that the restart stopped, and that is not safe to repeat, comes back to the model as interrupted.

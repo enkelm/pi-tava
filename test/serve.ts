@@ -20,7 +20,12 @@ import { watchTree } from "../src/server/reload.ts";
 const port = Number(process.argv[2] ?? 8899);
 const host = process.argv[3] ?? "127.0.0.2";
 const app = await openApp(scriptedModel());
+
+// A throwaway app must not discover or control the owner's real Herdr sessions.
+app.imports.active.local.sockets = async () => [];
 const server = createServer(createHandler({ app, listen: { host, port }, restart: () => {} }));
+
+server.on("upgrade", app.privateTerminals.upgrade);
 const stopWatching = watchTree(join(APP_ROOT, "web"), (file) => app.reloadClients(file));
 
 // Extension modules reload when saved, as in the real server (`app.close()` stops this).
