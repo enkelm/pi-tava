@@ -287,7 +287,7 @@ export function ModelPicker() {
                         </span>`
                     }
                 </span>
-                <button class="pop-menu-link" onClick=${() => openSheet({ type: "providers" })}>
+                <button class="pop-menu-link" onClick=${() => openSheet({ type: "settings", tab: "providers" })}>
                     <${Icon} name="key" size=${13} /> Providers
                 </button>
             </header>

@@ -287,7 +287,7 @@ test(
         skip: chromium === undefined ? "no Chromium installed" : false,
         timeout: 90_000,
     },
-    async () => {
+    async (t) => {
         const app = await openApp(scriptedModel());
 
         app.imports.active.local.sockets = async () => [];
@@ -565,6 +565,75 @@ test(
             assert.equal(requests[0]?.body.acknowledged, true);
             assert.ok(requests[0]?.pocket);
             assert.ok(Number(requests[0]?.body.cols) > 0);
+            await frames(page);
+            await t.test(
+                "native worktree hierarchy, local folds and retained native navigation",
+                async () => {
+                    // Native snapshots carry repo membership and branch updates before the next HTTP poll.
+                    await page.evaluate(`window.fixtureSockets[0].receive({type:'snapshot',snapshot:{...${JSON.stringify(snapshot)}, workspaces:[
+                {...${JSON.stringify(snapshot.workspaces[0])}, branch:'dev', worktree:{key:'ledger-repo',label:'ledger-api',is_linked_worktree:false}},
+                ${JSON.stringify(snapshot.workspaces[1])},
+                {workspace_id:'native-work-2',label:'short-checkout',branch:'feature/multi-currency',worktree:{key:'ledger-repo',label:'ledger-api',is_linked_worktree:true}},
+                {workspace_id:'native-work-3',label:'fix/rounding',branch:'fix/rounding',worktree:{key:'ledger-repo',label:'ledger-api',is_linked_worktree:true}}
+            ]}})`);
+                    await until(
+                        () =>
+                            value(
+                                page,
+                                `document.querySelectorAll('.sidebar .private-worktree-children .private-space-row').length === 2`,
+                            ),
+                        "native worktree hierarchy",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('.sidebar .private-space-row .session-meta').textContent`,
+                        ),
+                        "dev",
+                        "native branch replaces stale HTTP branch",
+                    );
+                    const sentBeforeFold = await value<number>(
+                        page,
+                        `window.fixtureSockets[0].sent.length`,
+                    );
+
+                    await page.click({ selector: ".sidebar .private-worktree-toggle" });
+                    assert.equal(
+                        await value(page, `window.fixtureSockets[0].sent.length`),
+                        sentBeforeFold,
+                        "folding never sends a Herdr command",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelectorAll('.sidebar .private-space-row').length`,
+                        ),
+                        3,
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.activeElement?.matches('.terminal-grid-input')`,
+                        ),
+                        true,
+                        "folding keeps terminal typing focus",
+                    );
+                    await page.click({ selector: ".sidebar .private-worktree-toggle" });
+                    await page.click({
+                        selector: ".sidebar .private-worktree-children .private-space-row",
+                    });
+                    assert.equal(
+                        await value(
+                            page,
+                            `window.fixtureSockets[0].sent.filter(frame => frame.method === 'workspace.focus').at(-1)?.params.workspace_id`,
+                        ),
+                        "native-work-2",
+                        "linked rows target native workspace IDs",
+                    );
+                    assert.equal(requests.length, 1, "worktree navigation retains the connection");
+                    await shot(page, "desktop-worktrees");
+                },
+            );
             await frames(page);
             assert.equal(
                 await value(
@@ -928,7 +997,9 @@ test(
                 "document.querySelector('.terminal-grid canvas').toDataURL()",
             );
 
-            await page.click({ selector: ".sidebar .private-space-row:nth-of-type(2)" });
+            await page.click({
+                selector: '.sidebar .private-space-row[data-workspace-id="native-work-0"]',
+            });
             assert.equal(
                 await value(
                     page,

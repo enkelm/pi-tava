@@ -1,5 +1,6 @@
 // Appearance: the theme and the colors, and how the app looks and moves.
 import { useEffect, useRef, useState } from "preact/hooks";
+import { Fragment } from "preact";
 import {
     actions,
     api,
@@ -27,7 +28,7 @@ import {
     themeVars,
     varsStyle,
 } from "../theme.js";
-import { html, Icon, Sheet, Switch } from "../ui.js";
+import { html, Icon, Switch } from "../ui.js";
 import { galleryAvailable } from "./gallery.js";
 
 // Key hints are for people with a keyboard: a touch screen has none.
@@ -229,14 +230,14 @@ function LookTools() {
                           <${Icon} name="sparkle" size=${14} /> Edit with Pi
                       </button>
                       ${
-                        galleryAvailable() &&
-                        html`<button
-                            class="button"
-                            onClick=${() => openSheet({ type: "gallery-share", id, theme: true })}
-                        >
-                            Share…
-                        </button>`
-                    }
+                          galleryAvailable() &&
+                          html`<button
+                              class="button"
+                              onClick=${() => openSheet({ type: "gallery-share", id, theme: true })}
+                          >
+                              Share…
+                          </button>`
+                      }
                       <button class="button ghost" onClick=${remove}>Remove</button>`
                 : html`<span class="muted small">Duplicate it to make a theme of your own.</span>`
         }
@@ -369,13 +370,13 @@ function SettingRow({ title, detail, children }) {
     </div>`;
 }
 
-export function AppearanceSheet() {
+export function AppearanceSettings() {
     const p = prefs();
     const desktop = store.state.desktopTheme;
 
     useEffect(() => () => preview(null), []);
 
-    return html`<${Sheet} title="Appearance" onClose=${closeSheet} wide=${true}>
+    return html`<${Fragment}>
         <div class="label">Theme</div>
         <div class="look-grid">
             ${lookIds().map((id) => html`<${LookCard} key=${id} id=${id} />`)}

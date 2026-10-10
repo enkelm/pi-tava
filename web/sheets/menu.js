@@ -24,10 +24,9 @@ import {
     openSheet,
     scoped,
     setUnread,
-    signOut,
     store,
 } from "../store.js";
-import { isPinned, lookLabel, togglePin } from "../theme.js";
+import { isPinned, togglePin } from "../theme.js";
 import { currentTrust, trustAvailable } from "../trust.js";
 import { branchAvailable } from "./branch.js";
 import { memoryAvailable, memoryHint, useMemory } from "./memory.js";
@@ -496,7 +495,9 @@ export function MenuSheet({ places = true }) {
         <div class="group">
             <div class="group-title">App</div>
             ${me?.role === "owner" && item("Import Pi session", () => openSheet({ type: "import" }), "a stopped session on this server")}
-            ${item("Appearance", () => openSheet({ type: "appearance" }), lookLabel())}
+            ${item("Settings", () => openSheet({ type: "settings" }), "appearance, providers, notifications, access, limits")}
+            ${item(collab() ? "People" : "Devices and access", () => openSheet({ type: "settings", tab: "account" }), me?.role === "viewer" ? "you can view" : "")}
+            ${item("Running now", () => openSheet({ type: "running" }), "everything Pi is doing")}
             ${!touch && item("Keyboard shortcuts", () => openSheet({ type: "shortcuts" }), "?")}
             ${
                 me?.role === "owner" &&
@@ -508,16 +509,10 @@ export function MenuSheet({ places = true }) {
                         "project, last picked, then Pi global",
                 )
             }
-            ${item("Your name", () => openSheet({ type: "name" }), me?.name)}
-            ${collab() ? item("People", () => openSheet({ type: "people" }), me?.role === "viewer" ? "you can view" : "") : item("Sign in another device", () => openSheet({ type: "invite" }))}
-            ${collab() && item("Notifications", () => openSheet({ type: "notifications" }), "Pi finished, approvals, chat")}
-            ${item("Running now", () => openSheet({ type: "running" }), "everything Pi is doing")}
-            ${item("Spend", () => openSheet({ type: "spend" }), me?.role === "owner" ? "by person and session, limits" : "yours")}
             ${triggersOn() && me?.role !== "viewer" && item("Webhooks and watches", () => openSheet({ type: "hooks" }), "GitHub, other services")}
-            ${me?.role === "owner" && item("Providers", () => openSheet({ type: "providers" }))}
             ${modelRefreshAvailable() && item("Refresh models", refreshModels, store.state.modelRefresh.loading ? "refreshing…" : "models.json and providers")}
             ${extensionMenuItems().map((each) => item(each.label, each.run, each.hint))}
-            ${item("Extensions", () => openSheet({ type: "extensions" }), extensionsHint())}
+            ${item("Extensions", () => openSheet({ type: "settings", tab: "extensions" }), extensionsHint())}
             ${
                 me?.role === "owner" &&
                 server?.supervised &&
@@ -532,7 +527,6 @@ export function MenuSheet({ places = true }) {
                     "running work resumes",
                 )
             }
-            ${item(html`<span class="menu-signout">Sign out</span>`, signOut)}
         </div>
     <//>`;
 }

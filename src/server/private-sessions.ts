@@ -1,8 +1,10 @@
 /** Owner-only live Herdr mirror. Herdr owns these processes; private views never become Durable conversations. */
 import { createHash, randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { PocketApp } from "./app.ts";
+import { gitDirOf, headOf } from "./branches.ts";
 import type { User } from "./config.ts";
 import { HttpError } from "./errors.ts";
 import { foregroundPi, type ProcessIdentity, type ProcessInfo } from "./imports/herdr.ts";
@@ -27,7 +29,14 @@ type WirePane = {
     agent_session?: { agent?: string; source?: string; kind?: string; value?: string };
 };
 type WireGroup = { workspace_id?: string; tab_id?: string; label?: string; number?: number };
-type Snapshot = { panes: WirePane[]; workspaces: WireGroup[]; tabs?: WireGroup[] };
+type WireWorkspace = WireGroup & {
+    worktree?: unknown;
+    branch?: unknown;
+    active_tab_id?: unknown;
+    agent_status?: unknown;
+    custom_label?: unknown;
+};
+type Snapshot = { panes: WirePane[]; workspaces: WireWorkspace[]; tabs?: WireGroup[] };
 export type PrivatePane = {
     id: string;
     nativeId: string;
@@ -36,8 +45,17 @@ export type PrivatePane = {
     agent?: string;
     state: string;
 };
-type Tab = { id: string; nativeId?: string; label: string; panes: PrivatePane[] };
-type Workspace = { id: string; nativeId?: string; label: string; tabs: Tab[] };
+type Tab = { id: string; nativeId?: string; label: string; active?: boolean; panes: PrivatePane[] };
+type Workspace = {
+    id: string;
+    nativeId?: string;
+    label: string;
+    tabs: Tab[];
+    worktree?: { key: string; label: string; isLinkedWorktree: boolean };
+    branch?: string;
+    state?: string;
+    customLabel?: boolean;
+};
 type Instance = {
     id: string;
     label: string;
@@ -48,12 +66,94 @@ type Instance = {
 type Target = { socket: string; wire: WirePane; pane: PrivatePane };
 export type PrivateRequest = { revision?: unknown; text?: unknown; requestId?: unknown };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const label = (value: unknown, fallback: string) =>
-    typeof value === "string" && value.trim()
-        ? stripVTControlCharacters(value).slice(0, 400)
-        : fallback;
+const unsafeText = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
+
+const label = (value: unknown, fallback: string) => {
+    const text =
+        typeof value === "string"
+            ? stripVTControlCharacters(value).replace(new RegExp(unsafeText, "g"), "").slice(0, 400)
+            : "";
+
+    return text.trim() ? text : fallback;
+};
+
 const validId = (value: unknown): value is string =>
     typeof value === "string" && value.length > 0 && value.length <= 256;
+const exactText = (value: unknown, maximum: number): string | undefined =>
+    typeof value === "string" && value.trim() && value.length <= maximum && !unsafeText.test(value)
+        ? value
+        : undefined;
+const record = (value: unknown): Record<string, unknown> | undefined =>
+    value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined;
+
+function worktreeOf(value: unknown): Workspace["worktree"] {
+    const row = record(value);
+    // Identity is never truncated or rewritten: distinct repositories must stay distinct.
+    const key = exactText(row?.repo_key, 4096);
+    const title = label(row?.repo_name, "");
+
+    return key && title && typeof row?.is_linked_worktree === "boolean"
+        ? { key, label: title, isLinkedWorktree: row.is_linked_worktree }
+        : undefined;
+}
+
+/** JSON snapshots currently omit branch. Read HEAD only for the list, never for prompt/detail scans. */
+function addBranches(workspaces: Workspace[], snapshot: Snapshot): void {
+    const paths = new Map<string, unknown[]>();
+    const cache = new Map<string, string | undefined>();
+
+    for (const row of snapshot.workspaces) {
+        paths.set(row.workspace_id!, [record(row.worktree)?.checkout_path]);
+    }
+
+    for (const pane of snapshot.panes) {
+        const parent = validId(pane.workspace_id) ? pane.workspace_id : "unassigned";
+        const candidates = paths.get(parent) ?? [];
+
+        candidates.push(pane.foreground_cwd, pane.cwd);
+        paths.set(parent, candidates);
+    }
+
+    for (const workspace of workspaces) {
+        if (workspace.branch) {
+            continue;
+        }
+
+        for (const candidate of paths.get(workspace.nativeId ?? "unassigned") ?? []) {
+            const path = exactText(candidate, 4096);
+
+            if (!path || !isAbsolute(path)) {
+                continue;
+            }
+
+            if (!cache.has(path)) {
+                let branch: string | undefined;
+
+                try {
+                    if (statSync(path).isDirectory()) {
+                        const gitDir = gitDirOf(path);
+                        const head = gitDir ? headOf(gitDir) : undefined;
+
+                        branch = head && "branch" in head ? exactText(head.branch, 400) : undefined;
+                    }
+                } catch {
+                    // Missing or unreadable optional paths do not make the instance unavailable.
+                }
+
+                cache.set(path, branch);
+            }
+
+            const branch = cache.get(path);
+
+            if (branch) {
+                workspace.branch = branch;
+                break;
+            }
+        }
+    }
+}
 
 function sessionPath(wire: WirePane): string | undefined {
     const ref = wire.agent_session;
@@ -83,6 +183,7 @@ function hierarchy(socket: string, snapshot: Snapshot) {
     const targets = new Map<string, Target>();
     const groups = new Map<string, Workspace>();
     const tabs = new Map<string, Tab>();
+    const activeTabs = new Map<string, string>();
 
     const workspace = (id: string, title?: string): Workspace => {
         let group = groups.get(id);
@@ -123,7 +224,33 @@ function hierarchy(socket: string, snapshot: Snapshot) {
             throw new Error("Invalid workspace");
         }
 
-        workspace(row.workspace_id, row.label);
+        const group = workspace(row.workspace_id, row.label);
+        const worktree = worktreeOf(row.worktree);
+        const branch = exactText(row.branch, 400);
+        const activeTab = exactText(row.active_tab_id, 256);
+
+        if (worktree) {
+            group.worktree = worktree;
+        }
+
+        if (branch) {
+            group.branch = branch;
+        }
+
+        if (activeTab) {
+            activeTabs.set(row.workspace_id, activeTab);
+        }
+
+        if (
+            typeof row.agent_status === "string" &&
+            ["idle", "working", "blocked", "done", "unknown"].includes(row.agent_status)
+        ) {
+            group.state = row.agent_status;
+        }
+
+        if (typeof row.custom_label === "boolean") {
+            group.customLabel = row.custom_label;
+        }
     }
 
     for (const row of snapshot.tabs ?? []) {
@@ -167,6 +294,12 @@ function hierarchy(socket: string, snapshot: Snapshot) {
         targets.set(id, { socket, wire, pane });
     }
 
+    for (const [parent, activeTab] of activeTabs) {
+        for (const group of groups.get(parent)!.tabs) {
+            group.active = group.nativeId === activeTab;
+        }
+    }
+
     return { workspaces: [...groups.values()], targets };
 }
 
@@ -193,7 +326,7 @@ export class PrivateSessions {
         }
     }
 
-    async #scan() {
+    async #scan(readBranches = false) {
         const sockets = [...new Set(await this.local.sockets())].slice(0, 33);
         const targets = new Map<string, Target>();
         const instances: Instance[] = await Promise.all(
@@ -211,6 +344,10 @@ export class PrivateSessions {
                         "session.snapshot",
                     );
                     const tree = hierarchy(socket, snapshot);
+
+                    if (readBranches) {
+                        addBranches(tree.workspaces, snapshot);
+                    }
 
                     for (const [key, target] of tree.targets) {
                         targets.set(key, target);
@@ -242,7 +379,7 @@ export class PrivateSessions {
 
     async list(user: User) {
         this.#owner(user);
-        const { instances, warnings } = await this.#scan();
+        const { instances, warnings } = await this.#scan(true);
 
         this.#owner(user);
 

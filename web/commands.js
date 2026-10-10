@@ -424,9 +424,13 @@ const COMMANDS = [
     {
         name: "login",
         description: "Sign in to a model provider",
-        run: () => openSheet({ type: "providers" }),
+        run: () => openSheet({ type: "settings", tab: "providers" }),
     },
-    { name: "settings", description: "Open the menu", run: () => openSheet({ type: "menu" }) },
+    {
+        name: "settings",
+        description: "Open settings: appearance and model providers",
+        run: () => openSheet({ type: "settings" }),
+    },
     {
         name: "trust",
         description: "Whether Pi trusts this project, for its own skills",
@@ -444,11 +448,11 @@ const COMMANDS = [
 
 /**
  * `/theme lantern` (a theme folder), `/theme gruvbox`, `/theme rose`, `/theme desktop` (colors); without a name, the
- * Appearance sheet. A theme's name wins over colors' of the same name.
+ * Settings → Appearance. A theme's name wins over colors' of the same name.
  */
 function setTheme(arg) {
     if (arg === "") {
-        return openSheet({ type: "appearance" });
+        return openSheet({ type: "settings", tab: "appearance" });
     }
 
     const needle = arg.toLowerCase().replace(/\s+/g, "-");

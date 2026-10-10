@@ -134,10 +134,16 @@ function actionItems() {
             run: () => setPrefs({ sidebar: prefs().sidebar === "rail" ? "open" : "rail" }),
         },
         {
+            label: "Settings",
+            detail: "appearance, providers, notifications, extensions, account, access, usage, limits",
+            icon: "settings",
+            run: () => openSheet({ type: "settings" }),
+        },
+        {
             label: "Appearance",
             detail: "theme, colors, tiling, motion, text size, thinking, reply speed",
             icon: "palette",
-            run: () => openSheet({ type: "appearance" }),
+            run: () => openSheet({ type: "settings", tab: "appearance" }),
         },
         wide && {
             label: prefs().tiling ? "Turn tiling off" : "Turn tiling on",
@@ -275,7 +281,25 @@ function actionItems() {
             label: "Providers",
             detail: "sign in to model providers",
             icon: "key",
-            run: () => openSheet({ type: "providers" }),
+            run: () => openSheet({ type: "settings", tab: "providers" }),
+        },
+        {
+            label: "Notifications",
+            detail: "this device, Pi finished, approvals, mentions, chat",
+            icon: "bell",
+            run: () => openSheet({ type: "settings", tab: "notifications" }),
+        },
+        {
+            label: "Extensions & safety",
+            detail: "tools, Lancet Guard, approval rules",
+            icon: "shield",
+            run: () => openSheet({ type: "settings", tab: "extensions" }),
+        },
+        {
+            label: "Usage & limits",
+            detail: "spend, budgets by person and session",
+            icon: "pulse",
+            run: () => openSheet({ type: "settings", tab: "usage" }),
         },
         modelRefreshAvailable() && {
             label: "Refresh models",
@@ -285,7 +309,6 @@ function actionItems() {
             icon: "reload",
             run: refreshModels,
         },
-        { label: "Extensions", icon: "shield", run: () => openSheet({ type: "extensions" }) },
         galleryAvailable() && {
             label: "Find extensions",
             detail: "browse and install drop-ins",
@@ -293,17 +316,16 @@ function actionItems() {
             icon: "search",
             run: () => openSheet({ type: "gallery" }),
         },
-        { label: "Spend", icon: "pulse", run: () => openSheet({ type: "spend" }) },
         collab()
             ? {
                   label: "People and invites",
                   icon: "users",
-                  run: () => openSheet({ type: "people" }),
+                  run: () => openSheet({ type: "settings", tab: "account" }),
               }
             : {
                   label: "Sign in another device",
                   icon: "users",
-                  run: () => openSheet({ type: "invite" }),
+                  run: () => openSheet({ type: "settings", tab: "account" }),
               },
         {
             label: "Keyboard shortcuts",
@@ -315,7 +337,7 @@ function actionItems() {
             label: "Your name",
             detail: me?.name,
             icon: "users",
-            run: () => openSheet({ type: "name" }),
+            run: () => openSheet({ type: "settings", tab: "account" }),
         },
         { label: "Sign out", detail: "this browser", icon: "logout", run: signOut },
         // What extensions' browser modules added (`extension-ui.js`).

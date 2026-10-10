@@ -1,7 +1,8 @@
+import { Fragment } from "preact";
 // Model providers: signing in and out, the models subagents may use besides their session's own, and the dialog a
 // sign-in uses to ask for a code or a key.
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { api, attempt, closeSheet, closeSignIn, signInAnswered, store } from "../store.js";
+import { api, attempt, closeSignIn, signInAnswered, store } from "../store.js";
 import { html, Icon, Loader, Sheet } from "../ui.js";
 import { RefreshModels } from "../model-refresh.js";
 
@@ -139,7 +140,7 @@ function SubagentModels({ names }) {
     </div>`;
 }
 
-export function ProvidersSheet() {
+export function ProvidersSettings() {
     const { me, auth } = store.state;
     const [providers, setProviders] = useState(null);
     const [query, setQuery] = useState("");
@@ -184,7 +185,7 @@ export function ProvidersSheet() {
                 a.name.localeCompare(b.name),
         );
 
-    return html`<${Sheet} title="Providers" onClose=${closeSheet}>
+    return html`<${Fragment}>
         <p class="muted small">
             Pi Coop shares Pi's sign-ins (<span class="mono">~/.pi/agent/auth.json</span>). ${owner ? "" : "Only the owner can change them."}
         </p>
@@ -195,10 +196,10 @@ export function ProvidersSheet() {
                 names=${Object.fromEntries((providers ?? []).map((each) => [each.id, each.name]))}
             />`
         }
-        ${store.state.auth && html`<${AuthDialog} inline=${true} />`}
         <label class="search">
             <${Icon} name="search" size=${16} />
             <input
+                aria-label="Search providers"
                 placeholder="Search providers"
                 value=${query}
                 onInput=${(event) => setQuery(event.currentTarget.value)}
@@ -270,6 +271,12 @@ export function ProvidersSheet() {
                 </div>`,
             )}
         </div>
+        ${
+            providers !== null &&
+            list.length === 0 &&
+            needle === "" &&
+            html`<p class="muted small" role="status">No providers available.</p>`
+        }
     <//>`;
 }
 

@@ -5088,7 +5088,7 @@ pre.diff .del {
 
 .foot-tiles {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 4px;
 }
 
@@ -8909,6 +8909,196 @@ textarea.notes {
     }
     .launcher-foot .launcher-touch-help {
         display: block;
+    }
+}
+
+/* ─── Settings ─────────────────────────────────────────────── */
+
+.sheet.settings-sheet {
+    max-width: 900px;
+    height: min(720px, 86dvh);
+}
+
+.settings-sheet .sheet-head {
+    flex: none;
+    border-bottom: 1px solid var(--line);
+}
+
+.settings-sheet .sheet-body {
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+    overflow: hidden;
+    gap: 0;
+}
+
+.settings-layout {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+}
+
+.settings-tabs {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 4px;
+    width: 210px;
+    padding: 12px 8px;
+    overflow-y: auto;
+    border-right: 1px solid var(--line);
+}
+
+.settings-tabs button {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-height: 44px;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid transparent;
+    text-align: left;
+    font-size: 0.84rem;
+    color: var(--body);
+}
+
+.settings-tabs button svg {
+    flex: none;
+}
+
+.settings-tabs button:hover {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.settings-tabs button[aria-selected="true"] {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+    color: var(--accent);
+}
+
+.settings-panel {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0.65rem;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    overflow-wrap: anywhere;
+    padding: 1rem 1.25rem 1.25rem;
+}
+
+.settings-panel[hidden] {
+    display: none;
+}
+
+.settings-panel > h3 {
+    margin: 0 0 0.35rem;
+    font-size: 1rem;
+    color: var(--text);
+}
+
+.settings-panel .provider {
+    flex-wrap: wrap;
+}
+
+.settings-panel .provider > div:first-child {
+    flex: 1 1 130px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.settings-panel .person-main,
+.settings-panel .spend-row .grow {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.settings-panel .limit-edit {
+    max-width: 100%;
+    flex-wrap: wrap;
+}
+
+.settings-account {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.65rem;
+}
+
+.settings-account .field {
+    align-self: stretch;
+}
+
+.settings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.settings-actions .button {
+    max-width: 100%;
+    white-space: normal;
+}
+
+@media (min-width: 700px) {
+    .sheet.settings-sheet {
+        width: calc(100% - 2rem);
+    }
+}
+
+@media (max-width: 699px) {
+    .settings-layout {
+        flex-direction: column;
+    }
+    .settings-tabs {
+        flex-direction: row;
+        width: auto;
+        min-width: 0;
+        padding: 8px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scroll-padding-inline: 8px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+    }
+    .settings-tabs button {
+        flex: none;
+        justify-content: center;
+        white-space: nowrap;
+    }
+    .settings-panel {
+        padding: 0.8rem 1rem 1rem;
+    }
+    .settings-panel .setting-row:has(.segmented) {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .settings-panel .segmented {
+        align-self: flex-start;
+        max-width: 100%;
+        flex-wrap: wrap;
+    }
+    .settings-panel .person-row {
+        flex-wrap: wrap;
+    }
+    .settings-panel .person-main {
+        flex-basis: calc(100% - 55px);
+    }
+    .settings-panel .person-actions {
+        flex-basis: 100%;
+        justify-content: flex-start;
+    }
+    .settings-panel .spend-row .grow {
+        flex-basis: 100%;
+    }
+    .settings-panel .provider > div:first-child {
+        flex-basis: 100%;
+    }
+    .settings-panel .provider-actions {
+        justify-content: flex-start;
     }
 }
 
@@ -15335,6 +15525,72 @@ pre.gallery-code {
     color: var(--body);
 }
 
+.private-space-item {
+    display: flex;
+    position: relative;
+    min-width: 0;
+}
+
+.private-space-item > .private-space-row {
+    flex: 1;
+    min-width: 0;
+}
+
+.private-worktree-toggle {
+    flex: none;
+    align-self: stretch;
+    width: 28px;
+    height: auto;
+    min-height: 30px;
+    color: var(--muted);
+}
+
+.private-worktree-toggle[aria-expanded="true"] svg {
+    transform: rotate(90deg);
+}
+
+.private-worktree-children {
+    position: relative;
+    margin-left: 14px;
+    padding-left: 12px;
+}
+
+.private-worktree-children::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 15px;
+    left: 0;
+    border-left: 1px solid var(--line-strong);
+}
+
+.private-worktree-item::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: -12px;
+    width: 12px;
+    border-top: 1px solid var(--line-strong);
+}
+
+.private-worktree-item .private-space-row {
+    min-height: 30px;
+    padding-block: 4px;
+}
+
+@media (max-width: 959px) {
+    .private-worktree-toggle {
+        width: 40px;
+        min-height: 40px;
+    }
+    .private-worktree-item .private-space-row {
+        min-height: 40px;
+    }
+    .private-worktree-children::before {
+        bottom: 20px;
+    }
+}
+
 .private-space-row:hover,
 .private-pane-row:hover {
     background: var(--hover);
@@ -15383,6 +15639,13 @@ pre.gallery-code {
 .private-row-copy .session-meta {
     font-size: 11px;
     margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.private-space-row .session-meta {
+    color: var(--body);
 }
 
 .private-status {
@@ -15393,7 +15656,8 @@ pre.gallery-code {
     border-radius: 50%;
 }
 
-.private-status.idle {
+.private-status.idle,
+.private-status.done {
     border-color: var(--ok);
 }
 
@@ -15404,6 +15668,7 @@ pre.gallery-code {
 }
 
 .private-status.waiting,
+.private-status.blocked,
 .private-status.error {
     border-color: var(--err);
     background: var(--err);

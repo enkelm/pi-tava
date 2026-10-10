@@ -2,12 +2,14 @@
 // its context.
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { browserModuleState, leaveSafeMode, safeMode } from "../extension-ui.js";
-import { api, attempt, closeSheet, openSheet, store } from "../store.js";
-import { html, Icon, Loader, Sheet, shortPath, Switch } from "../ui.js";
+import { api, attempt, openSheet, store } from "../store.js";
+import { html, Icon, Loader, shortPath, Switch } from "../ui.js";
 import { ACCESS_WORDS, galleryApi, galleryAvailable } from "./gallery.js";
 
 /** The guide for people who write extensions: its first page, on the docs site, which describes the latest release. */
 const GUIDE = "https://tannermidd.github.io/pi-pocket/docs/extensions/first-extension/";
+
+import { Fragment } from "preact";
 
 /** What Lancet Guard does here, given the module's switch and Pi's own setting. */
 function guardNote(module, guard) {
@@ -125,13 +127,13 @@ function GalleryPart({ module, installed, busy, turnOff }) {
             html`<div class="error-box small">
                 The gallery revoked this version: ${installed.revoked}
                 ${
-                module.enabled &&
-                html`<div class="sheet-actions">
-                    <button class="button small primary" disabled=${busy} onClick=${turnOff}>
-                        Turn it off
-                    </button>
-                </div>`
-            }
+                    module.enabled &&
+                    html`<div class="sheet-actions">
+                        <button class="button small primary" disabled=${busy} onClick=${turnOff}>
+                            Turn it off
+                        </button>
+                    </div>`
+                }
             </div>`
         }
         <div class="extension-gallery">
@@ -181,7 +183,7 @@ function PipCompactAt({ owner }) {
     </div>`;
 }
 
-export function ExtensionsSheet() {
+export function ExtensionsSettings() {
     const { me } = store.state;
     const owner = me?.role === "owner";
     const [data, setData] = useState(null);
@@ -263,7 +265,7 @@ export function ExtensionsSheet() {
         change(module, "", { enabled: !module.enabled });
     };
 
-    return html`<${Sheet} title="Extensions" onClose=${closeSheet} wide=${true}>
+    return html`<${Fragment}>
         <p class="muted small">
             Extensions give Pi its tools and checks in Pi Coop, and can add pages and buttons to the
             app. A change applies to every session right away and stays after
@@ -286,7 +288,13 @@ export function ExtensionsSheet() {
                 </a>
             </div>`
         }
-        ${problem && html`<div class="error-box">${problem}</div>`}
+        ${
+            problem &&
+            html`<div class="error-box">
+                ${problem}
+                <button class="button small" onClick=${load}>Retry</button>
+            </div>`
+        }
         ${!data && !problem && html`<${Loader} label="Loading extensions" />`}
         ${
             data &&
@@ -301,40 +309,40 @@ export function ExtensionsSheet() {
                             <div class="group-title">${title}</div>
                             <div class="sheet-list">
                                 ${modules.map((module) => {
-                                const tools = module.extensions.flatMap(
-                                    (extension) => extension.tools,
-                                );
-                                const note =
-                                    module.file === "guard.ts"
-                                        ? guardNote(module, data.guard)
-                                        : null;
+                                    const tools = module.extensions.flatMap(
+                                        (extension) => extension.tools,
+                                    );
+                                    const note =
+                                        module.file === "guard.ts"
+                                            ? guardNote(module, data.guard)
+                                            : null;
 
-                                return html`<div
-                                    class=${`extension ${module.enabled ? "" : "off"}`}
-                                >
-                                    <div class="extension-main">
-                                        <div class="extension-title">
-                                            ${module.title}
-                                            ${module.error && html` <span class="warn small">· failed to load</span>`}
-                                        </div>
-                                        ${module.summary && html`<div class="muted small">${module.summary}</div>`}
-                                        ${
+                                    return html`<div
+                                        class=${`extension ${module.enabled ? "" : "off"}`}
+                                    >
+                                        <div class="extension-main">
+                                            <div class="extension-title">
+                                                ${module.title}
+                                                ${module.error && html` <span class="warn small">· failed to load</span>`}
+                                            </div>
+                                            ${module.summary && html`<div class="muted small">${module.summary}</div>`}
+                                            ${
                                             note &&
                                             html`<div class=${`small ${note.warn ? "warn" : "ok"}`}>
                                                 ${note.text}
                                             </div>`
                                         }
-                                        ${
+                                            ${
                                             module.file === "guard.ts" &&
                                             module.enabled &&
                                             html`<${ApprovalRule} owner=${owner} />`
                                         }
-                                        ${
+                                            ${
                                             module.file === "pip.ts" &&
                                             module.enabled &&
                                             html`<${PipCompactAt} owner=${owner} />`
                                         }
-                                        ${
+                                            ${
                                             module.file === "guard.ts" &&
                                             module.enabled &&
                                             confirmGuard &&
@@ -381,28 +389,28 @@ export function ExtensionsSheet() {
                                                 </div>
                                             </div>`
                                         }
-                                        ${module.error && html`<div class="error-box small">${module.error}</div>`}
-                                        <${WebPart} module=${module} />
-                                        <${GalleryPart}
-                                            module=${module}
-                                            installed=${fromGallery.get(module.file)}
-                                            busy=${busy !== null}
-                                            turnOff=${() => change(module, "", { enabled: false })}
-                                        />
-                                        <div class="muted small mono">
-                                            ${module.source === "drop-in" ? `drop-in${module.path ? ` · ${shortPath(module.path, store.state.server?.home)}` : ""}` : module.file}
-                                            ${tools.length > 0 ? ` · tools: ${tools.join(", ")}` : ""}
-                                            ${module.required ? " · required" : ""}
+                                            ${module.error && html`<div class="error-box small">${module.error}</div>`}
+                                            <${WebPart} module=${module} />
+                                            <${GalleryPart}
+                                                module=${module}
+                                                installed=${fromGallery.get(module.file)}
+                                                busy=${busy !== null}
+                                                turnOff=${() => change(module, "", { enabled: false })}
+                                            />
+                                            <div class="muted small mono">
+                                                ${module.source === "drop-in" ? `drop-in${module.path ? ` · ${shortPath(module.path, store.state.server?.home)}` : ""}` : module.file}
+                                                ${tools.length > 0 ? ` · tools: ${tools.join(", ")}` : ""}
+                                                ${module.required ? " · required" : ""}
+                                            </div>
                                         </div>
-                                    </div>
-                                    <div class="extension-actions">
-                                        <${Switch}
-                                            on=${module.enabled}
-                                            disabled=${!owner || module.required || busy !== null}
-                                            label=${`${module.title}: ${module.enabled ? "on" : "off"}`}
-                                            onChange=${(event) => toggle(module, event.currentTarget)}
-                                        />
-                                        ${
+                                        <div class="extension-actions">
+                                            <${Switch}
+                                                on=${module.enabled}
+                                                disabled=${!owner || module.required || busy !== null}
+                                                label=${`${module.title}: ${module.enabled ? "on" : "off"}`}
+                                                onChange=${(event) => toggle(module, event.currentTarget)}
+                                            />
+                                            ${
                                             owner &&
                                             module.enabled &&
                                             html`<button
@@ -413,9 +421,9 @@ export function ExtensionsSheet() {
                                                 Reload
                                             </button>`
                                         }
-                                    </div>
-                                </div>`;
-                            })}
+                                        </div>
+                                    </div>`;
+                                })}
                             </div>
                         </div>`,
                 )

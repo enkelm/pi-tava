@@ -1,7 +1,8 @@
 // Phone notifications: this device subscribes to the server's pushes, and each person picks what they hear about.
+import { Fragment } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import { api, attempt, closeSheet, notify, sessionUnread } from "./store.js";
-import { html, Loader, Sheet, Switch } from "./ui.js";
+import { api, attempt, notify, sessionUnread } from "./store.js";
+import { html, Loader, Switch } from "./ui.js";
 
 const supported =
     "serviceWorker" in navigator && "PushManager" in globalThis && "Notification" in globalThis;
@@ -105,14 +106,21 @@ const KINDS = [
     ["chat", "Chat messages", "in sessions you take part in"],
 ];
 
-export function NotificationsSheet() {
+export function NotificationsSettings() {
     const [info, setInfo] = useState(null);
+    const [error, setError] = useState(null);
     const [subscription, setSubscription] = useState(undefined);
     const [busy, setBusy] = useState(false);
     const problem = blocker();
 
+    const load = () => {
+        setError(null);
+
+        return api("push").then(setInfo, (error) => setError(error.message));
+    };
+
     useEffect(() => {
-        attempt(async () => setInfo(await api("push")));
+        load();
         registerWorker()
             .then((registration) => registration?.pushManager.getSubscription() ?? null)
             .then(setSubscription, () => setSubscription(null));
@@ -183,19 +191,20 @@ export function NotificationsSheet() {
 
     const on = Boolean(subscription);
 
-    return html`<${Sheet}
-        title="Notifications"
-        onClose=${closeSheet}
-        className="notifications-sheet"
-    >
+    return html`<${Fragment}>
         <p class="muted small">
             Get a notification on this device when you are not looking at the session: Pi finished, Pi needs approval, or someone wrote to you.
         </p>
         ${problem && html`<div class="error-box small">${problem}</div>`}
         ${
-            !info || subscription === undefined
-                ? html`<${Loader} label="Checking this device" />`
-                : html`<div class="sheet-list">
+            error
+                ? html`<div class="error-box small">
+                    Could not load notification settings: ${error}
+                    <button class="button small" onClick=${load}>Retry</button>
+                </div>`
+                : !info || subscription === undefined
+                  ? html`<${Loader} label="Checking this device" />`
+                  : html`<div class="sheet-list">
                     <div class="extension">
                         <div class="extension-main">
                             <div class="extension-title">This device</div>

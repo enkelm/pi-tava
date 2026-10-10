@@ -271,8 +271,128 @@ const pickPane = (workspace) => {
     return tab?.panes.find((pane) => pane.active) || tab?.panes[0];
 };
 
+// Native frames have fresher labels/branches and may include newly opened spaces before GET refreshes.
+function liveWorkspaces(instance, live) {
+    if (live?.view !== "terminal" || live.instanceId !== instance.id) {
+        return instance.workspaces;
+    }
+
+    const native = new Map(live.snapshot.workspaces.map((row) => [row.workspace_id, row]));
+    const known = new Set(instance.workspaces.map((workspace) => workspace.nativeId));
+    const extra = live.snapshot.workspaces
+        .filter((row) => !known.has(row.workspace_id))
+        .map((row) => ({ id: `native:${row.workspace_id}`, nativeId: row.workspace_id, tabs: [] }));
+
+    return [...instance.workspaces, ...extra].map((workspace) => {
+        const row = native.get(workspace.nativeId);
+
+        if (!row) {
+            return workspace;
+        }
+
+        return {
+            ...workspace,
+            label: row.label || workspace.label,
+            branch: row.branch || "",
+            customLabel: row.custom_label,
+            state: row.agent_status || workspace.state,
+            tabCount: live.snapshot.tabs.filter((tab) => tab.workspace_id === row.workspace_id)
+                .length,
+            worktree: row.worktree
+                ? {
+                      key: row.worktree.key,
+                      label: row.worktree.label,
+                      isLinkedWorktree: row.worktree.is_linked_worktree,
+                  }
+                : undefined,
+        };
+    });
+}
+
+// Match Herdr sidebar/workspaces.rs: daemon membership, earliest group position, parents before children.
+// Orphan worktrees and other primary checkouts stay visible; groups never cross instance boundaries.
+function workspaceGroups(workspaces) {
+    const repositories = new Map();
+
+    for (const workspace of workspaces) {
+        const tree = workspace.worktree;
+
+        if (!tree?.key || typeof tree.isLinkedWorktree !== "boolean") {
+            continue;
+        }
+
+        if (!repositories.has(tree.key)) {
+            repositories.set(tree.key, { key: tree.key, parents: [], children: [] });
+        }
+
+        const group = repositories.get(tree.key);
+
+        (tree.isLinkedWorktree ? group.children : group.parents).push(workspace);
+    }
+
+    const emitted = new Set();
+    const groups = [];
+
+    for (const workspace of workspaces) {
+        const group = repositories.get(workspace.worktree?.key);
+
+        if (!group?.parents.length || !group.children.length) {
+            groups.push({ parents: [workspace], children: [] });
+        } else if (!emitted.has(group.key)) {
+            groups.push(group);
+            emitted.add(group.key);
+        }
+    }
+
+    return groups;
+}
+
+function WorkspaceRow({ workspace, instance, live, child = false, group, folded, toggle, state }) {
+    const panes = workspace.tabs.flatMap((tab) => tab.panes);
+    const native =
+        live?.view === "terminal" && live.instanceId === instance.id && workspace.nativeId;
+    const selected = native
+        ? live.snapshot.focused_workspace_id === workspace.nativeId
+        : panes.some((pane) => pane.id === store.state.privateId);
+    const first = pickPane(workspace);
+    const title =
+        (child && !workspace.customLabel && workspace.branch) || workspace.label || "Workspace";
+    const childrenId = `worktrees-${instance.id}-${group?.parents[0].id}`;
+
+    return html`<div class=${`private-space-item ${child ? "private-worktree-item" : ""}`}>
+        <button
+            class=${`private-space-row ${selected ? "active" : ""}`}
+            data-workspace-id=${workspace.nativeId || workspace.id}
+            aria-current=${selected ? "location" : undefined}
+            title=${workspace.branch && workspace.branch !== title ? `${title} · ${workspace.branch}` : title}
+            disabled=${!first && !native}
+            onPointerDown=${keepTerminalFocus}
+            onClick=${() => (native ? live.request("workspace.focus", { workspace_id: workspace.nativeId }) : navigate(null, { privateId: first.id }))}
+        >
+            <${Status} state=${state || workspace.state || first?.state} />
+            <span class="private-row-copy">
+                <span class="session-title">${title}</span>
+                ${!child && workspace.branch && html`<span class="session-meta">${workspace.branch}</span>`}
+            </span>
+            <span class="private-row-count" title="Tabs">${workspace.tabCount ?? workspace.tabs.length}</span>
+        </button>
+        ${
+            group &&
+            html`<button
+            class="private-worktree-toggle icon-button"
+            aria-label=${`${folded ? "Expand" : "Collapse"} worktrees for ${workspace.label}`}
+            aria-expanded=${!folded}
+            aria-controls=${childrenId}
+            title=${`${folded ? "Expand" : "Collapse"} ${group.children.length} worktrees`}
+            onPointerDown=${keepTerminalFocus}
+            onClick=${toggle}
+        ><${Icon} name="chevron" size=${13} /></button>`
+        }
+    </div>`;
+}
+
 function Status({ state }) {
-    return html`<span class=${`private-status ${["idle", "working", "busy", "waiting", "error"].includes(state) ? state : ""}`} title=${state || "unknown"} aria-label=${state || "unknown"}></span>`;
+    return html`<span class=${`private-status ${["idle", "done", "working", "busy", "waiting", "blocked", "error"].includes(state) ? state : ""}`} title=${state || "unknown"} aria-label=${state || "unknown"}></span>`;
 }
 
 export function PrivateList({ compact = false, home = false }) {
@@ -282,6 +402,7 @@ export function PrivateList({ compact = false, home = false }) {
     const live = useLiveTerminal();
     const [importing, setImporting] = useState(null);
     const [notice, setNotice] = useState("");
+    const [collapsed, setCollapsed] = useState(() => new Set());
     const [, setImportRevision] = useState(0);
     const importOperation = useRef(null);
 
@@ -421,35 +542,81 @@ export function PrivateList({ compact = false, home = false }) {
                     ${
                         !instance.available
                             ? html`<p class="private-hint small error-box">Unavailable. ${instance.error || "Herdr is not answering."}</p>`
-                            : instance.workspaces.length === 0
+                            : liveWorkspaces(instance, live).length === 0
                               ? html`<p class="private-hint small muted">No workspaces.</p>`
-                              : instance.workspaces.map((workspace) => {
-                                    const panes = workspace.tabs.flatMap((tab) => tab.panes);
-                                    const native =
-                                        live?.view === "terminal" &&
-                                        live.instanceId === instance.id &&
-                                        workspace.nativeId;
-                                    const selected = native
-                                        ? live.snapshot.focused_workspace_id === workspace.nativeId
-                                        : panes.some((pane) => pane.id === store.state.privateId);
-                                    const first = pickPane(workspace);
+                              : workspaceGroups(liveWorkspaces(instance, live)).map((group) => {
+                                    const key = JSON.stringify([instance.id, group.key]);
+                                    const folded = collapsed.has(key);
+                                    const toggle = () =>
+                                        setCollapsed((previous) => {
+                                            const next = new Set(previous);
 
-                                    return html`<button
-                                  key=${workspace.id}
-                                  class=${`private-space-row ${selected ? "active" : ""}`}
-                                  aria-current=${selected ? "location" : undefined}
-                                  title=${workspace.label}
-                                  disabled=${!first && !native}
-                                  onPointerDown=${keepTerminalFocus}
-                                  onClick=${() => (native ? live.request("workspace.focus", { workspace_id: workspace.nativeId }) : navigate(null, { privateId: first.id }))}
-                              >
-                                  <${Status} state=${workspace.state || first?.state} />
-                                  <span class="private-row-copy">
-                                      <span class="session-title">${shortLabel(workspace.label, "Workspace")}</span>
-                                      ${workspace.branch && html`<span class="session-meta">${workspace.branch}</span>`}
-                                  </span>
-                                  <span class="private-row-count" title="Tabs">${workspace.tabs.length}</span>
-                              </button>`;
+                                            if (next.has(key)) {
+                                                next.delete(key);
+                                            } else {
+                                                next.add(key);
+                                            }
+
+                                            return next;
+                                        });
+                                    const priority = [
+                                        "shell",
+                                        "unknown",
+                                        "done",
+                                        "idle",
+                                        "working",
+                                        "busy",
+                                        "waiting",
+                                        "blocked",
+                                        "error",
+                                    ];
+                                    const state = folded
+                                        ? [...group.parents, ...group.children]
+                                              .map(
+                                                  (workspace) =>
+                                                      workspace.state || pickPane(workspace)?.state,
+                                              )
+                                              .sort(
+                                                  (a, b) =>
+                                                      priority.indexOf(b) - priority.indexOf(a),
+                                              )[0]
+                                        : undefined;
+
+                                    return html`<div key=${group.key || group.parents[0].id} class="private-repo-group">
+                                        ${group.parents.map(
+                                            (workspace) => html`<${WorkspaceRow}
+                                            key=${workspace.id}
+                                            workspace=${workspace}
+                                            instance=${instance}
+                                            live=${live}
+                                            group=${group.children.length ? group : undefined}
+                                            folded=${folded}
+                                            toggle=${toggle}
+                                            state=${state}
+                                        />`,
+                                        )}
+                                        ${
+                                            group.children.length > 0 &&
+                                            html`<div
+                                            id=${`worktrees-${instance.id}-${group.parents[0].id}`}
+                                            class="private-worktree-children"
+                                            hidden=${folded}
+                                        >
+                                            ${
+                                                !folded &&
+                                                group.children.map(
+                                                    (workspace) => html`<${WorkspaceRow}
+                                                key=${workspace.id}
+                                                workspace=${workspace}
+                                                instance=${instance}
+                                                live=${live}
+                                                child=${true}
+                                            />`,
+                                                )
+                                            }
+                                        </div>`
+                                        }
+                                    </div>`;
                                 })
                     }
                 </div>`,

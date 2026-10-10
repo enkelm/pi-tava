@@ -877,6 +877,8 @@ const ICONS = {
     shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z",
     external: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5",
     key: "M15 7a4 4 0 11-3.9 4.9L3 20v-3h3v-3h3l1.1-1.1A4 4 0 0115 7z",
+    settings:
+        "M10 3h4l.5 3 2 .9 2.6-1.1 2 3.4-2.3 1.9v2.2l2.3 1.9-2 3.4-2.6-1.1-2 .9-.5 3h-4l-.5-3-2-.9-2.6 1.1-2-3.4 2.3-1.9v-2.2L2.9 9.2l2-3.4L7.5 6.9l2-.9zM15 12a3 3 0 11-6 0 3 3 0 016 0z",
     users: "M16 20v-1a4 4 0 00-4-4H6a4 4 0 00-4 4v1M9 11a4 4 0 100-8 4 4 0 000 8zM22 20v-1a4 4 0 00-3-3.9M16 3.1a4 4 0 010 7.8",
     sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z",
     chat: "M21 12a8 8 0 01-11.6 7.1L4 20l1-4.6A8 8 0 1121 12z",
@@ -890,6 +892,7 @@ const ICONS = {
     palette:
         "M12 3a9 9 0 100 18c1 0 1.5-.8 1.5-1.5 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.8.7-1.5 1.5-1.5H16a5 5 0 005-5c0-4.4-4-7.8-9-7.8zM7.5 12.5h.01M9.5 8h.01M14.5 8h.01M17 11.5h.01",
     pulse: "M3 12h4l2-6 4 12 2-6h6",
+    bell: "M18 8a6 6 0 00-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4",
     keyboard: "M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10",
     swatch: "M4 4h7v16H4zM11 9l6-4 3 5-9 6M11 16h9v4h-9",
     home: "M3 11l9-7 9 7M5 10v10h14V10",
@@ -1311,7 +1314,15 @@ export const scrimPress = (close) => (event) =>
     close();
 
 /** A bottom sheet on phones, a centered dialog on wide screens. */
-export function Sheet({ title, onClose, children, wide = false, actions = null, className = "" }) {
+export function Sheet({
+    title,
+    onClose,
+    children,
+    wide = false,
+    actions = null,
+    class: panelClass = "",
+    className = panelClass,
+}) {
     const ref = useRef(null);
     const onBack = useContext(SheetBack);
     const info = useContext(SheetInfo);

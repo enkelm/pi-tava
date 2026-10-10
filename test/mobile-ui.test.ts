@@ -182,6 +182,363 @@ test("back closes the open file, then the Files tile, then leaves the session", 
     await reach({ path: "/" }, "back to the list");
 });
 
+test(
+    "Settings combines appearance and providers behind the rightmost footer button",
+    real,
+    async () => {
+        await fresh();
+        await page.setViewport(VIEWPORTS.desktop);
+        await tap(".sidebar .foot-tile:last-child");
+        await reach({ sheet: "settings", layers: 1 }, "Settings from the footer");
+        const layout = await inPage<{
+            footer: string[];
+            dialogs: number;
+            sidebar: boolean;
+            appearance: boolean;
+        }>(`
+        const tabs = document.querySelector('[role="tablist"][aria-label="Settings categories"]');
+        const panel = document.querySelector('[role="tabpanel"]:not([hidden])');
+
+        return JSON.stringify({
+            footer: [...document.querySelectorAll('.sidebar .foot-tile')].map((each) => each.textContent.trim()),
+            dialogs: document.querySelectorAll('[role="dialog"][aria-label="Settings"]').length,
+            sidebar: tabs.getBoundingClientRect().right <= panel.getBoundingClientRect().left,
+            appearance: panel.textContent.includes('Layout and motion'),
+        });
+    `);
+
+        assert.equal(layout.footer.at(-1), "Settings");
+        assert.ok(!layout.footer.includes("Providers") && !layout.footer.includes("Theme"));
+        assert.equal(layout.dialogs, 1);
+        assert.equal(layout.sidebar, true, "categories sit beside the content on desktop");
+        assert.equal(layout.appearance, true);
+
+        await tap('[role="tab"][aria-controls="settings-panel-providers"]');
+        await until(
+            async () =>
+                await inPage<boolean>(`
+                return JSON.stringify(document.querySelector('#settings-panel-providers .provider') !== null);
+            `),
+            "the provider list",
+        );
+        await page.evaluate(`
+        const search = document.querySelector('[aria-label="Search providers"]');
+
+        search.value = 'no-provider-with-this-name';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+    `);
+        await until(
+            async () =>
+                await inPage<boolean>(`
+                return JSON.stringify(document.querySelector('#settings-panel-providers [role="status"]')?.textContent.includes('No matching providers') === true);
+            `),
+            "no matching providers",
+        );
+        await tap('[role="tab"][aria-controls="settings-panel-appearance"]');
+        await tap('[role="tab"][aria-controls="settings-panel-providers"]');
+        assert.equal(
+            await inPage<string>(`
+            return JSON.stringify(document.querySelector('[aria-label="Search providers"]').value);
+        `),
+            "no-provider-with-this-name",
+            "switching tabs keeps the provider search",
+        );
+        await reach({ sheet: "settings", layers: 1 }, "tabs stay within one popup and back step");
+        await page.press("Escape");
+        await reach({ sheet: null, layers: 0 }, "Settings closed");
+    },
+);
+
+test(
+    "Settings tabs fit a phone, support keyboard navigation, and back returns to the menu",
+    real,
+    async () => {
+        await fresh();
+        await tap(row(first));
+        await tap('.topbar [aria-label="Menu"]');
+        await page.evaluate(`
+        [...document.querySelectorAll('.sheet .list-item')].find((each) => each.querySelector('span')?.textContent === 'Settings').click();
+    `);
+        await reach({ sheet: "settings", layers: 2 }, "Settings from the menu");
+        await page.evaluate(
+            `document.querySelector('[role="tab"][aria-controls="settings-panel-appearance"]').focus()`,
+        );
+        await page.press("ArrowRight");
+        assert.equal(
+            await inPage<string>(`
+            return JSON.stringify(document.activeElement.textContent.trim());
+        `),
+            "Providers",
+        );
+        assert.equal(
+            await inPage<boolean>(`
+            const tabs = document.querySelector('[role="tablist"][aria-label="Settings categories"]');
+            const panel = document.querySelector('[role="tabpanel"]:not([hidden])');
+            const sheet = document.querySelector('[role="dialog"][aria-label="Settings"]');
+
+            return JSON.stringify(
+                tabs.getAttribute('aria-orientation') === 'horizontal' &&
+                tabs.getBoundingClientRect().bottom <= panel.getBoundingClientRect().top &&
+                sheet.getBoundingClientRect().left >= 0 &&
+                sheet.getBoundingClientRect().right <= innerWidth &&
+                panel.scrollWidth <= panel.clientWidth
+            );
+        `),
+            true,
+            "phone tabs sit above the content without horizontal overflow",
+        );
+        await page.press("ArrowLeft");
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(document.activeElement.textContent.trim());`,
+            ),
+            "Appearance",
+        );
+        await reach({ sheet: "settings", layers: 2 }, "switching tabs adds no back steps");
+        await back();
+        await reach({ sheet: "menu", layers: 1 }, "back to the menu");
+        await back();
+        await reach({ sheet: null, layers: 0, path: `/s/${first}` }, "back to the conversation");
+    },
+);
+
+test(
+    "Settings preserves account and budget drafts, saves preferences, and returns from invites",
+    real,
+    async () => {
+        await fresh();
+        await page.setViewport(VIEWPORTS.desktop);
+        await tap(".sidebar .foot-tile:nth-child(2)");
+        await reach({ sheet: "settings", layers: 1 }, "People opens Account & access");
+        const originalName = await inPage<string>(`
+        return JSON.stringify((await import('/store.js')).store.state.me.name);
+    `);
+
+        await page.evaluate(`
+        window.settingsInviteRequests = 0;
+        window.settingsFetch = window.fetch;
+        window.fetch = (url, ...rest) => {
+            if (String(url).endsWith('/api/invite')) {
+                window.settingsInviteRequests++;
+            }
+
+            return window.settingsFetch(url, ...rest);
+        };
+        const name = document.querySelector('#settings-panel-account input[name="name"]');
+
+        name.value = 'Settings owner';
+        name.dispatchEvent(new Event('input', { bubbles: true }));
+    `);
+        await tap("#settings-tab-notifications");
+        await until(
+            async () =>
+                await inPage<boolean>(`
+            return JSON.stringify(document.querySelector('#settings-panel-notifications [aria-label="Chat messages"]') !== null);
+        `),
+            "notification preferences",
+        );
+        const originalChat = await inPage<boolean>(`
+        return JSON.stringify((await (await import('/store.js')).api('push')).prefs.chat);
+    `);
+
+        await tap('#settings-panel-notifications [aria-label="Chat messages"]');
+        await until(
+            async () =>
+                (await inPage<boolean>(`
+            return JSON.stringify((await (await import('/store.js')).api('push')).prefs.chat);
+        `)) !== originalChat,
+            "notification preference saved",
+        );
+        await tap('#settings-panel-notifications [aria-label="Chat messages"]');
+        await until(
+            async () =>
+                (await inPage<boolean>(`
+            return JSON.stringify((await (await import('/store.js')).api('push')).prefs.chat);
+        `)) === originalChat,
+            "notification preference restored",
+        );
+        await tap("#settings-tab-extensions");
+        await until(
+            async () =>
+                await inPage<boolean>(`
+            return JSON.stringify(document.querySelector('#settings-panel-extensions .switch') !== null);
+        `),
+            "extensions inside Settings",
+        );
+        await tap("#settings-tab-usage");
+        await tap("#settings-panel-usage .spend-row .link");
+        await page.evaluate(`
+        const budget = document.querySelector('#settings-panel-usage input[type="number"]');
+
+        budget.value = '45.5';
+        budget.dispatchEvent(new Event('input', { bubbles: true }));
+    `);
+        await tap("#settings-tab-account");
+        assert.equal(
+            await inPage<string>(`
+        return JSON.stringify(document.querySelector('#settings-panel-account input[name="name"]').value);
+    `),
+            "Settings owner",
+            "switching categories keeps the name draft",
+        );
+        await tap("#settings-tab-usage");
+        assert.equal(
+            await inPage<string>(`
+        return JSON.stringify(document.querySelector('#settings-panel-usage input[type="number"]').value);
+    `),
+            "45.5",
+            "switching categories keeps the budget draft",
+        );
+        assert.equal(
+            await inPage<number>(`return JSON.stringify(window.settingsInviteRequests);`),
+            0,
+            "visiting Settings does not create hidden invitations",
+        );
+        await tap("#settings-tab-account");
+        await tap("#settings-panel-account button[type='submit']");
+        await until(
+            async () =>
+                (await inPage<string>(`
+            return JSON.stringify((await (await import('/store.js')).api('me')).user.name);
+        `)) === "Settings owner",
+            "name saved without closing Settings",
+        );
+        await reach({ sheet: "settings", layers: 1 }, "saving keeps Settings open");
+        await page.evaluate(`
+        const name = document.querySelector('#settings-panel-account input[name="name"]');
+
+        name.value = ${JSON.stringify(originalName)};
+        name.dispatchEvent(new Event('input', { bubbles: true }));
+    `);
+        await tap("#settings-panel-account button[type='submit']");
+        await until(
+            async () =>
+                (await inPage<string>(`
+            return JSON.stringify((await (await import('/store.js')).api('me')).user.name);
+        `)) === originalName,
+            "name restored",
+        );
+        await tap("#settings-panel-account .settings-actions button:first-child");
+        await reach(
+            { sheet: "invite", layers: 2 },
+            "signing in another device is an explicit flow",
+        );
+        assert.equal(
+            await inPage<boolean>(`
+        return JSON.stringify(document.querySelector('.sheet input[type="checkbox"]').checked);
+    `),
+            true,
+            "another device signs in as the owner by default",
+        );
+        await back();
+        await reach({ sheet: "settings", layers: 1 }, "back returns to Settings");
+        assert.equal(
+            await inPage<string>(`
+        return JSON.stringify(document.querySelector('.settings-tabs [aria-selected="true"]').textContent.trim());
+    `),
+            "Account & access",
+        );
+        await page.evaluate(`window.fetch = window.settingsFetch;`);
+        await page.press("Escape");
+        await reach({ sheet: null, layers: 0 }, "Settings closed");
+    },
+);
+
+test(
+    "Settings phone tabs fit owner extension paths and keep owner controls read-only for guests",
+    real,
+    async () => {
+        await fresh();
+        await page.setViewport({ ...VIEWPORTS.mobile, width: 320 });
+        await page.evaluate(`
+            (await import("/store.js")).openSheet({ type: "settings", tab: "extensions" });
+        `);
+        await until(
+            async () =>
+                await inPage<boolean>(`
+                return JSON.stringify(document.querySelector("#settings-panel-extensions .switch") !== null);
+            `),
+            "owner extension settings",
+        );
+        assert.equal(
+            await inPage<boolean>(`
+                const panel = document.querySelector("#settings-panel-extensions");
+
+                return JSON.stringify(panel.scrollWidth <= panel.clientWidth);
+            `),
+            true,
+            "the owner’s extension directory wraps within a narrow phone panel",
+        );
+        const guest = app.config.addUser("Settings guest", "guest");
+
+        await page.navigate(`${base}/login?token=${encodeURIComponent(guest.token)}`);
+        await tap("form button");
+
+        try {
+            await fresh();
+            await page.setViewport({ ...VIEWPORTS.mobile, width: 320 });
+            await page.evaluate(`(await import('/store.js')).openSheet({ type: 'settings' });`);
+            await reach({ sheet: "settings", layers: 1 }, "guest Settings");
+            await page.evaluate(`document.querySelector('#settings-tab-appearance').focus();`);
+            await page.press("End");
+            await until(
+                async () =>
+                    await inPage<boolean>(`
+                const tab = document.querySelector('#settings-tab-usage').getBoundingClientRect();
+                const nav = document.querySelector('.settings-tabs').getBoundingClientRect();
+                const panel = document.querySelector('#settings-panel-usage');
+
+                return JSON.stringify(
+                    document.activeElement.id === 'settings-tab-usage' &&
+                    tab.left >= nav.left - 1 && tab.right <= nav.right + 1 &&
+                    panel.scrollWidth <= panel.clientWidth &&
+                    document.documentElement.scrollWidth <= innerWidth
+                );
+            `),
+                "the last category is scrolled into view without widening the phone",
+            );
+            await until(
+                async () =>
+                    await inPage<boolean>(`
+                return JSON.stringify(document.querySelector('#settings-panel-usage .spend-row') !== null);
+            `),
+                "guest usage",
+            );
+            assert.equal(
+                await inPage<number>(`
+            return JSON.stringify(document.querySelectorAll('#settings-panel-usage .spend-row button').length);
+        `),
+                0,
+                "guests cannot change budgets",
+            );
+            await tap("#settings-tab-extensions");
+            await until(
+                async () =>
+                    await inPage<boolean>(`
+                const switches = [...document.querySelectorAll('#settings-panel-extensions .switch')];
+
+                return JSON.stringify(switches.length > 0 && switches.every((each) => each.disabled));
+            `),
+                "guests can inspect extensions but not change them",
+            );
+            await tap("#settings-tab-account");
+            assert.equal(
+                await inPage<number>(`
+            return JSON.stringify(document.querySelectorAll('#settings-panel-account .person-actions').length);
+        `),
+                0,
+                "guests cannot change access",
+            );
+            await back();
+            await reach({ sheet: null, layers: 0 }, "one back step closes all Settings categories");
+        } finally {
+            await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
+            await tap("form button");
+            await fresh();
+        }
+    },
+);
+
 test("local Markdown file links use the viewer", real, async () => {
     const linked = await newSession(app);
 

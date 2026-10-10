@@ -157,8 +157,25 @@ test(
                                 available: true,
                                 workspaces: [
                                     {
+                                        id: "work-child",
+                                        label: "short directory name",
+                                        branch: "feature/68953-data-extract-notifications-with-a-long-name",
+                                        worktree: {
+                                            key: "repo-a",
+                                            label: "Pocket work",
+                                            isLinkedWorktree: true,
+                                        },
+                                        tabs: [],
+                                    },
+                                    {
                                         id: "work-a",
                                         label: "Pocket work",
+                                        branch: "main",
+                                        worktree: {
+                                            key: "repo-a",
+                                            label: "Pocket work",
+                                            isLinkedWorktree: false,
+                                        },
                                         tabs: [
                                             {
                                                 id: "tab-a",
@@ -181,6 +198,29 @@ test(
                                             },
                                         ],
                                     },
+                                    {
+                                        id: "work-custom",
+                                        label: "Named review",
+                                        customLabel: true,
+                                        branch: "feature/review",
+                                        worktree: {
+                                            key: "repo-a",
+                                            label: "Pocket work",
+                                            isLinkedWorktree: true,
+                                        },
+                                        tabs: [],
+                                    },
+                                    {
+                                        id: "work-orphan",
+                                        label: "feature/orphan",
+                                        worktree: {
+                                            key: "no-parent",
+                                            label: "Orphan repo",
+                                            isLinkedWorktree: true,
+                                        },
+                                        tabs: [],
+                                    },
+                                    { id: "work-plain", label: "feature/not-a-worktree", tabs: [] },
                                 ],
                             },
                             {
@@ -387,6 +427,62 @@ test(
             assert.match(
                 await value<string>(page, `document.querySelector('.home-list').textContent`),
                 /Unavailable[\s\S]*No workspaces/,
+            );
+            assert.deepEqual(
+                await value(
+                    page,
+                    `[...document.querySelectorAll('.home-list .private-space-row .session-title')].map(row => row.textContent)`,
+                ),
+                [
+                    "Pocket work",
+                    "feature/68953-data-extract-notifications-with-a-long-name",
+                    "Named review",
+                    "feature/orphan",
+                    "feature/not-a-worktree",
+                ],
+                "repo roots precede their linked checkouts; branch prefixes and custom labels survive",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelectorAll('.home-list .private-worktree-children .private-space-row').length`,
+                ),
+                2,
+                "only daemon-linked children with an open parent nest",
+            );
+            assert.equal(
+                await value(page, "document.documentElement.scrollWidth <= innerWidth"),
+                true,
+            );
+            const beforeFold = requests.length;
+
+            await click(page, ".home-list .private-worktree-toggle");
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelector('.home-list .private-worktree-toggle').getAttribute('aria-expanded')`,
+                ),
+                "false",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelectorAll('.home-list .private-space-row').length`,
+                ),
+                3,
+            );
+            assert.equal(
+                requests.length,
+                beforeFold,
+                "folding is local, without terminal focus or input",
+            );
+            await click(page, ".home-list .private-worktree-toggle");
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelectorAll('.home-list .private-space-row').length`,
+                ),
+                5,
             );
             await shot(page, "mobile-tree");
             await click(page, ".home-list .private-pane-row");

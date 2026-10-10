@@ -2,11 +2,8 @@
 // (chat.js, notify.js, share.js).
 import { ChatSheet } from "./chat.js";
 import { ExtensionSheet, onExtensionsGone } from "./extension-ui.js";
-import { NotificationsSheet } from "./notify.js";
 import { ShareSheet } from "./share.js";
-import { AppearanceSheet } from "./sheets/appearance.js";
 import { BranchPicker } from "./sheets/branch.js";
-import { ExtensionsSheet } from "./sheets/extensions.js";
 import { FileSheet } from "./sheets/file.js";
 import { FindSheet } from "./sheets/find.js";
 import {
@@ -23,27 +20,39 @@ import { MemorySheet } from "./sheets/memory.js";
 import { MenuSheet, PlacesSheet } from "./sheets/menu.js";
 import { MessageSheet } from "./sheets/message.js";
 import { ModelPicker } from "./sheets/model.js";
-import { InviteSheet, PeopleSheet } from "./sheets/people.js";
-import { AuthDialog, ProvidersSheet } from "./sheets/providers.js";
+import { InviteSheet } from "./sheets/people.js";
+import { AuthDialog } from "./sheets/providers.js";
 import { RunningSheet } from "./sheets/running.js";
 import { HooksSheet } from "./sheets/hooks.js";
 import { SchedulesSheet } from "./sheets/schedules.js";
 import { SessionSheet } from "./sheets/session.js";
+import { SettingsSheet } from "./sheets/settings.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
-import { SpendSheet } from "./sheets/spend.js";
 import { TextSheet } from "./sheets/text.js";
 import { ArtifactsSheet, ArtifactViewer, ImageViewer } from "./sheets/viewers.js";
 import { PiSessionSheet, PiSessionsSheet, piSessionsAvailable } from "./sheets/pi-sessions.js";
 import { WorktreeSheet } from "./sheets/worktree.js";
 import { TrustSheet } from "./trust.js";
 import { addLayer, goBack, removeLayer } from "./back.js";
-import { actions, api, signOut, store } from "./store.js";
-import { Boundary, html, Icon, SheetBack, SheetInfo, usePresence } from "./ui.js";
+import { actions, store } from "./store.js";
+import { Boundary, html, SheetBack, SheetInfo, usePresence } from "./ui.js";
 
 // ─── Back ─────────────────────────────────────────────────────────────────────────
 
+// Legacy settings entry points share one popup and one history step.
+const SETTINGS_TABS = {
+    appearance: "appearance",
+    providers: "providers",
+    notifications: "notifications",
+    extensions: "extensions",
+    name: "account",
+    people: "account",
+    spend: "usage",
+};
+
 /** What tells sheets apart: the same one changing (its query, say) stays one step back. */
-const sheetKey = (sheet) => `${sheet.type}:${sheet.entryId ?? sheet.id ?? ""}`;
+const sheetKey = (sheet) =>
+    `${SETTINGS_TABS[sheet.type] ? "settings" : sheet.type}:${sheet.entryId ?? sheet.id ?? sheet.pipId ?? ""}`;
 
 /**
  * The sheets opened one from another, oldest first (the menu, then the model picker it opened): each is a step back,
@@ -151,13 +160,13 @@ store.subscribe(({ sheet, launcher }) => {
  */
 export function Sheets() {
     const [sheet, leaving] = usePresence(store.state.sheet, 200);
-    const auth = store.state.auth && sheet?.type !== "providers" ? html`<${AuthDialog} />` : null;
+    const auth = store.state.auth ? html`<${AuthDialog} />` : null;
 
     if (!sheet) {
         return auth;
     }
 
-    const key = `${sheet.type}:${sheet.entryId ?? sheet.id ?? sheet.pipId ?? ""}`;
+    const key = sheetKey(sheet);
 
     return html`<div class=${`sheet-host ${leaving ? "leaving" : ""}`} inert=${leaving}>
             <${SheetBack.Provider} value=${trail.length > 1 ? goBack : null}>
@@ -183,8 +192,17 @@ function sheetBody(sheet) {
                       />`
                     : null;
             break;
+        case "settings":
         case "appearance":
-            body = html`<${AppearanceSheet} />`;
+        case "providers":
+        case "notifications":
+        case "extensions":
+        case "name":
+        case "people":
+        case "spend":
+            body = html`<${SettingsSheet}
+                tab=${sheet.tab ?? SETTINGS_TABS[sheet.type] ?? "appearance"}
+            />`;
             break;
         case "shortcuts":
             body = html`<${ShortcutsSheet} />`;
@@ -205,12 +223,6 @@ function sheetBody(sheet) {
             body = view.conversation
                 ? html`<${ArtifactViewer} id=${sheet.id} version=${sheet.version} />`
                 : null;
-            break;
-        case "providers":
-            body = html`<${ProvidersSheet} />`;
-            break;
-        case "extensions":
-            body = html`<${ExtensionsSheet} />`;
             break;
         case "gallery":
             body = galleryAvailable() ? html`<${GallerySheet} />` : null;
@@ -247,13 +259,10 @@ function sheetBody(sheet) {
             body = html`<${ImageViewer} src=${sheet.src} alt=${sheet.alt} />`;
             break;
         case "invite":
-            body = html`<${InviteSheet} session=${sheet.session ?? null} />`;
-            break;
-        case "people":
-            body = html`<${PeopleSheet} />`;
-            break;
-        case "notifications":
-            body = html`<${NotificationsSheet} />`;
+            body = html`<${InviteSheet}
+                session=${sheet.session ?? null}
+                initialAsOwner=${sheet.owner ?? false}
+            />`;
             break;
         case "menu":
             body = html`<${MenuSheet} places=${!sheet.fromPlaces} />`;
@@ -300,9 +309,6 @@ function sheetBody(sheet) {
             body = view.conversation
                 ? html`<${FindSheet} key=${view.conversation.id} initial=${sheet.query ?? ""} />`
                 : null;
-            break;
-        case "spend":
-            body = html`<${SpendSheet} />`;
             break;
         case "running":
             body = html`<${RunningSheet} />`;
@@ -361,25 +367,6 @@ function sheetBody(sheet) {
                 multiline=${true}
                 button="Compact"
                 submit=${(value) => actions.compact(value)}
-            />`;
-            break;
-        case "name":
-            body = html`<${TextSheet}
-                title="Your name"
-                label="Shown on your messages to others"
-                initial=${me?.name ?? ""}
-                footer=${html`<button
-                    class="button ghost wide sheet-footer signout"
-                    onClick=${signOut}
-                >
-                    <${Icon} name="logout" size=${16} /> Sign out
-                </button>`}
-                submit=${async (value) => {
-                    await api("me", { name: value });
-                    const hello = await api("me");
-
-                    store.set({ me: hello.user, users: hello.users });
-                }}
             />`;
             break;
     }

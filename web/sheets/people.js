@@ -1,19 +1,8 @@
 // People with access to this server, and invites for more.
 import { useEffect, useRef, useState } from "preact/hooks";
 import { Avatar } from "../avatar.js";
-import {
-    actions,
-    api,
-    attempt,
-    canSteer,
-    closeSheet,
-    collab,
-    notify,
-    openSheet,
-    scoped,
-    store,
-} from "../store.js";
-import { copyText, html, Icon, Loader, Sheet, timeAgo } from "../ui.js";
+import { actions, api, attempt, closeSheet, collab, notify, store } from "../store.js";
+import { copyText, html, Loader, Sheet, timeAgo } from "../ui.js";
 
 const ROLE_TEXT = {
     guest: "Can steer Pi, which can run commands on this machine",
@@ -42,13 +31,13 @@ const cancelInvite = (invite) => {
     }
 };
 
-export function InviteSheet({ session = null }) {
+export function InviteSheet({ session = null, initialAsOwner = false }) {
     const { view, me } = store.state;
     const here = view.conversation?.kind === "session" ? view.conversation : null;
     const [role, setRole] = useState("guest");
     const [only, setOnly] = useState(session !== null);
     // The owner's own other device: it signs in as the owner, not as someone new.
-    const [asOwner, setAsOwner] = useState(false);
+    const [asOwner, setAsOwner] = useState(initialAsOwner && me?.role === "owner");
     const [minutes, setMinutes] = useState(15);
     const [made, setMade] = useState(null);
     // The newest invite could not be made: the sheet offers to try again rather than wait for ever.
@@ -148,28 +137,28 @@ export function InviteSheet({ session = null }) {
             collab() &&
             !asOwner &&
             html`<div class="field">
-                <div class="label">They can</div>
-                <div class="segmented">
-                    <button
-                        class=${role === "guest" ? "on" : ""}
-                        aria-pressed=${role === "guest"}
-                        onClick=${() => setRole("guest")}
-                    >
-                        Steer
-                    </button>
-                    <button
-                        class=${role === "viewer" ? "on" : ""}
-                        aria-pressed=${role === "viewer"}
-                        onClick=${() => setRole("viewer")}
-                    >
-                        View only
-                    </button>
+                    <div class="label">They can</div>
+                    <div class="segmented">
+                        <button
+                            class=${role === "guest" ? "on" : ""}
+                            aria-pressed=${role === "guest"}
+                            onClick=${() => setRole("guest")}
+                        >
+                            Steer
+                        </button>
+                        <button
+                            class=${role === "viewer" ? "on" : ""}
+                            aria-pressed=${role === "viewer"}
+                            onClick=${() => setRole("viewer")}
+                        >
+                            View only
+                        </button>
+                    </div>
+                    <div class="muted small">
+                        ${ROLE_TEXT[role]}.${role === "guest" && only ? " Seeing one session in the app does not limit what Pi can reach on the machine." : ""}
+                    </div>
                 </div>
-                <div class="muted small">
-                    ${ROLE_TEXT[role]}.${role === "guest" && only ? " Seeing one session in the app does not limit what Pi can reach on the machine." : ""}
-                </div>
-            </div>
-            ${
+                ${
                 here &&
                 html`<div class="field">
                     <div class="label">In</div>
@@ -198,13 +187,14 @@ export function InviteSheet({ session = null }) {
                 <div class="label">Expires after</div>
                 <div class="segmented">
                     ${LASTS.map(
-                        ([each, label]) => html`<button
-                            class=${minutes === each ? "on" : ""}
-                            aria-pressed=${minutes === each}
-                            onClick=${() => setMinutes(each)}
-                        >
-                            ${label}
-                        </button>`,
+                        ([each, label]) =>
+                            html`<button
+                                class=${minutes === each ? "on" : ""}
+                                aria-pressed=${minutes === each}
+                                onClick=${() => setMinutes(each)}
+                            >
+                                ${label}
+                            </button>`,
                     )}
                 </div>
             </div>`
@@ -223,67 +213,71 @@ export function InviteSheet({ session = null }) {
         ${
             invite
                 ? html`<div class="invite">
-                    ${
+                      ${
                         invite.local &&
                         html`<div class="error-box">
-                            This link only works on this device. To let other devices in, press <span class="mono">a</span> in the Pi Coop terminal (or start it with <span class="mono">--access</span>) and pick Local network, Cloudflare Tunnel, or Tailscale. Then make a new invite.
+                            This link only works on this device. To let other devices in, press
+                            <span class="mono">a</span> in the Pi Coop terminal (or start it with
+                            <span class="mono">--access</span>) and pick Local network, Cloudflare
+                            Tunnel, or Tailscale. Then make a new invite.
                         </div>`
                     }
-                    <div class="invite-details">
-                    <div class="qr" dangerouslySetInnerHTML=${{ __html: invite.svg }}></div>
-                    <div class="invite-code">
-                        <div class="invite-code-head">
-                            <span>Invite code</span>
-                            <button
-                                class="link small"
-                                onClick=${() =>
+                      <div class="invite-details">
+                          <div class="qr" dangerouslySetInnerHTML=${{ __html: invite.svg }}></div>
+                          <div class="invite-code">
+                              <div class="invite-code-head">
+                                  <span>Invite code</span>
+                                  <button
+                                      class="link small"
+                                      onClick=${() =>
                                     copyText(invite.code).then(
                                         () => notify("info", "Code copied."),
                                         () => notify("error", "Could not copy."),
                                     )}
-                            >
-                                Copy
-                            </button>
-                        </div>
-                        <div
-                            class="invite-code-value"
-                            aria-label=${`Invite code ${invite.code.split("").join(" ")}`}
-                        >
-                            <span>${invite.code.slice(0, 5)}</span>
-                            <span>${invite.code.slice(5)}</span>
-                        </div>
-                        <div class="muted small">
-                            Or enter it on the other device's sign-in screen.
-                        </div>
-                    </div>
-                    </div>
-                    <div class="row">
-                        <input
-                            class="mono"
-                            readonly
-                            value=${invite.url}
-                            onFocus=${(event) => event.currentTarget.select()}
-                        />
-                        <button
-                            class="button"
-                            onClick=${() =>
+                                  >
+                                      Copy
+                                  </button>
+                              </div>
+                              <div
+                                  class="invite-code-value"
+                                  aria-label=${`Invite code ${invite.code.split("").join(" ")}`}
+                              >
+                                  <span>${invite.code.slice(0, 5)}</span>
+                                  <span>${invite.code.slice(5)}</span>
+                              </div>
+                              <div class="muted small">
+                                  Or enter it on the other device's sign-in screen.
+                              </div>
+                          </div>
+                      </div>
+                      <div class="row">
+                          <input
+                              class="mono"
+                              readonly
+                              value=${invite.url}
+                              onFocus=${(event) => event.currentTarget.select()}
+                          />
+                          <button
+                              class="button"
+                              onClick=${() =>
                                 copyText(invite.url).then(
                                     () => notify("info", "Link copied."),
                                     () => notify("error", "Could not copy."),
                                 )}
-                        >
-                            Copy
-                        </button>
-                    </div>
-                    ${
+                          >
+                              Copy
+                          </button>
+                      </div>
+                      ${
                         invite.alternatives?.length > 0 &&
                         html`<p class="muted small">
-                            Also reachable at: ${invite.alternatives.map(
+                            Also reachable at:
+                            ${invite.alternatives.map(
                                 (url) => html`<span class="mono">${url} </span>`,
                             )}
                         </p>`
                     }
-                </div>`
+                  </div>`
                 : failed
                   ? html`<p class="muted small">No invite yet. Tap New invite to try again.</p>`
                   : html`<${Loader} label="Making an invite" />`
@@ -306,7 +300,7 @@ function lastSeen(person) {
 }
 
 /** Everyone with access: who is online, when the others were last here, and (for the owner) what each may do. */
-function PeopleList() {
+export function PeopleList() {
     const { me, users, sessions } = store.state;
     const owner = me?.role === "owner";
     const sessionTitle = (id) => sessions.find((each) => each.id === id)?.title ?? `session ${id}`;
@@ -321,26 +315,28 @@ function PeopleList() {
     return html`<div class="group">
         <div class="group-title">People</div>
         <div class="sheet-list">
-        ${ordered.map(
-            (person) => html`<div class="person-row" key=${person.id}>
-                <span class="people-here">
-                    <${Avatar} person=${person} size=${32} />
-                    <span
-                        class=${`online-mark ${person.online ? "" : "away"}`}
-                        aria-hidden="true"
-                    ></span>
-                </span>
-                <div class="person-main">
-                    <div>
-                        ${person.name}
-                        ${person.id === me?.id ? html` <span class="muted small">(you)</span>` : ""}
+            ${ordered.map(
+            (person) =>
+                html`<div class="person-row" key=${person.id}>
+                    <span class="people-here">
+                        <${Avatar} person=${person} size=${32} />
+                        <span
+                            class=${`online-mark ${person.online ? "" : "away"}`}
+                            aria-hidden="true"
+                        ></span>
+                    </span>
+                    <div class="person-main">
+                        <div>
+                            ${person.name}
+                            ${person.id === me?.id ? html` <span class="muted small">(you)</span>` : ""}
+                        </div>
+                        <div class="muted small">
+                            ${person.role === "owner" ? "owner" : person.role === "viewer" ? "view only" : "can steer"}
+                            ${person.sessions ? ` · only ${person.sessions.map(sessionTitle).join(", ")}` : ""}
+                            · ${lastSeen(person)}
+                        </div>
                     </div>
-                    <div class="muted small">
-                        ${person.role === "owner" ? "owner" : person.role === "viewer" ? "view only" : "can steer"}
-                        ${person.sessions ? ` · only ${person.sessions.map(sessionTitle).join(", ")}` : ""} · ${lastSeen(person)}
-                    </div>
-                </div>
-                ${
+                    ${
                     owner &&
                     person.role !== "owner" &&
                     html`<div class="person-actions">
@@ -382,28 +378,8 @@ function PeopleList() {
                         </button>
                     </div>`
                 }
-            </div>`,
+                </div>`,
         )}
         </div>
     </div>`;
-}
-
-export function PeopleSheet() {
-    const canInvite = canSteer() && !scoped();
-
-    return html`<${Sheet} title="People" onClose=${closeSheet}>
-        ${
-            canInvite &&
-            html`<button class="button primary wide" onClick=${() => openSheet({ type: "invite" })}>
-                <${Icon} name="plus" size=${16} /> Invite someone
-            </button>`
-        }
-        <${PeopleList} />
-        <button
-            class="button ghost wide sheet-footer"
-            onClick=${() => openSheet({ type: "notifications" })}
-        >
-            Notifications on this device…
-        </button>
-    <//>`;
 }

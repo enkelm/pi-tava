@@ -13,10 +13,22 @@ import { importFixture } from "./import-fixtures.ts";
 
 after(cleanUp);
 
+const longRepoKey = `/repos/${"k".repeat(500)}`;
+
 async function fixture(name: string) {
     const directory = join(work, name);
 
     mkdirSync(directory);
+    const checkout = join(directory, "checkout");
+    const linked = join(directory, "linked");
+    const linkedGit = join(checkout, ".git", "worktrees", "linked");
+
+    mkdirSync(join(checkout, "src"), { recursive: true });
+    mkdirSync(linkedGit, { recursive: true });
+    mkdirSync(linked);
+    writeFileSync(join(checkout, ".git", "HEAD"), "ref: refs/heads/local-main\n");
+    writeFileSync(join(linked, ".git"), `gitdir: ${linkedGit}\n`);
+    writeFileSync(join(linkedGit, "HEAD"), "ref: refs/heads/worktree/feature\n");
     const source = importFixture(directory);
     const model = scriptedModel();
     const app = await openApp(model, join(root, name));
@@ -49,11 +61,69 @@ async function fixture(name: string) {
                 return {
                     snapshot: {
                         workspaces: [
-                            { workspace_id: "research", label: "Research workspace" },
-                            { workspace_id: "empty", label: "Empty workspace" },
+                            {
+                                workspace_id: "research",
+                                label: "Research workspace",
+                                active_tab_id: "r:t1",
+                                agent_status: "working",
+                                custom_label: false,
+                                worktree: {
+                                    repo_key: "/repos/example",
+                                    repo_name: "\u001b[32mExample\u001b[0m\u0000 project",
+                                    is_linked_worktree: true,
+                                    checkout_path: linked,
+                                    repo_root: checkout,
+                                },
+                            },
+                            {
+                                workspace_id: "empty",
+                                label: "Empty workspace",
+                                active_tab_id: {},
+                                agent_status: [],
+                                custom_label: "true",
+                                branch: "bad\u0000branch",
+                                worktree: {
+                                    repo_key: "/repos/example",
+                                    repo_name: "Example project",
+                                    is_linked_worktree: "true",
+                                    checkout_path: "relative/checkout",
+                                    repo_root: checkout,
+                                },
+                            },
+                            { workspace_id: "cwd-only", label: "Example project worktree" },
+                            ...[longRepoKey + "/a", longRepoKey + "/b"].map((key, index) => ({
+                                workspace_id: `long-${index}`,
+                                label: "Long repository",
+                                worktree: {
+                                    repo_key: key,
+                                    repo_name: "L".repeat(500),
+                                    is_linked_worktree: index === 1,
+                                },
+                            })),
+                            ...["k".repeat(4097), "bad\u001b[31mkey"].map((key, index) => ({
+                                workspace_id: `invalid-${index}`,
+                                label: "Invalid repository",
+                                worktree: {
+                                    repo_key: key,
+                                    repo_name: "Invalid repository",
+                                    is_linked_worktree: true,
+                                },
+                            })),
+                            {
+                                workspace_id: "unsafe-path",
+                                label: "Unsafe path",
+                                worktree: {
+                                    repo_key: "/repos/safe-key",
+                                    repo_name: "Safe name",
+                                    is_linked_worktree: false,
+                                    checkout_path: ".",
+                                    repo_root: checkout,
+                                },
+                            },
                         ],
                         tabs: [
                             { workspace_id: "research", tab_id: "r:t1", label: "Notes" },
+                            { workspace_id: "research", tab_id: "r:t2", label: "Inactive tab" },
                             { workspace_id: "empty", tab_id: "e:t1", label: "Empty tab" },
                         ],
                         panes: [
@@ -67,6 +137,18 @@ async function fixture(name: string) {
                                 label: "Other agent",
                                 cwd: "/example/notes",
                             },
+                            {
+                                pane_id: "cwd:p1",
+                                workspace_id: "cwd-only",
+                                tab_id: "cwd:t1",
+                                cwd: join(checkout, "src"),
+                            },
+                            {
+                                pane_id: "absent:p1",
+                                workspace_id: "absent-workspace",
+                                tab_id: "absent:t1",
+                                label: "Missing workspace row",
+                            },
                         ],
                     },
                 } as T;
@@ -79,6 +161,20 @@ async function fixture(name: string) {
             return {
                 snapshot: {
                     ...value.snapshot,
+                    workspaces: value.snapshot.workspaces.map((row) => ({
+                        ...(row as Record<string, unknown>),
+                        active_tab_id: "tab",
+                        agent_status: "done",
+                        custom_label: true,
+                        branch: "wire/main",
+                        worktree: {
+                            repo_key: "/repos/example",
+                            repo_name: "Example project",
+                            is_linked_worktree: false,
+                            checkout_path: checkout,
+                            repo_root: checkout,
+                        },
+                    })),
                     tabs: [{ workspace_id: "workspace", tab_id: "tab", label: "Main tab" }],
                     panes: [
                         ...value.snapshot.panes.map((pane) => ({
@@ -547,7 +643,7 @@ test("uncertain input is never automatically retried; pane input and import cann
     }
 });
 
-test("private HTTP rejects guests/viewers/scoped users and CSRF before discovery; responses are never cached", async () => {
+test("private HTTP authorizes before I/O and returns uncached, sanitized workspace metadata", async () => {
     const f = await fixture("http");
     const server = createServer(
         createHandler({ app: f.app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
@@ -611,6 +707,58 @@ test("private HTTP rejects guests/viewers/scoped users and CSRF before discovery
 
         assert.equal(response.status, 200);
         assert.equal(response.headers.get("cache-control"), "no-store");
+        const listing = await response.json();
+        const parent = listing.instances[0].workspaces[0];
+        const [linked, empty, cwdOnly, longA, longB, invalidA, invalidB, unsafe, absent] =
+            listing.instances[1].workspaces;
+
+        assert.deepEqual(parent.worktree, {
+            key: "/repos/example",
+            label: "Example project",
+            isLinkedWorktree: false,
+        });
+        assert.deepEqual(linked.worktree, {
+            key: "/repos/example",
+            label: "Example project",
+            isLinkedWorktree: true,
+        });
+        assert.equal(parent.customLabel, true);
+        assert.equal(linked.customLabel, false);
+        assert.equal(parent.state, "done");
+        assert.equal(linked.state, "working");
+        assert.equal(parent.tabs[0].active, true);
+        assert.deepEqual(
+            linked.tabs.map((tab: { active: boolean }) => tab.active),
+            [true, false],
+        );
+        assert.equal(parent.branch, "wire/main");
+        assert.equal(linked.branch, "worktree/feature");
+        assert.equal(cwdOnly.branch, "local-main");
+        assert.equal(cwdOnly.worktree, undefined); // Labels never imply worktree membership.
+        assert.equal(longA.worktree.key, longRepoKey + "/a");
+        assert.equal(longB.worktree.key, longRepoKey + "/b");
+        assert.notEqual(longA.worktree.key, longB.worktree.key);
+        assert.equal(longA.worktree.label, "L".repeat(400));
+
+        for (const invalid of [empty, invalidA, invalidB]) {
+            assert.equal(invalid.worktree, undefined);
+        }
+
+        assert.equal(empty.customLabel, undefined);
+        assert.equal(empty.state, undefined);
+        assert.equal(empty.branch, undefined);
+        assert.equal(empty.tabs[0].active, undefined);
+        assert.equal(unsafe.branch, undefined); // No relative paths or repo_root fallback.
+        assert.equal(absent.nativeId, "absent-workspace");
+        assert.equal(absent.tabs[0].panes[0].nativeId, "absent:p1");
+        assert.equal(listing.instances[1].available, true);
+        assert.deepEqual(listing.warnings, []);
+        assert.equal(parent.nativeId, "workspace");
+        assert.equal(parent.tabs[0].nativeId, "tab");
+        assert.equal(parent.tabs[0].panes[0].nativeId, "pane");
+        assert.match(parent.id, /^[a-f0-9]{64}$/);
+        assert.match(linked.id, /^[a-f0-9]{64}$/);
+        assert.doesNotMatch(JSON.stringify(listing), /checkout_path|repo_root|\\u001b|\\u0000/i);
         const viewResponse = await fetch(`${base}/${f.pane.id}`, { headers });
 
         assert.equal(viewResponse.headers.get("cache-control"), "no-store");

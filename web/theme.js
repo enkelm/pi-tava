@@ -30,7 +30,7 @@ const DEFAULTS = {
     /** "auto" follows the system's reduced-motion setting. */
     motion: "auto",
     /** The conversation's text in pixels, 13 to 17; the rest of the app keeps its own sizes. */
-    text: 15,
+    text: 14,
     /** How much room the spacing takes: "comfortable", "compact", or "tight". Font sizes stay. */
     density: "comfortable",
     /**
@@ -40,8 +40,8 @@ const DEFAULTS = {
     width: "comfortable",
     /** The sidebar on wide screens: "open", or "rail" (icons and numbered sessions only). */
     sidebar: "open",
-    /** The open sidebar's width, its borders, the rail, and the list's: a 254px list. */
-    sidebarWidth: 312,
+    /** The standalone Coop sidebar's saved width. */
+    sidebarWidth: 300,
     /** How the session list groups: "recent" (by day) or "folder". */
     group: "recent",
     /** Other sessions' live work as peek tiles beside the session (a strip on narrow screens). Off until turned on. */
@@ -66,39 +66,6 @@ const reduceQuery = matchMedia("(prefers-reduced-motion: reduce)");
 /** The system's light or dark, which a theme's pair of palettes follows. */
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
 
-/** Set once this browser's saved look has the sidebar's width for the rail beside the list. */
-const RAIL_KEY = "pocket.railBeside";
-/** Set once this browser's saved look has the soft tiles' text size and sidebar. */
-const SOFT_KEY = "pocket.softTiles";
-
-/**
- * What this browser saved. The sidebar's usual width was 300 before the rail went beside the list, then 324, and is
- * 312 with soft tiles. The text size was the whole app's, 12 to 16; it is now the conversation's, a step larger.
- */
-function savedPrefs() {
-    const saved = readJson(KEY, {});
-
-    if (localStorage.getItem(SOFT_KEY) !== null) {
-        return saved;
-    }
-
-    // Either usual width, the one from before the rail went beside the list too.
-    const usual =
-        saved.sidebarWidth === 324 ||
-        (saved.sidebarWidth === 300 && !localStorage.getItem(RAIL_KEY));
-    const next = {
-        ...saved,
-        ...(usual && { sidebarWidth: DEFAULTS.sidebarWidth }),
-        ...(typeof saved.text === "number" && { text: saved.text + 1 }),
-    };
-
-    localStorage.setItem(RAIL_KEY, "1");
-    localStorage.setItem(SOFT_KEY, "1");
-    localStorage.setItem(KEY, JSON.stringify(next));
-
-    return next;
-}
-
 /**
  * Appearance's Width, past Comfortable: the column's width and the message box's, set inline so they win over a theme's.
  * Each grows with the pane (a percentage of it) and has a floor of today's column, so phones and narrow windows stay as
@@ -112,11 +79,11 @@ const WIDTHS = {
     full: { "--transcript-width": "100%", "--composer-width": "100%" },
 };
 
-/** The open sidebar's width as it shows: the rail and its borders, and a list 204–464px wide. */
-const sidebarWidth = (p) => `${Math.min(524, Math.max(264, p.sidebarWidth))}px`;
+/** The standalone sidebar's width, matching its drag and reset controls. */
+const sidebarWidth = (p) => `${Math.min(520, Math.max(260, p.sidebarWidth))}px`;
 
-/** This browser's own choices: what it saved, over the defaults. */
-let own = { ...DEFAULTS, ...savedPrefs() };
+/** Preserve this browser's saved Coop choices without the upstream rail/text migration. */
+let own = { ...DEFAULTS, ...readJson(KEY, {}) };
 
 /** Which of the theme (`look`) and the colors (`theme`) this browser's person chose; the rest follow the owner's default. */
 const CHOSEN = "pocket.themeChosen";

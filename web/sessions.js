@@ -1150,20 +1150,20 @@ export function SessionList({ compact = false, home = false }) {
                                                     data-part="session-group-name"
                                                 >
                                                     ${
-                                          typeof group.label === "string"
-                                              ? html`<b>${group.label}</b>`
-                                              : group.label
-                                      }
+                                                        typeof group.label === "string"
+                                                            ? html`<b>${group.label}</b>`
+                                                            : group.label
+                                                    }
                                                 </span>
                                                 ${
-                                      trouble &&
-                                      html`<span
-                                          class=${`group-trouble ${trouble}`}
-                                          role="img"
-                                          aria-label=${trouble === "waiting" ? "A session needs you" : "A session failed"}
-                                          title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
-                                      ></span>`
-                                  }
+                                                    trouble &&
+                                                    html`<span
+                                                        class=${`group-trouble ${trouble}`}
+                                                        role="img"
+                                                        aria-label=${trouble === "waiting" ? "A session needs you" : "A session failed"}
+                                                        title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
+                                                    ></span>`
+                                                }
                                                 <span
                                                     class="group-count"
                                                     data-part="session-group-count"
@@ -1210,36 +1210,29 @@ export function SessionList({ compact = false, home = false }) {
                         <${Icon} name="pulse" size=${16} />
                         Running${busy > 0 && html`<span class="tile-count">${busy}</span>`}
                     </button>
-                    <button
-                        class="foot-tile"
-                        title="Model providers"
-                        onClick=${() => openSheet({ type: "providers" })}
-                    >
-                        <${Icon} name="key" size=${16} /> Providers
-                    </button>
                     ${
                         collab()
                             ? html`<button
                                   class="foot-tile"
                                   title=${canStart ? "People and invites" : "People"}
-                                  onClick=${() => openSheet({ type: "people" })}
+                                  onClick=${() => openSheet({ type: "settings", tab: "account" })}
                               >
                                   <${Icon} name="users" size=${16} /> People
                               </button>`
                             : html`<button
                                   class="foot-tile"
                                   title="Sign in another device"
-                                  onClick=${() => openSheet({ type: "invite" })}
+                                  onClick=${() => openSheet({ type: "settings", tab: "account" })}
                               >
                                   <${Icon} name="users" size=${16} /> Devices
                               </button>`
                     }
                     <button
                         class="foot-tile"
-                        title="Theme, tiling, motion"
-                        onClick=${() => openSheet({ type: "appearance" })}
+                        title="Appearance and model providers"
+                        onClick=${() => openSheet({ type: "settings" })}
                     >
-                        <${Icon} name="palette" size=${16} /> Theme
+                        <${Icon} name="settings" size=${16} /> Settings
                     </button>
                 </div>
                 ${
@@ -1272,7 +1265,11 @@ export function SessionList({ compact = false, home = false }) {
                     </div>`
                 }
             </div>
-            <button class="me-row" title="Your name" onClick=${() => openSheet({ type: "name" })}>
+            <button
+                class="me-row"
+                title="Your name"
+                onClick=${() => openSheet({ type: "settings", tab: "account" })}
+            >
                 ${me && html`<${Avatar} person=${me} size=${22} />`}
                 <span class="me-name">${me?.name}</span>
                 <span class="me-role">
@@ -1400,18 +1397,19 @@ export function Rail() {
             </button>
             <button
                 class="icon-button"
-                title="Appearance"
-                onClick=${() => openSheet({ type: "appearance" })}
-            >
-                <${Icon} name="palette" size=${18} />
-            </button>
-            <button
-                class="icon-button"
                 title="Unfold the sidebar"
                 aria-label="Unfold the sidebar"
                 onClick=${() => setPrefs({ sidebar: "open" })}
             >
                 <${Icon} name="sidebar" size=${18} />
+            </button>
+            <button
+                class="icon-button"
+                title="Settings"
+                aria-label="Settings"
+                onClick=${() => openSheet({ type: "settings" })}
+            >
+                <${Icon} name="settings" size=${18} />
             </button>
         </div>
     </div>`;
