@@ -1,4 +1,4 @@
-// The launcher, after Omarchy's Walker: one box for sessions, actions, and themes. Mod+K opens it anywhere. Arrowing
+// The launcher: one box for sessions, actions, and themes. Mod+K opens it anywhere. Arrowing
 // onto a theme shows it at once; Enter keeps it, Escape goes back. Start with > for actions only, @ for sessions, # for
 // themes.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
@@ -422,25 +422,19 @@ function lookItems() {
 }
 
 function themeItems() {
-    const desktop = store.state.desktopTheme;
-    const ids = [...(desktop ? ["desktop"] : []), ...themeIds(), ...folderPaletteIds()];
+    const ids = [...themeIds(), ...folderPaletteIds()];
 
     return [
         ...lookItems(),
         ...ids.map((id) => {
             const palette = paletteOf(id);
-            const name = id === "desktop" ? `Desktop · ${palette.name}` : palette.name;
+            const name = palette.name;
 
             return {
                 kind: "theme",
                 key: `theme:${id}`,
                 label: name,
-                detail:
-                    id === "desktop"
-                        ? "follows your Omarchy theme"
-                        : palette.colors.mode === "light"
-                          ? "light"
-                          : "dark",
+                detail: palette.colors.mode === "light" ? "light" : "dark",
                 text: `theme ${name} ${id}`,
                 theme: id,
                 vars: themeVars(palette),
@@ -577,7 +571,7 @@ export function Launcher({ leaving, returnTo }) {
         store.state.browserOpen,
         store.state.filesOpen,
         store.state.filesTab,
-        store.state.desktopTheme,
+        store.state.themeList,
         store.state.appearance,
         store.state.me,
         store.state.server,
@@ -887,21 +881,18 @@ export function Launcher({ leaving, returnTo }) {
                     [">", "Actions"],
                     ["#", "Themes"],
                 ].map(
-                    ([token, label]) => html`<button
-                        aria-pressed=${(prefix ? query[0] : "") === token}
-                        onClick=${() => chooseType(token)}
-                    >
-                        ${label}${token && html`<kbd aria-hidden="true">${token}</kbd>`}
-                    </button>`,
+                    ([token, label]) =>
+                        html`<button
+                            aria-pressed=${(prefix ? query[0] : "") === token}
+                            onClick=${() => chooseType(token)}
+                        >
+                            ${label}${token && html`<kbd aria-hidden="true">${token}</kbd>`}
+                        </button>`,
                 )}
             </div>
             ${
                 limitedRecent &&
-                html`<div
-                    class="launcher-summary"
-                    role="group"
-                    aria-label="Recent session options"
-                >
+                html`<div class="launcher-summary" role="group" aria-label="Recent session options">
                     <div class="launcher-group" data-part="launcher-group">
                         <span id="launcher-group-session">Recent sessions</span>
                         <span class="launcher-count">
@@ -973,35 +964,35 @@ export function Launcher({ leaving, returnTo }) {
                                     ${
                                         item.kind === "theme"
                                             ? html`
-                                                <span
-                                                    class="swatch"
-                                                    style=${varsStyle(item.vars)}
-                                                    aria-hidden="true"
-                                                >
-                                                    <i style="background:var(--o-bg)"></i>
-                                                    <i style="background:var(--o-accent)"></i>
-                                                    <i style="background:var(--o-green)"></i>
-                                                    <i style="background:var(--o-red)"></i>
-                                                </span>
-                                            `
+                                                  <span
+                                                      class="swatch"
+                                                      style=${varsStyle(item.vars)}
+                                                      aria-hidden="true"
+                                                  >
+                                                      <i style="background:var(--o-bg)"></i>
+                                                      <i style="background:var(--o-accent)"></i>
+                                                      <i style="background:var(--o-green)"></i>
+                                                      <i style="background:var(--o-red)"></i>
+                                                  </span>
+                                              `
                                             : html`
-                                                <span class="glyph" aria-hidden="true">
-                                                    ${
-                                                        item.kind === "session"
-                                                            ? html`<span
-                                                                class="launcher-folder"
-                                                                style=${`--folder:${item.folder}`}
-                                                            ></span>`
-                                                            : html`
-                                                                <${Icon}
-                                                                    name=${item.icon}
-                                                                    path=${item.iconPath}
-                                                                    size=${16}
-                                                                />
-                                                            `
-                                                    }
-                                                </span>
-                                            `
+                                                  <span class="glyph" aria-hidden="true">
+                                                      ${
+                                                          item.kind === "session"
+                                                              ? html`<span
+                                                                  class="launcher-folder"
+                                                                  style=${`--folder:${item.folder}`}
+                                                              ></span>`
+                                                              : html`
+                                                                  <${Icon}
+                                                                      name=${item.icon}
+                                                                      path=${item.iconPath}
+                                                                      size=${16}
+                                                                  />
+                                                              `
+                                                      }
+                                                  </span>
+                                              `
                                     }
                                     <span class="main">
                                         <span class="launcher-title">
@@ -1060,12 +1051,7 @@ export function Launcher({ leaving, returnTo }) {
                     <button class="button" onClick=${clear}>Clear search</button>
                 </div>`
             }
-            <div
-                class="launcher-status"
-                role="status"
-                aria-live="polite"
-                aria-atomic="true"
-            >
+            <div class="launcher-status" role="status" aria-live="polite" aria-atomic="true">
                 ${announcement}
             </div>
             <div class="launcher-foot">

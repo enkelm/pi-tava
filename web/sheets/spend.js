@@ -31,16 +31,16 @@ function SpendLimit({ budget, editable, save }) {
                 ${budget === undefined ? "no limit" : `limit ${money(budget)}`}
             </span>
             ${
-            editable
-                ? html`<button
+                editable
+                    ? html`<button
                       class="link small spend-change"
                       ref=${change}
                       onClick=${() => setDraft(budget === undefined ? "" : String(budget))}
                   >
                       Change
                   </button>`
-                : html`<span class="spend-change" aria-hidden="true"></span>`
-        }`;
+                    : html`<span class="spend-change" aria-hidden="true"></span>`
+            }`;
     }
 
     const done = (value) =>
@@ -60,12 +60,12 @@ function SpendLimit({ budget, editable, save }) {
             value=${draft}
             onInput=${(event) => setDraft(event.currentTarget.value)}
             onKeyDown=${(event) => {
-            // Esc lets go of the limit, not the whole sheet.
-            if (event.key === "Escape") {
-                event.stopPropagation();
-                setDraft(null);
-            }
-        }}
+                // Esc lets go of the limit, not the whole sheet.
+                if (event.key === "Escape") {
+                    event.stopPropagation();
+                    setDraft(null);
+                }
+            }}
         />
         <button
             class="button small primary"
@@ -141,8 +141,8 @@ export function SpendSettings() {
                     <div class="group-title">People</div>
                     <div class="sheet-list">
                         ${data.people.map(
-                        (person) =>
-                            html`<div class="spend-row" key=${person.id}>
+                            (person) =>
+                                html`<div class="spend-row" key=${person.id}>
                                 <span class="grow">${person.name}</span>
                                 <${Usage} row=${person} max=${peopleMax} />
                                 <span class="mono">${money(person.spent)}</span>
@@ -152,15 +152,15 @@ export function SpendSettings() {
                                     save=${save({ person: person.id })}
                                 />
                             </div>`,
-                    )}
+                        )}
                     </div>
                 </div>
                 <div class="group">
                     <div class="group-title">Sessions</div>
                     <div class="sheet-list">
                         ${data.sessions.map(
-                        (session) =>
-                            html`<div class="spend-row" key=${session.id}>
+                            (session) =>
+                                html`<div class="spend-row" key=${session.id}>
                                 <span class="grow">${session.title}</span>
                                 <${Usage} row=${session} max=${sessionsMax} />
                                 <span class="mono">${money(session.spent)}</span>
@@ -170,7 +170,7 @@ export function SpendSettings() {
                                     save=${save({ session: session.id })}
                                 />
                             </div>`,
-                    )}
+                        )}
                     </div>
                 </div>`
         }

@@ -8,7 +8,8 @@ import { test } from "node:test";
 import { APP_ROOT } from "../src/server/config.ts";
 import { readTheme, Themes } from "../src/server/themes.ts";
 import { cssReferences } from "../src/server/themes/css.ts";
-import { ThemeProblem } from "../src/server/themes/format.ts";
+import { parseThemeColors, ThemeProblem } from "../src/server/themes/format.ts";
+import { pocketVersion } from "../src/server/versions.ts";
 
 test("a theme's CSS may load only files in its own folder", () => {
     const dir = join(root, "themes", "mine");
@@ -39,6 +40,43 @@ test("a theme's CSS may load only files in its own folder", () => {
     }
 });
 
+test("palettes retain flat color values and omit URL or CSS payloads", () => {
+    const palette = [
+        "# A flat colors.toml, including comments and normalized keys.",
+        'mode = "dark"',
+        'background = "#1a1b26"',
+        'Foreground = "#c0caf5" # text color',
+        'accent = "#7aa2f7"',
+        'Selection-Background = "rgba(122, 162, 247, 0.3)"',
+        'hyprland_active_border = "#7aa2f7 #c0caf5 45deg"',
+        'bad = "url(javascript:alert(1)); color: red"',
+        'sneaky = "url(x)"',
+    ].join("\r\n");
+
+    assert.deepEqual(parseThemeColors(palette), {
+        mode: "dark",
+        background: "#1a1b26",
+        foreground: "#c0caf5",
+        accent: "#7aa2f7",
+        selection_background: "rgba(122, 162, 247, 0.3)",
+        hyprland_active_border: "#7aa2f7 #c0caf5 45deg",
+    });
+
+    for (const key of ["background", "foreground"]) {
+        const invalidRequiredColor = palette.replace(
+            new RegExp(`^${key} = "[^"]*"`, "im"),
+            `${key} = "url(/api/me)"`,
+        );
+
+        assert.throws(
+            () => parseThemeColors(invalidRequiredColor),
+            (error) =>
+                error instanceof ThemeProblem &&
+                error.message === "colors.toml has no background or no foreground",
+        );
+    }
+});
+
 test("the check reads deeply nested CSS in time: its cost does not grow with the square of the nesting", () => {
     const started = Date.now();
 
@@ -51,7 +89,7 @@ test("every built-in theme passes its checks", () => {
     const builtIn = join(APP_ROOT, "web", "themes");
 
     for (const id of readdirSync(builtIn)) {
-        assert.doesNotThrow(() => readTheme(join(builtIn, id), id, true, "0.14.0"), id);
+        assert.doesNotThrow(() => readTheme(join(builtIn, id), id, true, pocketVersion()), id);
     }
 });
 

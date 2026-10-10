@@ -1,14 +1,13 @@
-// Appearance: the theme (a folder of CSS the server lists, `themes.ts`), the colors (Omarchy palettes as CSS variables,
-// a theme folder's own, or "Follow desktop": the Omarchy theme this machine runs), tiled windows, motion, text size,
-// density, and the sidebar's shape. Saved per browser. index.html applies the last look before the first paint from
-// `pocket.themeCache`, the theme's stylesheets included, so a reload never flashes another look.
+// Appearance: Coop's bundled palettes and saved layout, with explicitly selected optional theme folders.
+// No desktop-theme or wallpaper synchronization. Theme CSS still participates in safe mode.
 import { THEMES } from "./themes.js";
 import { onSafeModeEnd, safeMode } from "./safe-mode.js";
-import { api, store } from "./store.js";
+import { store } from "./store.js";
 
 const KEY = "pocket.appearance";
 const CACHE = "pocket.themeCache";
-const DESKTOP_CACHE = "pocket.desktopTheme";
+const DEFAULT_CACHE = "pocket.themeDefault";
+const FOLLOW_DEFAULT = "pocket.followThemeDefault";
 const PINNED = "pocket.pinned";
 const FALLBACK = "tokyo-night";
 
@@ -16,17 +15,12 @@ const FALLBACK = "tokyo-night";
 export const BASE_LOOK = "pocket";
 
 const DEFAULTS = {
-    /**
-     * The colors: "desktop" follows the Omarchy theme of the machine Pi Pocket runs on; otherwise a key of THEMES, or the
-     * id of a theme folder with a colors.toml. (Its name is from before themes were folders.)
-     */
-    theme: "desktop",
-    /** The theme: a theme folder's id, or "pocket", the app's own look. */
+    /** A key of the bundled THEMES. */
+    theme: FALLBACK,
+    /** Optional theme-folder CSS; the standalone app loads no extra stylesheet by default. */
     look: BASE_LOOK,
-    /** Wide screens: the sidebar and the conversation as Hyprland windows, with gaps and borders. */
+    /** Wide screens: the sidebar and the conversation as tiled windows, with gaps and borders. */
     tiling: true,
-    /** The desktop's wallpaper in the gaps, when following the desktop. */
-    wallpaper: false,
     /** "auto" follows the system's reduced-motion setting. */
     motion: "auto",
     /** The conversation's text in pixels, 13 to 17; the rest of the app keeps its own sizes. */
@@ -63,7 +57,7 @@ function readJson(key, fallback) {
 }
 
 const reduceQuery = matchMedia("(prefers-reduced-motion: reduce)");
-/** The system's light or dark, which a theme's pair of palettes follows. */
+// Only an explicitly selected optional folder's paired palettes follow this; bundled palettes stay selected.
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
 
 /**
@@ -82,61 +76,84 @@ const WIDTHS = {
 /** The standalone sidebar's width, matching its drag and reset controls. */
 const sidebarWidth = (p) => `${Math.min(520, Math.max(260, p.sidebarWidth))}px`;
 
-/** Preserve this browser's saved Coop choices without the upstream rail/text migration. */
-let own = { ...DEFAULTS, ...readJson(KEY, {}) };
+/** Retired desktop settings fall back to Tokyo Night without resetting saved Coop layout choices. */
+function normalizePrefs(saved) {
+    const appearance = { ...DEFAULTS, ...saved };
+    const id = appearance.theme;
+    const cached = readJson(CACHE, {});
+    // Keep a selected folder palette while waiting for its listing, including reloads without a palette cache.
+    const cachedFolder = typeof id === "string" && id !== "desktop" && cached.attrs?.colors === id;
+    const known =
+        typeof id === "string" &&
+        (Object.hasOwn(THEMES, id) ||
+            folderColors(id) !== undefined ||
+            cachedFolder ||
+            !Array.isArray(store.state.themeList));
 
-/** Which of the theme (`look`) and the colors (`theme`) this browser's person chose; the rest follow the owner's default. */
-const CHOSEN = "pocket.themeChosen";
-const chosen = readJson(CHOSEN, null) ?? {
-    // From before there were defaults: colors other than the desktop's were someone's choice.
-    theme: own.theme !== DEFAULTS.theme,
-    look: own.look !== DEFAULTS.look,
-};
+    if (id === "desktop" || !known) {
+        appearance.theme = FALLBACK;
+    }
 
-/** The owner's default as the last `hello` said it: it stands until the next one, so a reload paints it from the start. */
-const DEFAULT_CACHE = "pocket.themeDefault";
+    if (typeof appearance.look !== "string") {
+        appearance.look = BASE_LOOK;
+    }
 
-/** The owner's default theme and colors: the server's, or, before it said, the one it said last time. */
-const ownerDefault = (state = store.state) =>
-    state.server ? (state.server.themeDefault ?? null) : readJson(DEFAULT_CACHE, null);
+    const width = Number(appearance.sidebarWidth);
 
-/** The look in force: this browser's own, with the owner's default theme and colors where its person chose none. */
-function inForce() {
-    const fallback = ownerDefault();
+    appearance.sidebarWidth = Number.isFinite(width)
+        ? Math.min(520, Math.max(260, width))
+        : DEFAULTS.sidebarWidth;
+    delete appearance.wallpaper;
 
-    return {
-        ...own,
-        ...(fallback && !chosen.look ? { look: fallback.look } : {}),
-        ...(fallback && !chosen.theme ? { theme: fallback.colors } : {}),
-    };
+    return appearance;
 }
 
-store.set({
-    appearance: inForce(),
-    desktopTheme: readJson(DESKTOP_CACHE, null),
-    pinned: readJson(PINNED, []),
-});
+// Treat every pre-existing appearance record as a personal choice, even if it matches our defaults.
+// Only genuinely new browsers get a follower marker; it survives layout edits and reloads until a theme/look choice.
+const following = localStorage.getItem(FOLLOW_DEFAULT);
+let followsDefault =
+    following === "1" || (following === null && localStorage.getItem(KEY) === null);
+let own = normalizePrefs(readJson(KEY, {}));
+
+if (followsDefault) {
+    localStorage.setItem(FOLLOW_DEFAULT, "1");
+}
+
+/** Before hello, only a new/unconfigured browser may reuse the last owner default. */
+const ownerDefault = () => (store.state.server ? themeDefault() : readJson(DEFAULT_CACHE, null));
+
+function inForce() {
+    const current = followsDefault ? ownerDefault() : null;
+
+    return current ? normalizePrefs({ ...own, look: current.look, theme: current.colors }) : own;
+}
+
+localStorage.removeItem("pocket.desktopTheme");
+// Startup never rewrites an existing browser's saved preferences, nor saves an inherited default as a choice.
+store.set({ appearance: inForce(), pinned: readJson(PINNED, []) });
 
 export const prefs = () => store.state.appearance;
 
 export function setPrefs(patch) {
-    own = { ...own, ...patch };
+    const choosing = Object.hasOwn(patch, "theme") || Object.hasOwn(patch, "look");
+    // A theme/look choice adopts both currently displayed values. Layout-only changes leave inheritance intact.
+    const base = choosing ? prefs() : own;
 
-    // Choosing the theme or the colors makes them this browser's own: the owner's default no longer moves them.
-    for (const key of ["look", "theme"]) {
-        if (key in patch) {
-            chosen[key] = true;
-            localStorage.setItem(CHOSEN, JSON.stringify(chosen));
-        }
+    if (choosing) {
+        followsDefault = false;
+        localStorage.setItem(FOLLOW_DEFAULT, "0");
     }
 
+    own = normalizePrefs({ ...base, ...patch });
     localStorage.setItem(KEY, JSON.stringify(own));
     store.set({ appearance: inForce() });
     apply();
 }
 
 /** The owner's default for browsers that have not chosen (`hello`), or null. */
-export const themeDefault = () => store.state.server?.themeDefault ?? null;
+export function themeDefault() {
+    return store.state.server?.themeDefault ?? null;
+}
 
 // ─── Pinned sessions (this browser) ──────────────────────────────────────────────
 
@@ -153,25 +170,8 @@ export function togglePin(id) {
 
 // ─── Palettes ───────────────────────────────────────────────────────────────────
 
-/** The palette a theme id means: a bundled theme, or the desktop's (falling back when there is none). */
+/** A bundled palette, or an explicitly chosen optional theme-folder palette; never the desktop. */
 export function paletteOf(id = prefs().theme) {
-    if (id === "desktop") {
-        const desktop = store.state.desktopTheme;
-
-        if (desktop?.colors) {
-            return {
-                id: "desktop",
-                name:
-                    (Object.hasOwn(THEMES, desktop.name) && THEMES[desktop.name].name) ||
-                    desktop.name,
-                colors: desktop.colors,
-                desktop: true,
-            };
-        }
-
-        return { id: FALLBACK, ...THEMES[FALLBACK] };
-    }
-
     // Own ids only: a folder named "constructor" is no palette of the app's.
     if (Object.hasOwn(THEMES, id)) {
         return { id, ...THEMES[id] };
@@ -208,10 +208,10 @@ function folderColors(id) {
 }
 
 /**
- * Whether the palette `id` names is known here yet: one that comes with the app, the desktop's, or any once the server
+ * Whether the palette `id` names is known here yet: one that comes with the app, or any once the server
  * listed its theme folders. Until then, the palette index.html put on the page from the cache stays.
  */
-const paletteKnown = (id) => id === "desktop" || Object.hasOwn(THEMES, id) || themesListed();
+const paletteKnown = (id) => Object.hasOwn(THEMES, id) || themesListed();
 
 /** The server listed its theme folders (`hello`). */
 const themesListed = () => Array.isArray(store.state.themeList);
@@ -303,6 +303,9 @@ export function chooseLook(id, event) {
             : undefined;
 
     if (id === prefs().look) {
+        // Choosing the inherited look still makes it this browser's own choice.
+        setPrefs({ look: id });
+
         return;
     }
 
@@ -322,7 +325,7 @@ export function chooseLook(id, event) {
 export function lookLabel() {
     const look = lookOf();
     const palette = paletteOf();
-    const colors = palette.desktop ? `${palette.name} (desktop)` : palette.name;
+    const colors = palette.name;
 
     return look && prefs().theme.split("@")[0] === look.id
         ? look.name
@@ -367,6 +370,7 @@ export function themeVars(palette) {
     const bg = pick("background") ?? "#1a1b26";
     const fg = pick("foreground") ?? "#a9b1d6";
     const accent = pick("accent", "blue") ?? fg;
+    const stops = c.active_border ?? [accent];
 
     return {
         "--o-bg": bg,
@@ -386,12 +390,21 @@ export function themeVars(palette) {
         "--o-cyan": pick("cyan") ?? "#7dcfff",
         "--o-blue": pick("blue", "accent") ?? accent,
         "--o-magenta": pick("magenta") ?? "#bb9af7",
+        "--o-active-a": stops[0],
+        "--o-active-b": stops[stops.length - 1],
+        "--o-active":
+            stops.length > 1
+                ? `linear-gradient(45deg, ${stops.join(", ")})`
+                : `linear-gradient(${stops[0]}, ${stops[0]})`,
+        // Only when the theme names one: otherwise style.css's default for dark or light themes.
+        "--o-inactive": c.inactive_border ?? null,
     };
 }
 
 /** Variables as an inline style. */
 export const varsStyle = (vars) =>
     Object.entries(vars)
+        .filter(([, value]) => value !== null && value !== undefined)
         .map(([name, value]) => `${name}:${value}`)
         .join(";");
 
@@ -448,25 +461,15 @@ export function apply() {
         loadSheets(sheets);
     }
 
-    const desktop = store.state.desktopTheme;
-    // The desktop's wallpaper is the person's choice, so it stays inline and wins; without it, the app's default (none)
-    // or the theme's own shows.
-    const wallpaper =
-        p.theme === "desktop" && p.wallpaper && p.tiling && desktop?.wallpaper
-            ? `url("/api/theme/wallpaper?v=${encodeURIComponent(desktop.stamp)}")`
-            : null;
+    // A retired cache or preference cannot restore desktop wallpaper.
+    root.style.removeProperty("--wallpaper");
     // Width other than Comfortable is the person's choice, inline over the theme's; Comfortable leaves it to the theme.
     const width = WIDTHS[p.width];
     const inline = {
         "--text-size": `${p.text}px`,
         "--sidebar-w": sidebarWidth(p),
-        ...(wallpaper === null ? {} : { "--wallpaper": wallpaper }),
         ...(width ?? {}),
     };
-
-    if (wallpaper === null) {
-        root.style.removeProperty("--wallpaper");
-    }
 
     if (!width) {
         root.style.removeProperty("--transcript-width");
@@ -570,6 +573,9 @@ export function chooseTheme(id, event) {
             : undefined;
 
     if (id === prefs().theme) {
+        // Choosing the inherited palette still opts out of future owner-default changes.
+        setPrefs({ theme: id });
+
         return;
     }
 
@@ -591,49 +597,9 @@ export function preview(id) {
     document.documentElement.dataset.mode = modeOf(palette);
 }
 
-// ─── Follow desktop ─────────────────────────────────────────────────────────────
-
-let checking = false;
 let started = false;
 
-/** Ask the server for the desktop's theme; animate to it when it changed since the last look. */
-async function checkDesktop({ animate = true } = {}) {
-    if (checking || store.state.me === null) {
-        return;
-    }
-
-    checking = true;
-
-    try {
-        const { theme } = await api("theme");
-        const before = store.state.desktopTheme;
-
-        if ((theme?.stamp ?? null) === (before?.stamp ?? null)) {
-            return;
-        }
-
-        localStorage.setItem(DESKTOP_CACHE, JSON.stringify(theme));
-
-        const change = () => {
-            store.set({ desktopTheme: theme });
-            apply();
-        };
-
-        if (animate && before !== null && prefs().theme === "desktop") {
-            transition(change);
-        } else {
-            change();
-        }
-    } catch {
-        // Signed out, or an older server without the route: keep what we have.
-    } finally {
-        checking = false;
-    }
-}
-
-const DESKTOP_EVERY_MS = 6000;
-
-/** Start following the desktop's theme: now, whenever the page comes back, and every few seconds while it shows. */
+/** Apply this browser's appearance; only unconfigured new browsers follow the owner's default. */
 export function startTheme() {
     apply();
 
@@ -645,42 +611,33 @@ export function startTheme() {
     reduceQuery.addEventListener?.("change", apply);
     lightQuery.addEventListener?.("change", apply);
     onSafeModeEnd(apply);
-    // The server's list of theme folders came or changed (a theme's new version, or one that went), or the owner's
-    // default did.
+    // Optional folder/default changes never replace a personal selection or write the appearance record.
     let list = store.state.themeList;
-    let fallback = JSON.stringify(ownerDefault());
+    let inherited = JSON.stringify(ownerDefault());
+
+    if (store.state.server) {
+        localStorage.setItem(DEFAULT_CACHE, inherited);
+    }
 
     store.subscribe((state) => {
-        const next = JSON.stringify(ownerDefault(state));
+        const next = JSON.stringify(ownerDefault());
+        const changed = next !== inherited || state.themeList !== list;
 
-        if (state.server && localStorage.getItem(DEFAULT_CACHE) !== next) {
+        if (state.server && next !== inherited) {
             localStorage.setItem(DEFAULT_CACHE, next);
         }
 
-        if (next !== fallback) {
-            fallback = next;
-            store.set({ appearance: inForce() });
-            apply();
-        } else if (state.themeList !== list) {
-            list = state.themeList;
+        // Update these before store.set, which can synchronously notify subscribers again.
+        inherited = next;
+        list = state.themeList;
+
+        if (changed) {
+            if (followsDefault) {
+                store.set({ appearance: inForce() });
+            }
+
             apply();
         }
-    });
-    const look = () =>
-        document.visibilityState === "visible" && prefs().theme === "desktop" && checkDesktop();
-
-    document.addEventListener("visibilitychange", look);
-    addEventListener("focus", look);
-    // A server without an Omarchy desktop answers null: no need to keep asking every few seconds.
-    setInterval(() => store.state.desktopTheme !== null && look(), DESKTOP_EVERY_MS);
-    // Once signed in: the route needs a person.
-    const stop = store.subscribe((state) => {
-        if (!state.me) {
-            return;
-        }
-
-        stop();
-        checkDesktop({ animate: false });
     });
 }
 

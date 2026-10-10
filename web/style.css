@@ -1,9 +1,6 @@
 /*
- * Pi Pocket's theme: soft tiles over an Omarchy palette. The palette is the Omarchy theme's colors.toml (theme.js sets
- * the --o-* variables, from a bundled theme or the desktop's own); everything else mixes from it the way omarchy-shell
- * does: the foreground over the background at a few percent for fills and hairlines. Windows still tile like
- * Hyprland's, with rounded corners, 1px hairlines, and a soft accent ring on the one in focus. Geist sets the words;
- * JetBrains Mono only code, paths, branches, numbers, counts, and keys. Motion keeps Hyprland's curves.
+ * Pi Coop's theme. theme.js sets the --o-* variables from a bundled palette; surfaces mix the foreground over the
+ * background for quiet fills. Square tiles, 2px window borders, no shadows or blur, and JetBrains Mono throughout.
  */
 /*
  * Contents, in the order the cascade reads them. Search for "─── " and a name to jump to a section. A rule later in
@@ -11,8 +8,8 @@
  * move a rule only after checking what it crosses.
  *
  *   Fonts, tokens, and the reset   the palette's variables, light themes, scrollbars, base elements
- *   Motion                         Hyprland's curves, reduced motion, the theme reveal
- *   Loaders                        the boot screen, the spinner
+ *   Motion                         easing curves, reduced motion, the theme reveal
+ *   Loaders                        the boot screen, the spinner, the thinking bar
  *   Layout                         windows on a desktop, the sidebar's edge
  *   Top bar
  *   Transcript                     messages, Pi's replies, code blocks, answer actions, arrivals, chevrons
@@ -77,7 +74,7 @@
     --o-blue: #7aa2f7;
     --o-magenta: #ad8ee6;
 
-    /* Surfaces, after omarchy-shell's control states: the foreground laid over the background. */
+    /* Surfaces: the foreground laid over the background. */
     --desk: var(--o-bg-darker);
     --bg: var(--o-bg);
     --panel: var(--bg);
@@ -120,7 +117,7 @@
     --err-soft: color-mix(in srgb, var(--o-red) 14%, transparent);
     --err-line: color-mix(in srgb, var(--o-red) 50%, transparent);
     --code-bg: var(--o-bg-dark);
-    /* Syntax colors, from the theme's own palette so every Omarchy theme colors code its way. */
+    /* Syntax colors come from the selected palette. */
     --hl-kw: var(--o-magenta);
     --hl-str: var(--o-green);
     --hl-num: var(--o-orange);
@@ -128,32 +125,30 @@
     --hl-type: var(--o-yellow);
     --hl-op: var(--o-cyan);
     --hl-tag: var(--o-red);
-    --scrim: color-mix(in srgb, var(--desk) 55%, transparent);
-    /* Shadows: a soft lift (the message box), and what floats over the page (popovers, sheets, the launcher, PiP). */
-    --sh: rgba(0, 0, 0, 0.5);
-    --shadow: 0 18px 40px -18px var(--sh), 0 2px 6px -2px var(--sh);
-    --pop: 0 24px 60px -16px var(--sh), 0 0 0 1px var(--hair-2);
-    /*
-     * Corners, from small to large: state squares; inline code, keys, and small tags; a segment in its track; small
-     * buttons and list rows; icon buttons, fields, and segmented tracks; cards and primary buttons; windows, approval
-     * cards, and peek tiles; the message box, sheets, and the launcher; PiP. Pills and avatars are round (999px).
-     */
-    --r-mark: 3px;
-    --r-tag: 5px;
-    --r-seg: 7px;
-    --r-row: 9px;
-    --r-control: 10px;
-    --r-card: 12px;
-    --r-window: 14px;
-    --r-sheet: 18px;
-    --r-float: 20px;
-    --r-pill: 999px;
+    --active: var(--o-active);
+    --o-inactive: var(--line-strong);
+    --scrim: color-mix(in srgb, var(--o-bg-darker) 62%, transparent);
+    /* Preserve upstream shadow tokens, with Coop's flat default. */
+    --sh: transparent;
+    --shadow: none;
+    --pop: none;
+    /* Existing widgets share these tokens; Coop uses square corners throughout. */
+    --r-mark: 0;
+    --r-tag: 0;
+    --r-seg: 0;
+    --r-row: 0;
+    --r-control: 0;
+    --r-card: 0;
+    --r-window: 0;
+    --r-sheet: 0;
+    --r-float: 0;
+    --r-pill: 0;
     /* Fields and plain controls that name no corner of their own. */
-    --radius: var(--r-control);
-    /* Hyprland's layout, softened: gaps_out 8, gaps_in 4, border_size 1. */
-    --gap-out: 8px;
-    --gap-in: 4px;
-    --border: 1px;
+    --radius: 0;
+    /* Coop's saved tiling geometry. */
+    --gap-out: 10px;
+    --gap-in: 5px;
+    --border: 2px;
     /* The conversation's column, and the message box under it, at their widest; room before the conversation's turns. */
     --transcript-width: clamp(720px, 72%, 1200px);
     --composer-width: calc(var(--transcript-width) + 48px);
@@ -164,10 +159,10 @@
     --step-mark-size: 19px;
     --step-gap: 10px;
     /* Tiled windows' border, the one in focus, and the ring around that one. */
-    --window-border: var(--hair);
-    --window-border-active: var(--accent-line);
-    --window-ring: 0 0 0 3px var(--accent-soft);
-    /* What shows in the gaps between tiled windows: the desktop's wallpaper when Appearance asks for it (inline), else this. */
+    --window-border: var(--o-inactive);
+    --window-border-active: var(--o-active-a);
+    --window-ring: none;
+    /* Kept as an optional-theme token only; Coop never restores desktop wallpaper. */
     --wallpaper: none;
     /*
      * Density, from Appearance (`data-density`): how much room the spacing takes. Padding and gaps from top to bottom
@@ -178,7 +173,7 @@
     --space-x: 1;
     --leading: 1.65;
 
-    /* Motion: Omarchy's Hyprland curves, and its speeds in milliseconds. */
+    /* Motion curves and durations in milliseconds. */
     --ease-out: cubic-bezier(0.23, 1, 0.32, 1); /* easeOutQuint */
     --ease-in-out: cubic-bezier(0.65, 0.05, 0.36, 1); /* easeInOutCubic */
     --ease-almost: cubic-bezier(0.5, 0.5, 0.75, 1); /* almostLinear */
@@ -193,7 +188,7 @@
     --mono:
         "Pocket Mono", "JetBrains Mono", "JetBrainsMono Nerd Font", ui-monospace, "SF Mono", Menlo,
         Consolas, monospace;
-    --sans: "Pocket Sans", "Geist", ui-sans-serif, system-ui, sans-serif;
+    --sans: var(--mono);
     color-scheme: dark;
 }
 
@@ -435,7 +430,7 @@ kbd {
 
 /* ─── Motion ───────────────────────────────────────────────── */
 
-/* Hyprland's popin 87%: what opens grows from 87% and fades in. */
+/* What opens grows from 87% and fades in. */
 @keyframes popin {
     from {
         opacity: 0;
@@ -523,9 +518,9 @@ kbd {
     }
 }
 
-/* ─── Loaders, after Omarchy's ───────────────────────────────── */
+/* ─── Loaders ───────────────────────────────────────────────── */
 
-/* The boot screen: π over a flat square bar (Omarchy's boot screen) that eases toward 70% while it waits. */
+/* The boot screen: π over a flat square bar that eases toward 70% while it waits. */
 .boot {
     display: flex;
     flex-direction: column;
@@ -679,8 +674,8 @@ kbd {
     background: var(--bg);
 }
 
-/* The sidebar and the conversation are windows. On wide screens with tiling on, they tile like Hyprland's, softened:
- * gaps over the desktop (or its wallpaper), rounded corners and a hairline, and a soft accent ring on the one in focus. */
+/* The sidebar and the session are windows. On wide screens with tiling on, they have gaps over the background,
+ * a 2px inactive border, and the active border on the one in focus. */
 .window {
     position: relative;
     min-width: 0;
@@ -799,9 +794,9 @@ kbd {
     :root[data-tiling="on"] .layout {
         padding: var(--gap-out);
         gap: calc(var(--gap-in) * 2);
-        background: var(--desk) var(--wallpaper, none) center / cover no-repeat;
+        background: var(--desk);
     }
-    /* Rounded, so what they hold is cut to their corners; the edges to drag sit inside them. */
+    /* New widgets retain their clipping; Coop's tile borders stay square. */
     :root[data-tiling="on"] .window {
         border: var(--border) solid var(--window-border);
         border-radius: var(--r-window);
@@ -824,6 +819,7 @@ kbd {
         ):not([data-focus="people-panel"]):not([data-focus="peeks"])
         .pane {
         border-color: var(--window-border-active);
+        border-image: var(--active) 1;
         box-shadow: var(--window-ring);
     }
 }
@@ -3099,7 +3095,7 @@ pre.diff .del {
     text-overflow: ellipsis;
 }
 
-/* The message box: a card that takes the accent's line while it has the focus. */
+/* The message box is a small window: its border lights up when it takes focus. */
 .composer {
     container: composer / inline-size;
     position: relative;
@@ -4558,15 +4554,72 @@ pre.diff .del {
     }
 }
 
+.session:active {
+    background: var(--pressed);
+}
+
+/* Selected row: a light fill, a quiet border, the accent for text. */
+.session-row.active .session {
+    background: var(--hover);
+    border-color: var(--edge);
+}
+
+.session-row.active .session-title {
+    color: var(--accent);
+}
+
+.session-state {
+    display: grid;
+    place-items: center;
+    width: 12px;
+    height: 12px;
+    align-self: start;
+    margin-top: 0.3rem;
+}
+
+.state-idle {
+    width: 6px;
+    height: 6px;
+    border: 1px solid var(--faint);
+    transition:
+        background-color var(--t-border) var(--ease-out),
+        border-color var(--t-border) var(--ease-out);
+}
+
+.session-row.active .state-idle {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.state-warn {
+    display: grid;
+    place-items: center;
+    width: 12px;
+    height: 12px;
+    background: var(--warn);
+    color: var(--accent-ink);
+    font-size: 0.6rem;
+    font-weight: 800;
+    animation: attention 1.6s var(--ease-in-out) infinite;
+}
+
+@keyframes attention {
+    50% {
+        box-shadow: 0 0 0 3px var(--warn-soft);
+        opacity: 0.75;
+    }
+}
+
 /* Keep focus outlines inside list controls: scrolling and folding groups clip their edges. */
 .group-head:focus-visible,
 .session:focus-visible {
     outline-offset: -1px;
 }
 
-/* The open session: the accent's soft fill, and its title in bold. */
+/* The open session keeps Coop's quiet fill, border and accent text. */
 .session-row.active .session {
-    background: var(--accent-soft);
+    background: var(--hover);
+    border-color: var(--edge);
 }
 
 .session-row.active .session-title {
@@ -5413,7 +5466,7 @@ pre.diff .del {
 
 /* ─── Sheets ───────────────────────────────────────────────── */
 
-/* omarchy-shell's scrim: the desktop's darkest color over everything, at about half. */
+/* Scrim: the palette's darkest color over everything, at about half. */
 .overlay {
     position: fixed;
     inset: 0;
@@ -5455,7 +5508,7 @@ pre.diff .del {
     }
 }
 
-/* Closing: Hyprland's windowsOut, short and linear. */
+/* Closing: short and linear. */
 .leaving {
     pointer-events: none;
 }
@@ -7520,9 +7573,7 @@ pre.diff .del {
 
 /* ─── Notices, sign-in, plain pages ────────────────────────── */
 
-/* Notices: small tiles that hang from the top edge, a state square in their level's color (the accent, a warning's
- * yellow, an error's red) and a countdown line until they go. A tap dismisses one, or does what it offers (a chevron
- * says so); on a phone, a swipe up puts it away. */
+/* Notices: the active border and a countdown line. Top right on wide screens. */
 .notices {
     position: fixed;
     left: 50%;
@@ -8682,7 +8733,7 @@ textarea.notes {
     font-family: var(--mono);
 }
 
-/* ─── Launcher: sessions, actions, and themes, with visible search modes ─── */
+/* ─── Launcher: sessions, actions, and themes ───────────────── */
 
 .launcher-overlay {
     position: fixed;
@@ -9353,7 +9404,7 @@ textarea.notes {
     gap: 10px;
 }
 
-/* A theme card draws a tiny Hyprland desktop in its own palette: the card sets the --o-* colors it uses. */
+/* A theme card draws tiny tiled windows in its own palette: the card sets the --o-* colors it uses. */
 .theme-card {
     position: relative;
     display: flex;
@@ -9468,32 +9519,6 @@ textarea.notes {
     width: 10px;
     height: 10px;
     border-radius: 3px;
-}
-
-.theme-desktop {
-    grid-column: 1 / -1;
-    flex-direction: row;
-}
-
-.theme-desktop .tc-desk {
-    width: 42%;
-    flex: none;
-    height: auto;
-    min-height: 70px;
-}
-
-.theme-desktop .tc-text {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    min-width: 0;
-}
-
-.theme-desktop .tc-note {
-    padding: 0 0 0.45rem;
-    font-size: 0.68rem;
-    color: var(--o-fg);
-    opacity: 0.75;
 }
 
 .setting-row {
@@ -16519,19 +16544,7 @@ pre.gallery-code {
         display: none;
     }
 
-    .private-layout {
-        --gap-out: 0px;
-        --gap-in: 0px;
-        --border: 0px;
-        gap: 0;
-        padding: 0;
-    }
-
-    .private-layout > .window {
-        border-width: 0;
-    }
-
-    :root .layout.private-layout > .sidebar {
+    :root[data-tiling="off"] .layout.private-layout > .sidebar {
         border-right: 1px solid var(--line-strong);
     }
 

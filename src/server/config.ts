@@ -45,8 +45,8 @@ export interface StoredInvite {
     createdBy: string;
 }
 
-/** The theme (a theme folder's id, or "pocket") and the colors ("desktop", a palette's id, or a folder's) a browser
- * starts with until its person chooses. */
+/** The theme (a theme folder's id, or "pocket") and bundled or theme-folder colors a browser
+ * starts with until its person chooses. Desktop synchronization is not supported in Coop. */
 export interface ThemeDefault {
     look: string;
     colors: string;
@@ -78,8 +78,9 @@ interface PocketConfig {
     /** The tokens of context above which PiP compacts itself once idle; 0: only as sessions do. Absent: the default. */
     pipCompactAt?: number;
     /**
-     * The models (`provider/modelId`) Pi may start subagents on besides their session's own, as the owner allowed them.
-     * Absent or empty: none, and subagents always run on their session's model.
+     * The owner's shared model list (`provider/modelId`). For background subagents, absent or empty leaves explicit
+     * choices unrestricted; nonempty restricts extra models. The parent's model is always allowed. Linked sessions
+     * always use this as an extra-model allowlist: absent or empty means parent only.
      */
     subagentModels?: string[];
 }
@@ -196,7 +197,7 @@ export class ConfigStore {
         this.save();
     }
 
-    /** The models Pi may start subagents on besides their session's own (`provider/modelId`); empty: none. */
+    /** Shared model list: empty means unrestricted background choices, but parent-only linked sessions. */
     get subagentModels(): readonly string[] {
         const models = this.#config.subagentModels;
 

@@ -40,7 +40,8 @@ export interface LinkedSession {
 export interface LinkedSessionsApi {
     /**
      * Start a session linked to `source`, in its folder, with a copy of its agent settings but not its history, and send
-     * it `message` as its first message. `model` is `provider/modelId`; `thinking` a level no higher than the source's.
+     * it `message` as its first message. `model` is `provider/modelId`: the source's or a listed `subagentModels` entry
+     * (empty means source only). Thinking is capped at the source's, then fitted at or below that cap on the model.
      */
     start(
         source: ConversationId,
@@ -202,8 +203,9 @@ export interface PocketHost {
      */
     resolveModel(spec: string): ModelRef;
     /**
-     * The models Pi may start subagents on besides their session's own, as the owner allowed them (`provider/modelId`).
-     * Empty, the default: none.
+     * The owner's shared model list (`provider/modelId`). Background subagents: empty (the default) leaves explicit
+     * choices unrestricted; nonempty restricts extra models. The parent's model is always allowed. Linked sessions
+     * always use this list as an allowlist of extra models: empty means parent only. Availability checks still apply.
      */
     subagentModels(): readonly string[];
     /**

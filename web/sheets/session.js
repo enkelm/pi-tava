@@ -23,33 +23,33 @@ export function SessionActions({ id }) {
     return html`<${Sheet} title=${session.title ?? "New session"} onClose=${closeSheet}>
         <div class="sheet-list">
             ${
-            !session.archived &&
-            item(
-                isPinned(id) ? "Unpin from the top" : "Pin to the top",
-                then(() => togglePin(id)),
-                "this browser",
-            )
-        }
+                !session.archived &&
+                item(
+                    isPinned(id) ? "Unpin from the top" : "Pin to the top",
+                    then(() => togglePin(id)),
+                    "this browser",
+                )
+            }
             ${
-            !session.archived &&
-            item(
-                isUnread(id) ? "Mark read" : "Mark unread",
-                then(() => setUnread(id, !isUnread(id))),
-                "this browser",
-            )
-        }
+                !session.archived &&
+                item(
+                    isUnread(id) ? "Mark read" : "Mark unread",
+                    then(() => setUnread(id, !isUnread(id))),
+                    "this browser",
+                )
+            }
             ${
-            steer &&
-            item(
-                session.archived ? "Unarchive" : "Archive",
-                then(() => setArchived([id], !session.archived)),
-            )
-        }
+                steer &&
+                item(
+                    session.archived ? "Unarchive" : "Archive",
+                    then(() => setArchived([id], !session.archived)),
+                )
+            }
             ${item(
-            "Select",
-            then(() => selectFromList(id)),
-            "then tap others to add them",
-        )}
+                "Select",
+                then(() => selectFromList(id)),
+                "then tap others to add them",
+            )}
         </div>
     <//>`;
 }

@@ -480,17 +480,17 @@ function App() {
                         : inConversation
                           ? html`<${Topbar} />
                                 ${
-                        peeking &&
-                        tiles.length > 0 &&
-                        !peekColumn &&
-                        html`<${PeekStrip} tiles=${tiles} />`
-                    }
+                                    peeking &&
+                                    tiles.length > 0 &&
+                                    !peekColumn &&
+                                    html`<${PeekStrip} tiles=${tiles} />`
+                                }
                                 <${Transcript} key=${state.conversationId} />
                                 ${
-                        state.view.conversation &&
-                        !state.missing &&
-                        html`<${Composer} key=${state.conversationId} />`
-                    }`
+                                    state.view.conversation &&
+                                    !state.missing &&
+                                    html`<${Composer} key=${state.conversationId} />`
+                                }`
                           : html`<div class="home-list"><${SessionList} home=${true} /></div>
                                 <${Splash} />`
             }
@@ -520,7 +520,7 @@ function App() {
 
 // ─── Windows and keys ───────────────────────────────────────────────────────────
 
-/** Which window has focus, as Hyprland shows it: the one under the mouse (Omarchy's follow_mouse), or that took a tap or a key. */
+/** Mark the active window on mouse hover, a tap, or keyboard focus. */
 function focusWindow(event) {
     if (event.type === "pointerover" && event.pointerType !== "mouse") {
         return;

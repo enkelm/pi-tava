@@ -2553,7 +2553,7 @@ export class PocketApp {
                 throw new HttpError(404, "No such theme");
             }
 
-            // Colors that are not here (the desktop's, on a machine without Omarchy) would leave new browsers on none.
+            // Unavailable colors would leave new browsers without a usable palette.
             if (!(await this.themes.hasColors(colors))) {
                 throw new HttpError(404, "No such colors here");
             }
@@ -2566,7 +2566,7 @@ export class PocketApp {
 
     /**
      * The owner's default after a theme went (removed in Appearance or the gallery, or its folder deleted): a theme that
-     * is gone gives way to Pocket, and colors that went with it (its own) to the desktop's; with both gone, no default.
+     * is gone gives way to Pocket, and its unavailable colors to Tokyo Night; with both gone, no default.
      * Everyone's tabs hear it.
      */
     async #themeDefaultStillHere(): Promise<void> {
@@ -2581,19 +2581,17 @@ export class PocketApp {
             const lookGone =
                 before.look !== BASE_THEME &&
                 !this.themes.list().some((each) => each.id === before.look);
-            // The desktop's colors are the app's own default: they never go.
-            const colorsGone =
-                before.colors !== "desktop" && !(await this.themes.hasColors(before.colors));
+            const colorsGone = !(await this.themes.hasColors(before.colors));
 
             if (!lookGone && !colorsGone) {
                 return;
             }
 
             const look = lookGone ? BASE_THEME : before.look;
-            const colors = colorsGone ? "desktop" : before.colors;
+            const colors = colorsGone ? "tokyo-night" : before.colors;
 
             this.config.themeDefault =
-                look === BASE_THEME && colors === "desktop" ? undefined : { look, colors };
+                look === BASE_THEME && colors === "tokyo-night" ? undefined : { look, colors };
             await this.#refreshClients();
         } catch (error) {
             this.#log(`The default theme could not be checked: ${describe(error)}`);
@@ -2672,10 +2670,10 @@ export class PocketApp {
         this.providers.needsSignIn(provider) !== undefined;
 
     /**
-     * The owner picks the models Pi may start subagents on besides their session's own (`provider/modelId`, models Pi
-     * knows). Empty, the default: none, and the subagent tool offers Pi no choice of model at all. The tool is rebuilt
-     * to match, so its description and parameters say what Pi may do. This replaces the whole list; the Providers sheet
-     * changes one model at a time (`allowSubagentModel`).
+     * Replace the owner's shared model list (`provider/modelId`, models Pi knows). Background subagents always offer
+     * an optional model parameter: empty leaves explicit choices unrestricted; nonempty restricts extra models, never
+     * the parent's own. Linked sessions always require extra models to be listed, so empty means parent only. The
+     * Providers sheet changes one entry at a time (`allowSubagentModel`). Availability checks are separate.
      */
     async setSubagentModels(user: User, models: unknown): Promise<void> {
         if (user.role !== "owner") {
@@ -2717,10 +2715,10 @@ export class PocketApp {
     }
 
     /**
-     * The owner allows one model for subagents, or stops allowing it, and keeps the rest as they are now: what the
-     * Providers sheet sends, so two quick taps, or two tabs, never undo each other. The list is read and written with no
-     * wait between, so changes that come together all count. A model stopped need not be one Pi still knows. Returns the
-     * list as it is then.
+     * Add or remove one entry in the shared model list, keeping the rest: what the Providers sheet sends, so two
+     * quick taps, or two tabs, never undo each other. The list is read and written with no wait between, so changes
+     * that come together all count. Removing the last entry restores unrestricted background model choices, but
+     * leaves linked sessions parent-only. A removed model need not be one Pi still knows. Returns the current list.
      */
     async allowSubagentModel(
         user: User,
@@ -2767,8 +2765,8 @@ export class PocketApp {
     }
 
     /**
-     * Keep the models for subagents, rebuild the subagent tool to match, and tell the owner's tabs, the only ones whose
-     * hello carries the list.
+     * Save the shared model list, reload subagents to refresh their guidance, and tell the owner's tabs, the only
+     * ones whose hello carries the list. The optional model parameter stays present even when the list is empty.
      */
     async #saveSubagentModels(chosen: readonly string[]): Promise<void> {
         const before = this.config.subagentModels;
@@ -2779,7 +2777,7 @@ export class PocketApp {
 
         this.config.subagentModels = chosen;
 
-        // The tool offers a model only while some are allowed: rebuilt now, for the next request of every session.
+        // Refresh the guidance for the next request of every session; explicit model choices remain in the schema.
         if (this.loader.enabled(SUBAGENTS_FILE)) {
             try {
                 await this.loader.reload(SUBAGENTS_FILE);
@@ -2790,19 +2788,12 @@ export class PocketApp {
         }
 
         await this.#refreshClients((user) => user.role === "owner");
-        // What changed: the checklist shows the rest.
-        const added = chosen.filter((each) => !before.includes(each));
-        const removed = before.filter((each) => !chosen.includes(each));
-        const said = [
-            ...(added.length === 0 ? [] : [`${added.join(", ")} allowed for subagents`]),
-            ...(removed.length === 0
-                ? []
-                : [`${removed.join(", ")} no longer allowed for subagents`]),
-        ];
-
-        if (said.length > 0) {
-            this.ownerNotice("info", `${said.join("; ")}.`);
-        }
+        this.ownerNotice(
+            "info",
+            chosen.length === 0
+                ? "Background subagent model restrictions cleared. New linked sessions use their source model."
+                : `Additional model choices restricted to ${chosen.join(", ")}. Parent/source models remain allowed.`,
+        );
     }
 
     /** Send clients a fresh hello, every one or those of the people `to` names: what it carries changed. */

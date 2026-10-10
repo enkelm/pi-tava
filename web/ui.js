@@ -1006,10 +1006,7 @@ export function Icon({ name, path, size = 20, class: className = "", stroke = 2,
     </svg>`;
 }
 
-/**
- * The app's loaders, after Omarchy's: a quadrant block that steps around a square like a terminal spinner, and a flat
- * bar that eases toward 70% the way Omarchy's boot screen does while it waits.
- */
+/** The app's quadrant-block spinner, with an optional decorative mode beside an existing label. */
 export function Spinner({ label = "Working", hidden = false }) {
     // Hidden from screen readers beside words that say the same.
     return hidden
@@ -1025,7 +1022,7 @@ export function Loader({ label = "Loading" }) {
     </div>`;
 }
 
-/** The full-screen loader: π over Omarchy's boot bar, and what is happening under it. */
+/** The full-screen loader: π over a progress bar, and what is happening under it. */
 export function Boot({ caption = "starting", detail = "", inline = false }) {
     return html`<div
         class=${`boot ${inline ? "inline" : ""}`}

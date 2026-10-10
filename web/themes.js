@@ -1,5 +1,5 @@
-// Omarchy's themes as palettes: each theme's colors.toml, keys as Omarchy names them. Generated from
-// /usr/share/omarchy/themes; "Follow desktop" reads the theme in use from the server instead.
+// Bundled standalone app palettes. Optional border fields use CSS hex colors;
+// active_border holds gradient stops for tiled windows.
 export const THEMES = {
     catppuccin: {
         name: "Catppuccin",
@@ -174,7 +174,7 @@ export const THEMES = {
             blue: "#829dd4",
             magenta: "#86a7df",
             bright_yellow: "#a4ffec",
-            hyprland_active_border: "rgba(26a269ee) rgba(2ec27eee) 45deg",
+            active_border: ["#26a269ee", "#2ec27eee"],
         },
     },
     kanagawa: {
@@ -224,8 +224,8 @@ export const THEMES = {
             blue: "#b59790",
             magenta: "#c4d8e2",
             bright_yellow: "#6b5e73",
-            hyprland_active_border: "rgba(8a8588ee) rgba(e2dddcee)",
-            hyprland_inactive_border: "rgba(584e51aa)",
+            active_border: ["#8a8588ee", "#e2dddcee"],
+            inactive_border: "#584e51aa",
         },
     },
     lumon: {
@@ -475,8 +475,8 @@ export const THEMES = {
             blue: "#798186",
             magenta: "#aeaeae",
             bright_yellow: "#c9c2b4",
-            hyprland_active_border: "rgba(798186ee) rgba(caccccee)",
-            hyprland_inactive_border: "rgb(1e1e1e)",
+            active_border: ["#798186ee", "#caccccee"],
+            inactive_border: "#1e1e1e",
         },
     },
     "tokyo-night": {

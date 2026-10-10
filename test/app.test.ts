@@ -22,6 +22,7 @@ import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import type { Attachment } from "../src/server/commands.ts";
+import type { ChatMessage } from "../src/server/docs.ts";
 
 /** The provider session id each request carried, with the message it answered. */
 const requests: { sessionId: string | undefined; text: string }[] = [];
@@ -504,40 +505,9 @@ test("the owner turns extensions off and on, the guard follows its switch, and t
     assert.ok(app.loader.extensionNames().includes("pocket-guard"));
 });
 
-test("everyone signed in gets the desktop's theme colors; only the owner gets its wallpaper", async () => {
+test("desktop theme and wallpaper endpoints are retired for everyone signed in", async () => {
     const { createServer } = await import("node:http");
-    const { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
     const { createHandler } = await import("../src/server/http.ts");
-    const home = mkdtempSync(join(tmpdir(), "pocket-desktop-"));
-    const current = join(home, ".local/state/omarchy/current");
-
-    mkdirSync(join(current, "theme"), { recursive: true });
-    writeFileSync(
-        join(current, "theme", "colors.toml"),
-        'background = "#111111"\nforeground = "#eeeeee"\n',
-    );
-    writeFileSync(join(current, "theme.name"), "gruvbox\n");
-    // A real PNG header, so the image check accepts it.
-    writeFileSync(
-        join(current, "theme", "wall.png"),
-        Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
-    );
-    let hasWallpaper = true;
-
-    try {
-        symlinkSync(join(current, "theme", "wall.png"), join(current, "background"), "file");
-    } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-
-        if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES")) {
-            throw error;
-        }
-
-        hasWallpaper = false;
-    }
-
     const server = createServer(
         createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
     );
@@ -545,48 +515,22 @@ test("everyone signed in gets the desktop's theme colors; only the owner gets it
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
     const guest = app.config.addUser("Guest", "guest");
-    const call = (token: string, path: string) =>
-        fetch(`http://127.0.0.1:${port}/api/${path}`, {
-            headers: { authorization: `Bearer ${token}` },
-        });
-    const realHome = process.env.HOME;
-    const realUserProfile = process.env.USERPROFILE;
-
-    process.env.HOME = home;
-    process.env.USERPROFILE = home;
 
     try {
-        type Theme = { theme: { name: string; wallpaper: boolean; stamp: string } };
-        const owner = (await (await call(app.config.ownerToken, "theme")).json()) as Theme;
+        for (const token of [app.config.ownerToken, guest.token]) {
+            for (const path of ["theme", "theme/wallpaper"]) {
+                const response = await fetch(`http://127.0.0.1:${port}/api/${path}`, {
+                    headers: { authorization: `Bearer ${token}` },
+                });
 
-        assert.equal(owner.theme.name, "gruvbox");
-        assert.equal(owner.theme.wallpaper, hasWallpaper);
-        assert.ok(!owner.theme.stamp.includes(home), "the stamp names no paths");
-        const theirs = (await (await call(guest.token, "theme")).json()) as Theme;
-
-        assert.equal(theirs.theme.name, "gruvbox");
-        assert.equal(theirs.theme.wallpaper, false);
-        assert.equal((await call(guest.token, "theme/wallpaper")).status, 403);
-        assert.equal(
-            (await call(app.config.ownerToken, "theme/wallpaper")).status,
-            hasWallpaper ? 200 : 404,
-        );
+                assert.equal(response.status, 404, path);
+                assert.deepEqual(await response.json(), { error: "Unknown API route" });
+            }
+        }
     } finally {
-        if (realHome === undefined) {
-            delete process.env.HOME;
-        } else {
-            process.env.HOME = realHome;
-        }
-
-        if (realUserProfile === undefined) {
-            delete process.env.USERPROFILE;
-        } else {
-            process.env.USERPROFILE = realUserProfile;
-        }
-
         app.config.removeUser(guest.user.id);
         server.closeAllConnections();
-        server.close();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
     }
 });
 
@@ -634,6 +578,8 @@ test("anyone signed in can list extensions; only the owner can change them", asy
 });
 
 test("people chat beside Pi: presence, one post per request, and the chat survives a reopen", async () => {
+    // Make the helper's explicit faux-1 selection a model switch, independently of earlier tests.
+    app.config.lastModel = { provider: "faux", modelId: "faux-2", thinkingLevel: "off" };
     const id = await newSession();
     const guest = app.config.addUser("Alex", "guest");
 
@@ -655,14 +601,22 @@ test("people chat beside Pi: presence, one post per request, and the chat surviv
     type People = { name: string }[];
     const people = () =>
         (mine.findLast((each) => each.event === "presence")?.data.people ?? []) as People;
+    const history = (messages: ChatMessage[] | undefined) =>
+        messages?.map(({ kind, userId, name, text }) => ({ kind, userId, name, text }));
+    const modelSwitch = {
+        kind: "event",
+        userId: owner().id,
+        name: owner().name,
+        text: "switched the model to faux-1",
+    };
 
     try {
         await app.attach(ownerTab);
-        assert.deepEqual(mine.find((each) => each.event === "chat")?.data, {
-            conversationId: id,
-            full: true,
-            messages: [],
-        });
+        const initial = mine.find((each) => each.event === "chat")?.data;
+
+        assert.equal(initial?.conversationId, id);
+        assert.equal(initial?.full, true);
+        assert.deepEqual(history(initial?.messages as ChatMessage[] | undefined), [modelSwitch]);
         await app.attach(guestTab);
         assert.deepEqual(
             people()
@@ -707,10 +661,10 @@ test("people chat beside Pi: presence, one post per request, and the chat surviv
     const { ChatDoc } = await import("../src/server/docs.ts");
     const stored = await app.harness.snapshot(ChatDoc, id, BACKGROUND_CONTEXT);
 
-    assert.deepEqual(
-        stored?.messages.map((message) => [message.name, message.text]),
-        [["Alex", "hi team"]],
-    );
+    assert.deepEqual(history(stored?.messages), [
+        modelSwitch,
+        { kind: undefined, userId: guest.user.id, name: "Alex", text: "hi team" },
+    ]);
 });
 
 /** A fake browser tab attached to a conversation, recording what the server sends it. */
@@ -750,6 +704,8 @@ test("viewers read and chat but never steer; people invited to one session see o
             /cannot move it to another folder/,
         );
         assert.equal(app.cwdOf(id), work);
+        // Model settings remain available within the shared session.
+        await app.commands.configure(id, scoped, { thinkingLevel: "off" });
         const tab = fakeTab(other, scoped);
 
         await app.attach(tab.client);
@@ -812,13 +768,13 @@ test("take turns: only the driver steers, others ask, the driver hands over", as
     }
 });
 
-test("a tab gets the queue when it changes, not with each update of a turn, and only the start of each message", async () => {
+test("a tab gets the full editable queue when it changes, not with each update of a turn", async () => {
     const { BACKGROUND_CONTEXT } = await import("@earendil-works/chord/context");
     const id = await newSession();
     const tab = fakeTab(id, owner());
     const late = fakeTab(id, owner());
 
-    type Row = { text?: string };
+    type Row = { text?: string; editableText?: string; hasAttachments?: boolean };
     const queue = (of = tab) => (of.field("inbox") ?? []) as Row[];
     const views = () => tab.events.flatMap((each) => (each.event === "view" ? [each.data] : []));
     const streaming = () =>
@@ -835,8 +791,11 @@ test("a tab gets the queue when it changes, not with each update of a turn, and 
         });
         await until(streaming, "the answer to stream");
         // While it streams: a long paste and a picture.
+        const pasted = `paste: ${"x".repeat(200_000)}`;
+        const imageData = "A".repeat(300_000);
+
         await app.commands.submit(id, owner(), {
-            text: `paste: ${"x".repeat(200_000)}`,
+            text: pasted,
             requestId: crypto.randomUUID(),
         });
         await conversation.submit(
@@ -844,7 +803,7 @@ test("a tab gets the queue when it changes, not with each update of a turn, and 
                 type: "input",
                 content: [
                     { type: "text", text: "look at this" },
-                    { type: "image", mimeType: "image/png", data: "A".repeat(300_000) },
+                    { type: "image", mimeType: "image/png", data: imageData },
                 ],
                 whenBusy: "followUp",
                 requestId: "queue-picture",
@@ -868,9 +827,13 @@ test("a tab gets the queue when it changes, not with each update of a turn, and 
 
         const [paste, picture] = queue();
 
-        assert.equal(paste!.text!.length, 501);
+        assert.equal(paste!.text, pasted, "the complete paste, not a display preview");
+        assert.equal(paste!.editableText, pasted);
+        assert.equal(paste!.hasAttachments, false);
         assert.equal(picture!.text, "look at this", "its text, not the picture");
-        assert.ok(JSON.stringify(queue()).length < 2000);
+        assert.equal(picture!.editableText, "look at this");
+        assert.equal(picture!.hasAttachments, true);
+        assert.ok(!JSON.stringify(queue()).includes(imageData), "image bytes stay off the wire");
 
         // A tab that comes now gets the queue with its first view.
         await app.attach(late.client);

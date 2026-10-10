@@ -319,10 +319,45 @@ test("a theme installs into the themes folder only as pinned, and only when its 
     assert.equal(readFileSync(join(themes, "paper", "theme.css"), "utf8"), good);
     assert.equal(app.themes.list().find((each) => each.id === "paper")?.usable, true);
 
-    // The owner's default, and a restart while an update had the theme out of its folder: it stays the default.
-    app.config.themeDefault = { look: "paper", colors: "desktop" };
+    // The installed theme's light-only palette is a supported default, independently of desktop sync.
+    const chosen = { look: "paper", colors: "paper" };
+
+    await app.setThemeDefault(owner(app), chosen);
+    const guest = app.config.addUser("Palette guest", "guest");
+
+    try {
+        await assert.rejects(
+            app.setThemeDefault(guest.user, { look: "pocket", colors: "tokyo-night" }),
+            { status: 403 },
+        );
+        assert.deepEqual(app.config.themeDefault, chosen, "a guest cannot change the default");
+    } finally {
+        app.config.removeUser(guest.user.id);
+    }
+
+    await assert.rejects(app.setThemeDefault(owner(app), { look: "paper", colors: "desktop" }), {
+        status: 404,
+    });
+    assert.deepEqual(app.config.themeDefault, chosen, "an unavailable palette changes nothing");
+
+    // Recovery must restore an interrupted gallery update before checking both default components.
     await app.close();
     renameSync(join(themes, "paper"), join(themes, `.gallery-paper-${randomUUID()}.part`));
     await open();
-    assert.deepEqual(app.config.themeDefault, { look: "paper", colors: "desktop" });
+    assert.deepEqual(app.config.themeDefault, chosen);
+    assert.equal(readFileSync(join(themes, "paper", "theme.css"), "utf8"), good);
+    assert.equal(app.themes.list().find((each) => each.id === "paper")?.usable, true);
+
+    // A saved pre-Coop desktop selection is legacy input, not a choice the current API accepts.
+    app.config.themeDefault = { look: "paper", colors: "desktop" };
+    await app.close();
+    await open();
+    assert.deepEqual(app.config.themeDefault, { look: "paper", colors: "tokyo-night" });
+    await app.close();
+    await open();
+    assert.deepEqual(
+        app.config.themeDefault,
+        { look: "paper", colors: "tokyo-night" },
+        "the fallback is persisted without losing the installed theme",
+    );
 });

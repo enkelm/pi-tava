@@ -34,53 +34,35 @@ import { galleryAvailable } from "./gallery.js";
 // Key hints are for people with a keyboard: a touch screen has none.
 const touch = matchMedia("(pointer: coarse)").matches;
 
-/** A theme as a card: a tiny Hyprland desktop drawn in its own colors. */
-function ThemeCard({ id, desktop = false, index = 0 }) {
+/** A theme as a card: tiny tiled windows drawn in its own colors. */
+function ThemeCard({ id, index = 0 }) {
     const palette = paletteOf(id);
     const vars = varsStyle(themeVars(palette));
-    // "Desktop" on a server without an Omarchy desktop shows Tokyo Night.
-    const on =
-        prefs().theme === id ||
-        (id === "tokyo-night" && prefs().theme === "desktop" && !store.state.desktopTheme);
+    const on = prefs().theme === id;
     const dots = ["--o-red", "--o-yellow", "--o-green", "--o-cyan", "--o-blue", "--o-magenta"];
     const desk = html`<div class="tc-desk">
         <div class="tc-win"><i></i><i></i><i class="lit"></i></div>
         <div class="tc-win"><i></i><i></i><i class="lit"></i></div>
     </div>`;
     const name = html`<div class="tc-name">
-        ${desktop ? `Desktop · ${palette.name}` : palette.name}
-        ${palette.pair ? html`<small>light and dark</small>` : palette.colors.mode === "light" && html`<small>light</small>`}
+        ${palette.name} ${palette.colors.mode === "light" && html`<small>light</small>`}
     </div>`;
 
     return html`<button
-        class=${`theme-card ${on ? "on" : ""} ${desktop ? "theme-desktop" : ""}`}
+        class=${`theme-card ${on ? "on" : ""}`}
         aria-pressed=${on}
         style=${`${vars};--i:${index}`}
-        title=${desktop ? "Follow the Omarchy theme of the machine Pi Coop runs on" : palette.name}
-        onMouseEnter=${() => matchMedia("(hover: hover)").matches && preview(id)}
+        title=${palette.name}
+        onMouseEnter=${() => matchMedia("(hover: hover) and (pointer: fine)").matches && preview(id)}
         onMouseLeave=${() => preview(null)}
         onFocus=${() => preview(id)}
         onBlur=${() => preview(null)}
         onClick=${(event) => chooseTheme(id, event)}
     >
-        ${desk}
-        ${
-            desktop
-                ? html`<div class="tc-text">
-                      ${name}
-                      <div class="tc-note">
-                          Follows your desktop: change the Omarchy theme and Pi Coop changes with
-                          it.
-                      </div>
-                      <div class="tc-dots">
-                          ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
-                      </div>
-                  </div>`
-                : html`${name}
-                      <div class="tc-dots">
-                          ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
-                      </div>`
-        }
+        ${desk} ${name}
+        <div class="tc-dots">
+            ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
+        </div>
     </button>`;
 }
 
@@ -280,7 +262,7 @@ function ColorsTools() {
         ) &&
         attempt(async () => {
             await api(`themes/${encodeURIComponent(own.id)}`, undefined, { method: "DELETE" });
-            setPrefs({ theme: "desktop" });
+            setPrefs({ theme: "tokyo-night" });
         });
 
     return html`<div class="look-tools">
@@ -304,22 +286,20 @@ function ColorsTools() {
 function DefaultTools() {
     const current = themeDefault();
     const p = prefs();
-    // The theme and colors in use as the server knows them, as Appearance shows them: a theme that is gone or broken
-    // shows Pocket, and "desktop" colors only where there is a desktop's.
+    // A missing or broken optional API theme falls back to the bundled app layout.
     const look = store.state.themeList?.some((each) => each.id === p.look && each.usable)
         ? p.look
         : BASE_LOOK;
     const colors = paletteOf(p.theme).id;
-    // What new browsers get already: the default, or with none, Pocket and the desktop's colors.
+    // Without a server default, new browsers use the bundled layout and Tokyo Night colors.
     const same = current
         ? current.look === look && current.colors === colors
-        : look === BASE_LOOK && p.theme === "desktop";
-    // A theme with its own colors is named once: "My Lantern", not "My Lantern with My Lantern". The desktop's colors
-    // are Tokyo Night where the server has no desktop.
+        : look === BASE_LOOK && p.theme === "tokyo-night";
+    // A theme with its own colors is named once, rather than repeated as its own palette.
     const name = (look, colors) =>
         colors.split("@")[0] === look
             ? (lookInfo(look)?.name ?? look)
-            : `${lookInfo(look)?.name ?? look} with ${paletteOf(colors).desktop ? "the desktop's colors" : paletteOf(colors).name}`;
+            : `${lookInfo(look)?.name ?? look} with ${paletteOf(colors).name}`;
     const set = (value) =>
         attempt(async () => {
             await api("themes/default", { default: value }, { method: "PUT" });
@@ -333,7 +313,7 @@ function DefaultTools() {
 
     return html`<div class="look-tools">
         <span class="muted small grow">
-            ${current ? `For new browsers: ${name(current.look, current.colors)}.` : `New browsers start with ${name(BASE_LOOK, "desktop")}.`}
+            ${current ? `For new browsers: ${name(current.look, current.colors)}.` : `New browsers start with ${name(BASE_LOOK, "tokyo-night")}.`}
         </span>
         ${
             !same &&
@@ -372,7 +352,6 @@ function SettingRow({ title, detail, children }) {
 
 export function AppearanceSettings() {
     const p = prefs();
-    const desktop = store.state.desktopTheme;
 
     useEffect(() => () => preview(null), []);
 
@@ -384,25 +363,17 @@ export function AppearanceSettings() {
         ${store.state.me?.role === "owner" && html`<${LookTools} />`}
         <div class="label">Colors</div>
         <div class="theme-grid">
-            ${desktop && html`<${ThemeCard} id="desktop" desktop=${true} index=${0} />`}
             ${[...themeIds(), ...folderPaletteIds()].map(
-                (id, index) => html`<${ThemeCard} key=${id} id=${id} index=${index + 1} />`,
+                (id, index) => html`<${ThemeCard} key=${id} id=${id} index=${index} />`,
             )}
         </div>
         ${store.state.me?.role === "owner" && html`<${ColorsTools} />`}
         ${store.state.me?.role === "owner" && html`<${DefaultTools} />`}
-        ${
-            !desktop &&
-            html`<p class="muted small">
-                Running Pi Coop on an Omarchy desktop adds “Desktop”: the app follows the theme the
-                desktop uses.
-            </p>`
-        }
         <div class="label">Layout and motion</div>
         <div class="sheet-list">
             <${SettingRow}
                 title="Tiled windows"
-                detail="Wide screens: the sidebar and the session as Hyprland windows, with gaps and the active border"
+                detail="Wide screens: the sidebar and the session as tiled windows, with gaps and the active border"
             >
                 <${Switch}
                     on=${p.tiling}
@@ -420,20 +391,6 @@ export function AppearanceSettings() {
                     onChange=${() => setPrefs({ peeks: !p.peeks })}
                 />
             <//>
-            ${
-                desktop?.wallpaper &&
-                html`<${SettingRow}
-                    title="Desktop wallpaper"
-                    detail="Your wallpaper in the gaps between windows, while following the desktop"
-                >
-                    <${Switch}
-                        on=${p.wallpaper}
-                        disabled=${!p.tiling || p.theme !== "desktop"}
-                        label="Desktop wallpaper"
-                        onChange=${() => setPrefs({ wallpaper: !p.wallpaper })}
-                    />
-                <//>`
-            }
             <${SettingRow}
                 title="Sidebar"
                 detail="Folded, it shows numbered sessions like workspaces"

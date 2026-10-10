@@ -4,9 +4,41 @@
  */
 import { extname } from "node:path";
 import { INVISIBLE_CLASS } from "../fence.ts";
-import { parseColors } from "../omarchy.ts";
 import { atLeast } from "../versions.ts";
 import { THEME_API } from "../../../web/theme-surface.js";
+
+/** A color value from a flat colors.toml: a mode, hex/RGB color, or bounded Hyprland gradient. */
+const COLOR_VALUE =
+    /^(?:dark|light|(?:#[0-9a-f]{3,8}|rgba?\([0-9a-f\s,.%]+\)|-?\d{1,3}deg)(?:\s+(?:#[0-9a-f]{3,8}|rgba?\([0-9a-f\s,.%]+\)|-?\d{1,3}deg)){0,7})$/i;
+const COLOR_KEY = /^[a-z][a-z0-9_]{0,40}$/;
+
+/** Pure colors.toml parsing, independent of the retired desktop-theme synchronization module. */
+function parseColors(toml: string): Record<string, string> {
+    const colors: Record<string, string> = {};
+
+    for (const raw of toml.split(/\r?\n/)) {
+        const line = raw.trim();
+
+        if (line === "" || line.startsWith("#") || line.startsWith("[")) {
+            continue;
+        }
+
+        const match = /^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"\s*(?:#.*)?$/.exec(line);
+
+        if (!match) {
+            continue;
+        }
+
+        const key = match[1]!.toLowerCase().replace(/-/g, "_");
+        const value = match[2]!.trim();
+
+        if (COLOR_KEY.test(key) && COLOR_VALUE.test(value)) {
+            colors[key] = value;
+        }
+    }
+
+    return colors;
+}
 
 /** The version of the theme surface (tokens, parts, states) this Pi Pocket offers, from `web/theme-surface.js`. */
 export { THEME_API };

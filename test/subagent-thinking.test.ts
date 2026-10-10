@@ -1,4 +1,6 @@
-// A subagent never thinks harder than its session, however hard Pi asks.
+// The thinking level the subagent tool gives a subagent: any a session's model picker offers, max included; and when
+// its model lacks the one asked for, or the one it starts with from Pi, the nearest one it has, as the picker gives,
+// with Pi told so.
 import { type App, cleanUp, context, lastText, openApp, owner, until, work } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -12,7 +14,10 @@ import {
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { SubagentsDoc } from "../src/server/docs.ts";
 
-/** The parent spawns as its message says: `spawn <name> <level>`. Subagents answer, and the parent is done. */
+/**
+ * The parent spawns as its message says: `spawn <name> <level> [model]`, with `-` for no level. Subagents answer, and
+ * the parent is done.
+ */
 const route: FauxResponseStep = (request) => {
     const { role, text } = lastText(request as never);
     const asked = /spawn (\S+) (\S+)(?: (\S+))?$/.exec(text);
@@ -37,14 +42,24 @@ const route: FauxResponseStep = (request) => {
     return fauxAssistantMessage([fauxText("done")]);
 };
 
-const faux = fauxProvider({ models: [{ id: "deep", reasoning: true }] });
+const faux = fauxProvider({
+    models: [{ id: "plain" }, { id: "thinker", reasoning: true }, { id: "deep", reasoning: true }],
+});
 
+// Thinks as far as max, as GPT-6 Luna does; the scripted provider has no option for it.
+Object.assign(
+    faux.models.find((model) => model.id === "deep")!,
+    {
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+    },
+);
 faux.setResponses(Array.from({ length: 100 }, () => route));
 
 let app: App;
 
 before(async () => {
     app = await openApp(faux);
+    await app.setSubagentModels(owner(app), ["faux/deep", "faux/thinker"]);
 });
 
 after(async () => {
@@ -72,22 +87,48 @@ async function spawn(modelId: string, text: string, thinkingLevel = "off") {
         child = (await app.harness.snapshot(SubagentsDoc, id, context))?.agents[name]
             ?.conversationId;
 
-        return child !== undefined && !app.isBusy(id);
+        return !app.isBusy(id);
     }, `${name} spawned`);
 
     const messages = (await (await app.harness.conversation(id, context))!.context(context))
         .messages;
     const answer = JSON.stringify(messages.filter((message) => message.role === "toolResult"));
 
-    return { thinking: (await app.agentState(child!))?.thinkingLevel, answer };
+    assert.ok(child !== undefined, `spawn admitted by the tool: ${answer}`);
+
+    return { thinking: (await app.agentState(child))?.thinkingLevel, answer };
 }
 
-test("a subagent never thinks harder than its session, and Pi is told", async () => {
-    const { thinking, answer } = await spawn("deep", "spawn eager max", "low");
+test("a subagent can think at max on a model that has it", async () => {
+    const { thinking, answer } = await spawn("plain", "spawn maxed max faux/deep");
 
-    assert.equal(thinking, "low");
+    assert.equal(thinking, "max");
+    assert.match(answer, /Started maxed(?: on faux\/deep)?\./);
+});
+
+test("a level its model lacks becomes the nearest it has, and Pi is told", async () => {
+    const { thinking, answer } = await spawn("plain", "spawn capped max faux/thinker");
+
+    assert.equal(thinking, "high");
     assert.match(
         answer,
-        /Started eager on faux\/deep, thinking at low: no higher than this session's low\./,
+        /Started capped(?: on faux\/thinker)?, thinking at high: its model has no max\./,
     );
+});
+
+test("with a model of its own and no level, the level it starts with from Pi fits its model", async () => {
+    const { thinking, answer } = await spawn("deep", "spawn kept - faux/thinker", "max");
+
+    assert.equal(thinking, "high");
+    assert.match(
+        answer,
+        /Started kept(?: on faux\/thinker)?, thinking at high: its model has no max\./,
+    );
+    // On Pi's own model, Pi's own level stays.
+    assert.equal((await spawn("deep", "spawn twin - faux/deep", "max")).thinking, "max");
+});
+
+test("without a model of its own, a subagent's level fits the model it shares with Pi", async () => {
+    assert.equal((await spawn("plain", "spawn none xhigh")).thinking, "off");
+    assert.equal((await spawn("deep", "spawn same max")).thinking, "max");
 });

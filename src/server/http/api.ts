@@ -23,9 +23,7 @@ import type { User } from "../config.ts";
 import { HttpError } from "../errors.ts";
 import type { ImportRequest } from "../imports.ts";
 import type { PrivateRequest } from "../private-sessions.ts";
-import { desktopTheme, wallpaperFile } from "../omarchy.ts";
 import { runningNow } from "../running.ts";
-import { serveImage } from "./assets.ts";
 import { browserProfileRoutes } from "./browser-profile-routes.ts";
 import { browserRoutes } from "./browser-routes.ts";
 import { conversationRoutes } from "./conversation-routes.ts";
@@ -345,19 +343,6 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return pushRoutes(route, second);
         }
 
-        // The Omarchy desktop's theme, for the app's "Follow desktop" look: colors say nothing about the sessions here, so
-        // everyone signed in gets them. The wallpaper may be a personal photo: only the owner gets that.
-        if (first === "theme" && second === undefined && method === "GET") {
-            const theme = await desktopTheme();
-
-            return json(response, 200, {
-                theme:
-                    theme === null
-                        ? null
-                        : { ...theme, wallpaper: theme.wallpaper && user.role === "owner" },
-            });
-        }
-
         // Theme folders (`themes.ts`): everyone signed in lists them, as everyone chooses one for their own browsers;
         // only the owner adds, edits, and removes them.
         if (first === "themes" && second === undefined && method === "GET") {
@@ -404,20 +389,6 @@ export function createApi(options: HttpOptions, auth: Auth) {
             app.themes.remove(second);
 
             return json(response, 200, { ok: true });
-        }
-
-        if (first === "theme" && second === "wallpaper" && method === "GET") {
-            if (user.role !== "owner") {
-                throw new HttpError(403, "Only the owner sees the desktop's wallpaper");
-            }
-
-            const file = await wallpaperFile();
-
-            if (file === undefined) {
-                throw new HttpError(404, "No wallpaper");
-            }
-
-            return serveImage(request, response, file);
         }
 
         if (first === "running" && method === "GET") {

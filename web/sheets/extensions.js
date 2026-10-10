@@ -123,8 +123,8 @@ function GalleryPart({ module, installed, busy, turnOff }) {
     }
 
     return html`${
-            installed.revoked !== null &&
-            html`<div class="error-box small">
+        installed.revoked !== null &&
+        html`<div class="error-box small">
                 The gallery revoked this version: ${installed.revoked}
                 ${
                     module.enabled &&
@@ -135,7 +135,7 @@ function GalleryPart({ module, installed, busy, turnOff }) {
                     </div>`
                 }
             </div>`
-        }
+    }
         <div class="extension-gallery">
             <span class="pi-tag gallery-plain">from the gallery · ${installed.version}</span>
             ${installed.update && html`<span class="pi-tag behind">update available</span>`}
@@ -327,26 +327,26 @@ export function ExtensionsSettings() {
                                             </div>
                                             ${module.summary && html`<div class="muted small">${module.summary}</div>`}
                                             ${
-                                            note &&
-                                            html`<div class=${`small ${note.warn ? "warn" : "ok"}`}>
+                                                note &&
+                                                html`<div class=${`small ${note.warn ? "warn" : "ok"}`}>
                                                 ${note.text}
                                             </div>`
-                                        }
+                                            }
                                             ${
-                                            module.file === "guard.ts" &&
-                                            module.enabled &&
-                                            html`<${ApprovalRule} owner=${owner} />`
-                                        }
+                                                module.file === "guard.ts" &&
+                                                module.enabled &&
+                                                html`<${ApprovalRule} owner=${owner} />`
+                                            }
                                             ${
-                                            module.file === "pip.ts" &&
-                                            module.enabled &&
-                                            html`<${PipCompactAt} owner=${owner} />`
-                                        }
+                                                module.file === "pip.ts" &&
+                                                module.enabled &&
+                                                html`<${PipCompactAt} owner=${owner} />`
+                                            }
                                             ${
-                                            module.file === "guard.ts" &&
-                                            module.enabled &&
-                                            confirmGuard &&
-                                            html`<div
+                                                module.file === "guard.ts" &&
+                                                module.enabled &&
+                                                confirmGuard &&
+                                                html`<div
                                                 class="guard-confirm"
                                                 role="alertdialog"
                                                 aria-label="Turn off Lancet Guard?"
@@ -388,7 +388,7 @@ export function ExtensionsSettings() {
                                                     </button>
                                                 </div>
                                             </div>`
-                                        }
+                                            }
                                             ${module.error && html`<div class="error-box small">${module.error}</div>`}
                                             <${WebPart} module=${module} />
                                             <${GalleryPart}
@@ -411,16 +411,16 @@ export function ExtensionsSettings() {
                                                 onChange=${(event) => toggle(module, event.currentTarget)}
                                             />
                                             ${
-                                            owner &&
-                                            module.enabled &&
-                                            html`<button
+                                                owner &&
+                                                module.enabled &&
+                                                html`<button
                                                 class="link small"
                                                 disabled=${busy !== null}
                                                 onClick=${() => change(module, "/reload", {})}
                                             >
                                                 Reload
                                             </button>`
-                                        }
+                                            }
                                         </div>
                                     </div>`;
                                 })}

@@ -26,7 +26,6 @@ import { pathToFileURL } from "node:url";
 import { APP_ROOT } from "./config.ts";
 import { describe, HttpError } from "./errors.ts";
 import { opened } from "./http/io.ts";
-import { desktopTheme } from "./omarchy.ts";
 import { watchTree } from "./reload.ts";
 import { cssReferences, themeFile } from "./themes/css.ts";
 import { reservedThemeIds } from "./themes/reserved.ts";
@@ -288,12 +287,12 @@ export class Themes {
     }
 
     /**
-     * Whether colors are here to use: the desktop's (on a machine with Omarchy), a palette that comes with the app, or a
-     * theme folder's that can be used (`<id>`, or a half of a pair: `<id>@dark`, `<id>@light`).
+     * Whether colors are here to use: a bundled palette or a usable theme folder's colors
+     * (`<id>`, or a half of a pair: `<id>@dark`, `<id>@light`). Coop does not synchronize desktop colors.
      */
     async hasColors(id: string): Promise<boolean> {
         if (id === "desktop") {
-            return (await desktopTheme()) !== null;
+            return false;
         }
 
         if (Object.hasOwn(this.#palettes, id)) {
@@ -317,8 +316,8 @@ export class Themes {
 
     /**
      * A new theme of the owner's called `name`. Of a theme (`colors` false): a copy of its whole folder, with a new name.
-     * Of colors (`colors` true): a theme of colors alone, from a palette that comes with the app, `desktop` (the
-     * desktop's, as it is now), or a theme folder's (`<id>`, both halves of a pair; `<id>@dark` or `<id>@light`, one).
+     * Of colors (`colors` true): a theme of colors alone, from a bundled palette or a theme folder's
+     * (`<id>`, both halves of a pair; `<id>@dark` or `<id>@light`, one).
      * Answers its id.
      */
     async duplicate(from: string, name: unknown, colorsOnly = false): Promise<string> {
@@ -370,12 +369,9 @@ export class Themes {
                 );
             }
         } else {
-            const colors =
-                from === "desktop"
-                    ? (await desktopTheme())?.colors
-                    : Object.hasOwn(this.#palettes, from)
-                      ? this.#palettes[from]!.colors
-                      : undefined;
+            const colors = Object.hasOwn(this.#palettes, from)
+                ? this.#palettes[from]!.colors
+                : undefined;
 
             if (colors === undefined) {
                 throw new HttpError(404, "No such colors to copy");

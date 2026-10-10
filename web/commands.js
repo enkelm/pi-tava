@@ -440,16 +440,12 @@ const COMMANDS = [
     {
         name: "theme",
         args: "[name]",
-        description:
-            "Change the theme or the colors: a theme, an Omarchy palette, or desktop to follow yours",
+        description: "Change the app theme",
         run: setTheme,
     },
 ];
 
-/**
- * `/theme lantern` (a theme folder), `/theme gruvbox`, `/theme rose`, `/theme desktop` (colors); without a name, the
- * Settings → Appearance. A theme's name wins over colors' of the same name.
- */
+/** Choose standalone bundled colors or an optional API theme; without a name, open Appearance. */
 function setTheme(arg) {
     if (arg === "") {
         return openSheet({ type: "settings", tab: "appearance" });
@@ -465,15 +461,9 @@ function setTheme(arg) {
             ? [{ id, name: id === BASE_LOOK ? "Pocket" : (listed?.name ?? id) }]
             : [];
     });
-    // The desktop's colors only where the server has a desktop: elsewhere "desktop" would show Tokyo Night.
-    const desktop = paletteOf("desktop").desktop === true;
-    const palettes = [
-        ...(desktop ? ["desktop"] : []),
-        ...Object.keys(THEMES),
-        ...folderPaletteIds(),
-    ].map((id) => ({
+    const palettes = [...Object.keys(THEMES), ...folderPaletteIds()].map((id) => ({
         id,
-        name: id === "desktop" ? "desktop" : paletteOf(id).name,
+        name: paletteOf(id).name,
     }));
     const find = (list) =>
         list.find((each) => each.id === needle) ??
@@ -492,11 +482,7 @@ function setTheme(arg) {
     const palette = find(palettes);
 
     if (!palette) {
-        const some = [
-            "pocket",
-            ...Object.keys(THEMES).slice(0, 3),
-            ...(desktop ? ["desktop"] : []),
-        ];
+        const some = ["pocket", ...Object.keys(THEMES).slice(0, 3)];
 
         throw new Error(
             `No theme or colors called “${arg}”. Try ${some.slice(0, -1).join(", ")}, or ${some.at(-1)}.`,
@@ -504,7 +490,7 @@ function setTheme(arg) {
     }
 
     chooseTheme(palette.id);
-    notify("info", `Colors: ${palette.id === "desktop" ? "follow your desktop" : palette.name}.`);
+    notify("info", `Colors: ${palette.name}.`);
 }
 
 /** Extensions' commands this person may run (`hello` lists them). A prompt template of the same name keeps it. */

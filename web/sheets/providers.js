@@ -1,5 +1,5 @@
 import { Fragment } from "preact";
-// Model providers: signing in and out, the models subagents may use besides their session's own, and the dialog a
+// Model providers: signing in and out, the shared model list for subagents and linked sessions, and the dialog a
 // sign-in uses to ask for a code or a key.
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { api, attempt, closeSignIn, signInAnswered, store } from "../store.js";
@@ -13,9 +13,9 @@ const MODEL_SEARCH_AT = 8;
 let saving = Promise.resolve();
 
 /**
- * The owner's choice of the models Pi may start subagents on besides their session's own: every model, by provider,
- * each checked or not on its own. None, the default: subagents always run on their session's model, and Pi is offered
- * no model to pick. A tap sends that one model's change, not the whole list, so quick taps and other tabs keep theirs.
+ * The owner's shared model list: nonempty restricts background subagents' extra models; empty leaves them unrestricted.
+ * Linked sessions always treat it as an allowlist of extra models, so empty means parent only. The parent's model is
+ * always allowed by either policy. A tap changes one entry, so quick taps and other tabs keep theirs.
  * `names`: providers' names by id, once the sheet has them.
  */
 function SubagentModels({ names }) {
@@ -42,8 +42,8 @@ function SubagentModels({ names }) {
     const chosen = rows.filter((row) => isOn(row.spec)).map((row) => row.model?.name ?? row.spec);
     const summary =
         chosen.length === 0
-            ? "None allowed: Pi never picks a model."
-            : `${chosen.length} allowed: ${chosen.join(", ")}`;
+            ? "No models checked: background choices unrestricted; linked sessions parent-only."
+            : `${chosen.length} checked: ${chosen.join(", ")}. Parent model always allowed.`;
     const needle = query.trim().toLowerCase();
     const groups = new Map();
 
@@ -87,7 +87,7 @@ function SubagentModels({ names }) {
     return html`<div class="subagent-models">
         <div class="label">Models for subagents</div>
         <p class="muted small">
-            Subagents and linked sessions run on their session's model, the one people picked. Pi cannot choose another model unless you allow it here.
+            Background subagents inherit their parent's model unless Pi names another. Check models to restrict those extra choices to this list; clearing the last box makes them unrestricted again. Linked sessions use only their parent's model or a checked model, even when this list is empty. Model availability and sign-in checks still apply.
         </p>
         <p class="small subagent-models-chosen" title=${summary}>${summary}</p>
         ${

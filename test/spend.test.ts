@@ -19,7 +19,7 @@ import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { type ConversationId, LiveDoc, type UsageState } from "@earendil-works/pi-durable";
 import type { User } from "../src/server/config.ts";
-import { SpendDoc } from "../src/server/docs.ts";
+import { SpendDoc, SubagentsDoc } from "../src/server/docs.ts";
 import { usageCost } from "../src/server/projection.ts";
 
 /** Usage worth `dollars`, split between a model and a tool. */
@@ -34,6 +34,13 @@ const route: FauxResponseStep = (request) => {
 
     if (role === "toolResult") {
         return fauxAssistantMessage([fauxText("done")]);
+    }
+
+    if (text.endsWith("delegate")) {
+        return fauxAssistantMessage(
+            [fauxToolCall("subagent", { action: "spawn", name: "helper", message: "help" })],
+            { stopReason: "toolUse" },
+        );
     }
 
     if (text.endsWith("work slowly")) {
@@ -226,5 +233,63 @@ test("a run that crosses its session's limit is stopped once, and the people the
         assert.equal(stopped().length, 1);
     } finally {
         app.detach(tab.client);
+    }
+});
+
+// The summary's root grouping has its own owner boundary: not per-conversation totals or person billing.
+test("the spend summary groups subagents with their roots, sorts totals, and respects scoped access after restart", async () => {
+    const first = await newSession(app);
+    const second = await newSession(app);
+    const empty = await newSession(app);
+
+    await sayAs(owner(app), first, "delegate");
+    let child: ConversationId | undefined;
+
+    await until(async () => {
+        child = (await app.harness.snapshot(SubagentsDoc, first, context))?.agents.helper
+            ?.conversationId;
+
+        return child !== undefined && !app.isBusy(child) && !app.isBusy(first);
+    }, "the subagent answered");
+    await recordCost(app, first, 0.5);
+    await recordCost(app, child!, 2.75);
+    await recordCost(app, second, 7);
+    await app.spend.setSessionBudget(owner(app), first, 20);
+    const scoped = app.config.addUser("Scoped spend", "guest", [String(first)]).user;
+
+    try {
+        const check = () => {
+            const summary = app.spend.summary(owner(app));
+            const sessions = summary.sessions.filter((session) =>
+                [Number(first), Number(second), Number(empty)].includes(session.id),
+            );
+
+            assert.deepEqual(
+                sessions.map(({ id, spent, budget }) => [id, spent, budget]),
+                [
+                    [Number(second), 7, undefined],
+                    [Number(first), 3.25, 20],
+                    [Number(empty), 0, undefined],
+                ],
+            );
+            assert.equal(
+                summary.sessions.some((session) => session.id === Number(child)),
+                false,
+            );
+            const limited = app.spend.summary(scoped);
+
+            assert.deepEqual(
+                limited.sessions.map(({ id, spent }) => [id, spent]),
+                [[Number(first), 3.25]],
+            );
+            assert.equal(limited.total, undefined);
+        };
+
+        check();
+        await app.close();
+        app = await openApp(model);
+        check();
+    } finally {
+        app.config.removeUser(scoped.id);
     }
 });

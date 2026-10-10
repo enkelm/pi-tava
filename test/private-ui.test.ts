@@ -71,6 +71,24 @@ async function chatAppearance(page: BrowserPage) {
     );
 }
 
+/** The outer windows must honor Appearance, regardless of which session type is open. */
+async function windowAppearance(page: BrowserPage) {
+    return value(
+        page,
+        `(() => {
+            const layout = getComputedStyle(document.querySelector('.layout'));
+            return {
+                padding: layout.padding,
+                gap: layout.gap,
+                borders: ['.sidebar', '.pane'].map(selector => {
+                    const style = getComputedStyle(document.querySelector(selector));
+                    return [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth];
+                }),
+            };
+        })()`,
+    );
+}
+
 test(
     "Private mirror: shared read-only Chat, lazy owner-only tree, guarded prompt and explicit shared import",
     {
@@ -413,6 +431,13 @@ test(
 
             await page.setViewport(VIEWPORTS.desktop);
             const desktopAppearance = await chatAppearance(page);
+            const tiledWindows = {
+                padding: "10px",
+                gap: "10px",
+                borders: Array.from({ length: 2 }, () => ["2px", "2px", "2px", "2px"]),
+            };
+
+            assert.deepEqual(await windowAppearance(page), tiledWindows, "shared tiled windows");
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.evaluate(`(await import('/store.js')).navigate(null)`);
@@ -530,6 +555,52 @@ test(
                 mobileAppearance,
                 "mobile private Chat shares Durable widths, bubbles, composer styling and arrow Send",
             );
+            await page.setViewport(VIEWPORTS.desktop);
+            await present(page, ".private-view-switch");
+            assert.deepEqual(
+                await windowAppearance(page),
+                tiledWindows,
+                "private sessions honor tiled gaps and both window borders",
+            );
+
+            for (const focused of ["sidebar", "pane"]) {
+                await page.hover({ selector: `.${focused}` });
+                await until(
+                    () =>
+                        value(
+                            page,
+                            `getComputedStyle(document.querySelector('.${focused}'), '::after').opacity === '1'`,
+                        ),
+                    `private ${focused} active border`,
+                );
+                assert.equal(
+                    await value(
+                        page,
+                        `getComputedStyle(document.querySelector('.${focused}'), '::after').borderTopWidth`,
+                    ),
+                    "2px",
+                );
+            }
+
+            await shot(page, "desktop-terminal");
+            await page.evaluate(`(await import('/theme.js')).setPrefs({ tiling: false })`);
+            assert.deepEqual(
+                await windowAppearance(page),
+                {
+                    padding: "0px",
+                    gap: "normal",
+                    borders: [
+                        ["0px", "1px", "0px", "0px"],
+                        ["0px", "0px", "0px", "0px"],
+                    ],
+                },
+                "private sessions still support flat layout",
+            );
+            await page.evaluate(`(await import('/theme.js')).setPrefs({ tiling: true })`);
+            assert.deepEqual(await windowAppearance(page), tiledWindows, "tiling can be restored");
+            await page.setViewport(VIEWPORTS.mobile);
+            await click(page, ".private-view-switch button:last-child");
+            await present(page, "#private-prompt");
             assert.equal(
                 await value(
                     page,
@@ -708,6 +779,11 @@ test(
                 await chatAppearance(page),
                 desktopAppearance,
                 "desktop private Chat shares Durable widths and composer presentation",
+            );
+            assert.deepEqual(
+                await windowAppearance(page),
+                tiledWindows,
+                "private Chat tiled windows",
             );
             assert.equal(
                 await value(page, `document.querySelector('.private-terminal').open`),

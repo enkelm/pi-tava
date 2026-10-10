@@ -1,7 +1,6 @@
-// Models are a person's to choose. A subagent runs on its session's model: with no models allowed (the default), Pi is
-// offered no model and one it names is refused; the owner may allow others, and Pi may use only those. A subagent on a
-// model no longer allowed gets no more work. A subagent its model failed is reported as such, and Pi is told to stop
-// and tell the user rather than try another model.
+// Coop's default empty model list preserves explicit model selection; omission inherits the session's model.
+// A nonempty owner list restricts additional choices, including later sends to existing children; clearing it restores
+// unrestricted selection. Model/provider failures still tell Pi to stop and tell the user, not switch models.
 import { type App, cleanUp, context, lastText, openApp, owner, until, work } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -119,7 +118,8 @@ async function ask(id: ConversationId, text: string) {
     };
 }
 
-test("with no models allowed, a subagent runs on its session's model, and Pi is offered no other", async () => {
+test("the default empty list preserves explicit model selection, and omission inherits the session model", async () => {
+    await app.setSubagentModels(owner(app), []);
     const id = await session();
     const started = await ask(id, "spawn plain");
 
@@ -129,14 +129,29 @@ test("with no models allowed, a subagent runs on its session's model, and Pi is 
         "mine",
     );
     assert.ok(offered !== undefined, "the parent was offered the tool");
-    assert.equal("model" in offered, false, "no model parameter");
+    assert.equal("model" in offered, true, "Coop always offers explicit model selection");
 
-    // One it names anyway is refused, nothing made, and Pi is told to ask the user.
-    const refused = await ask(id, "spawn sneaky faux/pricey");
+    const chosen = await ask(id, "spawn chosen faux/pricey");
 
-    assert.match(refused.answer, /cannot choose another/);
-    assert.match(refused.answer, /ask the user/);
-    assert.equal(refused.agents.sneaky, undefined);
+    assert.match(chosen.answer, /Started chosen on faux\/pricey\./);
+    assert.equal(
+        (await app.agentState(chosen.agents.chosen!.conversationId))?.model?.modelId,
+        "pricey",
+    );
+    await until(
+        async () =>
+            JSON.stringify(
+                (await (await app.harness.conversation(id, context))!.context(context)).messages,
+            ).includes("result of chosen"),
+        "the explicitly chosen model's answer reaches the parent",
+    );
+
+    // Unrestricted means any available model, not a missing model or a silent fallback.
+    const missing = await ask(id, "spawn missing faux/unknown");
+
+    assert.match(missing.answer, /Model faux\/unknown is not available here/);
+    assert.match(missing.answer, /Do not pick another model/);
+    assert.equal(missing.agents.missing, undefined);
 });
 
 test("the owner allows models: Pi may use those, and is refused any other with word to ask the user", async () => {
@@ -162,15 +177,32 @@ test("the owner allows models: Pi may use those, and is refused any other with w
     assert.match(refused.answer, /Do not pick another model/);
     assert.equal(refused.agents.wanderer, undefined);
 
-    // Allowed no longer: the subagent on it gets no more work.
-    await app.setSubagentModels(me, []);
+    // The parent model is always permitted, including when specified explicitly outside the restriction list.
+    const same = await ask(id, "spawn same faux/mine");
+
+    assert.match(same.answer, /Started same on faux\/mine\./);
+    assert.equal((await app.agentState(same.agents.same!.conversationId))?.model?.modelId, "mine");
+
+    // A different nonempty list revokes an existing child's model for subsequent work.
+    await app.setSubagentModels(me, ["faux/other"]);
     const after = await ask(id, "send reviewer");
 
     assert.match(
         after.answer,
         /reviewer runs on faux\/pricey, which is neither this session's model nor one/,
     );
-    assert.equal("model" in (offered ?? {}), false, "the tool offers no model again");
+    assert.equal("model" in (offered ?? {}), true, "the tool keeps its explicit model parameter");
+
+    // Clearing restrictions restores sends to that same child, without replacing it or its model.
+    await app.setSubagentModels(me, []);
+    const restored = await ask(id, "send reviewer");
+
+    assert.match(restored.answer, /Sent to reviewer\./);
+    assert.equal(restored.agents.reviewer!.conversationId, allowed.agents.reviewer!.conversationId);
+    assert.equal(
+        (await app.agentState(restored.agents.reviewer!.conversationId))?.model?.modelId,
+        "pricey",
+    );
 });
 
 test("a subagent its model failed is reported with the model, and Pi is told to stop and tell the user", async () => {

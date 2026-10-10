@@ -7,6 +7,7 @@ import {
     context,
     fakeTab,
     lastText,
+    modelTexts,
     newSession,
     openApp,
     owner,
@@ -17,11 +18,11 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { after, before, beforeEach, test } from "node:test";
+import { after, before, beforeEach, describe, test } from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { type ConversationId, InboxDoc } from "@earendil-works/pi-durable";
+import { type ConversationId, InboxDoc, LiveDoc } from "@earendil-works/pi-durable";
 import { dealtWith } from "../src/server/commands.ts";
 import { SubagentsDoc } from "../src/server/docs.ts";
 
@@ -441,7 +442,19 @@ test("past its spend limit, an idle parent starts no turn for a report: it waits
             !app.isBusy(id),
         "the subagent at work, the parent idle",
     );
-    // Spent past a limit set now: nothing runs to be stopped, but nothing new may start.
+    // Hold a completed answer, not an over-budget child that Spend aborts (which Coop keeps silent). The idle
+    // parent's courier gathers for a moment, so its genuine answer can wait under a limit without any run to stop.
+    await until(async () => {
+        const child = (await app.harness.snapshot(SubagentsDoc, id, context))?.agents.paid;
+
+        return (
+            child !== undefined &&
+            child.reported.length === 1 &&
+            !app.isBusy(child.conversationId) &&
+            (await held(id)).waiting === 1
+        );
+    }, "the completed answer waiting for the courier");
+    assert.deepEqual(await delivered(id), {});
     await recordCost(app, id, 2);
     await app.spend.setSessionBudget(owner(app), id, 1);
     await until(() => app.spend.heldBack(id) !== undefined, "the limit reached");
@@ -462,6 +475,7 @@ test("past its spend limit, an idle parent starts no turn for a report: it waits
         10_000,
     );
     assert.deepEqual(await held(id), { why: undefined, waiting: 0 });
+    assert.match(await parentText(id), /result of paid/);
     slow = {};
 });
 
@@ -492,4 +506,267 @@ test("reports taken out of the queue by something other than a person go again, 
         15_000,
     );
     assert.deepEqual(await delivered(id), { "again-a": 1, "again-b": 1 });
+});
+
+// Coop regressions retain the original reporter task/checkpoint and add courier-aware assertions.
+describe("Coop reporter lifecycle regressions", () => {
+    let fail: "first" | "follow-up" | undefined;
+
+    const route: FauxResponseStep = (request) => {
+        const { role, text } = lastText(request as never);
+        const child = JSON.stringify(request).includes('You are the subagent \\"helper\\"');
+
+        if (child) {
+            if (
+                (fail === "first" && role === "toolResult") ||
+                (fail === "follow-up" && text === "One more thing.")
+            ) {
+                return fauxAssistantMessage([], {
+                    stopReason: "error",
+                    errorMessage: "Bad request",
+                });
+            }
+
+            if (role === "user" && text === "Check it.") {
+                return fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 2" })], {
+                    stopReason: "toolUse",
+                });
+            }
+
+            return fauxAssistantMessage([fauxText("child answer")]);
+        }
+
+        if (role === "user" && text === "start helper") {
+            return fauxAssistantMessage(
+                [
+                    fauxToolCall("subagent", {
+                        action: "spawn",
+                        name: "helper",
+                        message: "Check it.",
+                    }),
+                ],
+                { stopReason: "toolUse" },
+            );
+        }
+
+        if (role === "user" && text === "nudge helper") {
+            return fauxAssistantMessage(
+                [
+                    fauxToolCall("subagent", {
+                        action: "send",
+                        name: "helper",
+                        message: "One more thing.",
+                        followUp: true,
+                    }),
+                ],
+                { stopReason: "toolUse" },
+            );
+        }
+
+        return fauxAssistantMessage([fauxText("noted")]);
+    };
+
+    let app: App;
+
+    before(async () => {
+        app = await openApp(scriptedModel(route), join(root, "subagents-coop-data"));
+    });
+
+    after(async () => {
+        await app?.close();
+    });
+
+    const queued = async (id: ConversationId) =>
+        (await app.harness.snapshot(InboxDoc, id, context))?.items.length ?? 0;
+
+    async function reports(id: ConversationId) {
+        const view = await (await app.harness.conversation(id, context))!.context(context);
+
+        // A courier may batch reports into one user message. Count each delivered report, not turns.
+        return view.messages
+            .filter((message) => message.role === "user")
+            .map((message) =>
+                typeof message.content === "string"
+                    ? message.content
+                    : message.content
+                          .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                          .join("\n"),
+            )
+            .flatMap((text) =>
+                [...text.matchAll(/\[subagent helper (?:answered|failed)[^\]]*\][^\n]*/g)].map(
+                    (match) => JSON.stringify(match[0]),
+                ),
+            );
+    }
+
+    async function reportersDone(id: ConversationId) {
+        const graph = await app.harness.taskGraph(context);
+
+        try {
+            return !Object.values(graph.value.tasks).some(
+                (task) =>
+                    (task.kind === "pocket.subagent-reporter" ||
+                        task.kind === "pocket.subagent-courier") &&
+                    task.conversationId === id,
+            );
+        } finally {
+            graph.dispose();
+        }
+    }
+
+    /** Spawn through the parent's model, and send through its tool while the child's real bash task is running. */
+    async function pendingFollowUp() {
+        const id = await newSession(app);
+
+        await app.commands.submit(id, owner(app), {
+            text: "start helper",
+            requestId: `start-${id}`,
+        });
+        let child: ConversationId | undefined;
+
+        await until(async () => {
+            child = (await app.harness.snapshot(SubagentsDoc, id, context))?.agents.helper
+                ?.conversationId;
+
+            return (
+                child !== undefined &&
+                (await app.harness.snapshot(LiveDoc, child, context))?.tools?.some(
+                    (tool) => tool.status === "running",
+                ) === true &&
+                !app.isBusy(id)
+            );
+        }, "the child's tool running");
+        await app.commands.submit(id, owner(app), {
+            text: "nudge helper",
+            requestId: `nudge-${id}`,
+        });
+        await until(async () => (await queued(child!)) === 1, "the follow-up queued");
+
+        return { id, child: child! };
+    }
+
+    for (const restart of [false, true]) {
+        test(`a failed subagent withdraws its pending follow-up and reports resend needed${restart ? " across restart" : ""}`, async () => {
+            fail = "first";
+            const { id, child } = await pendingFollowUp();
+
+            if (restart) {
+                // The reporter remains in its version-1 deliver checkpoint; bash is interrupted, not rerun.
+                await app.close();
+                app = await openApp(scriptedModel(route), join(root, "subagents-coop-data"));
+            }
+
+            await until(
+                async () => (await reports(id)).length === 2 && !app.isBusy(id),
+                "both failure reports",
+            );
+            const text = (await reports(id)).join("\n");
+
+            assert.match(text, /\[subagent helper failed: Bad request\]/);
+            assert.match(
+                text,
+                /\[subagent helper failed: went idle without taking the message; send it again\]/,
+            );
+            assert.equal(await queued(child), 0);
+            await until(() => reportersDone(id), "no reporter left waiting");
+            assert.equal(
+                (await modelTexts(app, child)).some((text) => text.includes("One more thing.")),
+                false,
+                "the withdrawn input never reached the child",
+            );
+
+            if (restart) {
+                await app.close();
+                app = await openApp(scriptedModel(route), join(root, "subagents-coop-data"));
+                assert.equal((await reports(id)).length, 2, "completed reports are not replayed");
+                assert.equal(await queued(child), 0);
+            }
+        });
+    }
+
+    test("a follow-up already placed is left alone when its run fails", async () => {
+        fail = "follow-up";
+        const { id, child } = await pendingFollowUp();
+
+        await until(
+            async () => (await reports(id)).length === 2 && !app.isBusy(id),
+            "both reports",
+        );
+        const text = (await reports(id)).join("\n");
+
+        assert.match(text, /\[subagent helper answered, no reply needed\] child answer/);
+        assert.match(text, /\[subagent helper failed: Bad request\]/);
+        assert.doesNotMatch(text, /went idle|send it again/);
+        assert.equal(await queued(child), 0);
+        assert.ok((await modelTexts(app, child)).some((text) => text.includes("One more thing.")));
+        await until(() => reportersDone(id), "both reporters finished");
+    });
+
+    test("Stop stays silent, drains pending reporters, and later sends still answer", async () => {
+        fail = undefined;
+        const { id, child } = await pendingFollowUp();
+
+        await app.commands.abort(child, owner(app));
+        await until(() => reportersDone(id), "the stopped reporters finished");
+        assert.equal(await queued(child), 0);
+        assert.deepEqual(await reports(id), [], "explicit Stop is not a resend-needed failure");
+        await app.commands.submit(id, owner(app), {
+            text: "nudge helper",
+            requestId: `later-${id}`,
+        });
+        await until(
+            async () => (await reports(id)).length === 1 && !app.isBusy(id),
+            "a later send answers",
+        );
+        assert.match((await reports(id))[0]!, /answered, no reply needed\] child answer/);
+        await until(() => reportersDone(id), "the later reporter finished");
+    });
+
+    test("a withdrawal published just before shutdown retains its resend report after restart", async () => {
+        fail = "first";
+        const { id, child } = await pendingFollowUp();
+        const item = (await app.harness.snapshot(InboxDoc, child, context))!.items[0]!;
+        let closing: Promise<void> | undefined;
+        const unsubscribe = app.harness.subscribeCommits((publication) => {
+            for (const change of publication.changes) {
+                if (
+                    change.type === "submission" &&
+                    change.value.id === item.id &&
+                    change.value.status === "unanswered" &&
+                    change.value.reason === "aborted"
+                ) {
+                    // Observe only inline; seal admission on the first microtask after this settlement publication.
+                    queueMicrotask(() => {
+                        closing = app.harness.close(context);
+                    });
+                }
+            }
+        });
+
+        try {
+            await until(() => closing !== undefined, "shutdown at the withdrawal publication");
+            await closing;
+            await app.close();
+            app = await openApp(scriptedModel(route), join(root, "subagents-coop-data"));
+            await until(
+                async () =>
+                    (await reportersDone(id)) &&
+                    (await reports(id)).length === 2 &&
+                    !app.isBusy(id),
+                "the restarted reporters finish",
+            );
+            assert.equal(await queued(child), 0);
+            const expected = [
+                '"[subagent helper failed: Bad request]"',
+                '"[subagent helper failed: went idle without taking the message; send it again]"',
+            ].sort();
+
+            assert.deepEqual((await reports(id)).sort(), expected);
+            await app.close();
+            app = await openApp(scriptedModel(route), join(root, "subagents-coop-data"));
+            assert.deepEqual((await reports(id)).sort(), expected, "neither report replays");
+        } finally {
+            unsubscribe();
+        }
+    });
 });

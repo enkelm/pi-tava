@@ -70,7 +70,12 @@ subagentModels(): readonly string[];
 
 Since 0.13.1 · Stable
 
-The models that the owner lets subagents use, as `provider/modelId`. A subagent can always use the model of its own session. The list is empty by default. The owner sets it in Menu → Providers → Models for subagents.
+The owner's shared model list, as `provider/modelId`, empty by default. The owner sets it in Settings → Providers → Models for subagents. Its meaning depends on the consumer:
+
+- **Background subagents** always offer an optional `model` parameter. Omission inherits the parent model. An empty list leaves explicit model choices unrestricted; a nonempty list restricts extra models to its entries. The parent's model is always allowed. Thinking is fitted to the nearest supported level, including `max` and levels above the parent's; sending more work does not lower it.
+- **Linked sessions (Agent Teams)** always treat this list as an allowlist of extra models. An empty list means parent-model only, not unrestricted. Thinking is capped at the source's level, then fitted to a supported level at or below that cap.
+
+Neither policy bypasses model availability or sign-in checks. A drop-in reading this list must choose its own policy; the host returns the list, not a universal permission decision.
 
 ### `modelProblem`
 
@@ -196,8 +201,8 @@ Makes a session linked to `source` and sends it `message` as its first message. 
 
 - The new session works in the folder of `source`. It gets a copy of the agent settings of `source`, but not its history.
 - Without `title`, the title is the first line of `message`.
-- `model` is `provider/modelId`. It must be the model of `source`, or a model that the owner lets subagents use. Without it, the session uses the model of `source`.
-- `thinking` is a level no higher than the level of `source`. Without it, the session uses the level of `source`. Pi Pocket lowers it to the highest level that the model has.
+- `model` is `provider/modelId`. It must be the model of `source`, or an entry in `subagentModels()`. An empty list permits only the source's model for linked sessions, unlike background subagents. Without `model`, the session uses the model of `source`.
+- `thinking` defaults to the level of `source`. A requested level above the source's is capped there, then fitted to the highest supported level at or below that cap. If the model has no such level, the start is refused.
 - When Pi cannot use the model now, `start` makes nothing and throws an error.
 
 #### `linkedSessions.send`

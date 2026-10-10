@@ -127,7 +127,9 @@ export interface Host {
      */
     resolveModel(spec: string): ModelRef;
     /**
-     * The models that the owner lets subagents use, as `provider/modelId`. Empty by default.
+     * The owner's shared model list, as `provider/modelId`, empty by default. For background subagents, empty leaves
+     * explicit choices unrestricted; nonempty restricts extra models. The parent's model is always allowed. Linked
+     * sessions always use this as an extra-model allowlist: empty means parent only. Availability checks still apply.
      * @since 0.13.1
      */
     subagentModels(): readonly string[];
@@ -203,7 +205,8 @@ export interface SafeText {
 export interface LinkedSessions {
     /**
      * Starts a session linked to `source`, in its folder, and sends it `message` as its first message. `model` is
-     * `provider/modelId`; `thinking` is a level no higher than the source's.
+     * `provider/modelId`: the source's or an entry in `subagentModels()` (empty means source only). Thinking is capped
+     * at the source's, then fitted to the highest level the model supports at or below that cap.
      * @since 0.14.0
      * @experimental
      */

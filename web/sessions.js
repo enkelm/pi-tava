@@ -371,14 +371,12 @@ function SessionRow({
         ${
             branches.length > 0 &&
             html`<span class="session-branches" data-part="session-branches" aria-hidden="true">
-                ${branches
-                    .slice(-3)
-                    .map(
-                        (continues, index, visible) =>
-                            html`<span
+                ${branches.slice(-3).map(
+                    (continues, index, visible) =>
+                        html`<span
                                 class=${`${continues ? "continues" : ""} ${index === visible.length - 1 ? "elbow" : ""}`}
                             ></span>`,
-                    )}
+                )}
             </span>`
         }
         <button

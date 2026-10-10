@@ -331,7 +331,7 @@ export class LinkedSessions implements LinkedSessionsApi {
 
         const selected = app.models.getModel(model.provider, model.modelId)!;
 
-        // Never above the source's level, as a subagent's: then the highest the model has at or below that.
+        // Linked sessions, unlike background subagents, stay at or below the source's thinking level.
         const cap = THINKING_LEVELS.indexOf(asked) > THINKING_LEVELS.indexOf(own) ? own : asked;
         const thinking = levelAtMost(selected, cap);
 

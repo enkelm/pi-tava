@@ -159,8 +159,8 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                     </div>
                 </div>
                 ${
-                here &&
-                html`<div class="field">
+                    here &&
+                    html`<div class="field">
                     <div class="label">In</div>
                     <div class="segmented">
                         <button
@@ -179,7 +179,7 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                         </button>
                     </div>
                 </div>`
-            }`
+                }`
         }
         ${
             !asOwner &&
@@ -214,14 +214,14 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
             invite
                 ? html`<div class="invite">
                       ${
-                        invite.local &&
-                        html`<div class="error-box">
+                          invite.local &&
+                          html`<div class="error-box">
                             This link only works on this device. To let other devices in, press
                             <span class="mono">a</span> in the Pi Coop terminal (or start it with
                             <span class="mono">--access</span>) and pick Local network, Cloudflare
                             Tunnel, or Tailscale. Then make a new invite.
                         </div>`
-                    }
+                      }
                       <div class="invite-details">
                           <div class="qr" dangerouslySetInnerHTML=${{ __html: invite.svg }}></div>
                           <div class="invite-code">
@@ -230,10 +230,10 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                                   <button
                                       class="link small"
                                       onClick=${() =>
-                                    copyText(invite.code).then(
-                                        () => notify("info", "Code copied."),
-                                        () => notify("error", "Could not copy."),
-                                    )}
+                                          copyText(invite.code).then(
+                                              () => notify("info", "Code copied."),
+                                              () => notify("error", "Could not copy."),
+                                          )}
                                   >
                                       Copy
                                   </button>
@@ -260,23 +260,23 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                           <button
                               class="button"
                               onClick=${() =>
-                                copyText(invite.url).then(
-                                    () => notify("info", "Link copied."),
-                                    () => notify("error", "Could not copy."),
-                                )}
+                                  copyText(invite.url).then(
+                                      () => notify("info", "Link copied."),
+                                      () => notify("error", "Could not copy."),
+                                  )}
                           >
                               Copy
                           </button>
                       </div>
                       ${
-                        invite.alternatives?.length > 0 &&
-                        html`<p class="muted small">
+                          invite.alternatives?.length > 0 &&
+                          html`<p class="muted small">
                             Also reachable at:
                             ${invite.alternatives.map(
                                 (url) => html`<span class="mono">${url} </span>`,
                             )}
                         </p>`
-                    }
+                      }
                   </div>`
                 : failed
                   ? html`<p class="muted small">No invite yet. Tap New invite to try again.</p>`
@@ -316,8 +316,8 @@ export function PeopleList() {
         <div class="group-title">People</div>
         <div class="sheet-list">
             ${ordered.map(
-            (person) =>
-                html`<div class="person-row" key=${person.id}>
+                (person) =>
+                    html`<div class="person-row" key=${person.id}>
                     <span class="people-here">
                         <${Avatar} person=${person} size=${32} />
                         <span
@@ -337,9 +337,9 @@ export function PeopleList() {
                         </div>
                     </div>
                     ${
-                    owner &&
-                    person.role !== "owner" &&
-                    html`<div class="person-actions">
+                        owner &&
+                        person.role !== "owner" &&
+                        html`<div class="person-actions">
                         ${
                             collab() &&
                             html`<button
@@ -377,9 +377,9 @@ export function PeopleList() {
                             Remove
                         </button>
                     </div>`
-                }
+                    }
                 </div>`,
-        )}
+            )}
         </div>
     </div>`;
 }
