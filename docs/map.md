@@ -5,15 +5,16 @@ Where things are in Pi Coop, for agents working on it. Internal Pocket names rem
 ## Fork additions
 
 - `src/server/private-sessions.ts`: owner-only local Herdr hierarchy, pane views, guarded agent prompts and preview of import into a shared conversation. It shares transport, identity checks and the pane-operation lock with takeover.
-- `src/server/private-sessions/journal.ts`: bounded read-only display of the last persisted Pi branch, using Pocket projection and adapted Collie text helpers. Never used as executable import input.
+- `src/server/private-sessions/journal.ts`: bounded read-only display and current model metadata from the last persisted Pi branch, using Pocket projection and adapted Collie text helpers. Never used as executable import input.
 - `web/private.js`: owner-only Private navigation, repo/worktree grouping and Chat view, isolated from Durable rooms. Chat reuses `transcript.js` read-only entries and the shared `message-box.js` presentation; private drafts and delivery stay separate. Native snapshots refresh workspace metadata; local folds do not change Herdr.
 - `src/server/private-sessions/control.ts`: durable, opaque input admission and takeover restrictions; no private transcript storage.
+- `src/server/private-sessions/uploads.ts`: private, revision-bound upload tokens, bounded staging and retained files for Pi's read tool. `web/private-input.js` owns memory-only previews, upload lifecycle, native command suggestions and the private model-picker wrapper.
 - `src/server/private-terminals.ts`: owner-authenticated one-use WebSocket tickets, native helper lifecycle, live authorization, command/queue bounds and terminal-use fencing.
 - `native/herdr-web/`, `scripts/build-herdr-web.mjs`: pinned Herdr GPUI client/protocol adapter, lockfile, notices and synthetic native tests. The helper speaks structured frames, not ANSI.
 - `web/private-terminal.js`, `web/terminal-grid.js`, `web/terminal-grid.css`: desktop terminal controls, mobile helpers, structured rendering and semantic input.
 - `test/private-control.test.ts`, `test/private-terminals.test.ts`, `test/terminal-grid.test.ts`, `test/private-terminal-ui.test.ts`: persisted input restrictions, HTTP/WS/child-pipe lifecycle, renderer and keyboard/mobile checks.
 - [terminal-mode.md](terminal-mode.md): structured connection and parity contract, current validation limits.
-- `test/private-sessions.test.ts`, `test/private-ui.test.ts`, `test/shared-imports.test.ts`: private authorization, protocol/identity checks, bridge/import coordination, shared publication and mobile/desktop routes.
+- `test/private-sessions.test.ts`, `test/private-ui.test.ts`, `test/private-input-ui.test.ts`, `test/private-journal-model.test.ts`, `test/shared-imports.test.ts`: private authorization, protocol/identity checks, guarded commands, uploads and model reflection, bridge/import coordination, shared publication and mobile/desktop routes.
 - [private-sessions.md](private-sessions.md): current private bridge contract and validation.
 
 - `src/server/imports.ts`: owner-only preview, destination configuration, atomic import publication and archive retrieval.
@@ -34,7 +35,7 @@ This fork's default data directory is `~/.pi-durable-app`; the files and the `PI
 
 - `pocket.sqlite`: Pi Durable's storage: conversations, entries, tasks, and Pi Pocket's documents.
 - `config.json`: people, roles, hashed tokens, settings. `push.json`: VAPID keys and push subscriptions.
-- `uploads/<conversation>/`, `worktrees/` (sessions' git worktrees), `extensions/` (the owner's drop-ins), `themes/` (the owner's theme folders, and `.removed/` for removed ones), `browser/profile/` (the built-in browser's profile; each session's cookies live in memory only).
+- `uploads/<conversation>/`, `private-uploads/` (owner-only Private Chat staging and retained files), `worktrees/` (sessions' git worktrees), `extensions/` (the owner's drop-ins), `themes/` (the owner's theme folders, and `.removed/` for removed ones), `browser/profile/` (the built-in browser's profile; each session's cookies live in memory only).
 
 ## Server: `src/server/`
 
@@ -215,7 +216,7 @@ PiP's `pip-window.js` handles pointer resize zones and the account/browser size 
 
 The menu in `sheets/menu.js` keeps `Sheet`'s focus, Escape, drag-to-close, and the sheet trail's Back behavior. Its `MenuFrame` positions it below the top bar's menu button at ≥700px, and adds arrow navigation and focus return; below that width it stays a bottom sheet. `PlacesSheet` uses the same three-column tiles.
 
-`message-box.js` provides the composer shell, auto-sizing field and send button for both Durable and Private Chat. `transcript.js` exports `TranscriptEntry`; its read-only mode shows journal entries without resolving private IDs or images through a Durable room.
+`message-box.js` provides the composer shell, auto-sizing field and send button for both Durable and Private Chat. `sheets/model.js` accepts a private picker callback without reading or configuring a Durable agent; Private sends an exact native model command and reflects the saved journal's selected-branch model. `transcript.js` exports `TranscriptEntry`; its read-only mode shows journal entries without resolving private IDs or images through a Durable room.
 
 `sheets/settings.js` hosts the Settings popup with responsive category tabs and retained, lazily mounted panels. Appearance and Providers come from `sheets/appearance.js` and `sheets/providers.js`; Notifications from `notify.js`; Extensions & safety from `sheets/extensions.js`; Account & access from `sheets/account.js` and the access list in `sheets/people.js`; Usage & limits from `sheets/spend.js`. Provider sign-in prompts remain in `providers.js`, and invitations remain a separate flow in `people.js`. Legacy settings sheet types route into the same popup in `sheets.js`.
 

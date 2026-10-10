@@ -1,9 +1,18 @@
 // Generated journals and synthetic Herdr replies only. No real Herdr sockets or processes are touched.
 import { cleanUp, context, openApp, owner, root, scriptedModel, until, work } from "./helpers.ts";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+    appendFileSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    readdirSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
+import { createServer, request as httpRequest } from "node:http";
+import { dirname, isAbsolute, join } from "node:path";
 import { after, test } from "node:test";
 import { createHandler } from "../src/server/http.ts";
 import { projectJournal, readJournal } from "../src/server/private-sessions/journal.ts";
@@ -38,6 +47,7 @@ async function fixture(name: string) {
     const options = {
         unavailable: false,
         failPrompt: false,
+        secondPi: false,
         duringRead: () => {},
         promptGate: Promise.resolve(),
     };
@@ -182,6 +192,16 @@ async function fixture(name: string) {
                             tab_id: "tab",
                             terminal_id: "terminal-1",
                         })),
+                        ...(options.secondPi
+                            ? [
+                                  {
+                                      ...value.snapshot.panes[0],
+                                      pane_id: "other-pi",
+                                      tab_id: "tab",
+                                      terminal_id: "terminal-2",
+                                  },
+                              ]
+                            : []),
                         {
                             pane_id: "shell",
                             workspace_id: "workspace",
@@ -191,6 +211,19 @@ async function fixture(name: string) {
                             label: "Shell pane",
                         },
                     ],
+                },
+            } as T;
+        }
+
+        if (
+            method === "pane.process_info" &&
+            (params as { pane_id: string }).pane_id === "other-pi"
+        ) {
+            return {
+                process_info: {
+                    shell_pid: 73101,
+                    foreground_process_group_id: 73102,
+                    foreground_processes: [{ pid: 73102 }],
                 },
             } as T;
         }
@@ -220,11 +253,542 @@ async function fixture(name: string) {
         return original(socket, method, params);
     };
 
+    fake.state.table.push({ ...fake.shell, pid: 73101 }, { ...fake.pi, pid: 73102, parent: 73101 });
     const list = await app.privateSessions.list(owner(app));
     const pane = list.instances[0]!.workspaces[0]!.tabs[0]!.panes[0]!;
 
     return { app, source, model, ...fake, calls, options, pane };
 }
+
+async function httpFor(app: Awaited<ReturnType<typeof openApp>>, paneId: string) {
+    const server = createServer(
+        createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
+    );
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/private`;
+    const headers = { authorization: `Bearer ${app.config.ownerToken}`, "x-pocket": "1" };
+
+    return {
+        base,
+        headers,
+        upload: (revision: string, name: string, body: Buffer | string = "file bytes") =>
+            fetch(`${base}/${paneId}/upload?${new URLSearchParams({ revision, name })}`, {
+                method: "POST",
+                headers,
+                body: typeof body === "string" ? body : new Uint8Array(body),
+            }),
+        prompt: (body: unknown, pane = paneId, auth = headers) =>
+            fetch(`${base}/${pane}/prompt`, {
+                method: "POST",
+                headers: { ...auth, "content-type": "application/json" },
+                body: JSON.stringify(body),
+            }),
+        remove: (id: string, pane = paneId, auth = headers) =>
+            fetch(`${base}/${pane}/upload?${new URLSearchParams({ id })}`, {
+                method: "DELETE",
+                headers: auth,
+            }),
+        close: async () => {
+            server.closeAllConnections();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await app.close();
+        },
+    };
+}
+
+async function httpFixture(name: string) {
+    const f = await fixture(name);
+
+    return { ...f, ...(await httpFor(f.app, f.pane.id)) };
+}
+
+function uploadFiles(dataDir: string): string[] {
+    const directory = join(dataDir, "private-uploads");
+
+    try {
+        return readdirSync(directory, { recursive: true, withFileTypes: true })
+            .filter((entry) => entry.isFile())
+            .map((entry) => join(entry.parentPath, entry.name));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            return []; // A cleanup can remove a staging directory during this observation.
+        }
+
+        throw error;
+    }
+}
+
+function streamingUpload(url: string, headers: Record<string, string>) {
+    let request!: ReturnType<typeof httpRequest>;
+    const result = new Promise<{ status: number; body: string }>((resolve) => {
+        request = httpRequest(url, { method: "POST", headers, agent: false }, (response) => {
+            let body = "";
+
+            response.setEncoding("utf8");
+            response.on("data", (chunk) => {
+                body += chunk;
+            });
+            response.on("end", () => resolve({ status: response.statusCode!, body }));
+        });
+        request.on("error", (error) => resolve({ status: 0, body: error.message }));
+    });
+
+    request.write("first bytes");
+
+    return { request, result };
+}
+
+async function spinUntil(check: () => boolean, description: string): Promise<void> {
+    const deadline = Date.now() + 10_000;
+
+    while (!check()) {
+        assert.ok(Date.now() < deadline, `Timed out: ${description}`);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+}
+
+// Primary upload contract owner: HTTP authentication, persisted bytes and agent-aware input.
+// These cases catch path acceptance, cross-pane/user/revision reuse and attachment-blind dedup.
+test("private HTTP uploads stream concurrent bytes into scoped tokens and deliver quoted file paths", async () => {
+    const f = await httpFixture("http-uploads");
+
+    try {
+        f.options.secondPi = true;
+        const tree = await f.app.privateSessions.list(owner(f.app));
+        const otherPane = tree.instances[0]!.workspaces[0]!.tabs[0]!.panes.find(
+            (pane) => pane.nativeId === "other-pi",
+        )!;
+        const view = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+        const otherView = await f.app.privateSessions.pane(owner(f.app), otherPane.id);
+        const bytes = Buffer.from([0, 255, 137, 80, 78, 71, 13, 10]);
+        const uploads = await Promise.all([
+            f.upload(view.revision, '../../screen "one"\n.png', bytes),
+            f.upload(view.revision, "C:\\fakepath\\notes.txt", "exact text\nwith a second line"),
+        ]);
+
+        assert.deepEqual(
+            uploads.map((response) => response.status),
+            [200, 200],
+        );
+        assert.equal(uploads[0]!.headers.get("cache-control"), "no-store");
+        const [image, notes] = await Promise.all(uploads.map((response) => response.json()));
+
+        assert.deepEqual(Object.keys(image).sort(), ["id", "name", "size"]);
+        assert.notEqual(image.id, notes.id);
+        assert.equal(image.size, bytes.length);
+        assert.match(image.name, /^[a-zA-Z0-9._-]+\.png$/);
+        assert.equal(notes.name, "notes.txt");
+        const staged = uploadFiles(f.app.dataDir);
+        const imagePath = staged.find((path) => path.endsWith(image.name))!;
+
+        assert.deepEqual(readFileSync(imagePath), bytes);
+        assert.equal(
+            readFileSync(
+                staged.find((path) => path.endsWith(notes.name))!,
+                "utf8",
+            ),
+            "exact text\nwith a second line",
+        );
+        assert.equal(statSync(imagePath).mode & 0o777, 0o600);
+        assert.equal(statSync(dirname(imagePath)).mode & 0o777, 0o700);
+        assert.equal(statSync(join(f.app.dataDir, "private-uploads")).mode & 0o777, 0o700);
+        assert.equal(existsSync(join(f.app.dataDir, "uploads")), false);
+        const before = f.calls.filter((call) => call.method === "agent.prompt").length;
+
+        for (const attachments of [
+            [f.source.path],
+            ["../outside"],
+            [image.id, image.id],
+            [image.id, ...Array.from({ length: 10 }, () => randomUUID())],
+            null,
+        ]) {
+            assert.equal(
+                (
+                    await f.prompt({
+                        revision: view.revision,
+                        requestId: "invalid",
+                        text: "Read",
+                        attachments,
+                    })
+                ).status,
+                400,
+            );
+        }
+
+        assert.equal((await f.remove(f.source.path)).status, 400);
+        assert.equal(
+            (
+                await f.prompt(
+                    {
+                        revision: otherView.revision,
+                        requestId: "wrong-pane",
+                        attachments: [image.id],
+                    },
+                    otherPane.id,
+                )
+            ).status,
+            409,
+        );
+        assert.equal((await f.remove(image.id, otherPane.id)).status, 404);
+        const otherOwner = f.app.config.addUser("Other owner identity", "owner");
+        const otherHeaders = { ...f.headers, authorization: `Bearer ${otherOwner.token}` };
+
+        assert.equal(
+            (
+                await f.prompt(
+                    { revision: view.revision, requestId: "wrong-user", attachments: [image.id] },
+                    f.pane.id,
+                    otherHeaders,
+                )
+            ).status,
+            409,
+        );
+        assert.equal((await f.remove(image.id, f.pane.id, otherHeaders)).status, 404);
+        f.state.path += ".replacement";
+        const replaced = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+
+        assert.equal(
+            (
+                await f.prompt({
+                    revision: replaced.revision,
+                    requestId: "wrong-revision",
+                    attachments: [image.id],
+                })
+            ).status,
+            409,
+        );
+        f.state.path = f.source.path;
+        const expandedOverflow = await f.prompt({
+            revision: view.revision,
+            requestId: "expanded-overflow",
+            text: "x".repeat(32 * 1024),
+            attachments: [image.id],
+        });
+
+        assert.equal(expandedOverflow.status, 400);
+        assert.match((await expandedOverflow.json()).error, /attachment paths.*32 KiB/);
+        assert.equal(
+            (
+                await f.prompt({
+                    revision: view.revision,
+                    requestId: "slash-files",
+                    text: "/compact",
+                    attachments: [image.id],
+                })
+            ).status,
+            400,
+        );
+        assert.equal(f.calls.filter((call) => call.method === "agent.prompt").length, before);
+        assert.equal(uploadFiles(f.app.dataDir).length, 2);
+        const slash = { revision: view.revision, requestId: "slash-alone", text: "/skill:review" };
+
+        assert.equal((await f.prompt(slash)).status, 200);
+        const request = {
+            revision: view.revision,
+            requestId: "files-only",
+            attachments: [image.id, notes.id],
+        };
+        const response = await f.prompt(request);
+
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { sent: true });
+        assert.equal((await f.prompt(request)).status, 200);
+        assert.equal(
+            (await f.prompt({ ...request, attachments: [notes.id, image.id] })).status,
+            409,
+        );
+        assert.equal((await f.prompt({ ...request, requestId: "already-used" })).status, 409);
+        assert.equal((await f.remove(image.id)).status, 409);
+        const sends = f.calls.filter((call) => call.method === "agent.prompt");
+
+        assert.equal(sends.length, 2);
+        assert.deepEqual(sends[0]!.params, { target: "pane", text: slash.text });
+        const text = sends[1]!.params.text as string;
+
+        assert.doesNotMatch(text, /[\n\r\t\u0000-\u001f]/);
+        assert.match(text, /including images/);
+        const paths = JSON.parse(text.slice(text.indexOf("["))) as string[];
+
+        assert.equal(paths.length, 2);
+
+        for (const path of paths) {
+            assert.equal(isAbsolute(path), true);
+            assert.ok(path.startsWith(join(f.app.dataDir, "private-uploads", "retained") + "/"));
+        }
+
+        assert.deepEqual(readFileSync(paths[0]!), bytes);
+        assert.equal(readFileSync(paths[1]!, "utf8"), "exact text\nwith a second line");
+        assert.equal(existsSync(imagePath), false);
+        const removable = await (await f.upload(view.revision, "discard.txt")).json();
+
+        assert.equal((await f.remove(removable.id)).status, 200);
+        assert.equal(uploadFiles(f.app.dataDir).length, 2);
+        assert.equal(
+            f.calls.some((call) => call.method.startsWith("pane.send")),
+            false,
+        );
+        assert.deepEqual(f.app.sessions(), []);
+        assert.deepEqual(f.state.signals, []);
+        assert.equal(readFileSync(f.source.path, "utf8"), f.source.archive);
+    } finally {
+        await f.close();
+    }
+});
+
+test("attachment-expanded input rejects Unicode controls in server-resolved paths", async () => {
+    const f = await httpFixture("upload-unsafe-root-\u2028");
+
+    try {
+        const view = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+        const file = await (await f.upload(view.revision, "safe.png", "image bytes")).json();
+
+        const response = await f.prompt({
+            revision: view.revision,
+            requestId: "unsafe-path",
+            text: "Read the image",
+            attachments: [file.id],
+        });
+
+        assert.equal(response.status, 400);
+        assert.match((await response.json()).error, /attachment paths.*safe single line/);
+
+        assert.equal(
+            f.calls.some((call) => call.method === "agent.prompt"),
+            false,
+        );
+        assert.equal(uploadFiles(f.app.dataDir).length, 1);
+        assert.equal((await f.remove(file.id)).status, 200);
+    } finally {
+        await f.close();
+    }
+});
+
+test("private HTTP upload rejects stale/busy input and cleans aborted, stale and oversized streams", async () => {
+    const f = await httpFixture("upload-cleanup");
+
+    try {
+        const view = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+
+        for (const status of ["working", "blocked"]) {
+            f.state.status = status;
+            assert.equal((await f.upload(view.revision, "busy.txt")).status, 409);
+        }
+
+        f.state.status = "idle";
+        f.state.path += ".changed";
+        assert.equal((await f.upload(view.revision, "stale.txt")).status, 409);
+        assert.equal(existsSync(join(f.app.dataDir, "private-uploads")), false);
+        f.state.path = f.source.path;
+        const url = `${f.base}/${f.pane.id}/upload?${new URLSearchParams({ revision: view.revision, name: "stream.bin" })}`;
+        const oversizedHeader = streamingUpload(url, {
+            ...f.headers,
+            "content-length": String(50 * 1024 * 1024 + 1),
+        });
+
+        oversizedHeader.request.end();
+        assert.equal((await oversizedHeader.result).status, 413);
+        assert.equal(existsSync(join(f.app.dataDir, "private-uploads")), false);
+        const stale = streamingUpload(url, f.headers);
+
+        await spinUntil(
+            () => uploadFiles(f.app.dataDir).some((path) => statSync(path).size > 0),
+            "stale stream bytes on disk",
+        );
+        f.state.path += ".during-stream";
+        stale.request.end("last bytes");
+        assert.equal((await stale.result).status, 409);
+        assert.deepEqual(uploadFiles(f.app.dataDir), []);
+        f.state.path = f.source.path;
+        const aborted = streamingUpload(url, f.headers);
+
+        await spinUntil(
+            () => uploadFiles(f.app.dataDir).some((path) => statSync(path).size > 0),
+            "aborted stream bytes on disk",
+        );
+        aborted.request.destroy();
+        await aborted.result;
+        await spinUntil(() => uploadFiles(f.app.dataDir).length === 0, "aborted stream cleanup");
+        const oversized = streamingUpload(url, f.headers);
+
+        oversized.request.end(Buffer.alloc(50 * 1024 * 1024 + 1, 0x7a));
+        const result = await oversized.result;
+
+        assert.ok(result.status === 413 || result.status === 0); // A refused chunked stream may close its socket.
+        await spinUntil(() => uploadFiles(f.app.dataDir).length === 0, "oversized stream cleanup");
+        const valid = await (await f.upload(view.revision, "valid.txt", "kept")).json();
+
+        assert.equal(valid.size, 4);
+        assert.equal((await f.remove(valid.id)).status, 200);
+        assert.deepEqual(uploadFiles(f.app.dataDir), []);
+        assert.equal(
+            f.calls.some((call) => call.method === "agent.prompt"),
+            false,
+        );
+    } finally {
+        await f.close();
+    }
+});
+
+test("private uploads bound pending counts and expire only unsubmitted files; stalled streams time out", async (t) => {
+    const f = await httpFixture("upload-limits");
+
+    try {
+        const view = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        const tokens: string[] = [];
+
+        for (let index = 0; index < 10; index++) {
+            const response = await f.upload(view.revision, `${index}.txt`, String(index));
+
+            assert.equal(response.status, 200);
+            tokens.push((await response.json()).id);
+        }
+
+        assert.equal((await f.upload(view.revision, "overflow.txt")).status, 429);
+        assert.equal(uploadFiles(f.app.dataDir).length, 10);
+        assert.equal((await f.remove(tokens[0]!)).status, 200);
+        assert.equal((await f.upload(view.revision, "replacement.txt")).status, 200);
+        assert.equal(
+            (
+                await f.prompt({
+                    revision: view.revision,
+                    requestId: "retain-before-expiry",
+                    text: "Read this",
+                    attachments: [tokens[1]],
+                })
+            ).status,
+            200,
+        );
+        const retained = uploadFiles(f.app.dataDir).find((path) => path.includes("/retained/"))!;
+
+        t.mock.timers.tick(60 * 60_000);
+        await spinUntil(() => uploadFiles(f.app.dataDir).length === 1, "staging expiry");
+        assert.equal(readFileSync(retained, "utf8"), "1");
+        assert.equal((await f.remove(tokens[1]!)).status, 409);
+        assert.equal(
+            (
+                await f.prompt({
+                    revision: view.revision,
+                    requestId: "expired",
+                    attachments: [tokens[2]],
+                })
+            ).status,
+            409,
+        );
+        const stalled = streamingUpload(
+            `${f.base}/${f.pane.id}/upload?${new URLSearchParams({ revision: view.revision, name: "stalled.txt" })}`,
+            f.headers,
+        );
+
+        await spinUntil(
+            () =>
+                uploadFiles(f.app.dataDir).some(
+                    (path) => path.endsWith("stalled.txt") && statSync(path).size > 0,
+                ),
+            "stalled stream bytes on disk",
+        );
+        t.mock.timers.tick(60_000);
+        assert.equal((await stalled.result).status, 0);
+        await spinUntil(() => uploadFiles(f.app.dataDir).length === 1, "stalled stream cleanup");
+        assert.equal(readFileSync(retained, "utf8"), "1");
+    } finally {
+        t.mock.timers.reset();
+        await f.close();
+    }
+});
+
+test("uncertain attachment delivery reuses the outcome, refuses deletion and survives an app restart without replay", async () => {
+    const f = await httpFixture("attachment-uncertainty");
+    let reopened: Awaited<ReturnType<typeof openApp>> | undefined;
+    let restartedHttp: Awaited<ReturnType<typeof httpFor>> | undefined;
+
+    try {
+        f.options.secondPi = true;
+        const view = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+        const file = await (await f.upload(view.revision, "evidence.png", "image bytes")).json();
+        const unsent = await (await f.upload(view.revision, "not-sent.txt")).json();
+
+        await f.upload(view.revision, "orphan.txt", "unsubmitted before restart");
+        const orphan = uploadFiles(f.app.dataDir).find((path) => path.endsWith("orphan.txt"))!;
+        let release!: () => void;
+
+        f.options.promptGate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        f.options.failPrompt = true;
+        const request = {
+            revision: view.revision,
+            requestId: "uncertain-files",
+            text: "Inspect",
+            attachments: [file.id],
+        };
+        const sending = f.prompt(request);
+        const repeat = f.prompt(request);
+
+        await until(
+            () => f.calls.some((call) => call.method === "agent.prompt"),
+            "attachment input admitted",
+        );
+        const retained = uploadFiles(f.app.dataDir).find((path) => path.includes("/retained/"))!;
+
+        assert.equal(readFileSync(retained, "utf8"), "image bytes");
+        assert.equal((await f.remove(file.id)).status, 409);
+        assert.equal((await f.remove(unsent.id)).status, 200);
+        assert.equal((await f.prompt({ ...request, attachments: [] })).status, 409);
+        release();
+        assert.deepEqual(
+            (await Promise.all([sending, repeat])).map((response) => response.status),
+            [503, 503],
+        );
+        assert.equal((await f.prompt(request)).status, 503);
+        assert.equal(f.calls.filter((call) => call.method === "agent.prompt").length, 1);
+        assert.equal((await f.remove(file.id)).status, 409);
+        const dataDir = f.app.dataDir;
+
+        await f.app.close();
+        reopened = await openApp(f.model, dataDir);
+        const restored = fakeHerdr(reopened, f.source.path);
+
+        restored.local.request = f.local.request;
+        restored.local.processes = f.local.processes;
+        restored.local.sockets = f.local.sockets;
+        const pane = await reopened.privateSessions.pane(owner(reopened), f.pane.id);
+
+        assert.equal(pane.canPrompt, false);
+        assert.notEqual(pane.revision, view.revision);
+        await assert.rejects(
+            reopened.privateSessions.prompt(owner(reopened), f.pane.id, request),
+            /delivery is uncertain/,
+        );
+        await assert.rejects(
+            reopened.privateSessions.deleteUpload(owner(reopened), f.pane.id, file.id),
+            /not found/,
+        );
+        assert.equal(f.calls.filter((call) => call.method === "agent.prompt").length, 1);
+        assert.equal(readFileSync(retained, "utf8"), "image bytes");
+        const tree = await reopened.privateSessions.list(owner(reopened));
+        const other = tree.instances[0]!.workspaces[0]!.tabs[0]!.panes.find(
+            (item) => item.nativeId === "other-pi",
+        )!;
+        const otherView = await reopened.privateSessions.pane(owner(reopened), other.id);
+
+        restartedHttp = await httpFor(reopened, other.id);
+        const newUpload = await restartedHttp.upload(otherView.revision, "after-restart.txt");
+
+        assert.equal(newUpload.status, 200);
+        assert.equal(existsSync(orphan), false);
+        assert.equal(readFileSync(retained, "utf8"), "image bytes");
+        assert.equal((await restartedHttp.remove((await newUpload.json()).id)).status, 200);
+        assert.equal((await reopened.harness.inspect(context)).tasks.length, 0);
+        assert.deepEqual(reopened.sessions(), []);
+    } finally {
+        await restartedHttp?.close();
+        await reopened?.close();
+        await f.close();
+    }
+});
 
 test("owner navigation includes native hierarchy IDs while HTTP targets remain opaque", async () => {
     const f = await fixture("native-navigation");
@@ -257,7 +821,7 @@ test("owner navigation includes native hierarchy IDs while HTTP targets remain o
     }
 });
 
-test("plain Chat rejects commands and multiline before discovery with a Terminal mode explanation", async () => {
+test("Chat delivers slash commands but refuses shell, multiline and controls before discovery", async () => {
     const f = await fixture("plain-only");
 
     try {
@@ -266,7 +830,23 @@ test("plain Chat rejects commands and multiline before discovery with a Terminal
 
         for (const [index, text] of [
             "/model",
-            "   /quit",
+            "  /model  ",
+            "/thinking",
+            "/thinking nonsense",
+            "/thinking high extra",
+            "/name",
+            ...[
+                "/settings",
+                "/tree",
+                "/scoped-models",
+                "/fork",
+                "/trust",
+                "/login",
+                "/logout",
+                "/resume",
+                "/import",
+                "/bug",
+            ].flatMap((command) => [command, command + " argument"]),
             "!echo hi",
             "\t!!pwd",
             "hello\nworld",
@@ -275,6 +855,10 @@ test("plain Chat rejects commands and multiline before discovery with a Terminal
             "hello\u2028world",
             "hello\u2029world",
             "hello\tworld",
+            "hello\u001b[201~",
+            "hello\u0000world",
+            "hello\u009bworld",
+            "hello\u202eworld",
         ].entries()) {
             await assert.rejects(
                 async () =>
@@ -283,11 +867,37 @@ test("plain Chat rejects commands and multiline before discovery with a Terminal
                         requestId: `rejected-${index}`,
                         text,
                     }),
-                /Use Terminal mode/,
+                /Use Terminal mode|plain-text/,
             );
         }
 
         assert.equal(f.calls.length, before);
+
+        const allowed = [
+            "/model provider/test-model",
+            "   /skill:review src/server",
+            "/template args",
+            "/extension-command",
+            "/thinking high",
+            "/name New session name",
+        ];
+
+        for (const [index, text] of allowed.entries()) {
+            await f.app.privateSessions.prompt(owner(f.app), f.pane.id, {
+                revision: view.revision,
+                requestId: `slash-${index}`,
+                text,
+            });
+        }
+
+        assert.deepEqual(
+            f.calls.filter((call) => call.method === "agent.prompt").map((call) => call.params),
+            allowed.map((text) => ({ target: "pane", text })),
+        );
+        assert.equal(
+            f.calls.some((call) => call.method.startsWith("pane.send")),
+            false,
+        );
         assert.deepEqual(f.state.signals, []);
         assert.deepEqual(f.app.sessions(), []);
         assert.equal(f.model.state.callCount, 0);
@@ -675,9 +1285,14 @@ test("private HTTP authorizes before I/O and returns uncached, sanitized workspa
                 `/${f.pane.id}`,
                 `/${f.pane.id}/prompt`,
                 `/${f.pane.id}/import-preview`,
+                `/${f.pane.id}/upload?revision=${"a".repeat(64)}&name=image.png`,
             ]) {
                 const method =
-                    route.endsWith("prompt") || route.endsWith("preview") ? "POST" : "GET";
+                    route.includes("upload") ||
+                    route.endsWith("prompt") ||
+                    route.endsWith("preview")
+                        ? "POST"
+                        : "GET";
 
                 assert.equal(
                     (
@@ -702,6 +1317,30 @@ test("private HTTP authorizes before I/O and returns uncached, sanitized workspa
             ).status,
             403,
         );
+
+        for (const person of guests) {
+            assert.equal(
+                (
+                    await fetch(`${base}/${f.pane.id}/upload?id=${"a".repeat(36)}`, {
+                        method: "DELETE",
+                        headers: { ...headers, authorization: `Bearer ${person.token}` },
+                    })
+                ).status,
+                403,
+            );
+        }
+
+        assert.equal(
+            (
+                await fetch(`${base}/${f.pane.id}/upload?revision=${"a".repeat(64)}&name=file`, {
+                    method: "POST",
+                    headers: { authorization: headers.authorization },
+                    body: "private bytes",
+                })
+            ).status,
+            403,
+        );
+        assert.equal(existsSync(join(f.app.dataDir, "private-uploads")), false);
         assert.equal(f.calls.length, before);
         const response = await fetch(base, { headers });
 
@@ -763,6 +1402,8 @@ test("private HTTP authorizes before I/O and returns uncached, sanitized workspa
 
         assert.equal(viewResponse.headers.get("cache-control"), "no-store");
         const view = await viewResponse.json();
+
+        assert.deepEqual(view.model, { provider: "faux", modelId: "faux-1" });
         const result = await fetch(`${base}/${f.pane.id}/prompt`, {
             method: "POST",
             headers,

@@ -15783,6 +15783,31 @@ pre.gallery-code {
     margin-block: 8px;
 }
 
+.private-composer .model-chip {
+    min-width: 0;
+    max-width: min(220px, 36vw);
+}
+
+.private-composer .model-chip span,
+.private-attachment-name {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.private-attachments .chip {
+    max-width: 100%;
+}
+
+.private-attachments .chip > :not(.private-attachment-name) {
+    flex-shrink: 0;
+}
+
+.private-composer .command {
+    min-height: 40px;
+}
+
 .private-live-terminal {
     flex: 1;
     min-height: 0;

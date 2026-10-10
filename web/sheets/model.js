@@ -65,23 +65,37 @@ const matches = (model, query) => {
  * `/model son` opened it already searching. Opened for the default (`forDefault`, from the menu), it picks the model
  * and thinking level new sessions start with instead, and stays open for both.
  */
-export function ModelPicker() {
-    const { models, server, me } = store.state;
-    const [pipId] = useState(() => store.state.sheet?.pipId);
-    const view = pipId === undefined ? store.state.view : store.state.pipView;
-    const locked =
-        pipId !== undefined &&
-        (view.conversation?.id !== pipId ||
-            view.live?.busy === true ||
-            (view.live?.compactions?.length ?? 0) > 0);
+export function ModelPicker({
+    privateMode = false,
+    models = store.state.models,
+    agent: suppliedAgent,
+    initialQuery,
+    onPick,
+    onClose = closeSheet,
+}) {
+    const { server, me } = privateMode ? {} : store.state;
+    const [pipId] = useState(() => (privateMode ? undefined : store.state.sheet?.pipId));
+    // A private Pi has its own state and delivery; never read a Durable room as its fallback.
+    const view = privateMode ? null : pipId === undefined ? store.state.view : store.state.pipView;
+    const agent = suppliedAgent ?? (privateMode ? null : view.agent);
+    const locked = privateMode
+        ? typeof onPick !== "function"
+        : pipId !== undefined &&
+          (view.conversation?.id !== pipId ||
+              view.live?.busy === true ||
+              (view.live?.compactions?.length ?? 0) > 0);
     const configure = (change) =>
-        pipId === undefined
-            ? actions.configure(change)
-            : api(`c/${pipId}/configure`, { ...change, pipPanel: true });
+        privateMode
+            ? undefined
+            : pipId === undefined
+              ? actions.configure(change)
+              : api(`c/${pipId}/configure`, { ...change, pipPanel: true });
     // While the picker animates out, the store has no sheet any more.
-    const [query, setQuery] = useState(store.state.sheet?.query ?? "");
-    const [forDefault] = useState(() => store.state.sheet?.forDefault === true);
-    const scopedModels = models.filter((model) => model.scoped);
+    const [query, setQuery] = useState(
+        initialQuery ?? (privateMode ? "" : (store.state.sheet?.query ?? "")),
+    );
+    const [forDefault] = useState(() => !privateMode && store.state.sheet?.forDefault === true);
+    const scopedModels = privateMode ? [] : models.filter((model) => model.scoped);
     // Opened already searching (`/model gem`) for models only outside the scope: it starts with all of them.
     const [showAll, setShowAll] = useState(
         () => query.trim() !== "" && !scopedModels.some((model) => matches(model, query)),
@@ -93,17 +107,19 @@ export function ModelPicker() {
     const [anchor, setAnchor] = useState(() =>
         forDefault || pipId !== undefined ? null : modelAnchor(),
     );
+    const close = useRef(onClose);
+
+    close.current = onClose;
     const box = useRef(null);
     const search = useRef(null);
     const list = useRef(null);
     // Arrows scroll the list to the model they reach; the mouse does not, or the list would run away under it.
     const keyed = useRef(false);
-    const agent = view.agent;
 
     // On a phone, a swipe away from where it opens closes it, as a sheet's does.
     useDragToClose(box, {
         dir: anchor?.down ? "up" : "down",
-        onClose: closeSheet,
+        onClose,
         enabled: BOTTOM_SHEETS.matches,
     });
     const owner = me?.role === "owner";
@@ -132,6 +148,7 @@ export function ModelPicker() {
         isDefault(agent?.model) &&
         (chosen?.thinkingLevel ?? "off") === (agent?.thinkingLevel ?? "off");
     const setDefault = (model, thinkingLevel) =>
+        !privateMode &&
         attempt(() =>
             actions.setDefaultModel({
                 provider: model.provider,
@@ -143,7 +160,7 @@ export function ModelPicker() {
     useEffect(() => {
         // The default's picker has no chip to open from: it stays in the middle.
         const place = () => setAnchor(forDefault || pipId !== undefined ? null : modelAnchor());
-        const onKey = (event) => event.key === "Escape" && closeSheet();
+        const onKey = (event) => event.key === "Escape" && close.current();
 
         addEventListener("resize", place);
         visualViewport?.addEventListener("resize", place);
@@ -180,17 +197,23 @@ export function ModelPicker() {
 
         attempt(async () => {
             if (!isCurrent(model)) {
-                await configure({ model: { provider: model.provider, modelId: model.id } });
+                if (onPick) {
+                    await onPick(model);
+                } else if (!privateMode) {
+                    await configure({ model: { provider: model.provider, modelId: model.id } });
+                }
             }
 
-            closeSheet();
+            onClose();
         });
     };
 
     const think = (each) =>
-        forDefault
-            ? setDefault(defaultModel, each)
-            : attempt(() => configure({ thinkingLevel: each }));
+        privateMode
+            ? undefined
+            : forDefault
+              ? setDefault(defaultModel, each)
+              : attempt(() => configure({ thinkingLevel: each }));
 
     // Arrows and Enter move through the models, and Tab switches scoped and all, from the search box or the picker
     // itself, not from its other buttons: there Tab and Shift+Tab move the focus as anywhere else.
@@ -233,7 +256,7 @@ export function ModelPicker() {
 
     return html`<div
         class="overlay pop-overlay"
-        onMouseDown=${scrimPress(closeSheet)}
+        onMouseDown=${scrimPress(onClose)}
     >
         <section
             class=${`pop-menu model-menu ${anchor ? (anchor.down ? "down" : "") : "free"}`}
@@ -287,9 +310,15 @@ export function ModelPicker() {
                         </span>`
                     }
                 </span>
-                <button class="pop-menu-link" onClick=${() => openSheet({ type: "settings", tab: "providers" })}>
+                ${
+                    !privateMode &&
+                    html`<button
+                        class="pop-menu-link"
+                        onClick=${() => openSheet({ type: "settings", tab: "providers" })}
+                    >
                     <${Icon} name="key" size=${13} /> Providers
-                </button>
+                </button>`
+                }
             </header>
             ${
                 searchable &&
@@ -307,11 +336,17 @@ export function ModelPicker() {
                     />
                 </label>`
             }
+            ${
+                privateMode &&
+                html`<p class="muted pop-menu-note">
+                Sends /model to this Pi. Its available models may differ; check the terminal if it opens a selector.
+            </p>`
+            }
             <div class="pop-menu-list" ref=${list} role="listbox" aria-label="Models">
                 ${
                     models.length === 0 &&
                     html`<p class="muted pop-menu-note">
-                        No models are available. Add a provider first.
+                        ${privateMode ? "No models are available for this Pi. Check its terminal." : "No models are available. Add a provider first."}
                     </p>`
                 }
                 ${
@@ -333,7 +368,7 @@ export function ModelPicker() {
                         <span class="pop-menu-row-text">
                             <span class="pop-menu-row-name">${model.name}</span>
                             <span class="pop-menu-row-sub">
-                                ${model.provider}${!forDefault && isDefault(model) ? " · default" : ""}${model.signIn ? " · needs sign-in" : ""}
+                                ${model.provider}${!privateMode && !forDefault && isDefault(model) ? " · default" : ""}${model.signIn ? " · needs sign-in" : ""}
                             </span>
                         </span>
                         ${isCurrent(model) && html`<${Icon} name="check" size=${14} />`}
@@ -341,6 +376,7 @@ export function ModelPicker() {
                 )}
             </div>
             ${
+                !privateMode &&
                 reasoning &&
                 html`<div class="pop-menu-foot">
                     <div class="label">Thinking</div>
@@ -361,7 +397,7 @@ export function ModelPicker() {
                 </div>`
             }
             ${
-                pipId !== undefined || !defaultsKept()
+                privateMode || pipId !== undefined || !defaultsKept()
                     ? null
                     : forDefault
                       ? html`<div class="pop-menu-foot pop-menu-default">

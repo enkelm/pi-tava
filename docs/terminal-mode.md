@@ -6,7 +6,9 @@ Structured Terminal is implemented, with the parity limits listed below. The goa
 
 Private desktop views default to Terminal. The sidebar follows GPUI's compact Spaces/workspaces and Agents lists; tabs belong above the terminal area. Desktop operation is keyboard-first. An action dropdown must not replace Herdr's bindings. A shortcuts reference can explain bindings and browser limits.
 
-Mobile defaults to agent Chat. Terminal remains available, with a mobile-only bottom helper bar. Do not squeeze a desktop split layout into a phone or make a mobile user operate every agent through terminal keystrokes. Public sessions keep Pocket's existing interface.
+Mobile defaults to agent Chat. Verified idle Pi panes also offer native slash-command completion, a model picker and private uploads in Chat. Files are delivered as server paths for Pi's tools to read; they are not native clipboard image events. Built-in terminal dialogs and multiline or shell input still require Terminal. A model command may open a selector if that model is not available to the target Pi, so Chat waits for saved model reflection or an explicit editor check. See [private-sessions.md](private-sessions.md).
+
+Terminal remains available, with a mobile-only bottom helper bar. Do not squeeze a desktop split layout into a phone or make a mobile user operate every agent through terminal keystrokes. Public sessions keep Pocket's existing interface.
 
 Opening Terminal connects automatically. The user chose this persistent behavior over the initial Connect confirmation screen. Keep one connection per opened Herdr instance across pane, tab and Chat navigation. Background views retain the connection and use `client_shell.surface.set` to suspend unnecessary frames. Wait for its response before considering surface interest changed. Transport loss can reconnect to fresh state, never replay old keystrokes or requests. Explicit disconnect and owner-access loss stop reconnection. Browsers, especially iOS in the background, can still suspend or close a socket.
 

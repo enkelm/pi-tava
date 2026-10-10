@@ -97,7 +97,13 @@ function content(value: unknown): unknown {
         });
 }
 
-export function projectJournal(text: string): { entries: ClientEntry[]; warnings: string[] } {
+type JournalView = {
+    entries: ClientEntry[];
+    warnings: string[];
+    model?: { provider: string; modelId: string };
+};
+
+export function projectJournal(text: string): JournalView {
     const lines = text.split("\n");
     const rows: Record<string, unknown>[] = [];
     const warnings: string[] = [];
@@ -167,6 +173,31 @@ export function projectJournal(text: string): { entries: ClientEntry[]; warnings
     }
 
     const entries: ClientEntry[] = [];
+    let model: JournalView["model"];
+
+    // Model changes are configuration, not transcript rows. Read the whole selected branch even
+    // when its display is capped; an abandoned branch must never become the current model chip.
+    for (const { row } of [...branch].reverse()) {
+        const source =
+            row.type === "model_change"
+                ? row
+                : row.type === "message" && record(row.message) && row.message.role === "assistant"
+                  ? { provider: row.message.provider, modelId: row.message.model }
+                  : undefined;
+
+        if (
+            source &&
+            [source.provider, source.modelId].every(
+                (part) =>
+                    typeof part === "string" &&
+                    part.length > 0 &&
+                    part.length <= 256 &&
+                    !/[\s\u0000-\u001f\u007f-\u009f]/.test(part),
+            )
+        ) {
+            model = { provider: source.provider as string, modelId: source.modelId as string };
+        }
+    }
 
     for (const { row, index } of branch.slice(0, 400).reverse()) {
         let entry: ClientEntry | undefined;
@@ -254,7 +285,7 @@ export function projectJournal(text: string): { entries: ClientEntry[]; warnings
         bounded.push(entry);
     }
 
-    return { entries: bounded.reverse(), warnings };
+    return { entries: bounded.reverse(), warnings, ...(model ? { model } : {}) };
 }
 
 export async function readJournal(path: string) {

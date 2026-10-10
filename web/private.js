@@ -4,8 +4,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { goHome } from "./back.js";
 import { api, navigate, openSheet, store, uid } from "./store.js";
-import { html, Icon, Loader } from "./ui.js";
+import { html, Icon, Loader, modelLabel } from "./ui.js";
 import { MessageBox, SendButton } from "./message-box.js";
+import {
+    privateCommands,
+    PrivateModelPicker,
+    PrivateAttachmentChips,
+    usePrivateAttachments,
+} from "./private-input.js";
 import { TranscriptEntry } from "./transcript.js";
 import {
     PrivateTerminal,
@@ -744,6 +750,14 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
     const [pending, setPending] = useState("");
     const [message, setMessage] = useState("");
     const [uncertain, setUncertain] = useState(false);
+    const [modelOpen, setModelOpen] = useState(false);
+    const [modelQuery, setModelQuery] = useState("");
+    const [modelCheck, setModelCheck] = useState(null);
+    const [commandPick, setCommandPick] = useState(0);
+    const [hideCommands, setHideCommands] = useState(false);
+    const attachments = usePrivateAttachments(id);
+    const filePicker = useRef(null);
+    const commandList = useRef(null);
     const uncertainRevision = useRef(null);
     const operation = useRef(null);
     const mounted = useRef(true);
@@ -753,10 +767,63 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
     const followTranscript = useRef(true);
     const followTerminal = useRef(true);
     const stale = Boolean(
-        draft && draftRevision !== null && data && draftRevision !== data.revision,
+        (draft || attachments.files.length) &&
+        draftRevision !== null &&
+        data &&
+        draftRevision !== data.revision,
     );
     const usable = data && !error && !paused && awake();
-    const canSend = usable && data.canPrompt && !pending && !stale && !uncertain && draft.trim();
+    const canAct = usable && data.canPrompt && !pending && !stale && !uncertain && !modelCheck;
+    const canSend =
+        canAct &&
+        attachments.files.every((file) => file.state === "done") &&
+        (draft.trim() || attachments.files.length > 0);
+    const suggestions = hideCommands ? [] : privateCommands(draft);
+    const chosen = suggestions[Math.min(commandPick, suggestions.length - 1)];
+    const model = data?.model;
+    const modelName = store.state.models.find(
+        (item) => item.provider === model?.provider && item.id === model?.modelId,
+    )?.name;
+
+    const closeModel = () => {
+        setModelOpen(false);
+        prompt.current?.focus({ preventScroll: true });
+    };
+
+    const openModel = (query = "") => {
+        if (canAct) {
+            setModelQuery(query);
+            setModelOpen(true);
+            setHideCommands(true);
+        }
+    };
+
+    const addFiles = (files) => {
+        if (!canAct || !files.length) {
+            return;
+        }
+
+        if (!draft && !attachments.files.length) {
+            setDraftRevision(data.revision);
+        }
+
+        attachments.add(files, data.revision, setMessage);
+    };
+
+    const chooseCommand = (command) => {
+        if (!canAct) {
+            return;
+        }
+
+        if (command.name === "model") {
+            openModel();
+        } else {
+            setDraft(`/${command.name}${command.name.endsWith(":") ? "" : " "}`);
+            setDraftRevision(data?.revision ?? null);
+            setHideCommands(true);
+            prompt.current?.focus();
+        }
+    };
 
     useLayoutEffect(() => {
         setDraft("");
@@ -764,6 +831,10 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
         setPending("");
         setMessage("");
         setUncertain(false);
+        setModelOpen(false);
+        setModelCheck(null);
+        setCommandPick(0);
+        setHideCommands(false);
         uncertainRevision.current = null;
         followTranscript.current = true;
         followTerminal.current = true;
@@ -812,19 +883,53 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
         }
     }, [data, uncertain]);
 
+    useEffect(() => {
+        if (!modelCheck || !data) {
+            return;
+        }
+
+        if (data.revision !== modelCheck.revision) {
+            setModelCheck(null);
+        } else if (
+            data.model?.provider === modelCheck.provider &&
+            data.model?.modelId === modelCheck.modelId
+        ) {
+            setModelCheck(null);
+            setMessage(`Saved model: ${modelLabel({ model: data.model, modelName })}.`);
+        }
+    }, [data, modelCheck, modelName]);
+
+    useEffect(() => {
+        commandList.current?.querySelector(".command.on")?.scrollIntoView({ block: "nearest" });
+    }, [commandPick]);
+
     const trackScroll = (ref) => (event) => {
         const box = event.currentTarget;
 
         ref.current = box.scrollHeight - box.clientHeight - box.scrollTop < 80;
     };
 
-    const act = async (kind) => {
+    const act = async (kind, command, pickedModel) => {
         if (
             operation.current ||
             !usable ||
-            (kind === "prompt" && !canSend) ||
+            (kind === "prompt" && !(command ? canAct : canSend)) ||
             (kind === "import-preview" && (!data.canImport || uncertain))
         ) {
+            return;
+        }
+
+        if (kind === "prompt" && !command && /^\/model(?:\s|$)/.test(draft.trim())) {
+            openModel(draft.trim().slice(6).trim());
+
+            return;
+        }
+
+        if (kind === "prompt" && !command && attachments.files.length && /^\//.test(draft.trim())) {
+            setMessage(
+                "Send commands separately. Your attachments stay ready for the next message.",
+            );
+
             return;
         }
 
@@ -834,6 +939,16 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
             mounted.current && who !== null && who === owner() && store.state.privateId === id;
         const timeout = setTimeout(() => controller.abort(), 15000);
 
+        if (kind === "prompt" && !command) {
+            attachments.retain();
+        } else if (pickedModel) {
+            setModelCheck({
+                provider: pickedModel.provider,
+                modelId: pickedModel.id,
+                revision: data.revision,
+            });
+        }
+
         operation.current = controller;
         setPending(kind);
         setMessage("");
@@ -842,8 +957,18 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
             const result = await api(
                 `private/${encodeURIComponent(id)}/${kind}`,
                 {
-                    revision: kind === "prompt" ? draftRevision : data.revision,
-                    ...(kind === "prompt" ? { text: draft.trim(), requestId: uid() } : {}),
+                    revision: kind === "prompt" && !command ? draftRevision : data.revision,
+                    ...(kind === "prompt"
+                        ? {
+                              text: command || draft.trim(),
+                              requestId: uid(),
+                              ...(!command && attachments.files.length
+                                  ? {
+                                        attachments: attachments.files.map((file) => file.id),
+                                    }
+                                  : {}),
+                          }
+                        : {}),
                 },
                 { signal: controller.signal },
             );
@@ -857,9 +982,24 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
                     throw new Error("Delivery was not confirmed.");
                 }
 
-                setDraft("");
-                setDraftRevision(null);
-                setMessage("Sent to Pi in Herdr. Check the terminal for live output.");
+                if (!command) {
+                    setDraft("");
+                    setDraftRevision(null);
+                    attachments.clear();
+                } else if (/^\/model(?:\s|$)/.test(draft.trim())) {
+                    setDraft("");
+
+                    if (!attachments.files.length) {
+                        setDraftRevision(null);
+                    }
+                }
+
+                setModelOpen(false);
+                setMessage(
+                    command || /^\//.test(draft.trim())
+                        ? "Command sent to Pi. Check the terminal for its result; the model follows saved history."
+                        : "Sent to Pi in Herdr. Check the terminal for live output.",
+                );
             } else {
                 openSheet({ type: "import", fromPrivate: true, initialPreview: result });
             }
@@ -885,6 +1025,11 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
                     "Delivery is uncertain. Check the terminal in Herdr before sending again. Import stays blocked until delivery is resolved. This prompt will not be retried automatically.",
                 );
             } else {
+                if (kind === "prompt" && !command) {
+                    attachments.retain(false);
+                }
+
+                setModelCheck(null);
                 setMessage(
                     failure.status === 409
                         ? "The pane changed or Pi is busy. Review the latest snapshot before trying again. Your draft is kept."
@@ -983,34 +1128,116 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
             ${
                 stale &&
                 html`
-                <p class="error-box" role="alert">The Pi session in this pane changed. Your draft has not been sent.</p>
-                <button class="button small" type="button" onClick=${() => {
+                <p class="error-box" role="alert">The Pi session in this pane changed. Your draft has not been sent.${attachments.files.length > 0 ? " Remove these attachments and attach them again for the current session." : ""}</p>
+                <button class="button small" type="button" disabled=${attachments.files.length > 0} onClick=${() => {
                     setDraftRevision(data.revision);
                     setMessage("Draft kept for the current session. Review it before sending.");
                 }}>Use draft for current session</button>
             `
             }
             ${
-                (data?.canPrompt || draft) &&
+                suggestions.length > 0 &&
+                html`<div
+                id="private-commands"
+                class="commands"
+                ref=${commandList}
+                role="listbox"
+                aria-label="Pi commands"
+            >
+                ${suggestions.map(
+                    (command) => html`<button
+                    type="button"
+                    id=${`private-command-${command.name}`}
+                    class=${`command ${command === chosen ? "on" : ""}`}
+                    role="option"
+                    aria-selected=${command === chosen}
+                    disabled=${!canAct}
+                    onMouseDown=${(event) => event.preventDefault()}
+                    onClick=${() => chooseCommand(command)}
+                >
+                    <span class="command-name">/${command.name}</span>
+                    ${command.args && html`<span class="command-args">${command.args}</span>`}
+                    <span class="command-description">${command.description}</span>
+                </button>`,
+                )}
+            </div>`
+            }
+            ${
+                (data?.canPrompt || draft || attachments.files.length) &&
                 html`<${MessageBox}
                 inputRef=${prompt}
+                onDragOver=${(event) => event.preventDefault()}
+                onDrop=${(event) => {
+                    event.preventDefault();
+                    addFiles([...(event.dataTransfer?.files ?? [])]);
+                }}
+                before=${html`<${PrivateAttachmentChips}
+                    files=${attachments.files}
+                    disabled=${Boolean(pending)}
+                    onRemove=${attachments.remove}
+                />`}
                 input=${{
                     id: "private-prompt",
                     value: draft,
                     disabled: Boolean(pending),
-                    placeholder: "Message this Pi…",
+                    placeholder: "Message this Pi… (/ commands)",
                     "aria-label": "Message private Pi in Herdr",
+                    "aria-controls": suggestions.length ? "private-commands" : undefined,
+                    "aria-expanded": suggestions.length > 0,
+                    "aria-activedescendant": chosen ? `private-command-${chosen.name}` : undefined,
                     enterkeyhint: matchMedia("(pointer: coarse)").matches ? "enter" : "send",
                     onInput: (event) => {
                         const text = event.currentTarget.value;
 
-                        if (!draft || !text) {
+                        if ((!draft || !text) && !attachments.files.length) {
                             setDraftRevision(data?.revision ?? null);
                         }
 
                         setDraft(text);
+                        setCommandPick(0);
+                        setHideCommands(false);
+                    },
+                    onPaste: (event) => {
+                        const files = [...(event.clipboardData?.files ?? [])];
+
+                        if (files.length) {
+                            event.preventDefault();
+                            addFiles(files);
+                        }
                     },
                     onKeyDown: (event) => {
+                        if (event.isComposing) {
+                            return;
+                        }
+
+                        if (suggestions.length) {
+                            const step =
+                                event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+
+                            if (step) {
+                                event.preventDefault();
+                                setCommandPick(
+                                    (commandPick + step + suggestions.length) % suggestions.length,
+                                );
+
+                                return;
+                            }
+
+                            if (event.key === "Escape") {
+                                event.preventDefault();
+                                setHideCommands(true);
+
+                                return;
+                            }
+
+                            if ((event.key === "Tab" || event.key === "Enter") && !event.shiftKey) {
+                                event.preventDefault();
+                                chooseCommand(chosen);
+
+                                return;
+                            }
+                        }
+
                         if (
                             event.key === "Enter" &&
                             !event.shiftKey &&
@@ -1026,6 +1253,37 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
                 <button class="chip" type="button" onClick=${onTerminal}>
                     <${Icon} name="terminal" size=${14} /> Terminal
                 </button>
+                <button
+                    class="icon-button"
+                    type="button"
+                    aria-label="Attach files"
+                    disabled=${!canAct}
+                    onClick=${() => filePicker.current?.click()}
+                >
+                    <${Icon} name="clip" />
+                </button>
+                <input
+                    ref=${filePicker}
+                    type="file"
+                    multiple
+                    hidden
+                    disabled=${!canAct}
+                    onChange=${(event) => {
+                        addFiles([...(event.currentTarget.files ?? [])]);
+                        event.currentTarget.value = "";
+                    }}
+                />
+                <button
+                    class="chip model-chip"
+                    type="button"
+                    aria-label="Change private Pi model"
+                    title=${model ? `${model.provider}/${model.modelId}` : "Choose a model for this Pi"}
+                    disabled=${!canAct}
+                    onClick=${() => openModel()}
+                >
+                    <${Icon} name="sparkle" size=${14} />
+                    <span>${model ? modelLabel({ model, modelName }) : "Model"}</span>
+                </button>
                 <span class="grow"></span>
                 <${SendButton}
                     type="submit"
@@ -1035,8 +1293,39 @@ function PrivatePaneView({ id, mode, instanceId, nativeId, onTerminal }) {
                 />
             </${MessageBox}>`
             }
+            ${
+                modelCheck &&
+                !pending &&
+                !uncertain &&
+                html`<p class="error-box small" role="status">
+                Waiting for the saved model to change. If Pi opened a selector or reported an error, finish in Terminal before sending again.
+                <button
+                    class="button small"
+                    type="button"
+                    disabled=${!usable || !data.canPrompt}
+                    onClick=${() => {
+                        setModelCheck(null);
+                        setMessage(
+                            "Continue only after checking that Pi's message editor is ready in Terminal.",
+                        );
+                    }}
+                >I checked Pi's editor</button>
+            </p>`
+            }
+            ${attachments.files.length > 0 && html`<p class="small muted">Files are saved privately on this server. Pi reads them by path, including images.</p>`}
             ${message && html`<p class=${`small ${uncertain ? "error-box" : "muted"}`} role="status">${message}</p>`}
         </form>
         <div class="status-line" title=${data?.pane.cwd}>Only you · Herdr · Saved history</div>
-    </footer>`;
+    </footer>
+    ${
+        modelOpen &&
+        canAct &&
+        html`<${PrivateModelPicker}
+        models=${store.state.models}
+        agent=${{ model, modelName }}
+        initialQuery=${modelQuery}
+        onClose=${closeModel}
+        onPick=${(picked) => act("prompt", `/model ${picked.provider}/${picked.id}`, picked)}
+    />`
+    }`;
 }

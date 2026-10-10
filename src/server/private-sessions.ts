@@ -1,6 +1,7 @@
 /** Owner-only live Herdr mirror. Herdr owns these processes; private views never become Durable conversations. */
 import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
+import type { IncomingMessage } from "node:http";
 import { basename, dirname, isAbsolute } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { PocketApp } from "./app.ts";
@@ -10,6 +11,7 @@ import { HttpError } from "./errors.ts";
 import { foregroundPi, type ProcessIdentity, type ProcessInfo } from "./imports/herdr.ts";
 import { readJournal } from "./private-sessions/journal.ts";
 import { PrivateControl, UNCERTAIN_INPUT_REASON } from "./private-sessions/control.ts";
+import { MAX_ATTACHMENTS, PrivateUploads, uploadId } from "./private-sessions/uploads.ts";
 import type { ClientEntry } from "./projection.ts";
 
 // Wire hierarchy and pane.read contract adapted from Collie bridge/mux/herdr/client.ts
@@ -64,7 +66,12 @@ type Instance = {
     workspaces: Workspace[];
 };
 type Target = { socket: string; wire: WirePane; pane: PrivatePane };
-export type PrivateRequest = { revision?: unknown; text?: unknown; requestId?: unknown };
+export type PrivateRequest = {
+    revision?: unknown;
+    text?: unknown;
+    requestId?: unknown;
+    attachments?: unknown;
+};
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const unsafeText = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028-\u202e\u2066-\u2069]/;
 
@@ -308,9 +315,11 @@ export class PrivateSessions {
     readonly #epoch = randomUUID();
     readonly #requests = new Map<string, { digest: string; promise: Promise<{ sent: true }> }>();
     readonly control: PrivateControl;
+    readonly #uploads: PrivateUploads;
 
     constructor(app: PocketApp) {
         this.#app = app;
+        this.#uploads = new PrivateUploads(() => app.dataDir);
         this.control = new PrivateControl(app);
         this.local.control = this.control;
     }
@@ -506,6 +515,7 @@ export class PrivateSessions {
         const inspected = await this.#inspect(target);
         const warnings: string[] = [];
         let entries: ClientEntry[] = [];
+        let model: { provider: string; modelId: string } | undefined;
         let terminal = "";
         const path = sessionPath(target.wire);
 
@@ -514,6 +524,7 @@ export class PrivateSessions {
                 const journal = await readJournal(path);
 
                 entries = journal.entries;
+                model = journal.model;
                 warnings.push(...journal.warnings);
             } catch {
                 warnings.push(
@@ -559,6 +570,7 @@ export class PrivateSessions {
             pane: target.pane,
             revision: inspected.revision,
             entries,
+            model,
             terminal,
             warnings,
             canPrompt: !current.reason,
@@ -574,17 +586,76 @@ export class PrivateSessions {
         };
     }
 
+    async #verifyPrompt(user: User, id: string, revision: string) {
+        this.#owner(user);
+        const target = await this.#target(id);
+        const inspected = await this.#inspect(target);
+
+        this.#owner(user);
+
+        if (inspected.revision !== revision) {
+            throw new HttpError(
+                409,
+                "This Pi process or session changed. Refresh and review it before sending.",
+            );
+        }
+
+        if (inspected.reason) {
+            throw new HttpError(409, inspected.reason);
+        }
+
+        return target;
+    }
+
+    async upload(
+        user: User,
+        id: string,
+        revision: unknown,
+        name: unknown,
+        request: IncomingMessage,
+    ) {
+        this.#owner(user);
+
+        if (typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
+            throw new HttpError(400, "Upload from the current private pane revision");
+        }
+
+        await this.#verifyPrompt(user, id, revision);
+
+        // Uploads send no external input and may stream concurrently. A takeover or replacement
+        // invalidates the post-stream revision check and the resulting token's later prompt guard.
+        return this.#uploads.store(
+            { user: user.id, pane: id, revision },
+            name,
+            request,
+            async () => {
+                await this.#verifyPrompt(user, id, revision);
+            },
+        );
+    }
+
+    async deleteUpload(user: User, id: string, token: unknown) {
+        this.#owner(user);
+
+        if (!/^[a-f0-9]{64}$/.test(id)) {
+            throw new HttpError(400, "Select a pane from Private");
+        }
+
+        // No Herdr lookup: the owner can discard an unsubmitted file even after its pane closes.
+        return this.#uploads.remove(user.id, id, token);
+    }
+
     prompt(user: User, id: string, request: PrivateRequest): Promise<{ sent: true }> {
         this.#owner(user);
 
         if (
             request &&
             typeof request.text === "string" &&
-            (/^[\/!]/.test(request.text.trimStart()) || /[\n\r\u2028\u2029\t]/.test(request.text))
+            (/^!/.test(request.text.trimStart()) || /[\n\r\u2028\u2029\t]/.test(request.text))
         ) {
             throw new HttpError(
                 400,
-                "Use Terminal mode for commands, tabs or multiline input. Chat accepts a single plain-text prompt; bracketed paste is not verified.",
+                "Use Terminal mode for shell commands, tabs or multiline input. Chat accepts a single-line prompt; bracketed paste is not verified.",
             );
         }
 
@@ -593,10 +664,9 @@ export class PrivateSessions {
             typeof request !== "object" ||
             typeof request.revision !== "string" ||
             !/^[a-f0-9]{64}$/.test(request.revision) ||
-            typeof request.text !== "string" ||
-            !request.text.trim() ||
-            Buffer.byteLength(request.text) > 32 * 1024 ||
-            /[\u0000-\u0008\u000b-\u001f\u007f]/.test(request.text) ||
+            (request.text !== undefined && typeof request.text !== "string") ||
+            Buffer.byteLength(request.text ?? "") > 32 * 1024 ||
+            unsafeText.test(request.text ?? "") ||
             typeof request.requestId !== "string" ||
             !/^[a-zA-Z0-9_-]{1,128}$/.test(request.requestId)
         ) {
@@ -606,8 +676,56 @@ export class PrivateSessions {
             );
         }
 
+        const text = (request.text ?? "") as string;
+        const attachments = request.attachments === undefined ? [] : request.attachments;
+
+        if (
+            !Array.isArray(attachments) ||
+            attachments.length > MAX_ATTACHMENTS ||
+            !attachments.every(uploadId) ||
+            new Set(attachments).size !== attachments.length ||
+            (!text.trim() && !attachments.length)
+        ) {
+            throw new HttpError(400, "Send text or up to 10 private attachment tokens, not paths");
+        }
+
+        if (attachments.length && text.trimStart().startsWith("/")) {
+            throw new HttpError(
+                400,
+                "Send slash commands without attachments; your files are kept for the next message",
+            );
+        }
+
+        const [command, ...args] = text.trim().split(/\s+/);
+        const argument = args.join(" ");
+
+        if (
+            [
+                "/settings",
+                "/tree",
+                "/scoped-models",
+                "/fork",
+                "/trust",
+                "/login",
+                "/logout",
+                "/resume",
+                "/import",
+                "/bug",
+            ].includes(command ?? "") ||
+            (["/model", "/thinking", "/name"].includes(command ?? "") && !argument) ||
+            (command === "/thinking" &&
+                !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(
+                    argument.toLowerCase(),
+                ))
+        ) {
+            throw new HttpError(
+                400,
+                "Use Terminal mode for Pi dialogs. In Chat, /model and /name need arguments and /thinking needs an explicit valid level.",
+            );
+        }
+
         const key = `${user.id}:${request.requestId}`;
-        const digest = hash([id, request.revision, request.text]);
+        const digest = hash([id, request.revision, text, attachments]);
         const previous = this.#requests.get(key);
 
         if (previous) {
@@ -629,7 +747,11 @@ export class PrivateSessions {
             );
         }
 
-        const promise = this.#send(user, id, request as { revision: string; text: string });
+        const promise = this.#send(user, id, {
+            revision: request.revision,
+            text,
+            attachments,
+        });
 
         this.#requests.set(key, { digest, promise });
 
@@ -639,7 +761,7 @@ export class PrivateSessions {
     async #send(
         user: User,
         id: string,
-        request: { revision: string; text: string },
+        request: { revision: string; text: string; attachments: string[] },
     ): Promise<{ sent: true }> {
         const first = await this.#target(id);
 
@@ -647,22 +769,22 @@ export class PrivateSessions {
             first.socket,
             first.wire.pane_id,
             async () => {
-                const target = await this.#target(id);
-                const inspected = await this.#inspect(target);
+                const target = await this.#verifyPrompt(user, id, request.revision);
+                const scope = { user: user.id, pane: id, revision: request.revision };
+                const paths = this.#uploads.paths(scope, request.attachments);
+                const text = paths.length
+                    ? `${request.text.trim() ? request.text + " " : ""}Attached files (use read on these paths, including images): ${JSON.stringify(paths)}`
+                    : request.text;
 
-                this.#owner(user);
-
-                if (inspected.revision !== request.revision) {
+                if (Buffer.byteLength(text) > 32 * 1024 || unsafeText.test(text)) {
                     throw new HttpError(
-                        409,
-                        "This Pi process or session changed. Refresh and review it before sending.",
+                        400,
+                        "The message including attachment paths must be a safe single line of up to 32 KiB",
                     );
                 }
 
-                if (inspected.reason) {
-                    throw new HttpError(409, inspected.reason);
-                }
-
+                await this.#uploads.retain(scope, request.attachments);
+                this.#owner(user);
                 const receipt = await this.control.admitPrompt(target.socket, target.wire.pane_id);
 
                 try {
@@ -672,7 +794,7 @@ export class PrivateSessions {
                     const ack = await this.local.request(
                         target.socket,
                         "agent.prompt",
-                        { target: target.wire.pane_id, text: request.text },
+                        { target: target.wire.pane_id, text },
                         7000,
                     );
 

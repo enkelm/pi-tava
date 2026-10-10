@@ -455,6 +455,34 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 return json(response, 200, await app.privateSessions.pane(user, second));
             }
 
+            if (second !== undefined && third === "upload" && fourth === undefined) {
+                if (method === "POST") {
+                    return json(
+                        response,
+                        200,
+                        await app.privateSessions.upload(
+                            user,
+                            second,
+                            url.searchParams.get("revision"),
+                            url.searchParams.get("name"),
+                            request,
+                        ),
+                    );
+                }
+
+                if (method === "DELETE") {
+                    return json(
+                        response,
+                        200,
+                        await app.privateSessions.deleteUpload(
+                            user,
+                            second,
+                            url.searchParams.get("id"),
+                        ),
+                    );
+                }
+            }
+
             if (second !== undefined && fourth === undefined && method === "POST") {
                 if (third === "terminal") {
                     return json(
