@@ -1,4 +1,5 @@
 /** Owner-confirmed imports of stopped Pi sessions, with private archives and optional shared conversations. */
+import { realpath } from "node:fs/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { configure, type ConversationId, type Tx } from "@earendil-works/pi-durable";
@@ -6,8 +7,9 @@ import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
 import { ImportedSessionDoc, ImportsDoc, SessionsDoc, TakeoversDoc } from "./docs.ts";
 import { HttpError } from "./errors.ts";
-import { appendPiHistory, readPiSession } from "./imports/pi-session.ts";
+import { appendPiHistory, readPiSession, type PiSessionMode } from "./imports/pi-session.ts";
 import { ActiveImports } from "./imports/active.ts";
+import { listSavedHistory, recentHistory } from "./imports/history.ts";
 import { modelList } from "./models.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -18,6 +20,8 @@ export type ImportRequest = {
     sha256?: unknown;
     stopped?: unknown;
     acknowledged?: unknown;
+    /** Explicit consent to Escape-abort current operations during a running-session move. */
+    abortRunning?: unknown;
     model?: unknown;
     thinkingLevel?: unknown;
     visibility?: unknown;
@@ -93,16 +97,63 @@ export class Imports {
     readonly #app: PocketApp;
     readonly #pending = new Map<string, { visibility: ImportVisibility; count: number }>();
     readonly active: ActiveImports;
+    #historyPending?: ReturnType<typeof listSavedHistory>;
 
     constructor(app: PocketApp) {
         this.#app = app;
         this.active = new ActiveImports(app, this);
     }
 
-    async preview(user: User, request: ImportRequest) {
+    /** Read-only picker discovery. Concurrent owner requests share a bounded scan, not a persistent cache. */
+    async history(user: User) {
+        requireOwner(user);
+
+        if (!this.#historyPending) {
+            this.#historyPending = this.#listHistory().finally(() => {
+                this.#historyPending = undefined;
+            });
+        }
+
+        return this.#historyPending;
+    }
+
+    async #listHistory() {
+        const excluded = new Set<string>();
+        const warnings: string[] = [];
+        const local = this.active.local;
+
+        try {
+            // Avoid spawning process discovery when no local Herdr sockets exist. Discovery never controls Pi.
+            if ((await local.sockets()).length) {
+                const active = await local.list();
+
+                warnings.push(
+                    ...active.warnings.slice(0, 16).map((warning) => warning.slice(0, 500)),
+                );
+
+                for (const session of active.sessions.slice(0, 1000)) {
+                    if (session.path) {
+                        excluded.add(await realpath(session.path).catch(() => session.path));
+                    }
+                }
+
+                if (active.sessions.length > 1000) {
+                    warnings.push("Not all active session references could be checked.");
+                }
+            }
+        } catch {
+            warnings.push(
+                "Active Pi discovery failed; running session files may appear in History.",
+            );
+        }
+
+        return listSavedHistory(excluded, warnings);
+    }
+
+    async preview(user: User, request: ImportRequest, mode: PiSessionMode = "strict") {
         requireOwner(user);
         const requestedVisibility = importVisibility(request);
-        const source = await readPiSession(request.path, request.leafId);
+        const source = await readPiSession(request.path, request.leafId, mode);
         const cwd = this.#app.workspace.checkDirectory(source.header.cwd);
         const imports = await this.#app.harness.snapshot(ImportsDoc, context);
         const existing = imports?.items[`${source.sha256}:${source.leafId}`];
@@ -121,6 +172,7 @@ export class Imports {
             sourceSessionId: source.header.id,
             entries: source.branch.length,
             messages: source.messages.length,
+            history: recentHistory(source),
             hasImages: source.hasImages,
             leaves: source.leaves,
             warnings: source.warnings,
@@ -132,12 +184,28 @@ export class Imports {
     }
 
     /** Validate everything that could reject an import before a takeover stops its source process. */
-    async prepare(user: User, request: ImportRequest) {
+    async prepare(
+        user: User,
+        request: ImportRequest,
+        options: { mode?: PiSessionMode; refresh?: boolean } = {},
+    ) {
         requireOwner(user);
         const { visibility } = confirmedImport(request);
-        const source = await readPiSession(request.path, request.leafId);
+        // Refresh is a trusted takeover option after explicit running-abort consent, not a request flag.
+        const source = await readPiSession(
+            request.path,
+            options.refresh ? undefined : request.leafId,
+            options.mode,
+        );
 
-        if (source.sha256 !== request.sha256) {
+        if (options.refresh && !source.branch.some((entry) => entry.id === request.leafId)) {
+            throw new HttpError(
+                409,
+                "The selected Pi branch changed since preview. Preview again before moving it.",
+            );
+        }
+
+        if (!options.refresh && source.sha256 !== request.sha256) {
             throw new HttpError(
                 409,
                 "The session changed since preview. Stop Pi and preview again.",
@@ -191,6 +259,7 @@ export class Imports {
         user: User,
         request: ImportRequest,
         takeoverId?: string,
+        mode: Exclude<PiSessionMode, "live"> = "strict",
     ): Promise<{ id: ConversationId; existing: boolean }> {
         requireOwner(user);
         const { visibility, key } = confirmedImport(request);
@@ -206,7 +275,9 @@ export class Imports {
         this.#pending.set(key, pending);
 
         try {
-            const { source, cwd, model, thinkingLevel } = await this.prepare(user, request);
+            const { source, cwd, model, thinkingLevel } = await this.prepare(user, request, {
+                mode,
+            });
 
             // The index, archive, entries and catalogue publish together; matching retries still read the same index.
             return await app.harness.commit(async (tx) => {

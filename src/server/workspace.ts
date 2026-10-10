@@ -23,6 +23,7 @@ import {
 import { type Changes, changesIn, diffOf, revertFile } from "./changes.ts";
 import type { User } from "./config.ts";
 import { describe, HttpError } from "./errors.ts";
+import { fileEditInput, saveFileEdit } from "./file-edits.ts";
 import { FileLists, type FileListing, type FileView, viewFile } from "./files.ts";
 import { displayPath, expandHome } from "./paths.ts";
 
@@ -320,6 +321,58 @@ export class Workspace {
         return file;
     }
 
+    /**
+     * An existing canonical path eligible for quick edits and language services. As with readableFile, callers
+     * check conversation access themselves. Even the owner cannot edit app/Pi configuration through this API.
+     */
+    editableFile(user: User, id: ConversationId, path: string): string {
+        if (typeof path !== "string" || path.trim() === "" || path.includes("\0")) {
+            throw new HttpError(400, "Name the file to edit.");
+        }
+
+        const file = this.readableFile(user, id, path);
+        let canonical: string;
+
+        try {
+            canonical = realpathSync(file);
+        } catch {
+            throw new HttpError(404, "File not found.");
+        }
+
+        const real = (root: string) => {
+            try {
+                return realpathSync(root);
+            } catch {
+                return resolve(root);
+            }
+        };
+
+        const inside = (target: string, root: string) =>
+            target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
+        const data = real(this.#app.dataDir);
+        const agent = real(getAgentDir());
+        const protectedPath = (target: string, dataRoot: string, agentRoot: string) =>
+            inside(target, agentRoot) ||
+            (inside(target, dataRoot) &&
+                !inside(target, join(dataRoot, "uploads")) &&
+                !inside(target, join(dataRoot, "worktrees")));
+
+        // Check both spellings: a protected folder's symlink must not grant an edit of its target, nor may an
+        // unprotected alias grant an edit of configuration. Exceptions are real subpaths, not symlink targets.
+        if (
+            protectedPath(canonical, data, agent) ||
+            protectedPath(
+                this.conversationPath(id, path),
+                resolve(this.#app.dataDir),
+                resolve(getAgentDir()),
+            )
+        ) {
+            throw new HttpError(403, "App data and Pi configuration cannot be edited here.");
+        }
+
+        return canonical;
+    }
+
     /** This session and the sessions it was forked from, nearest first. */
     #lineage(id: ConversationId): ConversationId[] {
         const lineage = [id];
@@ -361,7 +414,7 @@ export class Workspace {
         id: ConversationId,
         user: User,
         path: string,
-    ): Promise<{ path: string; display: string } & FileView> {
+    ): Promise<{ path: string; display: string; editable?: boolean } & FileView> {
         this.#app.requireSee(user, id);
         this.#app.requireSteer(user);
         await this.#app.conversation(id);
@@ -369,11 +422,25 @@ export class Workspace {
 
         try {
             file = this.readableFile(user, id, path);
+            const view = await viewFile(file);
+            let editable = false;
+
+            if (view.kind === "text" && view.revision !== undefined) {
+                try {
+                    const canonical = this.editableFile(user, id, path);
+                    const info = lstatSync(canonical);
+
+                    editable = info.isFile() && info.nlink === 1;
+                } catch {
+                    // Read access does not grant quick-edit access, including for the owner.
+                }
+            }
 
             return {
                 path: file,
                 display: displayPath(file, this.#app.cwdOf(id)),
-                ...(await viewFile(file)),
+                ...view,
+                ...(view.kind === "text" ? { editable } : {}),
             };
         } catch (error) {
             if (error instanceof HttpError || (error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -382,6 +449,52 @@ export class Workspace {
 
             throw new HttpError(409, describe(error));
         }
+    }
+
+    /** Save existing complete text without overwriting an intervening edit, then tell Pi and collaborators. */
+    async saveFile(
+        id: ConversationId,
+        user: User,
+        path: unknown,
+        text: unknown,
+        revision: unknown,
+    ): Promise<{ revision: string; warning?: string }> {
+        const input = fileEditInput(path, text, revision);
+
+        const authorize = async () => {
+            this.#app.requireSee(user, id);
+            await this.#app.conversation(id);
+            await this.#app.requireDriver(id, user);
+            // A queued save may have waited behind another conversation's save of this same path.
+            this.#app.requireSee(user, id);
+
+            if (this.#app.isBusy(id)) {
+                throw new HttpError(
+                    409,
+                    "Pi is working here: wait for it, or stop it, before saving a file.",
+                );
+            }
+
+            return this.editableFile(user, id, input.path);
+        };
+
+        const result = await saveFileEdit(input, authorize);
+        const what = `edited ${displayPath(this.conversationPath(id, input.path), this.#app.cwdOf(id))}`;
+        const recorded = await Promise.allSettled([
+            this.#app.commands.note(id, user, what),
+            this.#app.collab.activity(id, user, what),
+        ]);
+        const failed = recorded.filter((record) => record.status === "rejected");
+
+        if (failed.length > 0) {
+            for (const record of failed) {
+                this.#app.log(`file saved but edit recording failed: ${describe(record.reason)}`);
+            }
+
+            return { ...result, warning: "File saved, but the edit could not be fully recorded." };
+        }
+
+        return result;
     }
 
     /**

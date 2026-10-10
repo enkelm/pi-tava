@@ -9,11 +9,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { HttpError } from "../errors.ts";
-import {
-    TERMINAL_HELD_REASON,
-    type ControlPurpose,
-    type PrivateControl,
-} from "../private-sessions/control.ts";
+import type { ControlPurpose, PrivateControl } from "../private-sessions/control.ts";
 
 const execute = promisify(execFile);
 const MAX_REPLY = 2 * 1024 * 1024;
@@ -322,68 +318,22 @@ export class LocalPiSessions {
     request = herdrRequest;
     signal = (pid: number) => process.kill(pid, "SIGTERM");
     stopTimeoutMs = 8000;
+    abortTimeoutMs = 8000;
     /** Installed by PrivateSessions without reading storage during app construction. */
     control?: PrivateControl;
     readonly #operations = new Set<InputOperation>();
     readonly #operationContext = new AsyncLocalStorage<InputOperation>();
-    readonly #instanceHolds = new Map<string, number>();
 
-    async inputReason(
-        socket: string,
-        pane: string,
-        purpose: ControlPurpose = "takeover",
-    ): Promise<string | undefined> {
-        const reason = await this.control?.reason(socket, pane, purpose);
-
-        return (
-            reason ??
-            (purpose === "takeover" && this.#instanceHolds.has(socket)
-                ? TERMINAL_HELD_REASON
-                : undefined)
-        );
+    async inputReason(socket: string, pane: string): Promise<string | undefined> {
+        return this.control?.reason(socket, pane);
     }
 
-    async requireInputSafe(
-        socket: string,
-        pane: string,
-        purpose: ControlPurpose = "takeover",
-    ): Promise<void> {
-        const reason = await this.inputReason(socket, pane, purpose);
+    async requireInputSafe(socket: string, pane: string): Promise<void> {
+        const reason = await this.inputReason(socket, pane);
 
         if (reason) {
             throw new HttpError(409, reason);
         }
-    }
-
-    /** Attach before spawning a terminal client; release only when its child has shut down.
-     * This blocks takeover, not Chat or observation. Native writes require withTerminalInput separately.
-     */
-    holdInstance(socket: string): () => void {
-        if (
-            [...this.#operations].some(
-                (item) => item.socket === socket && item.purpose === "takeover",
-            )
-        ) {
-            throw new HttpError(409, "This Herdr instance has an import operation in progress.");
-        }
-
-        this.#instanceHolds.set(socket, (this.#instanceHolds.get(socket) ?? 0) + 1);
-        let released = false;
-
-        return () => {
-            if (released) {
-                return;
-            }
-
-            released = true;
-            const remaining = (this.#instanceHolds.get(socket) ?? 1) - 1;
-
-            if (remaining) {
-                this.#instanceHolds.set(socket, remaining);
-            } else {
-                this.#instanceHolds.delete(socket);
-            }
-        };
     }
 
     #reserve(
@@ -430,7 +380,7 @@ export class LocalPiSessions {
     }
 
     /** Serializes app bridge input with takeover and native writes, not the lifetime of an attached terminal.
-     * Prompt callers opt into fresh Chat checks alongside known terminal use, never after uncertain Chat.
+     * Known terminal use is not a takeover fence; uncertain Chat delivery still is.
      */
     async withPane<T>(
         socket: string,
@@ -438,15 +388,11 @@ export class LocalPiSessions {
         operation: () => Promise<T>,
         purpose: ControlPurpose = "takeover",
     ): Promise<T> {
-        if (purpose === "takeover" && this.#instanceHolds.has(socket)) {
-            throw new HttpError(409, TERMINAL_HELD_REASON);
-        }
-
         // Reserve synchronously, before durable I/O, so a conflicting native write cannot slip across it.
         const reservation = this.#reserve(socket, pane, purpose);
 
         try {
-            await this.requireInputSafe(socket, pane, purpose);
+            await this.requireInputSafe(socket, pane);
 
             return await this.#operationContext.run(reservation, operation);
         } finally {
@@ -556,10 +502,15 @@ export class LocalPiSessions {
                             ) {
                                 candidate.reason =
                                     "The session reference may be stale. Finish a turn in this Pi, then refresh.";
-                            } else if (!["idle", "done"].includes(candidate.state)) {
+                            } else if (
+                                !["idle", "done", "working", "blocked"].includes(candidate.state)
+                            ) {
                                 candidate.reason =
-                                    "Pi is working or waiting for input. Finish the current turn, then refresh.";
-                            } else if (table.some((item) => item.parent === actual.pid)) {
+                                    "Pi's status is unknown. Refresh before moving it.";
+                            } else if (
+                                ["idle", "done"].includes(candidate.state) &&
+                                table.some((item) => item.parent === actual.pid)
+                            ) {
                                 candidate.reason =
                                     "Pi still has child processes. Finish or close its tools before moving it.";
                             }
@@ -614,10 +565,10 @@ export class LocalPiSessions {
         return session;
     }
 
-    /** Standalone stops also reserve the pane. ActiveImports already holds the same takeover reservation.
-     * Async ownership lets that one caller reuse its lock without allowing unrelated callers to bypass it.
+    /** Standalone control also reserves the pane. Async ownership lets ActiveImports reuse its reservation,
+     * without allowing unrelated callers to bypass the input/import lock.
      */
-    async stop(expected: ActivePi): Promise<void> {
+    async #withTakeover<T>(expected: ActivePi, operation: () => Promise<T>): Promise<T> {
         const owned = this.#operationContext.getStore();
 
         if (
@@ -626,13 +577,110 @@ export class LocalPiSessions {
             owned.pane === expected.pane &&
             this.#operations.has(owned)
         ) {
-            return this.#stop(expected);
+            return operation();
         }
 
-        return this.withPane(expected.socket, expected.pane, () => this.#stop(expected));
+        return this.withPane(expected.socket, expected.pane, operation);
     }
 
-    /** Rechecks identity before SIGTERM; not an atomic OS process lease. No groups, keystrokes, or SIGKILL. */
+    /** Explicit caller consent is checked by ActiveImports before this targeted Escape. Never retries input. */
+    async abort(expected: ActivePi): Promise<void> {
+        return this.#withTakeover(expected, () => this.#abort(expected));
+    }
+
+    async #abort(expected: ActivePi): Promise<void> {
+        const current = await this.find(expected.id);
+        const table = await this.processes();
+
+        if (
+            !expected.process ||
+            !sameProcess(expected.process, current.process) ||
+            !sameProcess(
+                expected.process,
+                table.find((item) => item.pid === expected.process!.pid),
+            )
+        ) {
+            throw new HttpError(
+                409,
+                "The Pi process changed before cancellation. Refresh before moving it.",
+            );
+        }
+
+        if (["idle", "done"].includes(current.state)) {
+            return;
+        }
+
+        await this.requireInputSafe(expected.socket, expected.pane);
+        let ack: { type?: string };
+
+        try {
+            ack = await this.request(expected.socket, "pane.send_keys", {
+                pane_id: expected.pane,
+                keys: ["esc"],
+            });
+        } catch {
+            throw new HttpError(
+                409,
+                "Herdr did not confirm the abort request. No stop was sent and input was not retried. Check Pi, then preview again.",
+            );
+        }
+
+        // pane.send_keys uses Herdr's generic Ok result, not the agent.prompt acknowledgement.
+        if (ack?.type !== "ok") {
+            throw new HttpError(
+                409,
+                "Herdr did not confirm Escape for the selected pane. No stop was sent. Check Pi, then preview again.",
+            );
+        }
+
+        const deadline = Date.now() + this.abortTimeoutMs;
+
+        // Delivery acknowledgement alone does not prove Pi consumed Escape or its tools finished.
+        while (Date.now() < deadline) {
+            await delay(100);
+            const current = await this.list();
+            const session = current.sessions.find((item) => item.id === expected.id);
+
+            if (current.warnings.length) {
+                throw new HttpError(
+                    409,
+                    "Could not verify Pi after cancellation. No stop was sent.",
+                );
+            }
+
+            if (!session) {
+                if (await this.exited(expected)) {
+                    return;
+                }
+
+                throw new HttpError(
+                    409,
+                    "The Pi session changed during cancellation. No stop was sent.",
+                );
+            }
+
+            if (
+                ["idle", "done"].includes(session.state) &&
+                !session.reason &&
+                !(await this.processes()).some((item) => item.parent === expected.process!.pid)
+            ) {
+                await this.requireInputSafe(expected.socket, expected.pane);
+
+                return;
+            }
+        }
+
+        throw new HttpError(
+            409,
+            "Pi or its tools did not finish after Escape. No stop was sent and Pi was not force-killed. Check its terminal, then preview and retry.",
+        );
+    }
+
+    async stop(expected: ActivePi): Promise<void> {
+        return this.#withTakeover(expected, () => this.#stop(expected));
+    }
+
+    /** Rechecks idle state and identity before SIGTERM; not an atomic OS process lease. No groups or SIGKILL. */
     async #stop(expected: ActivePi): Promise<void> {
         if (
             !expected.process ||
@@ -659,7 +707,14 @@ export class LocalPiSessions {
             );
         }
 
-        await this.requireInputSafe(expected.socket, expected.pane, "takeover");
+        if (!["idle", "done"].includes(current.state)) {
+            throw new HttpError(
+                409,
+                "Pi is still running. Confirm aborting its operations before moving it.",
+            );
+        }
+
+        await this.requireInputSafe(expected.socket, expected.pane);
         this.signal(expected.process.pid);
         const deadline = Date.now() + this.stopTimeoutMs;
 

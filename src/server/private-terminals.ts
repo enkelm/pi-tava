@@ -56,16 +56,22 @@ const METHODS = new Set([
     "release_notes.dismiss",
 ]);
 const CLOSING = new Set(["pane.close", "tab.close", "workspace.close", "worktree.remove"]);
-const NAVIGATION = new Set([
-    "pane.focus",
-    "pane.focus_direction",
-    "pane.zoom",
-    "pane.resize",
+const OBSERVATION = new Set([
     "pane.scroll",
     "pane.copy_motion",
     "pane.copy_search",
     "pane.selection.read",
     "pane.link.resolve",
+    "worktree.list",
+    "product_announcement.dismiss",
+    "release_notes.dismiss",
+]);
+// These change native focus/layout or metadata, but never constitute terminal input.
+const CONTROLS = new Set([
+    "pane.focus",
+    "pane.focus_direction",
+    "pane.zoom",
+    "pane.resize",
     "layout.set_split_ratio",
     "tab.focus",
     "workspace.focus",
@@ -73,9 +79,6 @@ const NAVIGATION = new Set([
     "workspace.rename",
     "pane.rename",
     "client_shell.surface.set",
-    "worktree.list",
-    "product_announcement.dismiss",
-    "release_notes.dismiss",
 ]);
 
 type ObjectValue = Record<string, unknown>;
@@ -356,6 +359,7 @@ export class PrivateTerminals {
         }
 
         this.#upgrading++;
+        let upgrading = true;
 
         try {
             const target = await this.#app.privateSessions.terminalTarget(user, ticket.id);
@@ -378,27 +382,17 @@ export class PrivateTerminals {
                 return;
             }
 
-            const release = this.#app.imports.active.local.holdInstance(target.socket);
-            let handedOff = false;
+            // Connecting can resize shared panes. Hold through handshake and initial focus enqueue,
+            // not the attached lifetime or a PTY-drain acknowledgement. No nested lock ownership is inherited.
+            await this.#app.imports.active.local.withTerminalInput(target.socket, undefined, () => {
+                let initialization: Promise<void> | undefined;
 
-            const rejectedUpgrade = () => {
-                if (!handedOff) {
-                    release();
-                }
-            };
-
-            socket.once("close", rejectedUpgrade);
-
-            try {
                 this.#ws.handleUpgrade(request, socket, head, (ws) => {
-                    handedOff = true;
-                    socket.off("close", rejectedUpgrade);
                     let child: ChildProcessWithoutNullStreams;
 
                     try {
                         child = this.launch(endpoint, ticket.size);
                     } catch {
-                        release();
                         ws.close(1011, "Could not start the structured Herdr helper");
 
                         return;
@@ -421,25 +415,23 @@ export class PrivateTerminals {
                                 operation,
                             ),
                         finish: () => {
-                            release();
                             this.#connections.delete(connection);
                         },
                     });
 
                     this.#connections.add(connection);
-                    connection.start();
+                    // A connecting child now counts as a connection, not also as an upgrade.
+                    this.#upgrading--;
+                    upgrading = false;
+                    initialization = connection.start();
                 });
-            } catch (error) {
-                socket.off("close", rejectedUpgrade);
 
-                if (!handedOff) {
-                    release();
-                }
-
-                throw error;
-            }
+                return initialization;
+            });
         } finally {
-            this.#upgrading--;
+            if (upgrading) {
+                this.#upgrading--;
+            }
         }
     }
 
@@ -490,15 +482,20 @@ class Connection {
     readonly #requestIds = new Set<string>();
     readonly #done: Promise<void>;
     #resolveDone!: () => void;
+    readonly #initialization: Promise<void>;
+    #resolveInitialization!: () => void;
 
     constructor(options: ConnectionOptions) {
         this.#options = options;
         this.#done = new Promise((resolve) => {
             this.#resolveDone = resolve;
         });
+        this.#initialization = new Promise((resolve) => {
+            this.#resolveInitialization = resolve;
+        });
     }
 
-    start() {
+    start(): Promise<void> {
         const { ws, child } = this.#options;
 
         child.once("error", () => {
@@ -515,6 +512,8 @@ class Connection {
             void this.close(this.#stderr.trim() || "Herdr disconnected");
             clearTimeout(this.#kill);
             this.#options.finish();
+            // Failed initialization retains its reservation until the helper cannot attach later.
+            this.#resolveInitialization();
             this.#resolveDone();
         });
         ws.on("message", (data, binary) => {
@@ -594,6 +593,8 @@ class Connection {
                 void this.close("Owner access ended");
             }
         }, 1000).unref();
+
+        return this.#initialization;
     }
 
     #send(value: unknown) {
@@ -718,7 +719,6 @@ class Connection {
             this.#tabs = ids(snapshot.tabs, "tab_id");
             this.#workspaces = ids(snapshot.workspaces, "workspace_id");
             this.#commands = ids(snapshot.commands ?? [], "command_id");
-            clearTimeout(this.#handshake);
 
             if (!this.#initialFocus) {
                 if (!this.#panes.has(this.#options.target.pane)) {
@@ -733,6 +733,10 @@ class Connection {
                     method: "pane.focus",
                     params: { pane_id: this.#options.target.pane },
                 });
+                clearTimeout(this.#handshake);
+                // Resolve before exposing the snapshot. The reservation's finally runs before
+                // any browser command can arrive; subsequent commands acquire their own locks.
+                this.#resolveInitialization();
             }
         } else if (event.type === "surface") {
             const surface = object(event.surface);
@@ -785,6 +789,7 @@ class Connection {
         }
 
         let mutating = false;
+        let terminalInput = false;
 
         if (command.type === "input" || command.type === "popup-input") {
             const target = command.type === "input" ? command.paneId : command.terminalId;
@@ -805,6 +810,7 @@ class Connection {
             }
 
             mutating = true;
+            terminalInput = true;
         } else if (command.type === "clipboard-image") {
             const target = object(command.target);
             const pane = target.Pane;
@@ -846,8 +852,10 @@ class Connection {
             }
 
             mutating = true;
+            terminalInput = true;
         } else if (command.type === "resize") {
             Object.assign(command, size(command));
+            mutating = true;
         } else if (command.type === "request") {
             if (
                 typeof command.requestId !== "string" ||
@@ -908,11 +916,14 @@ class Connection {
 
             this.#requestIds.add(command.requestId);
             delete command.confirmed;
-            mutating = !NAVIGATION.has(command.method);
+            mutating = !OBSERVATION.has(command.method);
+            terminalInput = mutating && !CONTROLS.has(command.method);
         } else if (command.type === "focus") {
             if (typeof command.focused !== "boolean") {
                 throw new HttpError(400, "Invalid terminal focus state");
             }
+
+            mutating = true;
         } else if (command.type === "theme") {
             object(command.theme);
         } else {
@@ -923,9 +934,13 @@ class Connection {
             await this.#options.withInput(
                 command.type === "input" ? String(command.paneId) : undefined,
                 async () => {
-                    // Persist before bytes leave this process. A transport close does not cancel Herdr's queued PTY input.
-                    this.#fence ??= this.#options.beforeInput();
-                    await this.#fence;
+                    if (terminalInput) {
+                        // Persist actual input before enqueue. Geometry/focus need a lock, not a receipt.
+                        // A transport close does not cancel Herdr's queued PTY input.
+                        this.#fence ??= this.#options.beforeInput();
+                        await this.#fence;
+                    }
+
                     this.#options.authorize();
                     this.#write(command);
                 },

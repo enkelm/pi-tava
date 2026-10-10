@@ -5,13 +5,15 @@
  * in their own browser: it does not share their app tab or its cookies, and pages only this machine can reach (a dev
  * server on localhost) work from a phone too.
  *
- * Each conversation's page lives in a browser context of its own: cookies and storage are not shared between
- * conversations. Pages are memory only: a restart closes them, and each conversation's last address and size come back
- * from its saved state when its page is next opened.
+ * By default each conversation has an isolated, temporary browser context. When the owner imports a default profile,
+ * pages instead share that copied profile's persistent cookies and storage. A restart closes pages, and each
+ * conversation's last address and size come back from its saved state when its page is next opened.
  */
+import { COOKIE } from "./auth.ts";
 import { BrowserError, Chromium } from "./browser/cdp.ts";
 import { findBrowser, profileFolder } from "./browser/discovery.ts";
-import { BrowserPage, type BrowserState, type Saved, wait } from "./browser/page.ts";
+import { BrowserPage, type BrowserState, type Saved } from "./browser/page.ts";
+import { BrowserProfiles } from "./browser/profiles.ts";
 import { type Viewport, VIEWPORTS, viewportFrom } from "./browser/viewport.ts";
 import { describe } from "./errors.ts";
 
@@ -46,11 +48,15 @@ export interface BrowsersOptions {
  */
 export class Browsers {
     readonly #options: BrowsersOptions;
+    readonly profiles: BrowserProfiles;
+    #switching = false;
     #executable: string | null | undefined;
     #chromium: Promise<Chromium> | undefined;
+    #stopping: Promise<void> | undefined;
     readonly #pages = new Map<number, BrowserPage>();
     readonly #opening = new Map<number, Promise<BrowserPage>>();
     readonly #listeners = new Set<(conversationId: number, state: BrowserState) => void>();
+    readonly #observed = new Set<number>();
     readonly #pending = new Map<number, NodeJS.Timeout>();
     readonly #problems = new Map<number, string>();
     readonly #reaper: NodeJS.Timeout;
@@ -61,6 +67,7 @@ export class Browsers {
 
     constructor(options: BrowsersOptions) {
         this.#options = options;
+        this.profiles = new BrowserProfiles(options.dataDir);
         this.#executable = options.executable;
         this.#reaper = setInterval(() => this.#reap(), 60_000);
         this.#reaper.unref();
@@ -68,6 +75,12 @@ export class Browsers {
 
     /** The browser this machine has, if any. Looked up once. */
     get executable(): string | undefined {
+        const imported = this.profiles.current();
+
+        if (imported !== undefined && this.#options.executable !== null) {
+            return imported.executable;
+        }
+
         if (this.#executable === undefined) {
             this.#executable = findBrowser() ?? null;
         }
@@ -87,10 +100,16 @@ export class Browsers {
 
     /** A conversation's page as it is now; a closed one has no address. */
     state(conversationId: number): BrowserState {
+        this.#observed.add(conversationId);
         const page = this.#pages.get(conversationId);
+        const imported = this.profiles.current();
+        const profile =
+            imported === undefined
+                ? {}
+                : { sharedProfile: `${imported.browser} · ${imported.label}` };
 
         if (page !== undefined && !page.closed) {
-            return page.state(this.available);
+            return { ...page.state(this.available), ...profile };
         }
 
         const problem = this.#problems.get(conversationId);
@@ -108,6 +127,7 @@ export class Browsers {
             errors: 0,
             logs: 0,
             ...(problem === undefined ? {} : { problem }),
+            ...profile,
         };
     }
 
@@ -138,6 +158,10 @@ export class Browsers {
     }
 
     async #browser(): Promise<Chromium> {
+        while (this.#stopping !== undefined) {
+            await this.#stopping;
+        }
+
         const executable = this.executable;
 
         if (executable === undefined) {
@@ -147,25 +171,36 @@ export class Browsers {
         }
 
         if (this.#chromium !== undefined) {
-            const running = await this.#chromium.catch(() => undefined);
+            const pending = this.#chromium;
+            const running = await pending.catch(() => undefined);
+
+            // A shutdown may have started while the process was launching.
+            if (this.#stopping !== undefined || this.#chromium !== pending) {
+                return this.#browser();
+            }
 
             if (running !== undefined && !running.connection.closed) {
                 return running;
             }
         }
 
-        if (this.#closing) {
-            throw new BrowserError("The server is stopping.");
+        if (this.#closing || this.#switching) {
+            throw new BrowserError("The browser is stopping or changing profiles.");
         }
 
         const extra = [
             ...(this.#options.args ?? []),
             ...(process.env.PI_POCKET_BROWSER_ARGS?.split(/\s+/).filter(Boolean) ?? []),
         ];
+        const imported = this.profiles.current();
         const launching = Chromium.launch(
             executable,
-            profileFolder(executable, this.#options.dataDir),
+            imported?.directory ?? profileFolder(executable, this.#options.dataDir),
             extra,
+            {
+                nativeCredentials: imported !== undefined,
+                ...(imported === undefined ? {} : { stripCookies: [COOKIE] }),
+            },
         );
 
         this.#chromium = launching;
@@ -186,7 +221,7 @@ export class Browsers {
         this.#options.log?.(`Browser started: ${executable}`);
 
         chromium.connection.onEvent = (method, params) => {
-            if (!method.startsWith("Target.")) {
+            if (this.#chromium !== launching || !method.startsWith("Target.")) {
                 return;
             }
 
@@ -209,9 +244,11 @@ export class Browsers {
         };
 
         chromium.connection.onClose = () => {
-            if (this.#chromium === launching) {
-                this.#chromium = undefined;
+            if (this.#chromium !== launching) {
+                return;
             }
+
+            this.#chromium = undefined;
 
             for (const page of this.#pages.values()) {
                 page.close();
@@ -228,6 +265,10 @@ export class Browsers {
     async open(conversationId: number, options: OpenOptions = {}): Promise<BrowserPage> {
         if (this.#closing) {
             throw new BrowserError("The server is stopping.");
+        }
+
+        if (this.#switching) {
+            throw new BrowserError("The default browser profile is changing. Try again shortly.");
         }
 
         const open = this.page(conversationId);
@@ -273,20 +314,28 @@ export class Browsers {
         }
 
         const chromium = await this.#browser();
+
+        if (stale()) {
+            throw new BrowserError("The browser was closed.");
+        }
+
         const connection = chromium.connection;
-        const { browserContextId } = await connection.send("Target.createBrowserContext", {
-            disposeOnDetach: false,
-        });
+        const browserContextId: string | undefined =
+            this.profiles.current() === undefined
+                ? (await connection.send("Target.createBrowserContext", { disposeOnDetach: false }))
+                      .browserContextId
+                : undefined;
         let page: BrowserPage | undefined;
+        let targetId: string | undefined;
 
         try {
             await connection
                 .send("Browser.setDownloadBehavior", { behavior: "deny", browserContextId })
                 .catch(() => {});
-            const { targetId } = await connection.send("Target.createTarget", {
+            ({ targetId } = await connection.send("Target.createTarget", {
                 url: "about:blank",
                 browserContextId,
-            });
+            }));
             const { sessionId } = await connection.send("Target.attachToTarget", {
                 targetId,
                 flatten: true,
@@ -296,7 +345,7 @@ export class Browsers {
                 conversationId,
                 connection,
                 session: sessionId,
-                target: targetId,
+                target: targetId!,
                 context: browserContextId,
                 userAgent: chromium.userAgent,
                 viewport: viewportFrom(saved?.viewport) ??
@@ -326,9 +375,14 @@ export class Browsers {
             return page;
         } catch (error) {
             page?.close();
-            void connection
-                .send("Target.disposeBrowserContext", { browserContextId })
-                .catch(() => {});
+
+            if (browserContextId !== undefined) {
+                void connection
+                    .send("Target.disposeBrowserContext", { browserContextId })
+                    .catch(() => {});
+            } else if (targetId !== undefined) {
+                void connection.send("Target.closeTarget", { targetId }).catch(() => {});
+            }
 
             throw error;
         }
@@ -359,7 +413,14 @@ export class Browsers {
         const chromium = await this.#chromium?.catch(() => undefined);
 
         await chromium?.connection
-            .send("Target.disposeBrowserContext", { browserContextId: page.contextId })
+            .send(
+                page.contextId === undefined
+                    ? "Target.closeTarget"
+                    : "Target.disposeBrowserContext",
+                page.contextId === undefined
+                    ? { targetId: page.targetId }
+                    : { browserContextId: page.contextId },
+            )
             .catch(() => {});
     }
 
@@ -383,18 +444,67 @@ export class Browsers {
         }
     }
 
-    async #stopBrowser(): Promise<void> {
-        const pending = this.#chromium;
-
-        this.#chromium = undefined;
-        const chromium = await pending?.catch(() => undefined);
-
-        if (chromium === undefined) {
-            return;
+    #stopBrowser(): Promise<void> {
+        if (this.#stopping !== undefined) {
+            return this.#stopping;
         }
 
-        chromium.kill();
-        await Promise.race([chromium.exited, wait(4000)]);
+        const pending = this.#chromium;
+
+        if (pending === undefined) {
+            return Promise.resolve();
+        }
+
+        const stopping = pending
+            .catch(() => undefined)
+            .then(async (chromium) => {
+                await chromium?.stop();
+            })
+            .finally(() => {
+                if (this.#chromium === pending) {
+                    this.#chromium = undefined;
+                }
+
+                if (this.#stopping === stopping) {
+                    this.#stopping = undefined;
+                }
+            });
+
+        this.#stopping = stopping;
+
+        return stopping;
+    }
+
+    /** Changing the app-wide profile closes all pages; no opening can overlap the switch. */
+    async setDefaultProfile(id: string | null): Promise<void> {
+        if (this.#switching || this.#closing) {
+            throw new BrowserError("The browser is busy changing profiles or stopping.");
+        }
+
+        this.#switching = true;
+
+        try {
+            await this.closeAll();
+            await Promise.allSettled([...this.#opening.values()]);
+
+            if (this.#closing) {
+                throw new BrowserError("The server is stopping.");
+            }
+
+            if (id === null) {
+                this.profiles.useClean();
+            } else {
+                await this.profiles.import(id);
+            }
+
+            this.#problems.clear();
+        } finally {
+            this.#switching = false;
+
+            for (const conversationId of this.#observed) {
+                this.#changed(conversationId);
+            }
+        }
     }
 
     /** Close every page and stop the browser, as the server stops or the browser is turned off. */

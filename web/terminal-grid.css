@@ -12,6 +12,14 @@
     isolation: isolate;
 }
 
+.terminal-grid-display {
+    position: relative;
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 100px;
+}
+
 .terminal-grid-viewport {
     position: relative;
     flex: 1 1 auto;
@@ -77,29 +85,163 @@
     background: #101419;
 }
 
-.terminal-grid-tools {
+.terminal-keyboard {
+    display: none;
+    flex: 0 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 44px;
+    max-height: calc(100% - 100px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding: 44px 0 4px;
+    border-top: 1px solid var(--line, #39414b);
+    padding: 4px 4px max(4px, env(safe-area-inset-bottom, 0px));
+    background: var(--bg, #101419);
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: pan-y;
+}
+
+.terminal-keyboard-toolbar,
+.terminal-keyboard-layouts,
+.terminal-keyboard-row {
     display: flex;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+}
+
+.terminal-keyboard-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     flex: none;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px 12px;
-    padding: 4px 8px;
-    border-top: 1px solid var(--border, #39414b);
+    justify-content: space-between;
+    margin-bottom: 4px;
+    background: var(--bg, #101419);
 }
 
-.terminal-grid-mode {
-    font:
-        12px/1.5 system-ui,
-        sans-serif;
+.terminal-keyboard-layouts {
+    margin-right: auto;
 }
 
-.terminal-grid-keybar {
+.terminal-keyboard-keys {
     display: flex;
-    flex-wrap: wrap;
-    gap: 3px;
+    flex-direction: column;
+    gap: 5px;
 }
 
-.terminal-grid-tools button,
+.terminal-keyboard button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    min-width: 0;
+    min-height: 42px;
+    padding: 0 3px;
+    border: 1px solid var(--line, #39414b);
+    border-radius: 5px;
+    font:
+        15px/1 system-ui,
+        sans-serif;
+    color: var(--text, #d8dee9);
+    background: var(--raised, #20252d);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.terminal-keyboard-toolbar button {
+    min-height: 36px;
+    padding-inline: 10px;
+    border-color: transparent;
+    background: transparent;
+    font-size: 12px;
+}
+
+.terminal-keyboard-utility button,
+.terminal-keyboard-modifier,
+.terminal-keyboard-key[aria-label="Shift"],
+.terminal-keyboard-key[aria-label="Backspace"],
+.terminal-keyboard-key[aria-label="Enter"] {
+    font-size: 12px;
+}
+
+.terminal-keyboard-home {
+    padding-inline: 4%;
+}
+
+.terminal-keyboard-arrows button {
+    font-size: 20px;
+}
+
+.terminal-keyboard button:active:not(:disabled) {
+    background: var(--pressed, #39414b);
+}
+
+.terminal-keyboard button[aria-pressed="true"] {
+    border-color: var(--accent, #8fbcbb);
+    background: var(--accent-fill, var(--accent, #8fbcbb));
+    color: var(--accent-ink, #101419);
+}
+
+.terminal-keyboard button[data-locked="true"]::after {
+    content: "";
+    position: absolute;
+    bottom: 4px;
+    width: 12px;
+    height: 2px;
+    border-radius: 1px;
+    background: currentColor;
+}
+
+.terminal-keyboard button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.terminal-keyboard-hint {
+    margin: 0;
+    padding: 0 2px;
+    font:
+        11px/1.5 system-ui,
+        sans-serif;
+    color: var(--text, #d8dee9);
+    text-align: center;
+}
+
+@media (hover: hover) {
+    .terminal-keyboard button:hover:not(:disabled):not([aria-pressed="true"]) {
+        background: var(--hover, #39414b);
+    }
+}
+
+@media (max-width: 600px), (pointer: coarse) {
+    .terminal-keyboard {
+        display: flex;
+    }
+}
+
+/* Keep the whole keyboard usable when a phone is turned sideways. */
+@media (max-height: 500px) and (pointer: coarse) {
+    .terminal-keyboard-keys {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .terminal-keyboard-toolbar {
+        margin-bottom: 2px;
+    }
+
+    .terminal-keyboard button {
+        min-height: 34px;
+    }
+
+    .terminal-keyboard-hint {
+        display: none;
+    }
+}
+
 .terminal-grid-clipboard-offer button,
 .terminal-grid-selection-actions button,
 .terminal-grid-selection-actions a {
@@ -118,16 +260,6 @@
     background: transparent;
     cursor: pointer;
     touch-action: manipulation;
-}
-
-.terminal-grid-tools button:hover:not(:disabled),
-.terminal-grid-tools button[aria-pressed="true"] {
-    background: var(--hover, #2b2933);
-}
-
-.terminal-grid-tools button:disabled {
-    opacity: 0.45;
-    cursor: default;
 }
 
 .terminal-grid button:focus-visible,
@@ -149,7 +281,8 @@
 .terminal-grid-selection-actions {
     position: absolute;
     right: 8px;
-    bottom: 84px;
+    bottom: 12px;
+    z-index: 1;
     display: flex;
     gap: 4px;
     padding: 4px;
@@ -159,7 +292,8 @@
 
 .terminal-grid-selection {
     position: absolute;
-    bottom: 140px;
+    bottom: 68px;
+    z-index: 1;
     flex: none;
     box-sizing: border-box;
     width: 100%;
@@ -200,41 +334,4 @@
     flex: none;
     padding: 4px 8px;
     border-top: 1px solid var(--border, #39414b);
-}
-
-/* The helper bar belongs to touch-sized views, not desktop terminal chrome. */
-@media (min-width: 601px) {
-    .terminal-grid-tools,
-    .terminal-grid-keybar {
-        display: none;
-    }
-
-    .terminal-grid-selection-actions {
-        bottom: 12px;
-    }
-
-    .terminal-grid-selection {
-        bottom: 68px;
-    }
-}
-
-@media (max-width: 600px) {
-    .terminal-grid-tools {
-        gap: 4px;
-        padding: 4px;
-    }
-
-    .terminal-grid-mode {
-        width: 100%;
-        padding-inline: 4px;
-    }
-
-    .terminal-grid-keybar {
-        flex: 1;
-    }
-
-    .terminal-grid-keybar button {
-        flex: 1;
-        padding-inline: 5px;
-    }
 }

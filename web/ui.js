@@ -1332,7 +1332,11 @@ export function Sheet({
     // Not the Esc that ends an input method's composing, which belongs to the field.
     useEffect(() => {
         const onKey = (event) =>
-            event.key === "Escape" && !event.isComposing && event.keyCode !== 229 && onClose();
+            event.key === "Escape" &&
+            !event.defaultPrevented &&
+            !event.isComposing &&
+            event.keyCode !== 229 &&
+            onClose();
 
         addEventListener("keydown", onKey);
 

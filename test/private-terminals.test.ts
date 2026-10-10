@@ -1,6 +1,6 @@
 // Real HTTP/WebSocket and child pipes. The child and Unix socket are synthetic, never a live Herdr client.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createConnection, createServer as socketServer, type Socket } from "node:net";
@@ -8,7 +8,10 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { WebSocket } from "ws";
 import { createHandler } from "../src/server/http.ts";
-import { cleanUp, context, openApp, scriptedModel, until } from "./helpers.ts";
+import { PrivateControlDoc } from "../src/server/docs.ts";
+import { cleanUp, context, openApp, owner, scriptedModel, until } from "./helpers.ts";
+import { fakeHerdr } from "./active-import-fixture.ts";
+import { importFixture } from "./import-fixtures.ts";
 
 after(cleanUp);
 
@@ -32,7 +35,39 @@ async function fixture() {
     let checks = 0;
     let launches = 0;
     let bad = false;
+    let waitForSnapshot = false;
+    let closedHelpers = 0;
+    const helpers: ChildProcessWithoutNullStreams[] = [];
     const inputLog: Event[] = [];
+    const { local } = fakeHerdr(app, importFixture(directory).path);
+    const request = local.request;
+
+    local.sockets = async () => [target.socket];
+
+    local.request = async <T>(socket: string, method: string, params = {}): Promise<T> => {
+        if (method === "pane.read") {
+            return { read: { pane_id: target.pane, text: "Synthetic Pi" } } as T;
+        }
+
+        if (method === "session.snapshot") {
+            const { snapshot } = await request<{
+                snapshot: { panes: Record<string, unknown>[]; workspaces: unknown[] };
+            }>(socket, method, params);
+
+            return {
+                snapshot: {
+                    ...snapshot,
+                    panes: snapshot.panes.map((pane) => ({
+                        ...pane,
+                        pane_id: target.pane,
+                        terminal_id: target.terminal,
+                    })),
+                },
+            } as T;
+        }
+
+        return request<T>(socket, method, params);
+    };
 
     app.privateSessions.terminalTarget = async () => {
         reads++;
@@ -51,13 +86,22 @@ async function fixture() {
         `
         import {createInterface} from 'node:readline';
         const send = value => process.stdout.write(JSON.stringify(value)+'\\n');
-        const methods=['pane.focus','pane.close','tab.create','command.invoke','client_shell.surface.set'];
+        const methods=['pane.focus','pane.focus_direction','pane.zoom','pane.resize','layout.set_split_ratio',
+            'tab.focus','workspace.focus','pane.rename','tab.rename','workspace.rename','pane.scroll',
+            'pane.selection.read','worktree.list','pane.close','tab.create','command.invoke','client_shell.surface.set'];
+        const snapshot = () => {
+            send({type:'snapshot',snapshot:{boot_id:'boot-a',revision:'9007199254740993',
+                workspaces:[{workspace_id:'w1'}],tabs:[{tab_id:'t1'}],panes:[{pane_id:'w1:p1'}],
+                commands:[{command_id:'known-command'}]}});
+            send({type:'surface',surface:{boot_id:'boot-a',projection_revision:'9007199254740993',surface_revision:1,
+                frame:{width:2,height:1,cells:process.argv.includes('--bad')?[]:[{symbol:'A'},{symbol:'B'}]},popup:null}});
+        };
+        process.on('message', message => {
+            if (message === 'snapshot') snapshot();
+            if (message === 'fail') process.exit(1);
+        });
         send({type:'connected',welcome:{generation:1,methods}});
-        send({type:'snapshot',snapshot:{boot_id:'boot-a',revision:'9007199254740993',
-            workspaces:[{workspace_id:'w1'}],tabs:[{tab_id:'t1'}],panes:[{pane_id:'w1:p1'}],
-            commands:[{command_id:'known-command'}]}});
-        send({type:'surface',surface:{boot_id:'boot-a',projection_revision:'9007199254740993',surface_revision:1,
-            frame:{width:2,height:1,cells:process.argv.includes('--bad')?[]:[{symbol:'A'},{symbol:'B'}]},popup:null}});
+        if (!process.argv.includes('--wait-snapshot')) snapshot();
         const reader=createInterface({input:process.stdin,crlfDelay:Infinity});
         reader.on('line',line=>{
             const command=JSON.parse(line);
@@ -71,9 +115,14 @@ async function fixture() {
     app.privateTerminals.launch = (socket) => {
         launches++;
         assert.equal(socket, join(directory, "herdr-client.sock"));
-        const child = spawn(process.execPath, [script, ...(bad ? ["--bad"] : [])], {
-            stdio: ["pipe", "pipe", "pipe"],
-        });
+        const child = spawn(
+            process.execPath,
+            [script, ...(bad ? ["--bad"] : []), ...(waitForSnapshot ? ["--wait-snapshot"] : [])],
+            { stdio: ["pipe", "pipe", "pipe", "ipc"] },
+        ) as ChildProcessWithoutNullStreams;
+
+        helpers.push(child);
+        child.once("close", () => closedHelpers++);
         let pending = "";
 
         child.stdout.on("data", (buffer) => {
@@ -147,6 +196,17 @@ async function fixture() {
         bad: () => {
             bad = true;
         },
+        pauseHandshake: (paused = true) => {
+            waitForSnapshot = paused;
+        },
+        helper: (message: "snapshot" | "fail") => helpers.at(-1)!.send!(message),
+        closedHelpers: () => closedHelpers,
+        async view() {
+            const tree = await app.privateSessions.list(owner(app));
+            const pane = tree.instances[0]!.workspaces[0]!.tabs[0]!.panes[0]!;
+
+            return app.privateSessions.pane(owner(app), pane.id);
+        },
         async close() {
             for (const ws of sockets) {
                 ws.terminate();
@@ -180,6 +240,185 @@ function collect(ws: WebSocket): Event[] {
     ws.on("error", () => {});
 
     return events;
+}
+
+test("attachment reserves through handshake and initial focus dispatch, not the connected lifetime", async () => {
+    const f = await fixture();
+
+    f.pauseHandshake();
+
+    try {
+        const grant = (await (await f.ticket()).json()) as { url: string };
+        const ws = f.connect(grant.url);
+        const events = collect(ws);
+
+        ws.on("message", (data) => {
+            if (JSON.parse(String(data)).type === "snapshot") {
+                ws.send(
+                    JSON.stringify({
+                        type: "request",
+                        bootId: "boot-a",
+                        requestId: "initial-surface-interest",
+                        method: "client_shell.surface.set",
+                        params: { active: true },
+                    }),
+                );
+            }
+        });
+        await until(() => events.some((event) => event.type === "connected"), "paused handshake");
+        await assert.rejects(
+            f.app.imports.active.local.withPane(f.target.socket, f.target.pane, async () => {}),
+            /operation in progress/,
+            "takeover must not cross the helper's pending attachment",
+        );
+        assert.equal(f.inputLog.length, 0, "no initial focus before the snapshot");
+        f.helper("snapshot");
+        await until(
+            () =>
+                events.some(
+                    (event) =>
+                        event.type === "response" && event.requestId === "initial-surface-interest",
+                ),
+            "surface-interest command after initialization",
+        );
+        assert.deepEqual(
+            f.inputLog.map((event) => event.requestId),
+            ["pocket-initial-focus", "initial-surface-interest"],
+            "focus dispatch must precede browser navigation without lock reentry",
+        );
+        await f.app.imports.active.local.withPane(f.target.socket, f.target.pane, async () => {
+            assert.equal(ws.readyState, WebSocket.OPEN);
+        });
+        assert.equal((await f.view()).canImport, true);
+        const nextGrant = (await (await f.ticket()).json()) as { url: string };
+        const next = f.connect(nextGrant.url);
+        const nextEvents = collect(next);
+
+        await until(
+            () => nextEvents.some((event) => event.type === "connected"),
+            "next initialization",
+        );
+        const writesBefore = f.inputLog.length;
+        const observe = {
+            type: "request",
+            bootId: "boot-a",
+            requestId: "observe-initialization",
+            method: "worktree.list",
+            params: {},
+        };
+
+        ws.send(
+            JSON.stringify({
+                type: "input",
+                bootId: "boot-a",
+                paneId: f.target.pane,
+                events: [{ TextCommit: "never" }],
+            }),
+        );
+        ws.send(
+            JSON.stringify({
+                type: "request",
+                bootId: "boot-a",
+                requestId: "focus-during-initialization",
+                method: "pane.focus",
+                params: { pane_id: f.target.pane },
+            }),
+        );
+        ws.send(JSON.stringify(observe));
+        await until(
+            () =>
+                events.some(
+                    (event) => event.type === "response" && event.requestId === observe.requestId,
+                ),
+            "existing connection can observe during another attachment",
+        );
+        const refused = events.filter((event) => event.type === "rejected");
+
+        assert.equal(
+            refused.length,
+            2,
+            "existing connections cannot inherit initialization lock ownership",
+        );
+
+        for (const event of refused) {
+            assert.match(event.reason, /operation in progress/);
+        }
+
+        assert.deepEqual(f.inputLog.slice(writesBefore), [observe]);
+        f.helper("snapshot");
+        await until(
+            () => nextEvents.some((event) => event.type === "surface"),
+            "next initialization completes",
+        );
+        await f.app.imports.active.local.withPane(f.target.socket, f.target.pane, async () => {});
+        assert.equal(ws.readyState, WebSocket.OPEN);
+        assert.equal(next.readyState, WebSocket.OPEN);
+        assert.deepEqual(
+            (await f.app.harness.snapshot(PrivateControlDoc, context))?.items ?? {},
+            {},
+            "attachment, surface interest and rejected input create no terminal admission",
+        );
+    } finally {
+        await f.close();
+    }
+});
+
+for (const failure of ["helper", "browser", "timeout"] as const) {
+    test(`failed ${failure} initialization releases its attachment reservation`, async (t) => {
+        const f = await fixture();
+
+        f.pauseHandshake();
+
+        try {
+            const grant = (await (await f.ticket()).json()) as { url: string };
+
+            if (failure === "timeout") {
+                t.mock.timers.enable({ apis: ["setTimeout"] });
+            }
+
+            const ws = f.connect(grant.url);
+            const events = collect(ws);
+            const connected = new Promise<void>((resolve) => {
+                ws.on("message", (data) => {
+                    if (JSON.parse(String(data)).type === "connected") {
+                        resolve();
+                    }
+                });
+            });
+            const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
+
+            await connected;
+            await assert.rejects(
+                f.app.imports.active.local.withPane(f.target.socket, f.target.pane, async () => {}),
+                /operation in progress/,
+            );
+
+            if (failure === "helper") {
+                f.helper("fail");
+            } else if (failure === "browser") {
+                ws.close();
+            } else {
+                t.mock.timers.tick(15_000);
+            }
+
+            await closed;
+            t.mock.timers.reset();
+            await until(() => f.closedHelpers() === 1, "initializing helper reaped");
+            await f.app.imports.active.local.withPane(
+                f.target.socket,
+                f.target.pane,
+                async () => {},
+            );
+            assert.equal(f.inputLog.length, 0, "failed initialization never sends focus or input");
+
+            if (failure === "timeout") {
+                assert.match(events.find((event) => event.type === "closed")!.reason, /handshake/);
+            }
+        } finally {
+            t.mock.timers.reset();
+            await f.close();
+        }
+    });
 }
 
 test("rejected unauthenticated upgrades close TCP even when the peer keeps its write side open", async () => {
@@ -292,25 +531,33 @@ test("parallel ticket issuance and upgrades honor ticket and native-child limits
         const tickets = await Promise.all(
             accepted.map((response) => response.json() as Promise<{ url: string }>),
         );
-        const outcomes = await Promise.all(
-            tickets.map(
-                (ticket) =>
-                    new Promise<number>((resolve) => {
-                        const ws = f.connect(ticket.url);
 
-                        ws.on("error", () => {});
-                        ws.once("open", () => resolve(101));
-                        ws.once("unexpected-response", (_request, response) => {
-                            response.resume();
-                            ws.terminate();
-                            resolve(response.statusCode!);
-                        });
-                    }),
-            ),
+        f.pauseHandshake();
+        const first = f.connect(tickets[0]!.url);
+        const events = collect(first);
+
+        await until(() => events.some((event) => event.type === "connected"), "pending attachment");
+        assert.deepEqual(
+            await Promise.all(tickets.slice(1, 4).map((ticket) => rejected(f.connect(ticket.url)))),
+            [409, 409, 409],
+            "same-instance upgrades cannot cross an initializing attachment",
         );
+        f.pauseHandshake(false);
+        f.helper("snapshot");
+        await until(() => events.some((event) => event.type === "surface"), "first attachment");
 
-        assert.equal(outcomes.filter((code) => code === 101).length, 4);
-        assert.equal(outcomes.filter((code) => code === 409).length, 12);
+        for (const ticket of tickets.slice(4, 7)) {
+            const next = collect(f.connect(ticket.url));
+
+            await until(() => next.some((event) => event.type === "surface"), "next attachment");
+        }
+
+        assert.equal(f.counts().launches, 4);
+        assert.deepEqual(
+            await Promise.all(tickets.slice(7).map((ticket) => rejected(f.connect(ticket.url)))),
+            Array(9).fill(409),
+            "native child limits still apply after initialization reservations release",
+        );
         assert.equal(f.counts().launches, 4);
     } finally {
         await f.close();
@@ -329,10 +576,6 @@ test("structured terminal preserves revisions, fences targets and input, and doe
         assert.equal(
             events.find((event) => event.type === "surface")!.surface.projection_revision,
             "9007199254740993",
-        );
-        await assert.rejects(
-            f.app.imports.active.local.withPane(f.target.socket, f.target.pane, async () => {}),
-            /terminal|control|instance/i,
         );
         const invalid = [
             { type: "input", bootId: "old", paneId: "w1:p1", events: [{ TextCommit: "never" }] },
@@ -445,74 +688,173 @@ test("terminal replacement, malformed frames and revoked owner tokens close with
     }
 });
 
-test("an attached terminal permits Chat; native writes cannot cross an active Chat admission", async () => {
+test("an attached terminal remains importable after input; Chat and takeover exclude writes without disconnecting", async () => {
     const f = await fixture();
 
     try {
         const grant = (await (await f.ticket()).json()) as { url: string };
         const ws = f.connect(grant.url);
         const events = collect(ws);
-
-        await until(() => events.some((event) => event.type === "surface"), "structured frame");
-        ws.send(
-            JSON.stringify({
+        const input = (text: string) => ({
+            type: "input",
+            bootId: "boot-a",
+            paneId: f.target.pane,
+            events: [{ TextCommit: text }],
+        });
+        const forwarded = (text: string) =>
+            f.inputLog.some((event) => event.events?.[0]?.TextCommit === text);
+        const controls = (phase: string) => [
+            { type: "resize", bootId: "boot-a", cols: 80, rows: 24, cellWidth: 8, cellHeight: 18 },
+            { type: "focus", bootId: "boot-a", focused: true },
+            ...[
+                ["pane.focus", { pane_id: f.target.pane }],
+                ["pane.focus_direction", { pane_id: f.target.pane, direction: "right" }],
+                ["pane.zoom", { pane_id: f.target.pane }],
+                ["pane.resize", { pane_id: f.target.pane, direction: "right", amount: 0.1 }],
+                ["layout.set_split_ratio", { tab_id: "t1", path: [], ratio: 0.5 }],
+                ["tab.focus", { tab_id: "t1" }],
+                ["workspace.focus", { workspace_id: "w1" }],
+                ["pane.rename", { pane_id: f.target.pane, label: "Pi" }],
+                ["tab.rename", { tab_id: "t1", label: "Tab" }],
+                ["workspace.rename", { workspace_id: "w1", label: "Workspace" }],
+                ["client_shell.surface.set", { active: true }],
+            ].map(([method, params], index) => ({
                 type: "request",
                 bootId: "boot-a",
-                requestId: "pause-surfaces",
-                method: "client_shell.surface.set",
-                params: { active: false },
-            }),
-        );
+                requestId: `${phase}-control-${index}`,
+                method,
+                params,
+            })),
+        ];
+
+        await until(() => events.some((event) => event.type === "surface"), "structured frame");
         await until(
-            () => f.inputLog.some((event) => event.method === "client_shell.surface.set"),
-            "surface-interest request without disconnect",
+            () => f.inputLog.some((event) => event.requestId === "pocket-initial-focus"),
+            "initial focus dispatch",
+        );
+        const beforeControls = controls("before");
+        const initializedWrites = f.inputLog.length;
+        const receiptsBefore =
+            (await f.app.harness.snapshot(PrivateControlDoc, context))?.items ?? {};
+
+        for (const command of beforeControls) {
+            ws.send(JSON.stringify(command));
+        }
+
+        await until(
+            () => f.inputLog.length === initializedWrites + beforeControls.length,
+            "native geometry and focus before takeover",
+        );
+        assert.deepEqual(f.inputLog.slice(initializedWrites), beforeControls);
+        assert.deepEqual(
+            (await f.app.harness.snapshot(PrivateControlDoc, context))?.items ?? {},
+            receiptsBefore,
+            "geometry and focus acquire reservations without recording terminal input",
         );
         assert.equal(
-            await f.app.privateSessions.control.reason(f.target.socket, f.target.pane, "takeover"),
-            undefined,
+            (await f.view()).canImport,
+            true,
+            "an attached terminal is not a lifetime lease",
         );
-        await f.app.imports.active.local.withPane(
-            f.target.socket,
-            f.target.pane,
-            async () => {
-                ws.send(
-                    JSON.stringify({
-                        type: "input",
-                        bootId: "boot-a",
-                        paneId: f.target.pane,
-                        events: [{ TextCommit: "must-not-cross" }],
-                    }),
-                );
-                await until(
-                    () => events.some((event) => event.type === "rejected"),
-                    "native write excluded by Chat",
-                );
-                assert.ok(!f.inputLog.some((event) => event.type === "input"));
-            },
-            "prompt",
-        );
-        ws.send(
-            JSON.stringify({
-                type: "input",
+        ws.send(JSON.stringify(input("before-import")));
+        await until(() => forwarded("before-import"), "native input before import");
+        const view = await f.view();
+
+        assert.equal(view.canImport, true, "known native input must not fence imports");
+        assert.equal(view.importReason, undefined);
+
+        for (const purpose of ["prompt", "takeover"] as const) {
+            const rejectedBefore = events.filter((event) => event.type === "rejected").length;
+            const writesBefore = f.inputLog.length;
+            const requestId = `blocked-${purpose}`;
+            const blockedControls = controls(purpose);
+            const observation = {
+                type: "request",
                 bootId: "boot-a",
-                paneId: f.target.pane,
-                events: [{ TextCommit: "after-chat" }],
-            }),
-        );
-        await until(
-            () => f.inputLog.some((event) => event.type === "input"),
-            "native write after Chat",
-        );
-        await f.app.imports.active.local.withPane(
-            f.target.socket,
-            f.target.pane,
-            async () => {},
-            "prompt",
-        );
-        await assert.rejects(
-            f.app.imports.active.local.withPane(f.target.socket, f.target.pane, async () => {}),
-            /terminal|Terminal/,
-        );
+                requestId: `observe-${purpose}`,
+                method: "worktree.list",
+                params: {},
+            };
+
+            await f.app.imports.active.local.withPane(
+                f.target.socket,
+                f.target.pane,
+                async () => {
+                    ws.send(JSON.stringify(input(`during-${purpose}`)));
+                    ws.send(
+                        JSON.stringify({
+                            type: "request",
+                            bootId: "boot-a",
+                            requestId,
+                            method: "tab.create",
+                            params: { workspace_id: "w1" },
+                        }),
+                    );
+
+                    for (const command of blockedControls) {
+                        ws.send(JSON.stringify(command));
+                    }
+
+                    ws.send(JSON.stringify(observation));
+                    await until(
+                        () =>
+                            events.some(
+                                (event) =>
+                                    event.type === "response" &&
+                                    event.requestId === observation.requestId,
+                            ),
+                        `observation remains available during ${purpose}`,
+                    );
+                    assert.equal(
+                        events.filter((event) => event.type === "rejected").length,
+                        rejectedBefore + 2 + blockedControls.length,
+                        "input, native geometry and focus must all respect the operation reservation",
+                    );
+                    const rejections = events
+                        .filter((event) => event.type === "rejected")
+                        .slice(rejectedBefore);
+
+                    assert.ok(rejections.some((event) => event.requestId === requestId));
+
+                    for (const event of rejections) {
+                        assert.match(event.reason, /operation in progress/);
+                    }
+
+                    assert.deepEqual(
+                        f.inputLog.slice(writesBefore),
+                        [observation],
+                        "only observation reaches the helper while writes are reserved",
+                    );
+                    assert.equal(
+                        ws.readyState,
+                        WebSocket.OPEN,
+                        "existing connection stays attached",
+                    );
+
+                    if (purpose === "takeover") {
+                        const blocked = (await (await f.ticket()).json()) as { url: string };
+
+                        assert.equal(await rejected(f.connect(blocked.url)), 409);
+                        assert.equal(
+                            f.counts().launches,
+                            1,
+                            "upgrade cannot launch across takeover",
+                        );
+                    }
+                },
+                purpose,
+            );
+            ws.send(JSON.stringify(input(`after-${purpose}`)));
+            await until(
+                () => forwarded(`after-${purpose}`),
+                `native input resumes after ${purpose}`,
+            );
+        }
+
+        assert.equal(ws.readyState, WebSocket.OPEN);
+        assert.equal(f.counts().launches, 1, "no detach or reconnect is needed");
+        assert.equal((await f.view()).canImport, true);
+        assert.ok(!forwarded("during-prompt") && !forwarded("during-takeover"));
     } finally {
         await f.close();
     }

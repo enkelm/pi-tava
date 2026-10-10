@@ -1,4 +1,4 @@
-/** Select a discovered Pi, validate first, stop only that process, then use the existing atomic importer. */
+/** Select a verified Pi, explicitly abort live work when confirmed, then stop only Pi and atomically import its final journal. */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { PocketApp } from "../app.ts";
 import type { User } from "../config.ts";
@@ -41,7 +41,7 @@ export class ActiveImports {
     readonly #imports: Imports;
     readonly #pending = new Map<
         string,
-        { visibility?: ImportVisibility; promise: Promise<Result> }
+        { visibility?: ImportVisibility; abortRunning: boolean; promise: Promise<Result> }
     >();
     readonly local = new LocalPiSessions();
 
@@ -89,6 +89,7 @@ export class ActiveImports {
             cwd: item.cwd,
             location: item.location,
             state: item.state,
+            running: ["working", "blocked"].includes(item.state),
             reason: item.reason,
             recovery: false,
             visibility: this.#visibility({}, stored?.items[item.id]),
@@ -102,6 +103,7 @@ export class ActiveImports {
                     cwd: item.session.cwd,
                     location: item.session.location,
                     state: "unfinished move",
+                    running: false,
                     reason: await this.local.inputReason(item.session.socket, item.session.pane),
                     recovery: true,
                     visibility: this.#visibility({}, item),
@@ -150,9 +152,24 @@ export class ActiveImports {
         const stored = await this.#app.harness.snapshot(TakeoversDoc, context);
         const visibility = this.#visibility(request, stored?.items[id]);
         const session = await this.#session(id);
-        const preview = await this.#imports.preview(user, { path: session.path, visibility });
+        const running =
+            ["working", "blocked"].includes(session.state) && !(await this.local.exited(session));
+        // Verified idle/done Pi can already have been aborted manually in its terminal.
+        const mode = running ? "live" : "aborted";
+        const preview = await this.#imports.preview(user, { path: session.path, visibility }, mode);
 
-        return { ...preview, activeId: id, location: session.location };
+        return {
+            ...preview,
+            activeId: id,
+            location: session.location,
+            running,
+            warnings: running
+                ? [
+                      ...preview.warnings,
+                      "Moving this running Pi will abort its current operations, like pressing Escape. Unfinished work may be lost. Only its final saved journal is imported; no historical work is restarted.",
+                  ]
+                : preview.warnings,
+        };
     }
 
     move(user: User, request: MoveRequest): Promise<Result> {
@@ -167,6 +184,13 @@ export class ActiveImports {
         const pending = this.#pending.get(id);
 
         if (pending) {
+            if (pending.abortRunning !== (request.abortRunning === true)) {
+                throw new HttpError(
+                    409,
+                    "A move with different abort confirmation is already in progress",
+                );
+            }
+
             if ((pending.visibility ?? "owner") !== visibility) {
                 throw new HttpError(409, "A move with different visibility is already in progress");
             }
@@ -187,6 +211,7 @@ export class ActiveImports {
 
         this.#pending.set(id, {
             visibility: request.visibility === undefined ? undefined : visibility,
+            abortRunning: request.abortRunning === true,
             promise,
         });
 
@@ -196,20 +221,50 @@ export class ActiveImports {
     async #move(user: User, id: string, request: MoveRequest): Promise<Result> {
         const stored = await this.#app.harness.snapshot(TakeoversDoc, context);
         const previous = stored?.items[id];
-        // Legacy retries retain earlier consent; explicitly conflicting unfinished retries are refused.
+        // Legacy retries retain publication consent; conflicting unfinished visibility retries are refused.
         const visibility = this.#visibility(request, previous);
 
         if (previous?.result !== undefined) {
             return this.#imports.retry(user, previous.result, { ...request, visibility });
         }
 
-        const session = await this.#session(id);
+        const selected = await this.#session(id);
 
-        return this.local.withPane(session.socket, session.pane, async () => {
-            const prepared = { ...request, path: session.path, stopped: true, visibility };
+        return this.local.withPane(selected.socket, selected.pane, async () => {
+            // Recheck after acquiring the lock. A previously idle Pi may have begun another turn.
+            const session = await this.#session(id);
+            const alive = !(await this.local.exited(session));
+            const consent = request.abortRunning === true;
 
-            // No signal is sent until source compatibility, fingerprint, cwd and destination are valid.
-            await this.#imports.prepare(user, prepared);
+            if (alive && ["working", "blocked"].includes(session.state) && !consent) {
+                throw new HttpError(
+                    409,
+                    "Pi is running its current turn. Explicitly confirm aborting current operations with abortRunning: true before moving it.",
+                );
+            }
+
+            // Active handoff requires complete tools, but does not require an assistant after a manual abort.
+            const mode = "aborted";
+            let prepared = { ...request, path: session.path, stopped: true, visibility };
+            const preflight = await this.#imports.prepare(user, prepared, {
+                mode: consent && alive ? "live" : mode,
+                refresh: consent && alive,
+            });
+
+            const requireSameSource = (source: typeof preflight.source) => {
+                if (
+                    source.path !== preflight.source.path ||
+                    source.header.id !== preflight.source.header.id ||
+                    source.header.cwd !== preflight.source.header.cwd
+                ) {
+                    throw new HttpError(
+                        409,
+                        "The Pi session identity or working directory changed during takeover. Preview again.",
+                    );
+                }
+            };
+
+            // Durable intent precedes both Escape and SIGTERM. A reservation is never reusable abort consent.
             await this.#app.harness.commit(async (tx) => {
                 const document = await tx.doc(TakeoversDoc);
 
@@ -220,14 +275,51 @@ export class ActiveImports {
             }, context);
 
             if (!(await this.local.exited(session))) {
-                await this.local.stop(session);
+                if (consent) {
+                    await this.local.abort(session);
+                    // Do not stop Pi if Escape left any dispatched tool without its saved result.
+                    const final = await this.#imports.prepare(user, prepared, {
+                        mode,
+                        refresh: true,
+                    });
+
+                    requireSameSource(final.source);
+                } else {
+                    const current = await this.#session(id);
+
+                    if (["working", "blocked"].includes(current.state)) {
+                        throw new HttpError(
+                            409,
+                            "Pi started its current turn. Confirm abortRunning: true before moving it.",
+                        );
+                    }
+                }
+
+                // stop independently enforces idle/done and child-process guards, including post-abort races.
+                if (!(await this.local.exited(session))) {
+                    await this.local.stop(session);
+                }
             }
 
-            // Session metadata may change during shutdown. Revalidate the preview rather than silently changing context.
             await this.#session(id);
 
             try {
-                return await this.#imports.create(user, prepared, id);
+                if (consent && alive) {
+                    // Shutdown may flush more journal entries. Automatically bind the import to those exact final bytes.
+                    const final = await this.#imports.prepare(user, prepared, {
+                        mode,
+                        refresh: true,
+                    });
+
+                    requireSameSource(final.source);
+                    prepared = {
+                        ...prepared,
+                        sha256: final.source.sha256,
+                        leafId: final.source.leafId,
+                    };
+                }
+
+                return await this.#imports.create(user, prepared, id, mode);
             } catch (error) {
                 const message = error instanceof Error ? error.message : "Import failed";
 

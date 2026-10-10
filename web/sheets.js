@@ -25,8 +25,8 @@ import { AuthDialog } from "./sheets/providers.js";
 import { RunningSheet } from "./sheets/running.js";
 import { HooksSheet } from "./sheets/hooks.js";
 import { SchedulesSheet } from "./sheets/schedules.js";
-import { SessionSheet } from "./sheets/session.js";
 import { SettingsSheet } from "./sheets/settings.js";
+import { NewSessionSheet, SessionActions } from "./sheets/session.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
 import { TextSheet } from "./sheets/text.js";
 import { ArtifactsSheet, ArtifactViewer, ImageViewer } from "./sheets/viewers.js";
@@ -51,8 +51,15 @@ const SETTINGS_TABS = {
 };
 
 /** What tells sheets apart: the same one changing (its query, say) stays one step back. */
-const sheetKey = (sheet) =>
-    `${SETTINGS_TABS[sheet.type] ? "settings" : sheet.type}:${sheet.entryId ?? sheet.id ?? sheet.pipId ?? ""}`;
+const sheetKey = (sheet) => {
+    const session =
+        sheet.type === "new-session" ||
+        (sheet.type === "cwd" && sheet.mode === "new") ||
+        (sheet.type === "import" && !sheet.fromPrivate);
+    const type = session ? "new-session" : SETTINGS_TABS[sheet.type] ? "settings" : sheet.type;
+
+    return `${type}:${sheet.entryId ?? sheet.id ?? sheet.pipId ?? ""}`;
+};
 
 /**
  * The sheets opened one from another, oldest first (the menu, then the model picker it opened): each is a step back,
@@ -186,11 +193,22 @@ function sheetBody(sheet) {
         case "import":
             body =
                 me?.role === "owner"
-                    ? html`<${ImportSheet}
-                          initialPreview=${sheet.initialPreview}
-                          fromPrivate=${sheet.fromPrivate}
-                      />`
+                    ? sheet.fromPrivate
+                        ? html`<${ImportSheet}
+                              initialPreview=${sheet.initialPreview}
+                              fromPrivate=${true}
+                          />`
+                        : html`<${NewSessionSheet}
+                              tab=${sheet.tab ?? "import"}
+                              initialPreview=${sheet.initialPreview}
+                          />`
                     : null;
+            break;
+        case "new-session":
+            body = html`<${NewSessionSheet}
+                tab=${sheet.tab}
+                initialPreview=${sheet.initialPreview}
+            />`;
             break;
         case "settings":
         case "appearance":
@@ -214,7 +232,10 @@ function sheetBody(sheet) {
             body = view.conversation ? html`<${BranchPicker} />` : null;
             break;
         case "cwd":
-            body = html`<${CwdSheet} mode=${sheet.mode} />`;
+            body =
+                sheet.mode === "new"
+                    ? html`<${NewSessionSheet} tab=${sheet.tab} />`
+                    : html`<${CwdSheet} mode=${sheet.mode} />`;
             break;
         case "artifacts":
             body = html`<${ArtifactsSheet} />`;
@@ -269,7 +290,7 @@ function sheetBody(sheet) {
             break;
         case "session":
             body = store.state.sessions.some((each) => each.id === sheet.id)
-                ? html`<${SessionSheet} id=${sheet.id} />`
+                ? html`<${SessionActions} id=${sheet.id} />`
                 : null;
             break;
         case "places":

@@ -1467,14 +1467,15 @@ export function PrivateTerminal({
 
     const keymap = useMemo(() => terminalKeymap(state.snapshot), [state.snapshot]);
 
-    const shortcut = (event) => {
+    const shortcut = (event, context) => {
         if (
             !interactive ||
             ["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock"].includes(event.key) ||
             event.isComposing ||
             event.getModifierState?.("AltGraph") ||
-            !event.target.matches?.(".terminal-grid-input") ||
-            document.activeElement !== event.target
+            (!context?.virtual &&
+                (!event.target.matches?.(".terminal-grid-input") ||
+                    document.activeElement !== event.target))
         ) {
             return;
         }
@@ -1500,7 +1501,7 @@ export function PrivateTerminal({
                 name?.startsWith("split-") ||
                 name?.endsWith("-new"))
         ) {
-            return;
+            return true;
         }
 
         prefix.current = null;
@@ -1522,6 +1523,8 @@ export function PrivateTerminal({
         } else {
             setNotice("This prefix chord is not supported in the browser. No input was sent.");
         }
+
+        return true;
     };
 
     useEffect(() => {
@@ -1611,6 +1614,7 @@ export function PrivateTerminal({
                 focusRef=${gridFocus}
                 theme=${theme || undefined}
                 reportAllKeys=${state.reportAllKeys}
+                onShortcut=${(event, context) => (context?.virtual ? shortcut(event, context) : undefined)}
                 clipboardOffer=${state.clipboard}
                 fontFamily='"Pocket Mono", monospace'
                 fontSize=${13}
@@ -1671,7 +1675,7 @@ export function PrivateTerminal({
             ${(statusError || notice || state.reason || loadError) && html`<p role="status">${statusError || notice || state.reason || loadError}</p>`}
             ${state.welcome && !state.welcome.methods?.includes("client_shell.surface.set") && html`<p>This Herdr connection does not advertise surface pausing. Only local painting can pause.</p>`}
             <p>Opening Terminal gives this browser control of the full Herdr instance. Connecting can resize panes or resume a pending agent. Access stays private to you.</p>
-            <p>Click the terminal to type. Paste uses the terminal’s paste event. Escape, arrows and control keys go to Herdr while the terminal has focus.</p>
+            <p>Click the terminal to type. On touch screens, use the full keyboard below it: tap Ctrl, Alt, Cmd or Shift once for the next key, twice to lock, and again to release. Hide expands the terminal; Native opens your device keyboard only when requested. Paste uses the terminal’s paste event. Escape, arrows and control keys go to Herdr while the terminal has focus.</p>
             <p>While the terminal has keyboard focus: Cmd+D splits right, Cmd+Shift+D splits down, Cmd+Shift+Enter zooms, Cmd+Option+arrows focus a pane, and Cmd+Shift+[ or ] change tabs. Cmd means Command on macOS and Super on Linux. Ctrl+C and Ctrl+D remain terminal input.</p>
             <p>Herdr’s default prefix is Ctrl+B, then c for a new tab, v to split right, minus to split down, z to zoom, n/p to switch tabs, and x to close a pane with confirmation. Repeat the prefix to send it to the terminal; Escape cancels. Published Herdr [keys] bindings and advertised command bindings replace the corresponding daemon defaults where supported.</p>
             <p>Browsers may reserve Cmd+T, Cmd+W, Cmd+1–9 and Cmd+L. We handle them only when delivered, without inventing replacement shortcuts. GPUI-local keybinding files, native windows, worktree management and native search dialogs are not mirrored. Clipboard writes and links always need your action.</p>

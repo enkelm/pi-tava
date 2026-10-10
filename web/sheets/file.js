@@ -2,6 +2,7 @@
 // file sheet alike.
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { browserAvailable, openInBrowser } from "../browser.js";
+import { FileEditor } from "../file-editor.js";
 import { mentionText } from "../files.js";
 import { highlightLines, langOf } from "../highlight.js";
 import { HtmlPreview } from "../rich.js";
@@ -45,13 +46,14 @@ function useLines(file, path) {
 }
 
 /**
- * A file of the session, read-only: text with line numbers and colors (Markdown shows rendered too), an image, or a
+ * A file of the session: text with line numbers, colors, and quick edits (Markdown shows rendered too), an image, or a
  * folder to browse, under a bar with its path and the viewer's buttons (copy, mention, preview). `line` scrolls to and
  * marks that line. `onOpen` opens an entry of a folder.
  */
 export function FileView({ path, line, onOpen = openFile, onLoad }) {
     const [file, setFile] = useState(null);
     const [error, setError] = useState(null);
+    const [editing, setEditing] = useState(false);
     const markdown = isMarkdown(path);
     const page = isPage(path);
     const [preview, setPreview] = useState(markdown && line === undefined);
@@ -70,6 +72,7 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
         let live = true;
 
         setFile(null);
+        setEditing(false);
         setError(null);
         actions.view(path).then(
             (each) => {
@@ -99,14 +102,16 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
     const shown = file?.display ?? path;
     const name = shown.replace(/\/$/, "").split("/").pop() || shown;
 
-    return html`<div class="file-viewer">
+    return html`<div class=${`file-viewer ${editing ? "editing" : ""}`}>
         <div class="file-tools">
             <span class="muted small mono file-path" title=${file?.path ?? path}>
                 ${shown}
                 ${file?.size !== undefined ? ` · ${formatBytes(file.size)}` : ""}
                 ${file?.kind === "text" ? ` · ${lines.length} ${lines.length === 1 ? "line" : "lines"}` : ""}
             </span>
-            <${FileActions}
+            ${
+                !editing &&
+                html`<${FileActions}
                 file=${file}
                 shown=${shown}
                 previewable=${markdown || page}
@@ -114,7 +119,12 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
                 onPreview=${setPreview}
                 running=${page && preview ? running : null}
                 onRun=${setRunning}
-            />
+                onEdit=${() => {
+                    setRunning(false);
+                    setEditing(true);
+                }}
+            />`
+            }
         </div>
         ${error && html`<p class="muted">${error}</p>`}
         ${!file && !error && html`<${Loader} label="Opening" />`}
@@ -152,6 +162,32 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
             </div>`
         }
         ${
+            editing &&
+            file?.kind === "text" &&
+            html`<${FileEditor}
+            key=${file.path}
+            file=${file}
+            line=${line}
+            onSaved=${(saved) => {
+                setFile(saved);
+                onLoad?.(saved);
+            }}
+            onCancel=${() => setEditing(false)}
+            onReload=${async () => {
+                try {
+                    const latest = await actions.view(path);
+
+                    setEditing(false);
+                    setFile(latest);
+                    onLoad?.(latest);
+                } catch (failure) {
+                    notify("error", failure.message);
+                }
+            }}
+        />`
+        }
+        ${
+            !editing &&
             file?.kind === "text" &&
             preview &&
             markdown &&
@@ -162,6 +198,7 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
             />`
         }
         ${
+            !editing &&
             file?.kind === "text" &&
             preview &&
             page &&
@@ -182,6 +219,7 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
             </p>`
         }
         ${
+            !editing &&
             file?.kind === "text" &&
             !preview &&
             html`<div class="file-view" ref=${body}>${rows}</div>
@@ -226,10 +264,18 @@ function FileLines({ lines, colored, all, line }) {
 
 /**
  * The viewer's buttons: Preview or Source for Markdown and pages, Run for a previewed page (`running` is null where it
- * does not apply), Copy, and @ Mention.
+ * does not apply), Edit for complete writable text files, Copy, and @ Mention.
  */
-function FileActions({ file, shown, previewable, preview, onPreview, running, onRun }) {
+function FileActions({ file, shown, previewable, preview, onPreview, running, onRun, onEdit }) {
     return html`${
+        file?.kind === "text" &&
+        !file.truncated &&
+        file.revision &&
+        file.editable !== false &&
+        canSteer() &&
+        html`<button class="button small file-edit-open" onClick=${onEdit}>Edit</button>`
+    }
+    ${
         file?.kind === "text" &&
         running !== null &&
         html`<button

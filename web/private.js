@@ -18,7 +18,6 @@ import {
     useLiveTerminal,
     selectTerminalInstance,
     syncTerminalTargets,
-    disconnectPrivateTerminal,
 } from "./private-terminal.js";
 
 const owner = () => (store.state.me?.role === "owner" ? store.state.me.id : null);
@@ -424,7 +423,7 @@ export function PrivateList({ compact = false, home = false }) {
         };
     }, []);
 
-    const importPane = async (pane, instance) => {
+    const importPane = async (pane) => {
         if (importOperation.current || importBlocks.get(pane.id) || !awake() || owner() === null) {
             return;
         }
@@ -439,8 +438,6 @@ export function PrivateList({ compact = false, home = false }) {
         importOperation.current = controller;
         setImporting(pane.id);
         setNotice("");
-        // Import is a new explicit action: detach our view and suppress its reconnect first.
-        disconnectPrivateTerminal(instance.id);
 
         try {
             const until = Date.now() + 3000;
@@ -481,12 +478,7 @@ export function PrivateList({ compact = false, home = false }) {
                     view.reason ||
                     "This agent has no verified session available to import.";
 
-                setNotice(
-                    /attached|detach|disconnect/i.test(reason)
-                        ? reason +
-                              " Disconnect other web Terminals for this instance, then try again."
-                        : reason,
-                );
+                setNotice(reason);
 
                 return;
             }
@@ -504,10 +496,7 @@ export function PrivateList({ compact = false, home = false }) {
             if (who === owner()) {
                 setNotice(
                     error.name === "AbortError"
-                        ? /attached|detach|disconnect/i.test(importReason)
-                            ? importReason +
-                              " Disconnect other web Terminals for this instance, then try again."
-                            : importReason || "Import preparation timed out. Nothing was shared."
+                        ? importReason || "Import preparation timed out. Nothing was shared."
                         : error.message,
                 );
 
@@ -659,7 +648,7 @@ export function PrivateList({ compact = false, home = false }) {
                             <span class="session-meta">${pane.agent} · ${pane.state}</span>
                         </span>
                     </button>
-                    ${supported && html`<button class="icon-button private-import" aria-label=${`Import & share ${shortLabel(pane.title, "agent")}`} title=${importBlocks.get(pane.id) ? "Import is blocked while prompt delivery is pending or uncertain" : "Import & share — disconnects this browser’s terminal first"} disabled=${Boolean(importing) || importBlocks.get(pane.id)} onClick=${() => importPane(pane, instance)}><${Icon} name=${importing === pane.id ? "pulse" : "external"} size=${15} /></button>`}
+                    ${supported && html`<button class="icon-button private-import" aria-label=${`Import & share ${shortLabel(pane.title, "agent")}`} title=${importBlocks.get(pane.id) ? "Import is blocked while prompt delivery is pending or uncertain" : "Import & share — running operations need confirmation"} disabled=${Boolean(importing) || importBlocks.get(pane.id)} onClick=${() => importPane(pane)}><${Icon} name=${importing === pane.id ? "pulse" : "external"} size=${15} /></button>`}
                     </div>`;
                 })}
             </div>

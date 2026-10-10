@@ -167,8 +167,6 @@ const LAUNCH_ARGS = [
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--mute-audio",
-    "--password-store=basic",
-    "--use-mock-keychain",
     "--force-color-profile=srgb",
 ];
 
@@ -187,6 +185,8 @@ export class Chromium {
                 done();
             } else {
                 child.once("exit", () => done());
+                // Failed spawns emit close without exit.
+                child.once("close", () => done());
             }
         });
     }
@@ -195,11 +195,28 @@ export class Chromium {
         executable: string,
         profile: string,
         extra: readonly string[],
+        options: { nativeCredentials?: boolean; stripCookies?: readonly string[] } = {},
     ): Promise<Chromium> {
+        if (extra.some((arg) => /^--(?:user-data-dir|profile-directory)(?:=|$)/.test(arg))) {
+            throw new BrowserError(
+                "Browser flags cannot override the app-owned profile directory.",
+            );
+        }
+
         mkdirSync(profile, { recursive: true, mode: 0o700 });
+        const credentials = options.nativeCredentials
+            ? []
+            : ["--password-store=basic", "--use-mock-keychain"];
         const child = spawn(
             executable,
-            [...LAUNCH_ARGS, `--user-data-dir=${profile}`, ...extra, "about:blank"],
+            [
+                ...LAUNCH_ARGS,
+                ...credentials,
+                ...extra,
+                `--user-data-dir=${profile}`,
+                "--profile-directory=Default",
+                "about:blank",
+            ],
             {
                 stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
             },
@@ -249,14 +266,68 @@ export class Chromium {
                 "HeadlessChrome/",
                 "Chrome/",
             );
+
+            // Strip app authentication before any caller can open a page in an imported default context.
+            if (options.stripCookies?.length) {
+                const { targetId } = await connection.send("Target.createTarget", {
+                    url: "about:blank",
+                });
+                const { sessionId } = await connection.send("Target.attachToTarget", {
+                    targetId,
+                    flatten: true,
+                });
+
+                try {
+                    const { cookies } = await connection.send("Storage.getCookies");
+
+                    for (const cookie of cookies) {
+                        if (!options.stripCookies.includes(cookie.name)) {
+                            continue;
+                        }
+
+                        await connection.send(
+                            "Network.deleteCookies",
+                            {
+                                name: cookie.name,
+                                domain: cookie.domain,
+                                path: cookie.path,
+                                ...(cookie.partitionKey === undefined
+                                    ? {}
+                                    : { partitionKey: cookie.partitionKey }),
+                            },
+                            sessionId,
+                        );
+                    }
+                } finally {
+                    await connection.send("Target.closeTarget", { targetId }).catch(() => {});
+                }
+            }
+
             await connection.send("Target.setDiscoverTargets", { discover: true });
         } catch (error) {
-            chromium.kill();
+            await chromium.stop();
 
             throw error;
         }
 
         return chromium;
+    }
+
+    /** Ask Chromium to flush persistent cookies/storage before terminating our own child if necessary. */
+    async stop(): Promise<void> {
+        await this.connection.send("Browser.close", {}, undefined, 1000).catch(() => {});
+        let timer: NodeJS.Timeout | undefined;
+
+        await Promise.race([
+            this.exited,
+            new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, 3000);
+                timer.unref();
+            }),
+        ]);
+        clearTimeout(timer);
+        this.kill();
+        await this.exited;
     }
 
     kill(): void {

@@ -41,9 +41,7 @@ function attach(app: App, path: string) {
 
         if (method === "agent.prompt") {
             state.sent++;
-            state.admitted = Boolean(
-                await app.privateSessions.control.reason(endpoint, "pane", "prompt"),
-            );
+            state.admitted = Boolean(await app.privateSessions.control.reason(endpoint, "pane"));
             assert.equal(state.admitted, true, "receipt is durable before transport is invoked");
             assert.deepEqual(Object.keys(params).sort(), ["target", "text"]);
 
@@ -126,17 +124,15 @@ test("pending admission survives restart, blocks fresh revisions and all app sto
             /delivery is uncertain/,
         );
         // Explicit raw control is still available after restart, but must not settle the unknown Chat receipt.
-        const detach = next.local.holdInstance(socket);
         let rawWrites = 0;
 
         await next.local.withTerminalInput(socket, "pane", async () => {
             await app.privateSessions.markTerminalInput(owner(app), socket);
             rawWrites++;
         });
-        detach();
         assert.equal(rawWrites, 1);
         assert.match(
-            (await app.privateSessions.control.reason(socket, "pane", "prompt"))!,
+            (await app.privateSessions.control.reason(socket, "pane"))!,
             /delivery is uncertain/,
         );
         // Fresh snapshots, PID/session replacement and local process disappearance are not queue cancellation.
@@ -358,145 +354,61 @@ for (const failingCommit of [1, 2]) {
     });
 }
 
-test("attached terminals permit fresh guarded Chat across detach/restart but retain the automatic takeover fence", async () => {
+test("known terminal receipts survive restart without fencing Chat or import, but cannot mask uncertain delivery", async () => {
     const f = await fixture("terminal-control");
-    const active = (await f.local.list()).sessions[0]!;
-    const release = f.local.holdInstance(socket);
-    const second = f.local.holdInstance(socket);
-    const attached = await selected(f.app);
-    let view = attached.view;
-
-    assert.equal(view.canPrompt, true);
-    assert.equal(view.reason, undefined);
-    assert.equal(view.canImport, false);
-    assert.match(view.importReason!, /web terminal is attached/);
-    assert.deepEqual(
-        await f.app.privateSessions.prompt(owner(f.app), attached.pane.id, {
-            revision: view.revision,
-            text: "Chat alongside a persistent desktop terminal",
-            requestId: "attached-chat",
-        }),
-        { sent: true },
-    );
-    await assert.rejects(
-        f.local.withPane(socket, "different-pane", async () => true),
-        /web terminal is attached/,
-    );
-    release();
-    release();
-    await assert.rejects(f.local.stop(active), /web terminal is attached/);
-    second();
-    assert.deepEqual((await f.app.harness.snapshot(PrivateControlDoc, context))?.items ?? {}, {});
-    view = (await selected(f.app)).view;
-    assert.equal(view.canPrompt, true);
     const guest = f.app.config.addUser("Guest", "guest").user;
 
     await assert.rejects(f.app.privateSessions.markTerminalInput(guest, socket), /Only the owner/);
     assert.deepEqual((await f.app.harness.snapshot(PrivateControlDoc, context))?.items ?? {}, {});
-    const detach = f.local.holdInstance(socket);
-
     await f.app.privateSessions.markTerminalInput(owner(f.app), socket);
     await f.app.privateSessions.markTerminalInput(owner(f.app), socket);
-    assert.equal(await f.local.withPane(socket, "pane", async () => true, "prompt"), true);
-    assert.deepEqual(
-        await f.app.privateSessions.prompt(owner(f.app), attached.pane.id, {
-            revision: view.revision,
-            text: "Chat after native input, still attached",
-            requestId: "attached-after-input",
-        }),
-        { sent: true },
-    );
-    detach();
-    assert.equal(
-        Object.keys((await f.app.harness.snapshot(PrivateControlDoc, context))!.items).length,
-        1,
-    );
-    const detached = await selected(f.app);
+    const stored = await f.app.harness.snapshot(PrivateControlDoc, context);
+    const current = await selected(f.app);
 
-    assert.equal(detached.view.canPrompt, true);
-    assert.equal(detached.view.reason, undefined);
-    assert.equal(detached.view.canImport, false);
-    assert.equal(
-        detached.view.importReason,
-        "Terminal input was used. Exit Pi in Herdr and import its saved file.",
-    );
+    assert.equal(Object.keys(stored!.items).length, 1);
+    assert.equal(current.view.canPrompt, true);
+    assert.equal(current.view.canImport, true);
+    assert.equal(current.view.reason, undefined);
+    assert.equal(current.view.importReason, undefined);
     assert.deepEqual(
-        await f.app.privateSessions.prompt(owner(f.app), detached.pane.id, {
-            revision: detached.view.revision,
-            text: "Back to Chat",
+        await f.app.privateSessions.prompt(owner(f.app), current.pane.id, {
+            revision: current.view.revision,
+            text: "Chat after native input",
             requestId: "after-terminal",
         }),
         { sent: true },
     );
-    assert.equal(
-        await f.local.withPane(socket, "different-pane", async () => true, "prompt"),
-        true,
-    );
-    await assert.rejects(
-        f.local.withPane(socket, "different-pane", async () => true),
-        /Terminal input was used/,
-    );
-    await assert.rejects(f.local.stop(active), /Terminal input was used/);
-    assert.equal(
-        Object.keys((await f.app.harness.snapshot(PrivateControlDoc, context))!.items).length,
-        1,
-    );
-    assert.equal(
-        await f.local.withPane("/synthetic/other/herdr.sock", "pane", async () => true),
-        true,
+    assert.deepEqual(
+        (await f.app.harness.snapshot(PrivateControlDoc, context))!.items,
+        stored!.items,
     );
     await f.app.close();
     const app = await openApp(f.model, f.data);
     const next = attach(app, f.source.path);
 
     try {
-        const stillCanAttach = next.local.holdInstance(socket);
+        const restarted = await selected(app);
 
-        await app.privateSessions.markTerminalInput(owner(app), socket);
-        const current = await selected(app);
-
-        assert.equal(current.view.canPrompt, true);
-        assert.equal(current.view.canImport, false);
-        assert.equal(current.view.reason, undefined);
-        assert.match(current.view.importReason!, /Terminal input was used/);
+        assert.equal(restarted.view.canPrompt, true);
+        assert.equal(restarted.view.canImport, true);
+        assert.equal(restarted.view.reason, undefined);
+        assert.equal(restarted.view.importReason, undefined);
         assert.deepEqual(
-            await app.privateSessions.prompt(owner(app), current.pane.id, {
-                revision: current.view.revision,
-                text: "Chat after restart with the terminal still attached",
+            (await app.harness.snapshot(PrivateControlDoc, context))!.items,
+            stored!.items,
+        );
+        assert.deepEqual(
+            await app.privateSessions.prompt(owner(app), restarted.pane.id, {
+                revision: restarted.view.revision,
+                text: "Chat after restart",
                 requestId: "after-restart",
             }),
             { sent: true },
         );
-        stillCanAttach();
-        await assert.rejects(next.local.stop(active), /Terminal input was used/);
-        // A standalone stop still checks takeover receipts immediately before signaling, even if discovery was cached.
-        next.local.find = async () => active;
-        await assert.rejects(next.local.stop(active), /Terminal input was used/);
-        next.state.status = "working";
-        await assert.rejects(
-            app.privateSessions.prompt(owner(app), current.pane.id, {
-                revision: current.view.revision,
-                text: "Still must check idle",
-                requestId: "busy",
-            }),
-            /working or waiting/,
-        );
-        next.state.status = "idle";
-        next.state.table = [next.shell, { ...next.pi, started: "Mon Jan 1 00:00:01 2024" }];
-        await assert.rejects(
-            app.privateSessions.prompt(owner(app), current.pane.id, {
-                revision: current.view.revision,
-                text: "Still must check identity",
-                requestId: "changed",
-            }),
-            /changed/,
-        );
-        next.state.table = [next.shell, next.pi];
-        // Known terminal use must never mask a later unknown Chat delivery, or let it be retried.
         next.transport.response = { type: "ok" };
         await assert.rejects(
-            app.privateSessions.prompt(owner(app), current.pane.id, {
-                revision: current.view.revision,
+            app.privateSessions.prompt(owner(app), restarted.pane.id, {
+                revision: restarted.view.revision,
                 text: "Lost Chat acknowledgement",
                 requestId: "unknown-chat",
             }),
@@ -519,7 +431,7 @@ test("attached terminals permit fresh guarded Chat across detach/restart but ret
     }
 });
 
-test("native writes reject an active Chat operation; observation and input to unrelated panes stay available", async () => {
+test("native writes reject active Chat while input to unrelated panes stays available", async () => {
     const f = await fixture("native-chat-exclusion");
     const { pane, view } = await selected(f.app);
     const original = f.local.request;
@@ -547,9 +459,6 @@ test("native writes reject an active Chat operation; observation and input to un
 
     try {
         await until(() => entered, "synthetic prompt awaiting response");
-        // An auto-connected observer may attach during Chat. Only writes need the short operation guard.
-        const detach = f.local.holdInstance(socket);
-
         await assert.rejects(
             f.local.withTerminalInput(socket, "pane", () => {
                 writes++;
@@ -579,7 +488,6 @@ test("native writes reject an active Chat operation; observation and input to un
         assert.equal(writes, 1);
         assert.equal(f.transport.sent, 1);
         assert.deepEqual(f.state.signals, []);
-        detach();
     } finally {
         release();
         await sending;
@@ -590,7 +498,6 @@ test("native writes reject an active Chat operation; observation and input to un
 test("native reservation covers asynchronous admission and pipe write, blocks new Chat, and releases on errors", async () => {
     const f = await fixture("native-admission-exclusion");
     const { pane, view } = await selected(f.app);
-    const detach = f.local.holdInstance(socket);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -638,7 +545,7 @@ test("native reservation covers asynchronous admission and pipe write, blocks ne
         assert.deepEqual(
             await f.app.privateSessions.prompt(owner(f.app), pane.id, {
                 revision: view.revision,
-                text: "Native forwarding ended, terminal remains attached",
+                text: "Native forwarding ended",
                 requestId: "after-native",
             }),
             { sent: true },
@@ -650,20 +557,15 @@ test("native reservation covers asynchronous admission and pipe write, blocks ne
             /pipe write failed/,
         );
         assert.equal(await f.local.withPane(socket, "pane", async () => true, "prompt"), true);
-        assert.match(
-            (await f.app.privateSessions.control.reason(socket, "pane", "takeover"))!,
-            /Terminal input was used/,
-        );
         assert.deepEqual(f.state.signals, []);
     } finally {
         release();
         await forwarding;
-        detach();
         await f.app.close();
     }
 });
 
-test("standalone stop reserves the pane against native writes and new Chat without allowing a terminal lease", async () => {
+test("standalone stop reserves the pane against native writes and new Chat", async () => {
     const f = await fixture("native-stop-exclusion");
     const active = (await f.local.list()).sessions[0]!;
     const processes = f.local.processes;
@@ -698,7 +600,6 @@ test("standalone stop reserves the pane against native writes and new Chat witho
             f.local.withPane(socket, "pane", async () => true, "prompt"),
             /operation in progress/,
         );
-        assert.throws(() => f.local.holdInstance(socket), /import operation in progress/);
         assert.equal(writes, 0);
         assert.deepEqual(f.state.signals, []);
         release();
@@ -711,29 +612,6 @@ test("standalone stop reserves the pane against native writes and new Chat witho
     } finally {
         release();
         await stopping;
-        await f.app.close();
-    }
-});
-
-test("instance lease cannot cross a takeover operation, including while its durable check is awaiting", async () => {
-    const f = await fixture("lease-race");
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-        release = resolve;
-    });
-    const operation = f.local.withPane(socket, "pane", () => gate);
-
-    try {
-        assert.throws(() => f.local.holdInstance(socket), /operation in progress/);
-        const other = f.local.holdInstance("/synthetic/other/herdr.sock");
-
-        other();
-        release();
-        await operation;
-        f.local.holdInstance(socket)();
-    } finally {
-        release();
-        await operation;
         await f.app.close();
     }
 });

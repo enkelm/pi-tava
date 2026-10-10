@@ -11,6 +11,7 @@
 import { h } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
+import { TerminalKeyboard } from "./terminal-keyboard.js";
 
 const html = htm.bind(h);
 
@@ -206,9 +207,9 @@ export function safeHyperlink(value) {
     }
 }
 
-export function keyEvent(event, { altKeys = false, reportAllKeys = false } = {}) {
+export function keyEvent(event, { altKeys = false, reportAllKeys = false, virtual = false } = {}) {
     if (
-        event.metaKey ||
+        (event.metaKey && !virtual) ||
         event.isComposing ||
         event.key === "Dead" ||
         event.key === "Process" ||
@@ -242,7 +243,9 @@ export function keyEvent(event, { altKeys = false, reportAllKeys = false } = {})
 
     if (
         !code &&
-        (event.ctrlKey || (event.altKey && altKeys)) &&
+        (event.ctrlKey ||
+            (event.altKey && altKeys) ||
+            (virtual && (event.metaKey || reportAllKeys))) &&
         [...(event.key || "")].length === 1
     ) {
         code = { Char: event.key };
@@ -854,8 +857,9 @@ function paintFrame(
  * images: [{key: SurfaceGraphicsAssetKey, serial, encoding: "base64", data}], never URLs.
  * Native Rgb, Rgba and Png; PNG dimensions are checked before decoding.
  * onInput(paneIdOrPopupTerminalId, ClientPaneInputEvent[], popupBoolean).
- * onShortcut(KeyboardEvent, {targetId, popup}) synchronously returns true to consume
+ * onShortcut(keyEventLike, {targetId, popup, virtual?}) synchronously returns true to consume
  * an application binding or chord prefix before any PTY input. UI owns chord state/timers.
+ * Touch strokes set virtual=true and never dispatch DOM keys or open the native keyboard.
  * Terminal key events do not bubble; document/window capture listeners must also check focus.
  * onPasteImage(targetId, {encoding:"base64",format:"png",data}, popupBoolean) handles
  * only explicit image paste gestures. Parent wraps this in native clipboard-image + bootId.
@@ -910,12 +914,19 @@ export function TerminalGrid({
     const wheel = useRef({ id: null, x: 0, y: 0 });
     const pasteState = useRef({ context: "", epoch: 0, pending: false, inputEpoch });
     const pendingPane = useRef(null);
+    const touchKeyboard = useRef(null);
     const externalActivity = useRef({ composing: false, dragging: false });
     const [metrics, setMetrics] = useState({ cw: cellWidth || fontSize * 0.6, ch: cellHeight });
     const [selection, setSelection] = useState(null),
         [focused, setFocused] = useState(false);
-    const [ctrl, setCtrl] = useState(false),
-        [notice, setNotice] = useState("");
+    const [notice, setNotice] = useState("");
+    const [touchLayout, setTouchLayout] = useState(
+        () =>
+            typeof window !== "undefined" &&
+            window.matchMedia("(max-width: 600px), (pointer: coarse)").matches,
+    );
+    const [nativeKeyboard, setNativeKeyboard] = useState(false);
+    const touchInput = showKeybar && touchLayout && !nativeKeyboard;
     const [imageVersion, setImageVersion] = useState(0);
     const [linkOffer, setLinkOffer] = useState(null);
     const frame = surface?.frame;
@@ -980,11 +991,13 @@ export function TerminalGrid({
             seen: surface.panes?.some((p) => p.pane_id === paneId) || false,
         };
 
+        touchKeyboard.current?.();
         pendingPane.current = pending;
         pasteState.current.epoch++;
 
         return () => {
             if (pendingPane.current === pending) {
+                touchKeyboard.current?.();
                 pendingPane.current = null;
                 pasteState.current.epoch++;
             }
@@ -1096,9 +1109,17 @@ export function TerminalGrid({
     }, [cw, ch, interactive]);
 
     useEffect(() => {
+        const media = window.matchMedia("(max-width: 600px), (pointer: coarse)");
+        const changed = () => setTouchLayout(media.matches);
+
+        media.addEventListener("change", changed);
+
+        return () => media.removeEventListener("change", changed);
+    }, []);
+
+    useEffect(() => {
         setSelection(null);
         setLinkOffer(null);
-        setCtrl(false);
         drag.current = null;
         held.current.clear();
         composing.current = false;
@@ -1730,11 +1751,88 @@ export function TerminalGrid({
             return;
         }
 
-        if (ctrl && [...text].length === 1) {
-            send([keyEvent({ key: text, ctrlKey: true })]);
-            setCtrl(false);
-        } else {
-            send([{ TextCommit: text }]);
+        send([{ TextCommit: text }]);
+    };
+
+    const touchKey = (stroke, { pointer = false } = {}) => {
+        const target = activeTarget();
+
+        if (!interactive || !drawable || !target.id) {
+            return;
+        }
+
+        if (pointer) {
+            focusInput();
+        }
+
+        let prevented = false;
+        const event = {
+            ...stroke,
+            code: "[{".includes(stroke.key)
+                ? "BracketLeft"
+                : "]}".includes(stroke.key)
+                  ? "BracketRight"
+                  : "",
+            target: input.current,
+            get defaultPrevented() {
+                return prevented;
+            },
+            preventDefault() {
+                prevented = true;
+            },
+            stopPropagation() {},
+            getModifierState() {
+                return false;
+            },
+        };
+
+        try {
+            const consumed = onShortcut?.(event, {
+                targetId: target.id,
+                popup: !!target.popup,
+                virtual: true,
+            });
+
+            if (consumed?.then) {
+                report(
+                    "Terminal shortcut handlers must return synchronously; this key was not sent.",
+                );
+
+                return;
+            }
+
+            if (consumed === true || prevented) {
+                return;
+            }
+        } catch {
+            report("The terminal shortcut failed; this key was not sent or retried.");
+
+            return;
+        }
+
+        const translated = keyEvent(event, { altKeys: true, reportAllKeys, virtual: true });
+
+        if (translated) {
+            send(
+                reportAllKeys
+                    ? [translated, { Key: { ...translated.Key, kind: "Release", repeat_count: 1 } }]
+                    : [translated],
+                target,
+            );
+        } else if ([...event.key].length === 1) {
+            send([{ TextCommit: event.key }], target);
+        }
+    };
+
+    const changeKeyboard = (native) => {
+        setNativeKeyboard(native);
+
+        if (input.current) {
+            // Apply synchronously inside the tap so Safari permits the explicit native fallback.
+            input.current.blur();
+            input.current.readOnly = !native;
+            input.current.inputMode = native ? "text" : "none";
+            focusInput();
         }
     };
 
@@ -1822,6 +1920,10 @@ export function TerminalGrid({
             }
 
             send([translated]);
+        } else if (touchInput && [...(event.key || "")].length === 1 && !event.metaKey) {
+            // A hardware keyboard still types while the touch input is read-only.
+            event.preventDefault();
+            commit(event.key);
         }
     };
 
@@ -2034,6 +2136,7 @@ export function TerminalGrid({
         <section class=${`terminal-grid ${className}`} aria-label=${label}
             data-enabled=${interactive} data-focused=${focused} onCopy=${copy}>
             <link rel="stylesheet" href="/terminal-grid.css" />
+            <div class="terminal-grid-display">
             <div class="terminal-grid-viewport" ref=${viewport} tabIndex="-1"
                 style=${{ backgroundColor: rgb(theme.background) }}>
                 ${
@@ -2060,7 +2163,8 @@ export function TerminalGrid({
                         }
                         ${surface.popup && html`<span class="terminal-grid-popup-title">${surface.popup.title}</span>`}
                         <textarea ref=${input} class="terminal-grid-input" aria-label="Terminal input"
-                            disabled=${!interactive} readOnly=${!interactive} spellcheck="false"
+                            disabled=${!interactive} readOnly=${!interactive || touchInput}
+                            inputMode=${touchInput ? "none" : "text"} spellcheck="false"
                             autocapitalize="off" autocomplete="off" autocorrect="off" enterkeyhint="enter"
                             style=${pixels({
                                 left: clamp(
@@ -2168,45 +2272,6 @@ export function TerminalGrid({
                         : html`<p class="terminal-grid-empty">${surface ? "This frame exceeds browser rendering limits or is invalid." : "Waiting for a terminal frame…"}</p>`
                 }
             </div>
-            <div class="terminal-grid-tools">
-                <span class="terminal-grid-mode">${interactive ? (focused ? "Keyboard active" : "Click terminal to type") : "Read only"}</span>
-                ${
-                    showKeybar &&
-                    html`<div class="terminal-grid-keybar" role="group" aria-label="Terminal keys">
-                    ${[
-                        ["Escape", "Esc"],
-                        ["Control", "Ctrl"],
-                        ["Tab", "Tab"],
-                        ["ArrowLeft", "Left"],
-                        ["ArrowUp", "Up"],
-                        ["ArrowDown", "Down"],
-                        ["ArrowRight", "Right"],
-                    ].map(
-                        ([key, text]) => html`
-                        <button type="button" disabled=${!interactive || !drawable} aria-label=${key}
-                            aria-pressed=${key === "Control" ? ctrl : undefined}
-                            onPointerDown=${(e) => e.preventDefault()}
-                            onClick=${() => {
-                                focusInput();
-
-                                if (key === "Control") {
-                                    setCtrl(!ctrl);
-                                } else {
-                                    send([keyEvent({ key, ctrlKey: ctrl })]);
-                                    setCtrl(false);
-                                }
-                            }}>${text}</button>`,
-                    )}
-                </div>`
-                }
-            </div>
-            ${
-                typeof clipboardOffer === "string" &&
-                clipboardOffer.length <= MAX_SELECTION_BYTES &&
-                html`<div class="terminal-grid-clipboard-offer">
-                    <button type="button" onClick=${() => explicitCopy(clipboardOffer)}>Copy terminal clipboard request</button>
-                </div>`
-            }
             ${
                 (selection?.text || linkOffer) &&
                 html`
@@ -2220,6 +2285,27 @@ export function TerminalGrid({
                 </div>`
             }
             ${selection?.text && html`<textarea class="terminal-grid-selection" aria-label="Selected terminal text" readOnly value=${selection.text} />`}
+            </div>
+            ${
+                showKeybar &&
+                html`
+                <${TerminalKeyboard}
+                    disabled=${!interactive || !drawable}
+                    contextKey=${JSON.stringify([pasteContext, touchLayout])}
+                    onKey=${touchKey}
+                    native=${nativeKeyboard}
+                    onNative=${changeKeyboard}
+                    resetRef=${touchKeyboard}
+                />
+            `
+            }
+            ${
+                typeof clipboardOffer === "string" &&
+                clipboardOffer.length <= MAX_SELECTION_BYTES &&
+                html`<div class="terminal-grid-clipboard-offer">
+                    <button type="button" onClick=${() => explicitCopy(clipboardOffer)}>Copy terminal clipboard request</button>
+                </div>`
+            }
             ${notice && html`<p class="terminal-grid-notice" role="status">${notice}</p>`}
         </section>`;
 }

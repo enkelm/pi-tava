@@ -111,6 +111,7 @@ import { Spend } from "./spend.ts";
 import { Transcripts } from "./transcripts.ts";
 import { Watches } from "./watches.ts";
 import { Workspace } from "./workspace.ts";
+import { LanguageServices } from "./language-services.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -277,6 +278,7 @@ export class PocketApp {
     readonly attribution = new Attribution(this);
     /** The conversation's folder: files, the viewer, changes, and uploads. */
     readonly workspace = new Workspace(this);
+    readonly languages = new LanguageServices(this);
     /** The conversation's stored history, as people read it. */
     readonly transcripts = new Transcripts(this);
     /** Pi's sessions from the terminal, which the owner can continue here. */
@@ -2853,6 +2855,7 @@ export class PocketApp {
             }
 
             this.providers.close();
+            this.languages.close();
             await this.privateTerminals.close();
 
             // A timer that holds the process: with nothing else to do, Node would end it here, before the rest closed.

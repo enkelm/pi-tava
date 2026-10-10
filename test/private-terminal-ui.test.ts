@@ -314,8 +314,6 @@ test(
         };
         let denied = false;
         let extraInstances = 0;
-        let importLeaseReads = 0;
-        let prepareImport = false;
         let focusedWorkspace = "native-work";
         const reads: string[] = [];
         const server = createServer(async (request, response) => {
@@ -342,7 +340,7 @@ test(
                     response.statusCode = 409;
                     response.end(
                         JSON.stringify({
-                            error: "Synthetic import preview reached after lease release",
+                            error: "Synthetic import preview reached with terminal attached",
                         }),
                     );
                 } else if (denied) {
@@ -464,10 +462,7 @@ test(
                     revision: "fixture-revision",
                     capturedAt: Date.now(),
                     canPrompt: !isShell,
-                    canImport: !isShell && (!prepareImport || ++importLeaseReads > 3),
-                    importReason: prepareImport
-                        ? "A web terminal is attached to this pane."
-                        : undefined,
+                    canImport: !isShell,
                     warnings: [],
                     terminal:
                         "$ cargo test\n\nrunning 2 tests\ntest result: ok. 2 passed; 0 failed\n\nSynthetic fixture. Connect is mocked.",
@@ -673,7 +668,7 @@ test(
             assert.equal(
                 await value(
                     page,
-                    `getComputedStyle(document.querySelector('.terminal-grid-keybar')).display`,
+                    `getComputedStyle(document.querySelector('.terminal-keyboard')).display`,
                 ),
                 "none",
                 "desktop is keyboard-first",
@@ -1245,19 +1240,22 @@ test(
             );
             await frames(page);
 
-            // Import detaches our connection, waits only with safe GETs, and previews once.
-            prepareImport = true;
+            // Import previews once while the existing terminal remains attached.
+            await page.evaluate(
+                `window.fixtureImportConfirmations = []; window.confirm = message => { window.fixtureImportConfirmations.push(message); return true; };`,
+            );
             await click(page, ".sidebar .private-import");
             await until(
                 () => requests.some((request) => request.path.endsWith("/import-preview")),
-                "import preview follows lease cleanup",
+                "import preview with terminal attached",
             );
-            assert.ok(importLeaseReads >= 4);
-            assert.equal(await value(page, "window.fixtureSockets[2].closed"), true);
+            assert.equal(await value(page, "window.fixtureSockets[2].closed"), false);
+            assert.equal(await value(page, "window.fixtureSockets.length"), 3);
+            assert.deepEqual(await value(page, "window.fixtureImportConfirmations"), []);
             assert.equal(
                 requests.filter((request) => request.path.endsWith("/terminal")).length,
                 3,
-                "import detach suppresses reconnect",
+                "import neither detaches nor reconnects the terminal",
             );
             assert.equal(
                 requests.filter((request) => request.path.endsWith("/import-preview")).length,
@@ -1272,7 +1270,7 @@ test(
                     ),
                 "import refusal is shown truthfully",
             );
-            prepareImport = false;
+            assert.equal(await value(page, "window.fixtureSockets[2].closed"), false);
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.navigate(`${base}/private/opaque-agent`);

@@ -26,6 +26,7 @@ import type { PrivateRequest } from "../private-sessions.ts";
 import { desktopTheme, wallpaperFile } from "../omarchy.ts";
 import { runningNow } from "../running.ts";
 import { serveImage } from "./assets.ts";
+import { browserProfileRoutes } from "./browser-profile-routes.ts";
 import { browserRoutes } from "./browser-routes.ts";
 import { conversationRoutes } from "./conversation-routes.ts";
 import { createEventStreams } from "./events.ts";
@@ -141,6 +142,10 @@ export function createApi(options: HttpOptions, auth: Auth) {
 
         const [first, second, third, fourth] = parts;
         const route: ApiRequest = { app, request, response, url, user };
+
+        if (first === "browser-profiles" && third === undefined) {
+            return browserProfileRoutes(route, second);
+        }
 
         if (first === "events" && method === "GET") {
             return events(request, response, url, user);
@@ -518,6 +523,18 @@ export function createApi(options: HttpOptions, auth: Auth) {
             }
 
             throw new HttpError(404, "No such private session action");
+        }
+
+        if (
+            first === "imports" &&
+            second === "history" &&
+            third === undefined &&
+            method === "GET"
+        ) {
+            response.setHeader("cache-control", "no-store");
+            requireOwner(user);
+
+            return json(response, 200, await app.imports.history(user));
         }
 
         if (first === "imports" && second === "active") {

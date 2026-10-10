@@ -13,7 +13,7 @@ import {
     setBrowserOpen,
     toggleBrowser,
 } from "./browser.js";
-import { api, attempt, canSteer, notify, panelsBeside, store } from "./store.js";
+import { api, attempt, canSteer, notify, openSheet, panelsBeside, store } from "./store.js";
 import { APPLE, html, Icon, Spinner } from "./ui.js";
 
 const WIDTH_KEY = "pocket.browserWidth";
@@ -1027,6 +1027,17 @@ export function BrowserPanel({ leaving = false }) {
                     <${Icon} name="keyboard" size=${18} />
                 </button>`
             }
+            ${
+                me?.role === "owner" &&
+                html`<button
+                    class="icon-button"
+                    aria-label="Browser profiles"
+                    title="Import a browser profile"
+                    onClick=${() => openSheet({ type: "settings", tab: "browser" })}
+                >
+                    <${Icon} name="users" size=${18} />
+                </button>`
+            }
             <button
                 class="icon-button browser-close"
                 aria-label="Close the browser"
@@ -1062,11 +1073,11 @@ export function BrowserPanel({ leaving = false }) {
             />`
         }
         ${
-            me &&
-            !steer &&
             open &&
+            (state.sharedProfile || (me && !steer)) &&
             html`<div class="browser-foot muted small">
-                ${canSteer() ? "Take turns is on: the driver uses the page." : "You can watch; people who can steer use the page."}
+                ${state.sharedProfile && html`<span>Shared profile: ${state.sharedProfile}. </span>`}
+                ${me && !steer && (canSteer() ? "Take turns is on: the driver uses the page." : "You can watch; people who can steer use the page.")}
             </div>`
         }
     </section>`;

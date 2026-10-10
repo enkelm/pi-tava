@@ -4079,6 +4079,11 @@ pre.diff .del {
     margin-left: 0.25rem;
 }
 
+.sessions > .new-button {
+    flex: none;
+    min-height: 40px;
+}
+
 @media (max-width: 959px) {
     /* The list fills the screen here, so there is no sidebar to fold. */
     .sidebar-fold {
@@ -5702,6 +5707,67 @@ pre.diff .del {
     color: var(--muted);
 }
 
+/* Provider disclosure stays separate from its selectable model rows. */
+.model-provider + .model-provider {
+    border-top: 1px solid var(--line);
+}
+
+.model-provider-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-height: 44px;
+    padding: 0.55rem 0.8rem;
+    background: var(--card);
+    color: var(--text);
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-align: left;
+}
+
+.model-provider-toggle:hover {
+    background: var(--card-2);
+}
+
+.model-provider-toggle > .icon {
+    flex: none;
+    color: var(--muted);
+}
+
+.model-provider-toggle[aria-expanded="true"] > .icon {
+    transform: rotate(90deg);
+}
+
+.model-provider-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.model-provider-current,
+.model-provider-count {
+    flex: none;
+    font-size: 0.7rem;
+    font-weight: 400;
+}
+
+.model-provider-current {
+    color: var(--accent);
+}
+
+.model-provider-count {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.model-provider .pop-menu-row {
+    min-height: 40px;
+    padding-left: 2rem;
+}
+
 /* A heading between a menu's groups of rows. */
 .pop-menu-label {
     padding: 10px 10px 4px;
@@ -6110,6 +6176,40 @@ pre.diff .del {
     margin: calc(4px * var(--space-y)) 2px calc(6px * var(--space-y));
 }
 
+/* New Session keeps both flows in the same sheet, with their drafts retained. */
+.new-session-tabs button {
+    min-height: 40px;
+    color: var(--body);
+    font-size: 0.85rem;
+    letter-spacing: normal;
+    border-bottom: 2px solid transparent;
+}
+
+.new-session-tabs button.on {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
+.new-session-panel {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.new-session-panel[hidden] {
+    display: none;
+}
+
+.new-session-panel .row input {
+    min-width: 0;
+}
+
+.new-session-panel > .button {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
 .import-form code,
 .import-cwd {
     min-width: 0;
@@ -6136,6 +6236,111 @@ pre.diff .del {
     gap: 0.4rem;
     text-align: left;
     white-space: normal;
+}
+
+.import-source-tabs {
+    margin-bottom: 0.75rem;
+}
+
+.import-source-tabs button {
+    flex: 1;
+    min-height: 40px;
+    border-bottom: 2px solid transparent;
+}
+
+.import-source-tabs button.on {
+    border-bottom-color: var(--accent);
+    color: var(--accent);
+}
+
+.import-history[hidden] {
+    display: none;
+}
+
+.import-history-session {
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--card-2);
+}
+
+.import-history-session > .button {
+    border: 0;
+    border-radius: 0;
+    background: none;
+}
+
+.import-history-session > .button:hover {
+    background: var(--raised);
+}
+
+.import-history-session > .button:focus-visible {
+    outline-offset: -3px;
+}
+
+.import-history-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    width: 100%;
+}
+
+.import-history-heading svg {
+    flex-shrink: 0;
+}
+
+.import-history-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-weight: 600;
+}
+
+.import-history-path {
+    display: -webkit-box;
+    min-width: 0;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.import-history-preview {
+    padding: 0.9rem;
+    border-top: 1px solid var(--line);
+}
+
+.import-history-preview .button {
+    align-items: center;
+    min-height: 40px;
+}
+
+.import-history-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.import-history-message p {
+    display: -webkit-box;
+    overflow: hidden;
+    margin: 0.2rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+}
+
+.import-preview-source {
+    margin-top: 0.75rem;
+}
+
+.import-manual {
+    margin-top: 1rem;
+}
+
+.import-manual summary {
+    min-height: 40px;
 }
 
 .field {
@@ -6366,6 +6571,16 @@ pre.diff .del {
     min-height: 0;
     gap: 0.5rem;
     padding-bottom: 0.75rem;
+}
+
+/* The shared picker keeps its scroll regions bounded inside New Session or Working directory. */
+.folder-picker {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    height: min(65dvh, 500px);
+    gap: 0.5rem;
 }
 
 .fp-bar {
@@ -9032,6 +9247,34 @@ textarea.notes {
     align-self: stretch;
 }
 
+.browser-profile-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    overflow-wrap: anywhere;
+}
+
+.browser-profile-settings .field {
+    margin-bottom: 0.75rem;
+}
+
+.browser-profile-settings input,
+.browser-profile-settings select {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.browser-profile-settings .button,
+.browser-profile-settings summary {
+    min-height: 40px;
+    white-space: normal;
+}
+
+.browser-profile-settings .check {
+    margin: 0.75rem 0;
+    align-items: flex-start;
+}
+
 .settings-actions {
     display: flex;
     flex-wrap: wrap;
@@ -11276,6 +11519,319 @@ textarea.notes {
     height: 32px;
 }
 
+/* Editing fills the viewer; CodeMirror, not the outer panel, owns the scroll. */
+.ft-view:has(> .file-viewer.editing) {
+    overflow: hidden;
+}
+
+.ft-view:has(> .file-viewer.editing) > .ft-view-head {
+    flex: none;
+}
+
+.ft-view .file-viewer.editing {
+    flex: 1;
+    min-height: 0;
+    padding-bottom: 0.35rem;
+}
+
+.sheet:has(.file-viewer.editing) {
+    height: 86dvh;
+}
+
+.sheet-body:has(> .file-viewer.editing) {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 0.35rem;
+}
+
+.sheet-body > .file-viewer.editing {
+    flex: 1;
+    min-height: 0;
+}
+
+.file-viewer.editing > .file-tools {
+    flex: none;
+}
+
+.file-edit {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    gap: 0.35rem;
+}
+
+.file-tools .file-edit-open,
+.file-edit-error .button.small {
+    min-height: 40px;
+    padding-inline: 0.8rem;
+}
+
+.file-edit-surface {
+    flex: 1;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+}
+
+.file-edit-surface .cm-editor {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+}
+
+.file-edit-surface .cm-editor.cm-focused {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+}
+
+.file-edit-error {
+    flex: none;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    color: var(--err);
+}
+
+.file-edit-error > span {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.file-edit-warning {
+    margin: 0;
+    color: var(--warn);
+    font-size: 0.75rem;
+}
+
+.file-edit-footer {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.2rem 0.5rem;
+    min-width: 0;
+}
+
+.file-edit-statusbar {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: 0.35rem;
+    font-size: 0.7rem;
+}
+
+.file-edit-save-state {
+    padding: 0.15rem 0.45rem;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--body);
+    white-space: nowrap;
+}
+
+.file-edit-save-state.modified {
+    border-color: var(--warn-line);
+    background: var(--warn-soft);
+}
+
+.file-edit-save-state.failed {
+    color: var(--err);
+    border-color: var(--err-line);
+}
+
+.file-edit-lsp-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0.45rem;
+    min-height: 30px;
+    border: 1px solid var(--line);
+    color: var(--body);
+    font-size: inherit;
+}
+
+.file-edit-lsp-chip:hover,
+.file-edit-lsp-chip[aria-expanded="true"] {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.file-edit-status-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--muted);
+}
+
+.state-connected .file-edit-status-dot {
+    background: var(--ok);
+}
+
+.state-starting .file-edit-status-dot {
+    background: var(--warn);
+}
+
+.file-edit-lsp-local {
+    color: var(--body);
+}
+
+.file-edit-shortcuts {
+    flex: 1;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    flex-wrap: wrap;
+    min-width: 0;
+    gap: 0.15rem;
+}
+
+.file-edit-shortcut {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 30px;
+    padding: 0.25rem 0.35rem;
+    color: var(--body);
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+.file-edit-shortcut kbd {
+    padding: 0.05rem 0.2rem;
+    border: 1px solid var(--line);
+    background: var(--card);
+    font-family: inherit;
+    font-size: 0.66rem;
+}
+
+.file-edit-shortcut:disabled {
+    color: var(--muted);
+    cursor: default;
+}
+
+.file-edit-shortcut:hover:not(:disabled) {
+    background: var(--hover);
+    color: var(--text);
+}
+
+.file-edit-shortcut:focus-visible,
+.file-edit-lsp-chip:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+}
+
+.file-lsp-menu {
+    z-index: 25;
+    overflow-y: auto;
+    outline: none;
+}
+
+.file-lsp-menu .pop-menu-head {
+    justify-content: space-between;
+    flex: none;
+}
+
+.file-lsp-menu .icon-button {
+    width: 40px;
+    height: 40px;
+}
+
+.file-lsp-detail,
+.file-lsp-error {
+    margin: 0;
+    padding: 0.6rem 0.8rem;
+    color: var(--body);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+}
+
+.file-lsp-error {
+    color: var(--err);
+}
+
+.file-lsp-servers {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.file-lsp-server {
+    padding: 0.6rem 0.8rem;
+    border-top: 1px solid var(--line);
+}
+
+.file-lsp-server-head,
+.file-lsp-project {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.file-lsp-server-head {
+    color: var(--text);
+    font-size: 0.8rem;
+}
+
+.file-lsp-server-state {
+    flex: none;
+    font-size: 0.7rem;
+    color: var(--body);
+}
+
+.file-lsp-server-state.state-starting {
+    color: var(--warn);
+}
+
+.file-lsp-project {
+    margin-top: 0.2rem;
+    color: var(--body);
+    font-size: 0.7rem;
+}
+
+.file-lsp-project > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-lsp-project > span:last-child {
+    flex: none;
+}
+
+@media (max-width: 699px), (pointer: coarse) {
+    .file-edit-shortcut,
+    .file-edit-lsp-chip {
+        min-height: 40px;
+        min-width: 40px;
+    }
+}
+
+@media (max-width: 699px) {
+    .file-edit-shortcuts {
+        justify-content: flex-start;
+        flex: 1 1 100%;
+    }
+    .file-edit-shortcut {
+        padding-inline: 0.7rem;
+        font-size: 0.78rem;
+    }
+    .file-edit-shortcut kbd {
+        display: none;
+    }
+}
+
 /* ─── Browser ──────────────────────────────────────────────── */
 
 /* Phones and narrow windows: the page full screen, over the conversation and under sheets. Wide screens: a window
@@ -11763,6 +12319,7 @@ textarea.notes {
 }
 
 .browser-foot {
+    overflow-wrap: anywhere;
     padding: 0.3rem 0.8rem calc(env(safe-area-inset-bottom) + 0.3rem);
     border-top: 1px solid var(--line);
     text-align: center;

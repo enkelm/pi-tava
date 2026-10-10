@@ -288,7 +288,7 @@ test(
             await fill(page, "/model");
             await page.press("Enter");
             await present(page, picker);
-            await present(page, `${picker} .pop-menu-list[role=listbox]`);
+            await present(page, `${picker} .pop-menu-list [role=listbox]`);
             await until(
                 () => value(page, "history.state?.pocket?.layers === 1"),
                 "mobile picker history layer",

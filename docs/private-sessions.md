@@ -43,7 +43,7 @@ Private attachments are stored under `private-uploads/` in the app's data folder
 
 Bridge input and takeover use one pane-operation lock. The app commits an opaque admission receipt before sending a prompt. Only a matching `agent_prompted` acknowledgement settles it. A lost or invalid reply leaves a durable restriction on further Chat prompts and takeover. Restarting Pocket does not clear it and cannot cancel Herdr's queued Enter. Other terminal clients remain outside this lock, and process checks are not atomic OS handles. No guarantee is made about a process swap between checks and Herdr dispatch.
 
-A connected web Terminal holds an instance lease that excludes automatic takeover, not guarded Chat. A separate operation lock prevents newly forwarded native input from overlapping an active Chat admission inside Pocket. It is not a PTY-drain or cross-transport acknowledgement. Native keyboard input has no PTY-drain acknowledgement, so the app also records terminal use before forwarding input. Automatic shutdown/import remains restricted afterward; disconnecting or restarting is not proof of cancellation. Private transcripts and input text never enter these receipts. Stopped-file import remains available after the owner exits Pi directly.
+A connected web Terminal and recorded terminal input do not disable import. Terminal attachment and newly forwarded input take the same short operation lock as Chat and takeover, so they cannot cross an active move. This is not a PTY-drain or cross-transport acknowledgement; external terminal clients remain outside the lock. Terminal use is recorded before forwarding input, but only an uncertain Chat receipt blocks future import. Private transcripts and input text never enter these receipts. Preview keeps the browser's terminal attached and stops or aborts nothing.
 
 ## Saved history and limits
 
@@ -59,7 +59,7 @@ Discovery covers same-owner default and named local Herdr sockets plus the inher
 
 The importer validates visibility before sending a signal. New shared imports publish history, archive/provenance, catalogue visibility and retry identity atomically. Existing private imports can be explicitly promoted on retry; legacy owner-only retries never downgrade shared sessions. Conflicting visibility choices for the same move are rejected rather than silently ignored. The saved-file and older import API remain owner-only by default for compatibility.
 
-The existing shutdown safeguards still apply: no busy work, unresolved real tool calls, protected ancestors, children, uncertain process identities, process-group signals or SIGKILL. An app restart never automatically stops Herdr agents. Source files remain unchanged; subsequent shared work stays in Durable.
+Busy Pi can be selected for import, but the confirmation must separately accept aborting running operations. The server sends Escape once, waits for idle status and child tools to exit, then stops Pi and imports its final saved branch. Already-made tool changes are not undone. Protected ancestors, unresolved tool results, surviving children and uncertain process identities remain blocked; no process-group signals or SIGKILL are used. An app restart never automatically aborts or stops Herdr agents. The importer never writes source files; Pi may save cancellation results before exit. Subsequent shared work stays in Durable.
 
 ## Reuse and verification
 

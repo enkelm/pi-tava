@@ -11,16 +11,10 @@ const hash = (...parts: string[]) =>
 
 export const UNCERTAIN_INPUT_REASON =
     "Input delivery is uncertain. Chat prompts and Import & share are blocked for safety. Restarting the app or refreshing does not clear this block. Input was not automatically retried.";
-export const TERMINAL_HELD_REASON =
-    "A web terminal is attached to this Herdr instance. Disconnect it before using Import & share.";
-
-export const TERMINAL_IMPORT_REASON =
-    "Terminal input was used. Exit Pi in Herdr and import its saved file.";
-
 export type ControlPurpose = "prompt" | "takeover";
 export type PromptReceipt = Readonly<{ id: string; socket: string; pane: string }>;
 
-/** Internal server API. Callers authorize the owner and acquire the local pane/instance lease first.
+/** Internal server API. Callers authorize the owner and acquire the local pane/instance operation reservation first.
  * No generic clear method: snapshots, socket closure and process replacement do not cancel queued input.
  */
 export class PrivateControl {
@@ -30,11 +24,7 @@ export class PrivateControl {
         this.#app = app;
     }
 
-    async reason(
-        socket: string,
-        pane: string,
-        purpose: ControlPurpose = "takeover",
-    ): Promise<string | undefined> {
+    async reason(socket: string, pane: string): Promise<string | undefined> {
         const stored = await this.#app.harness.snapshot(PrivateControlDoc, context);
         const instance = hash(socket);
         const target = hash(socket, pane);
@@ -42,19 +32,13 @@ export class PrivateControl {
             (item) => item.instance === instance && (!item.pane || item.pane === target),
         );
 
-        if (receipts.some((item) => item.kind !== "terminal")) {
-            return UNCERTAIN_INPUT_REASON;
-        }
-
-        return purpose === "takeover" && receipts.length ? TERMINAL_IMPORT_REASON : undefined;
+        return receipts.some((item) => item.kind !== "terminal")
+            ? UNCERTAIN_INPUT_REASON
+            : undefined;
     }
 
-    async requireClear(
-        socket: string,
-        pane: string,
-        purpose: ControlPurpose = "takeover",
-    ): Promise<void> {
-        const reason = await this.reason(socket, pane, purpose);
+    async requireClear(socket: string, pane: string): Promise<void> {
+        const reason = await this.reason(socket, pane);
 
         if (reason) {
             throw new HttpError(409, reason);
@@ -126,9 +110,8 @@ export class PrivateControl {
     }
 
     /** Call before forwarding any terminal input or input-capable native request. Idempotent per instance.
-     * The native endpoint has no per-input completion fence, so automatic takeover remains blocked after detach.
-     * This is known terminal use, not a lost Chat acknowledgement: fresh guarded Chat remains allowed while attached,
-     * with the same non-atomic process checks as alongside a desktop client. No queue cancellation is implied.
+     * Known terminal use is retained for storage compatibility, not as a Chat or import restriction.
+     * It never settles an uncertain Chat receipt or implies cancellation of Herdr's queued input.
      * Instance scope covers input/focus that can target panes other than the initial one.
      */
     async markTerminalInput(socket: string): Promise<void> {

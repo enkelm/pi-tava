@@ -906,7 +906,7 @@ test("Chat delivers slash commands but refuses shell, multiline and controls bef
     }
 });
 
-test("terminalTarget authorizes before I/O and resolves shells/all agents, even during holds or uncertainty", async () => {
+test("terminalTarget authorizes before I/O and resolves shells/all agents after terminal input", async () => {
     const f = await fixture("terminal-target");
 
     try {
@@ -933,8 +933,6 @@ test("terminalTarget authorizes before I/O and resolves shells/all agents, even 
             terminal: "terminal-1",
             instanceId: tree.instances[0]!.id,
         });
-        const release = f.local.holdInstance("/synthetic/herdr.sock");
-
         await f.app.privateSessions.markTerminalInput(owner(f.app), "/synthetic/herdr.sock");
         assert.deepEqual(await f.app.privateSessions.terminalTarget(owner(f.app), shell.id), {
             socket: "/synthetic/herdr.sock",
@@ -942,7 +940,6 @@ test("terminalTarget authorizes before I/O and resolves shells/all agents, even 
             terminal: "terminal-shell",
             instanceId: tree.instances[0]!.id,
         });
-        release();
         assert.deepEqual(await f.app.privateSessions.terminalTarget(owner(f.app), codex.id), {
             socket: "/synthetic/sessions/Research/herdr.sock",
             pane: "r:p1",
@@ -1132,7 +1129,7 @@ test("private prompts recheck process/session identity, deduplicate, and use onl
     }
 });
 
-test("busy/blocked Pi is read-only, replacement during a read is rejected, restart invalidates old input", async () => {
+test("busy/blocked Pi keeps Chat read-only but permits import preview; replacement and restart invalidate input", async () => {
     const f = await fixture("stale");
 
     try {
@@ -1140,10 +1137,10 @@ test("busy/blocked Pi is read-only, replacement during a read is rejected, resta
 
         for (const state of ["working", "blocked", "unknown"]) {
             f.state.status = state;
-            assert.equal(
-                (await f.app.privateSessions.pane(owner(f.app), f.pane.id)).canPrompt,
-                false,
-            );
+            const current = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+
+            assert.equal(current.canPrompt, false);
+            assert.equal(current.canImport, state !== "unknown");
             await assert.rejects(
                 f.app.privateSessions.prompt(owner(f.app), f.pane.id, {
                     revision: view.revision,

@@ -1019,27 +1019,6 @@ export function SessionList({ compact = false, home = false }) {
                     <${Icon} name="sidebar" size=${18} />
                 </button>`
             }
-            ${
-                !privateTab &&
-                store.state.me?.role === "owner" &&
-                html`<button
-                    class="button small"
-                    aria-label="Import Pi session"
-                    onClick=${() => openSheet({ type: "import" })}
-                >
-                    Import
-                </button>`
-            }
-            ${
-                !privateTab &&
-                canStart &&
-                html`<button
-                    class="button primary small new-button"
-                    onClick=${() => openSheet({ type: "cwd", mode: "new" })}
-                >
-                    <${Icon} name="plus" size=${16} /> New
-                </button>`
-            }
         </div>
         <${PrivateTabs} />
         ${
@@ -1096,6 +1075,16 @@ export function SessionList({ compact = false, home = false }) {
                                         </button>`
                           }
                       </label>
+                      ${
+                          canStart &&
+                          html`<button
+                              class="button primary wide new-button"
+                              aria-label="New session"
+                              onClick=${() => openSheet({ type: "new-session" })}
+                          >
+                              <${Icon} name="plus" size=${16} /> New Session
+                          </button>`
+                      }
                       <div class="session-tabs" data-part="session-tabs" role="tablist" ref=${tabs}>
                           ${TABS.map(
                               ([key, label]) =>
@@ -1120,7 +1109,7 @@ export function SessionList({ compact = false, home = false }) {
                               sessionsLoaded &&
                               shown.length === 0 &&
                               html`<div class="sessions-empty">
-                                  ${archived ? "No archived sessions." : needle ? "No matches." : "No sessions yet. Start one with New."}
+                                  ${archived ? "No archived sessions." : needle ? "No matches." : "No sessions yet. Start one with New Session."}
                               </div>`
                           }
                           ${groups.map((group) => {

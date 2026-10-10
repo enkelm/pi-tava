@@ -29,6 +29,8 @@ export type BrowserState = {
     errors: number;
     /** How many console lines there are, to know when to fetch them again. */
     logs: number;
+    /** The app-wide persistent profile, when the owner selected an import. */
+    sharedProfile?: string;
     /** Why the page could not open, or that it crashed. */
     problem?: string;
 };
@@ -136,7 +138,7 @@ export class BrowserPage {
     readonly #connection: Connection;
     readonly #session: string;
     readonly #target: string;
-    readonly #context: string;
+    readonly #context: string | undefined;
     readonly #baseAgent: string;
     readonly #changed: () => void;
     readonly #saved: (saved: Saved) => void;
@@ -174,7 +176,7 @@ export class BrowserPage {
         connection: Connection;
         session: string;
         target: string;
-        context: string;
+        context: string | undefined;
         userAgent: string;
         viewport: Viewport;
         changed: () => void;
@@ -196,7 +198,7 @@ export class BrowserPage {
         return this.#target;
     }
 
-    get contextId(): string {
+    get contextId(): string | undefined {
         return this.#context;
     }
 
@@ -464,7 +466,13 @@ export class BrowserPage {
             return;
         }
 
-        if (info?.type !== "page" || info.browserContextId !== this.#context) {
+        // A persistent default profile has several conversations' tabs. Only our opener's popups belong here.
+        if (
+            info?.type !== "page" ||
+            (this.#context === undefined
+                ? info.openerId !== this.#target
+                : info.browserContextId !== this.#context)
+        ) {
             return;
         }
 

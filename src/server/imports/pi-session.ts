@@ -200,9 +200,15 @@ function validateEntry(entry: Record<string, unknown>): void {
 }
 
 export type PiImport = ReturnType<typeof parsePiSession>;
+/** Live is only for a verified running Pi's preview/preflight, never for publishing history. */
+export type PiSessionMode = "strict" | "live" | "aborted";
 
 /** Parse all envelopes strictly, then validate and project only the selected branch. The original bytes stay untouched. */
-export function parsePiSession(archive: string, selectedLeaf?: string) {
+export function parsePiSession(
+    archive: string,
+    selectedLeaf?: string,
+    mode: PiSessionMode = "strict",
+) {
     requireValue(
         Buffer.byteLength(archive) <= MAX_IMPORT_BYTES,
         "Session exceeds the 16 MiB import limit",
@@ -310,8 +316,8 @@ export function parsePiSession(archive: string, selectedLeaf?: string) {
     const projected = modelMessages(projection.messages);
 
     // Validate raw ordering before filtering failed attempts, so they cannot hide an unfinished real tool round.
-    checkToolHistory(modelMessages(branch.flatMap(sessionEntryToContextMessages)));
-    checkToolHistory(projected);
+    checkToolHistory(modelMessages(branch.flatMap(sessionEntryToContextMessages)), mode === "live");
+    checkToolHistory(projected, mode === "live");
     const messages = projected.filter((message) => !failedAssistant(message));
     const lastConversationMessage = branch.findLast(
         (entry) =>
@@ -319,12 +325,17 @@ export function parsePiSession(archive: string, selectedLeaf?: string) {
             ["user", "assistant", "toolResult"].includes(entry.message.role),
     );
 
-    requireValue(
-        lastConversationMessage?.type === "message" &&
-            lastConversationMessage.message.role === "assistant" &&
-            lastConversationMessage.message.stopReason !== "toolUse",
-        "Import a stopped branch ending in a saved assistant response",
-    );
+    requireValue(lastConversationMessage !== undefined, "Expected saved conversation history");
+
+    if (mode === "strict") {
+        requireValue(
+            lastConversationMessage.type === "message" &&
+                lastConversationMessage.message.role === "assistant" &&
+                lastConversationMessage.message.stopReason !== "toolUse",
+            "Import a stopped branch ending in a saved assistant response",
+        );
+    }
+
     const info = branch.findLast((entry) => entry.type === "session_info" && entry.name);
     const title = (info?.type === "session_info" ? info.name : undefined) ?? "Imported Pi session";
     const parentIds = new Set([...byId.values()].map((entry) => entry.parentId));
@@ -399,7 +410,7 @@ function replaceContent<T extends { role: string; content: unknown }>(
 }
 
 /** Reject missing, unmatched or reordered tool results instead of letting Durable synthesize or reorder them. */
-function checkToolHistory(messages: Message[]): void {
+function checkToolHistory(messages: Message[], allowPendingTail = false): void {
     let pending: { id: string; name: string }[] = [];
 
     for (const message of messages) {
@@ -429,13 +440,18 @@ function checkToolHistory(messages: Message[]): void {
     }
 
     requireValue(
-        pending.length === 0,
+        allowPendingTail || pending.length === 0,
         "Incomplete tool round; finish the original session before importing",
     );
 }
 
-/** A bounded stable read of a regular file, never SessionManager.open(), which can repair or migrate its input. */
-export async function readPiSession(path: unknown, leaf?: unknown) {
+/** A bounded stable read, never SessionManager.open(). The fourth argument is a trusted I/O cap, not HTTP input. */
+export async function readPiSession(
+    path: unknown,
+    leaf?: unknown,
+    mode: PiSessionMode = "strict",
+    maxReadBytes = MAX_IMPORT_BYTES + 1,
+) {
     requireValue(
         typeof path === "string" && isAbsolute(expandHome(path)),
         "Enter an absolute session file path on this server",
@@ -444,6 +460,11 @@ export async function readPiSession(path: unknown, leaf?: unknown) {
         leaf === undefined || (typeof leaf === "string" && identifier(leaf)),
         "Invalid branch entry ID",
     );
+    requireValue(
+        Number.isSafeInteger(maxReadBytes) && maxReadBytes >= 0,
+        "Invalid session read byte limit",
+    );
+    const readBound = Math.min(MAX_IMPORT_BYTES + 1, maxReadBytes);
     let file;
 
     try {
@@ -459,7 +480,12 @@ export async function readPiSession(path: unknown, leaf?: unknown) {
             before.isFile() && before.size <= MAX_IMPORT_BYTES,
             "Choose a regular session file no larger than 16 MiB",
         );
-        const buffer = Buffer.alloc(MAX_IMPORT_BYTES + 1);
+        requireValue(
+            before.size <= readBound,
+            "The source exceeded its discovery read budget; preview again.",
+        );
+        // A trusted discovery cap needs no extra-byte probe: the stable before/after/path stats still reject growth.
+        const buffer = Buffer.alloc(readBound);
         let size = 0;
 
         while (size < buffer.length) {
@@ -498,7 +524,7 @@ export async function readPiSession(path: unknown, leaf?: unknown) {
             throw new HttpError(400, "Session file is not valid UTF-8");
         }
 
-        return { ...parsePiSession(archive, leaf), path: resolved };
+        return { ...parsePiSession(archive, leaf, mode), path: resolved };
     } catch (error) {
         if (error instanceof HttpError) {
             throw error;

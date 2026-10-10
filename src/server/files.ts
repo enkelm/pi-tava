@@ -6,10 +6,11 @@
  * themselves as people type: typing never waits on the network.
  */
 import { createHash } from "node:crypto";
-import type { Dirent } from "node:fs";
+import { constants, type Dirent } from "node:fs";
 import { open, opendir, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { gzip as gzipCallback } from "node:zlib";
+import { boundedBytes, decodeText, MAX_EDIT_BYTES, textRevision } from "./file-edits.ts";
 import { git } from "./git.ts";
 
 const gzip = promisify(gzipCallback);
@@ -261,13 +262,12 @@ export class FileLists {
 }
 
 /** How much of a file the viewer shows, and of a folder. */
-const VIEW_BYTES = 512 * 1024;
 const VIEW_ENTRIES = 1000;
 const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
 
 /** A file as the viewer shows it: text, an image (loaded through the image route), a folder's entries, binary, or other (a pipe, a device). */
 export type FileView =
-    | { kind: "text"; size: number; text: string; truncated: boolean }
+    | { kind: "text"; size: number; text: string; truncated: boolean; revision?: string }
     | { kind: "image" | "binary" | "other"; size: number }
     | { kind: "folder"; entries: { name: string; dir: boolean }[]; truncated: boolean };
 
@@ -293,23 +293,38 @@ export async function viewFile(file: string): Promise<FileView> {
         return { kind: "image", size: info.size };
     }
 
-    const handle = await open(file, "r");
+    const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
 
     try {
-        const buffer = Buffer.alloc(Math.min(info.size, VIEW_BYTES));
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-        const bytes = buffer.subarray(0, bytesRead);
+        // The name may have changed since stat: never read a swapped pipe or device.
+        const before = await handle.stat();
 
-        // Text files have no NUL bytes; nearly every other kind does, early on.
-        if (bytes.subarray(0, 8000).includes(0)) {
-            return { kind: "binary", size: info.size };
+        if (!before.isFile()) {
+            return { kind: "other", size: before.size };
+        }
+
+        const bytes = await boundedBytes(handle);
+        const after = await handle.stat();
+        const truncated =
+            bytes.length > MAX_EDIT_BYTES ||
+            before.size !== bytes.length ||
+            after.size !== bytes.length ||
+            before.mtimeMs !== after.mtimeMs ||
+            before.ctimeMs !== after.ctimeMs;
+        const shown = bytes.subarray(0, MAX_EDIT_BYTES);
+        // A preview may cut a UTF-8 character at the cap. Only complete valid text gets a revision.
+        const text = decodeText(shown);
+
+        if (shown.includes(0) || (!truncated && text === undefined)) {
+            return { kind: "binary", size: after.size };
         }
 
         return {
             kind: "text",
-            size: info.size,
-            text: bytes.toString("utf8"),
-            truncated: info.size > bytesRead,
+            size: after.size,
+            text: text ?? shown.toString("utf8"),
+            truncated,
+            ...(!truncated ? { revision: textRevision(bytes) } : {}),
         };
     } finally {
         await handle.close();

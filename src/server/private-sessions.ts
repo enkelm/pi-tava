@@ -397,8 +397,8 @@ export class PrivateSessions {
 
     /** Terminal gateway only: socket must come from terminalTarget, never a browser-supplied path.
      * Await once before the first mutating native input/request, inside local.withTerminalInput.
-     * Keep the instance lease for the child lifetime. It blocks takeover, not fresh guarded Chat.
-     * Detach and write completion are not PTY drain acknowledgements; the takeover fence has no timeout or cleanup.
+     * Known terminal use does not block import or fresh guarded Chat. Mutating input is excluded during takeover.
+     * Detach and write completion are not PTY drain acknowledgements; uncertain Chat receipts remain separate.
      */
     async markTerminalInput(user: User, socket: string): Promise<void> {
         this.#owner(user);
@@ -463,6 +463,7 @@ export class PrivateSessions {
             target.wire.agent === "pi"
                 ? "Cannot verify this Pi process. Chat prompts are disabled; use Terminal mode."
                 : "Chat prompts currently support only Pi. Use Terminal mode for this pane.";
+        let importReason = reason;
 
         if (target.wire.agent === "pi") {
             try {
@@ -485,17 +486,21 @@ export class PrivateSessions {
                         : !["idle", "done"].includes(target.pane.state)
                           ? "Pi is working or waiting for input. Finish this turn in Herdr before sending another message."
                           : "";
+                    importReason = !sessionPath(target.wire)
+                        ? "Pi has not reported its current session. Enable Herdr's Pi integration first."
+                        : !["idle", "done", "working", "blocked"].includes(target.pane.state)
+                          ? "Pi's status is unknown. Refresh before importing."
+                          : "";
                 }
             } catch {
                 // Read access is still useful if a Herdr version cannot verify foreground processes.
             }
         }
 
-        reason =
-            (await this.local.inputReason(target.socket, target.wire.pane_id, "prompt")) ?? reason;
-        const importReason =
-            (await this.local.inputReason(target.socket, target.wire.pane_id, "takeover")) ??
-            reason;
+        const inputReason = await this.local.inputReason(target.socket, target.wire.pane_id);
+
+        reason = inputReason ?? reason;
+        importReason = inputReason ?? importReason;
 
         const revision = hash([
             this.#epoch,
@@ -575,12 +580,7 @@ export class PrivateSessions {
             warnings,
             canPrompt: !current.reason,
             ...(current.reason ? { reason: current.reason } : {}),
-            canImport: Boolean(
-                path &&
-                current.identity &&
-                ["idle", "done"].includes(target.pane.state) &&
-                !current.importReason,
-            ),
+            canImport: Boolean(path && current.identity && !current.importReason),
             ...(current.importReason ? { importReason: current.importReason } : {}),
             capturedAt: Date.now(),
         };

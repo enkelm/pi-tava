@@ -15,6 +15,9 @@ export function fakeHerdr(app: App, path: string) {
         foregroundGroup: pi.pid,
         table: [shell, pi] as LocalProcess[],
         signals: [] as number[],
+        escapes: [] as unknown[],
+        refuseAbort: false,
+        onEscape: undefined as (() => void | Promise<void>) | undefined,
         refuseExit: false,
         omitArgv: false,
     };
@@ -23,7 +26,23 @@ export function fakeHerdr(app: App, path: string) {
     local.processes = async () => state.table;
     local.sockets = async () => ["/synthetic/herdr.sock"];
 
-    local.request = async <T>(_socket: string, method: string): Promise<T> => {
+    local.request = async <T>(
+        _socket: string,
+        method: string,
+        params?: Record<string, unknown>,
+    ): Promise<T> => {
+        if (method === "pane.send_keys") {
+            state.escapes.push(params);
+            await state.onEscape?.();
+
+            if (!state.refuseAbort) {
+                state.status = "idle";
+                state.table = state.table.filter((item) => item.parent !== pi.pid);
+            }
+
+            return { type: "ok" } as T;
+        }
+
         if (method === "session.snapshot") {
             return {
                 snapshot: {

@@ -117,6 +117,18 @@ function LineInput({ value, placeholder, label, onSubmit, onCancel, class: class
 }
 
 export function CwdSheet({ mode }) {
+    return html`<${Sheet}
+        title=${mode === "change" ? "Working directory" : "New Session"}
+        onClose=${closeSheet}
+        wide=${true}
+        className="folder-sheet"
+    >
+        <${FolderPicker} mode=${mode} />
+    <//>`;
+}
+
+/** Folder selection shared by New Session and Working directory. */
+export function FolderPicker({ mode }) {
     const { view, server, folderFavorites: favorites } = store.state;
     const changing = mode === "change";
     const initial =
@@ -137,6 +149,7 @@ export function CwdSheet({ mode }) {
     // Set at once, unlike busy: a second shortcut in the same moment does not start a second session.
     const starting = useRef(false);
     const [saving, setSaving] = useState(false);
+    const root = useRef(null);
     const list = useRef(null);
     const crumbsBox = useRef(null);
     // Only the latest read shows: a slow one answering after a later click is dropped.
@@ -206,7 +219,7 @@ export function CwdSheet({ mode }) {
             list.current.scrollTop = 0;
         }
 
-        if (!touch && !naming && editing === null) {
+        if (!touch && !naming && editing === null && !root.current?.closest("[hidden]")) {
             list.current?.focus({ preventScroll: true });
         }
     }, [folder]);
@@ -300,8 +313,11 @@ export function CwdSheet({ mode }) {
                 event.altKey ||
                 event.shiftKey ||
                 event.isComposing ||
-                sheet?.type !== "cwd" ||
-                sheet.mode !== "new" ||
+                root.current?.closest("[hidden]") ||
+                !(
+                    (sheet?.type === "cwd" && sheet.mode === "new") ||
+                    (sheet?.type === "new-session" && (sheet.tab ?? "new") === "new")
+                ) ||
                 store.state.launcher
             ) {
                 return;
@@ -419,12 +435,7 @@ export function CwdSheet({ mode }) {
         ${key && html`<span class="fp-key">${key}</span>`}
     </button>`;
 
-    return html`<${Sheet}
-        title=${changing ? "Move this session: pick a folder" : "New session: pick a folder"}
-        onClose=${closeSheet}
-        wide=${true}
-        className="folder-sheet"
-    >
+    return html`<div class="folder-picker" ref=${root}>
         <div class="fp-bar">
             <button
                 type="button"
@@ -669,5 +680,5 @@ export function CwdSheet({ mode }) {
                 </button>
             </div>
         </div>
-    <//>`;
+    </div>`;
 }

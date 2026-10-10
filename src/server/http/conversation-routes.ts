@@ -465,6 +465,24 @@ export async function conversationRoutes(
         return json(response, 200, await app.workspace.viewFile(id, user, requested));
     }
 
+    if (third === "edit" && method === "POST") {
+        // JSON escaping can take six bytes per byte of UTF-8 text; the save boundary checks the decoded byte limit.
+        const body = await readJson<{ path?: unknown; text?: unknown; revision?: unknown } | null>(
+            request,
+            4 * 1024 * 1024,
+        );
+
+        return json(
+            response,
+            200,
+            await app.workspace.saveFile(id, user, body?.path, body?.text, body?.revision),
+        );
+    }
+
+    if (third === "lsp" && method === "POST") {
+        return json(response, 200, await app.languages.handle(id, user, await readJson(request)));
+    }
+
     if (third === "changes" && fourth === "revert" && method === "POST") {
         const body = await readJson<{ path?: unknown }>(request);
 

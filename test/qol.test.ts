@@ -304,7 +304,8 @@ test("the viewer shows a text file, and does not open a pipe", async () => {
     writeFileSync(join(folder, "docs", "a.md"), "alpha\n");
     const me = owner(app);
 
-    assert.deepEqual(await app.workspace.viewFile(id, me, "docs/a.md"), {
+    // This test owns the viewer's content/kind contract; revision and edit eligibility are covered by file-edits.
+    assert.partialDeepStrictEqual(await app.workspace.viewFile(id, me, "docs/a.md"), {
         path: join(folder, "docs", "a.md"),
         display: "docs/a.md",
         kind: "text",

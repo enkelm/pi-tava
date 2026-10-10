@@ -17,6 +17,7 @@ header{padding:12px}#fixture{height:calc(100dvh - 60px);min-height:300px}header 
 export async function terminalFixture(port = 0) {
     const paths: Record<string, [string, string]> = {
         "/terminal-grid.js": ["web/terminal-grid.js", "text/javascript"],
+        "/terminal-keyboard.js": ["web/terminal-keyboard.js", "text/javascript"],
         "/terminal-grid.css": ["web/terminal-grid.css", "text/css"],
         "/terminal-grid-fixture.js": ["test/terminal-grid-fixture.js", "text/javascript"],
         "/preact.mjs": ["node_modules/preact/dist/preact.mjs", "text/javascript"],

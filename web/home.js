@@ -127,15 +127,9 @@ export function Splash() {
                 canStart &&
                 html`<button
                     class="button primary"
-                    onClick=${() => openSheet({ type: "cwd", mode: "new" })}
+                    onClick=${() => openSheet({ type: "new-session" })}
                 >
-                    <${Icon} name="plus" size=${16} /> New session <${Keys} keys="Alt N" />
-                </button>`
-            }
-            ${
-                me?.role === "owner" &&
-                html`<button class="button" onClick=${() => openSheet({ type: "import" })}>
-                    Import Pi session
+                    <${Icon} name="plus" size=${16} /> New Session <${Keys} keys="Alt N" />
                 </button>`
             }
             <button class="button" onClick=${() => store.set({ launcher: true })}>

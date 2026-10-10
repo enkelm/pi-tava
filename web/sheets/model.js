@@ -1,6 +1,6 @@
 // The model picker: a menu over the model chip, searchable once there are many models; and the same menu for the model
 // and thinking level new sessions start with.
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useRef, useState } from "preact/hooks";
 import { actions, api, attempt, closeSheet, openSheet, store } from "../store.js";
 import { useDragToClose } from "../gestures.js";
 import {
@@ -64,6 +64,7 @@ const matches = (model, query) => {
  * scoped models (Pi's `enabledModels`) and all of them; a search box shows when there are many models, or when
  * `/model son` opened it already searching. Opened for the default (`forDefault`, from the menu), it picks the model
  * and thinking level new sessions start with instead, and stays open for both.
+ * Models are grouped by provider; disclosure is separate from the selectable rows.
  */
 export function ModelPicker({
     privateMode = false,
@@ -104,6 +105,9 @@ export function ModelPicker({
     // Decided once: a search box that went away when emptied would take the caret with it.
     const [searchable] = useState(() => models.length > MODEL_SEARCH_AT || query !== "");
     const [picked, setPicked] = useState(0);
+    // Provider disclosure is local; each search starts with matching groups revealed.
+    const [expanded, setExpanded] = useState(() => new Map());
+    const groupId = useId();
     const [anchor, setAnchor] = useState(() =>
         forDefault || pipId !== undefined ? null : modelAnchor(),
     );
@@ -137,10 +141,39 @@ export function ModelPicker({
         ? (chosen?.thinkingLevel ?? agent?.thinkingLevel ?? "off")
         : agent?.thinkingLevel;
     const reasoning = forDefault ? defaultModel?.reasoning : agent?.reasoning;
-    const shown = choices
+    const needle = query.trim().toLowerCase();
+    const filtered = choices
         .filter((model) => matches(model, query))
         .sort((a, b) => Number(isCurrent(b)) - Number(isCurrent(a)));
-    // The list can change while the picker is open.
+    const byProvider = new Map();
+
+    for (const model of filtered) {
+        if (!byProvider.has(model.provider)) {
+            byProvider.set(model.provider, []);
+        }
+
+        byProvider.get(model.provider).push(model);
+    }
+
+    const providers = [...byProvider.keys()].sort(
+        (a, b) =>
+            Number(b === current?.provider) - Number(a === current?.provider) || a.localeCompare(b),
+    );
+    const defaultProvider = providers.includes(current?.provider) ? current.provider : providers[0];
+    let offset = 0;
+    const groups = providers.map((provider) => {
+        const items = byProvider.get(provider);
+        const open = expanded.get(provider) ?? (needle !== "" || provider === defaultProvider);
+        const group = { provider, items, open, offset };
+
+        if (open) {
+            offset += items.length;
+        }
+
+        return group;
+    });
+    const shown = groups.flatMap((group) => (group.open ? group.items : []));
+    // The list can change while the picker is open, including when a provider collapses.
     const active = Math.max(0, Math.min(picked, shown.length - 1));
     // The session's model and level are the default already.
     const sessionIsDefault =
@@ -183,7 +216,12 @@ export function ModelPicker({
 
         keyed.current = false;
         list.current?.querySelector(".pop-menu-row.on")?.scrollIntoView({ block: "nearest" });
-    }, [active]);
+    }, [active, shown[active]]);
+
+    const toggleProvider = (provider, open) => {
+        setExpanded((previous) => new Map(previous).set(provider, !open));
+        setPicked(0);
+    };
 
     const pick = (model) => {
         if (locked) {
@@ -331,6 +369,7 @@ export function ModelPicker({
                         value=${query}
                         onInput=${(event) => {
                             setQuery(event.currentTarget.value);
+                            setExpanded(new Map());
                             setPicked(0);
                         }}
                     />
@@ -342,7 +381,7 @@ export function ModelPicker({
                 Sends /model to this Pi. Its available models may differ; check the terminal if it opens a selector.
             </p>`
             }
-            <div class="pop-menu-list" ref=${list} role="listbox" aria-label="Models">
+            <div class="pop-menu-list" ref=${list}>
                 ${
                     models.length === 0 &&
                     html`<p class="muted pop-menu-note">
@@ -351,28 +390,61 @@ export function ModelPicker({
                 }
                 ${
                     models.length > 0 &&
-                    shown.length === 0 &&
+                    filtered.length === 0 &&
                     html`<p class="muted pop-menu-note">No model matches “${query.trim()}”.</p>`
                 }
-                ${shown.map(
-                    (model, index) => html`<button
-                        key=${`${model.provider}/${model.id}`}
-                        class=${`pop-menu-row ${index === active ? "on" : ""} ${isCurrent(model) ? "current" : ""}`}
-                        role="option"
-                        aria-selected=${isCurrent(model)}
-                        disabled=${locked}
-                        title=${`${model.provider}/${model.id} · ${formatTokens(model.contextWindow)} context${model.images ? " · images" : ""}`}
-                        onMouseMove=${() => index !== active && setPicked(index)}
-                        onClick=${() => pick(model)}
-                    >
-                        <span class="pop-menu-row-text">
-                            <span class="pop-menu-row-name">${model.name}</span>
-                            <span class="pop-menu-row-sub">
-                                ${model.provider}${!privateMode && !forDefault && isDefault(model) ? " · default" : ""}${model.signIn ? " · needs sign-in" : ""}
+                ${groups.map(
+                    (
+                        group,
+                        groupIndex,
+                    ) => html`<section class="model-provider" key=${group.provider}>
+                        <button
+                            class="model-provider-toggle"
+                            aria-expanded=${group.open}
+                            aria-controls=${`${groupId}-${groupIndex}`}
+                            onClick=${() => toggleProvider(group.provider, group.open)}
+                        >
+                            <${Icon} name="chevron" size=${14} />
+                            <span class="model-provider-name" title=${group.provider}>
+                                ${group.provider}
                             </span>
-                        </span>
-                        ${isCurrent(model) && html`<${Icon} name="check" size=${14} />`}
-                    </button>`,
+                            ${
+                                group.provider === current?.provider &&
+                                html`<span class="model-provider-current">Current</span>`
+                            }
+                            <span class="model-provider-count">${group.items.length}</span>
+                        </button>
+                        <div
+                            id=${`${groupId}-${groupIndex}`}
+                            role="listbox"
+                            aria-label=${`${group.provider} models`}
+                            hidden=${!group.open}
+                        >
+                            ${
+                                group.open &&
+                                group.items.map(
+                                    (model, index) => html`<button
+                                        key=${`${model.provider}/${model.id}`}
+                                        class=${`pop-menu-row ${group.offset + index === active ? "on" : ""} ${isCurrent(model) ? "current" : ""}`}
+                                        role="option"
+                                        aria-selected=${isCurrent(model)}
+                                        disabled=${locked}
+                                        title=${`${model.provider}/${model.id} · ${formatTokens(model.contextWindow)} context${model.images ? " · images" : ""}`}
+                                        onMouseMove=${() => group.offset + index !== active && setPicked(group.offset + index)}
+                                        onClick=${() => pick(model)}
+                                    >
+                                        <span class="pop-menu-row-text">
+                                            <span class="pop-menu-row-name">${model.name}</span>
+                                            <span class="pop-menu-row-sub">
+                                                ${!privateMode && !forDefault && isDefault(model) ? "default" : ""}${model.signIn ? " · needs sign-in" : ""}
+                                            </span>
+                                        </span>
+                                        ${isCurrent(model) && html`<${Icon} name="check" size=${14} />`}
+                                    </button>`,
+                                )
+                            }
+                        </div>
+                    </section>`,
                 )}
             </div>
             ${

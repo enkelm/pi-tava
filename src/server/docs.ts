@@ -130,7 +130,7 @@ export const TakeoversDoc = defineDoc<{
 
 /** Private input admissions, not transcripts. Hashes identify targets; no text, commands or prompt digests are stored.
  * Prompt receipts mean possibly delivered, even after a crash, and block prompts plus automatic takeover.
- * Terminal receipts record known raw input and block automatic takeover only, not fresh guarded Chat.
+ * Terminal receipts record known raw input without blocking Chat or import.
  * Neither kind expires or resets on a fresh snapshot/restart. This document must stay out of ROOM_DOCS.
  */
 export const PrivateControlDoc = defineDoc<{

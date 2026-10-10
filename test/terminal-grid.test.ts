@@ -677,6 +677,655 @@ async function shortcuts(page: BrowserPage) {
     );
 }
 
+async function mobileKeyboard(page: BrowserPage) {
+    // Ordinary gestures use CDP. Distinct touch IDs use PointerEvents below because
+    // BrowserPage exposes mouse input (including held presses), but no touch dispatch API.
+    const tap = async (label: string) => {
+        const result = await page.click({ label });
+
+        assert.equal(result.covered, undefined, `${label} is not covered`);
+    };
+
+    const touchSequence = async (labels: readonly string[], sequence: string) => {
+        await page.evaluate(`const buttons=${JSON.stringify(labels)}.map(label=>
+            document.querySelector('.terminal-keyboard button[aria-label="'+label+'"]'));
+            const saved=buttons.map(button=>({button,
+                descriptor:Object.getOwnPropertyDescriptor(button,'setPointerCapture')}));
+            for(const {button} of saved){button.setPointerCapture=()=>{}}
+            try {
+                const point=(index,type)=>{const b=buttons[index],r=b.getBoundingClientRect();
+                    b.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,
+                        pointerId:41+index,pointerType:'touch',isPrimary:index===0,
+                        button:0,buttons:type==='pointerdown'?1:0,detail:type==='click'?1:0,
+                        clientX:r.left+r.width/2,clientY:r.top+r.height/2}));};
+                ${sequence}
+            } finally {
+                for(const {button,descriptor} of saved){
+                    if(descriptor){Object.defineProperty(button,'setPointerCapture',descriptor)}
+                    else{delete button.setPointerCapture}
+                }
+            }`);
+    };
+
+    const expectInputs = async (
+        events: unknown[],
+        id = "pane-left",
+        popup = false,
+        description = "virtual keyboard delivers expected protocol events",
+    ) => {
+        assert.deepEqual(
+            await value(
+                page,
+                `fixture.inputs.flatMap(i=>i.events.map(e=>e.Key
+                    ? [e.Key.code,e.Key.modifiers,e.Key.kind,e.Key.tracks_release] : e))`,
+            ),
+            events,
+            description,
+        );
+        assert.equal(
+            await value(
+                page,
+                `fixture.inputs.every(i=>i.id===${JSON.stringify(id)}&&i.popup===${popup})`,
+            ),
+            true,
+            "every callback goes to the current terminal target",
+        );
+        await page.evaluate("fixture.inputs=[]");
+    };
+
+    const modifierState = async (label: string, pressed: boolean, locked = false) => {
+        assert.deepEqual(
+            await value(
+                page,
+                `(() => {const b=document.querySelector('button[aria-label="${label}"]');
+                    return [b.getAttribute('aria-pressed')==='true',b.dataset.locked==='true']})()`,
+            ),
+            [pressed, locked],
+            `${label} exposes its one-shot/locked state`,
+        );
+    };
+
+    const inputMode = async (native = false) => {
+        assert.deepEqual(
+            await value(
+                page,
+                `(() => {const i=document.querySelector('.terminal-grid-input');
+                    return [i.readOnly,${native} ? i.inputMode!=='none' : i.inputMode==='none',i.disabled]})()`,
+            ),
+            [!native, true, false],
+        );
+    };
+
+    const layout = async () => {
+        assert.equal(
+            await value(
+                page,
+                `(() => {const k=document.querySelector('.terminal-keyboard');
+                    const v=document.querySelector('.terminal-grid-viewport');
+                    const r=k.getBoundingClientRect(),vr=v.getBoundingClientRect();
+                    const visible=[...k.querySelectorAll('button')].filter(b=>b.getClientRects().length);
+                    return getComputedStyle(k).display!=='none' && r.height>0 && vr.height>=100 &&
+                        vr.bottom<=r.top+1 && r.left>=0 && r.right<=innerWidth+1 &&
+                        r.bottom<=innerHeight+1 && document.documentElement.scrollWidth<=innerWidth &&
+                        visible.length>0 && visible.every(b=>{const br=b.getBoundingClientRect();
+                            return br.width>0 && br.height>0 && br.left>=r.left-1 &&
+                                br.right<=r.right+1 && br.top>=r.top-1 && br.bottom<=r.bottom+1 &&
+                                (document.elementFromPoint(br.left+br.width/2,br.top+br.height/2)===b ||
+                                 b.contains(document.elementFromPoint(br.left+br.width/2,br.top+br.height/2)))})})()`,
+            ),
+            true,
+            "the keyboard and all visible buttons fit below a usable, non-overlapping terminal",
+        );
+    };
+
+    const constrainedLayout = async () => {
+        const originalStyle = await value<string>(
+            page,
+            "document.querySelector('#fixture').style.cssText",
+        );
+
+        try {
+            await page.setViewport({ width: 844, height: 390, scale: 2, mobile: true });
+            await page.evaluate(`const f=document.querySelector('#fixture');
+                f.style.height='209px';f.style.minHeight='0';`);
+            await settle(page);
+            assert.equal(await value(page, "document.querySelector('#fixture').clientHeight"), 209);
+            await inputMode();
+
+            for (const tab of ["Letters", "Symbols", "Function keys"]) {
+                await tap(tab);
+                const labels = await value<string[]>(
+                    page,
+                    `[...document.querySelectorAll('.terminal-keyboard button')]
+                        .map(b=>b.getAttribute('aria-label')||b.textContent.trim())`,
+                );
+
+                assert.ok(labels.length > 0);
+
+                for (const [index, label] of labels.entries()) {
+                    await page.evaluate(`document.querySelectorAll('.terminal-keyboard button')[${index}]
+                        .scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});
+                        await new Promise(resolve=>requestAnimationFrame(resolve));`);
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `(() => {const b=document.querySelectorAll('.terminal-keyboard button')[${index}];
+                                const br=b.getBoundingClientRect(),hit=document.elementFromPoint(br.left+br.width/2,br.top+br.height/2);
+                                const fr=document.querySelector('#fixture').getBoundingClientRect();
+                                const kr=document.querySelector('.terminal-keyboard').getBoundingClientRect();
+                                const vr=document.querySelector('.terminal-grid-viewport').getBoundingClientRect();
+                                return [
+                                    br.width>0 && br.height>0 && br.left>=kr.left-1 && br.right<=kr.right+1 &&
+                                        br.top>=kr.top-1 && br.bottom<=kr.bottom+1 && (hit===b||b.contains(hit)),
+                                    vr.height>=100 && vr.top>=fr.top-1 && vr.bottom<=kr.top+1,
+                                    kr.height>0 && kr.top>=fr.top && kr.bottom<=fr.bottom+1 &&
+                                        kr.left>=0 && kr.right<=innerWidth+1 && fr.bottom<=innerHeight+1,
+                                ]})()`,
+                        ),
+                        [true, true, true],
+                        `${tab}/${label}: every key is reachable without clipping or losing the useful terminal area`,
+                    );
+                }
+            }
+
+            await tap("Letters");
+            await expectInputs([]);
+        } finally {
+            await page.evaluate(`document.querySelector('#fixture').style.cssText=${JSON.stringify(originalStyle)};
+                document.querySelector('.terminal-keyboard').scrollTop=0;
+                document.querySelector('.terminal-grid').scrollTop=0;
+                document.querySelector('.terminal-grid-viewport').scrollTop=0;`);
+            await page.setViewport(VIEWPORTS.mobile);
+            await settle(page);
+        }
+    };
+
+    await page.evaluate(`fixture.inputs=[];fixture.keyboardBase=structuredClone(fixture.props.surface);
+        fixture.keyboardBase.panes=fixture.keyboardBase.panes.map(p=>({...p,mouse_reporting:false}));
+        fixture.draw({surface:fixture.keyboardBase,reportAllKeys:false,inputEpoch:1});`);
+    await settle(page);
+    assert.equal(
+        await value(page, "!!document.querySelector('.terminal-keyboard')"),
+        true,
+        "mobile provides the full touch keyboard, not just the old helper keybar",
+    );
+    await inputMode();
+
+    for (const cancelFirst of [false, true]) {
+        await touchSequence(
+            ["a", "s"],
+            `point(0,'pointerdown');point(1,'pointerdown');
+                if(${cancelFirst}){point(0,'pointercancel')}
+                else{point(0,'pointerup');point(0,'click')}
+                point(1,'pointerup');point(1,'click');`,
+        );
+        await expectInputs(
+            cancelFirst ? [{ TextCommit: "s" }] : [{ TextCommit: "a" }, { TextCommit: "s" }],
+            "pane-left",
+            false,
+            cancelFirst
+                ? "cancelling one touch does not discard the other finger's letter"
+                : "overlapping touch-downs deliver both letters in release order",
+        );
+    }
+
+    for (const redraw of [false, true]) {
+        for (const [character, text] of [
+            ["a", "A"],
+            ["1", "!"],
+        ] as const) {
+            await touchSequence(
+                ["Shift", character],
+                `point(0,'pointerdown');point(1,'pointerdown');
+                    point(0,'pointerup');point(0,'click');
+                    ${redraw ? "await new Promise(resolve=>requestAnimationFrame(resolve));" : ""}
+                    point(1,'pointerup');point(1,'click');`,
+            );
+            await expectInputs(
+                [{ TextCommit: text }],
+                "pane-left",
+                false,
+                `Shift released while ${character} is held commits ${text} once ${redraw ? "after redraw" : "without redraw"}`,
+            );
+            await modifierState("Shift", false);
+        }
+    }
+
+    await layout();
+    await page.setViewport({ width: 320, height: 568, scale: 2, mobile: true });
+    await settle(page);
+    await layout();
+    await page.setViewport(VIEWPORTS.mobile);
+    await settle(page);
+    await constrainedLayout();
+    await layout();
+    const canvasPoint = await value<{ x: number; y: number }>(
+        page,
+        `(() => {const r=document.querySelector('canvas').getBoundingClientRect();
+            return {x:r.left+11,y:r.top+41}})()`,
+    );
+
+    await page.click(canvasPoint);
+    assert.equal(await value(page, "document.activeElement.matches('.terminal-grid-input')"), true);
+    await inputMode();
+    await page.input([{ type: "text", text: "native-must-not-open" }]);
+    assert.equal(await value(page, "document.querySelector('.terminal-grid-input').value"), "");
+    await expectInputs([]);
+    await page.press("q");
+    await expectInputs(
+        [{ TextCommit: "q" }],
+        "pane-left",
+        false,
+        "hardware keydown still types while native text insertion is suppressed",
+    );
+    await inputMode();
+
+    await page.evaluate(
+        `document.querySelector('.terminal-keyboard button[aria-label="q"]').focus()`,
+    );
+
+    for (const key of ["Enter", "Space"]) {
+        await page.press(key);
+        await expectInputs(
+            [{ TextCommit: "q" }],
+            "pane-left",
+            false,
+            `${key} activates the focused virtual q button`,
+        );
+        assert.equal(
+            await value(
+                page,
+                `document.activeElement.matches('.terminal-keyboard button[aria-label="q"]')`,
+            ),
+            true,
+            "keyboard activation retains focus on the virtual button, not the hidden terminal input",
+        );
+    }
+
+    await page.press("Tab");
+    await expectInputs(
+        [],
+        "pane-left",
+        false,
+        "Tab navigates virtual controls rather than reaching the PTY",
+    );
+    assert.equal(
+        await value(
+            page,
+            `document.activeElement.matches('.terminal-keyboard button') &&
+            document.activeElement.getAttribute('aria-label')!=='q'`,
+        ),
+        true,
+        "Tab advances to another keyboard control",
+    );
+    await inputMode();
+
+    for (const label of ["q", "Enter", "Control", "Backspace"]) {
+        const at = await page.locate({ label });
+
+        await page.input([
+            { type: "mouse", action: "down", x: at.x, y: at.y },
+            { type: "mouse", action: "move", x: at.x, y: at.y + 50, pressed: true },
+        ]);
+
+        // Let a repeatable key's hold deadline expire after the drag has cancelled it.
+        if (label === "Backspace") {
+            await page.evaluate("await new Promise(resolve=>setTimeout(resolve,700))");
+        }
+
+        await page.input([{ type: "mouse", action: "up", x: at.x, y: at.y }]);
+        await expectInputs(
+            [],
+            "pane-left",
+            false,
+            `dragging ${label} cancels the tap without sending accidental input`,
+        );
+        await modifierState("Control", false);
+    }
+
+    await page.evaluate("document.querySelector('#outside').focus()");
+    await tap("a");
+    assert.equal(await value(page, "document.activeElement.matches('.terminal-grid-input')"), true);
+    await tap("z");
+    await tap("Space");
+    await expectInputs([{ TextCommit: "a" }, { TextCommit: "z" }, { TextCommit: " " }]);
+    assert.equal(await value(page, "document.activeElement.matches('.terminal-grid-input')"), true);
+    await inputMode();
+
+    for (const [label, code] of [
+        ["Enter", "Enter"],
+        ["Escape", "Esc"],
+        ["ArrowLeft", "Left"],
+        ["ArrowUp", "Up"],
+        ["ArrowDown", "Down"],
+        ["ArrowRight", "Right"],
+        ["Backspace", "Backspace"],
+        ["Tab", "Tab"],
+    ] as const) {
+        await tap(label);
+        await expectInputs([[code, 0, "Press", false]]);
+    }
+
+    for (const [label, mask, display] of [
+        ["Control", 2, "Ctrl"],
+        ["Alt", 4, "Alt"],
+        ["Meta", 8, "Cmd"],
+    ] as const) {
+        assert.equal(
+            await value(
+                page,
+                `document.querySelector('button[aria-label="${label}"]').textContent.trim()`,
+            ),
+            display,
+        );
+        await tap(label);
+        await modifierState(label, true);
+        await expectInputs([]);
+        await tap("a");
+        await modifierState(label, false);
+        await tap("a");
+        await expectInputs([[{ Char: "a" }, mask, "Press", false], { TextCommit: "a" }]);
+        await tap(label);
+        await tap(label);
+        await modifierState(label, true, true);
+        await tap("a");
+        await tap("z");
+        await expectInputs([
+            [{ Char: "a" }, mask, "Press", false],
+            [{ Char: "z" }, mask, "Press", false],
+        ]);
+        await modifierState(label, true, true);
+        await tap(label);
+        await modifierState(label, false);
+    }
+
+    await tap("Control");
+    await tap("Alt");
+    await tap("Meta");
+    await tap("a");
+    await expectInputs([[{ Char: "a" }, 14, "Press", false]]);
+    await tap("Shift");
+    await modifierState("Shift", true);
+    assert.equal(
+        await value(
+            page,
+            `document.querySelector('button[aria-label="a"]')?.textContent.trim() ?? null`,
+        ),
+        "A",
+        "Shift changes the displayed letter, not its accessible label",
+    );
+    await tap("a");
+    await modifierState("Shift", false);
+    await tap("a");
+    await expectInputs([{ TextCommit: "A" }, { TextCommit: "a" }]);
+    await tap("Shift");
+    await tap("Shift");
+    await tap("a");
+    await tap("z");
+    await expectInputs([{ TextCommit: "A" }, { TextCommit: "Z" }]);
+    await modifierState("Shift", true, true);
+    await tap("Shift");
+    await tap("Shift");
+    await tap("Control");
+    await tap("Alt");
+    await tap("Meta");
+    await tap("a");
+    await expectInputs([[{ Char: "A" }, 15, "Press", false]]);
+    await tap("Shift");
+    await tap("Tab");
+    await expectInputs([["BackTab", 1, "Press", false]]);
+    await modifierState("Shift", false);
+
+    await tap("1");
+    await expectInputs([{ TextCommit: "1" }]);
+    await tap("Shift");
+    // Symbol accessible names may follow their displayed character; letters retain labels a-z.
+    const symbolPoint = await value<{ x: number; y: number }>(
+        page,
+        `(() => {const b=[...document.querySelectorAll('.terminal-keyboard button')]
+            .find(b=>b.textContent.trim()==='!');const r=b.getBoundingClientRect();
+            return {x:r.left+r.width/2,y:r.top+r.height/2}})()`,
+    );
+
+    await page.click(symbolPoint);
+    await expectInputs([{ TextCommit: "!" }]);
+    await modifierState("Shift", false);
+    await tap("Symbols");
+    await expectInputs([]);
+    await layout();
+    await tap("!");
+    await expectInputs([{ TextCommit: "!" }]);
+    await tap("Function keys");
+    await layout();
+    await tap("F1");
+    await tap("F12");
+    await expectInputs([
+        [{ F: 1 }, 0, "Press", false],
+        [{ F: 12 }, 0, "Press", false],
+    ]);
+    await tap("Letters");
+
+    const expandedHeight = await value<number>(
+        page,
+        "document.querySelector('.terminal-grid-viewport').clientHeight",
+    );
+
+    await tap("Hide keyboard");
+    assert.ok(
+        (await value<number>(
+            page,
+            "document.querySelector('.terminal-grid-viewport').clientHeight",
+        )) > expandedHeight,
+        "hiding keys returns space to the terminal",
+    );
+    assert.equal(
+        await value(
+            page,
+            `!!document.querySelector('button[aria-label="a"]')?.getClientRects().length`,
+        ),
+        false,
+    );
+    await inputMode();
+    await tap("Show keyboard");
+    await layout();
+    await tap("Control");
+    await tap("Control");
+    await modifierState("Control", true, true);
+    await tap("Native keyboard");
+    await inputMode(true);
+    assert.equal(await value(page, "document.activeElement.matches('.terminal-grid-input')"), true);
+    await page.type(undefined, "native fallback");
+    await expectInputs([{ TextCommit: "native fallback" }]);
+    await tap("Touch keyboard");
+    await modifierState("Control", false);
+    await inputMode();
+    await layout();
+    await tap("a");
+    await expectInputs([{ TextCommit: "a" }]);
+
+    await page.evaluate(`fixture.virtualShortcuts=[];
+        fixture.draw({onShortcut:(e,c)=>{fixture.virtualShortcuts.push([e.key,c.targetId,c.popup,c.virtual]);
+            if(e.key==='x'){e.preventDefault();return true}return false}});`);
+    await settle(page);
+    await tap("x");
+    await expectInputs([]);
+    await tap("Control");
+    await tap("v");
+    await tap("Meta");
+    await tap("r");
+    await tap("Shift");
+    await tap("Escape");
+    await expectInputs([
+        [{ Char: "v" }, 2, "Press", false],
+        [{ Char: "r" }, 8, "Press", false],
+        ["Esc", 1, "Press", false],
+    ]);
+    assert.deepEqual(await value(page, "fixture.virtualShortcuts"), [
+        ["x", "pane-left", false, true],
+        ["v", "pane-left", false, true],
+        ["r", "pane-left", false, true],
+        ["Escape", "pane-left", false, true],
+    ]);
+    assert.equal(await value(page, "document.activeElement.matches('.terminal-grid-input')"), true);
+
+    await page.evaluate(`fixture.retargetShortcut=[];
+        fixture.draw({onShortcut:(e,c)=>{if(e.key.toLowerCase()==='x'){
+            fixture.retargetShortcut.push([e.key,c.targetId]);
+            fixture.focusRef.current.setTarget('pane-right');return true}return false}});`);
+    await settle(page);
+
+    for (const label of ["Control", "Alt", "Meta", "Shift"]) {
+        await tap(label);
+        await tap(label);
+        await modifierState(label, true, true);
+    }
+
+    await tap("x");
+    await expectInputs(
+        [],
+        "pane-left",
+        false,
+        "a synchronously retargeting shortcut consumes the key",
+    );
+    assert.deepEqual(await value(page, "fixture.retargetShortcut"), [["X", "pane-left"]]);
+
+    for (const label of ["Control", "Alt", "Meta", "Shift"]) {
+        await modifierState(label, false);
+    }
+
+    await tap("a");
+    await expectInputs(
+        [{ TextCommit: "a" }],
+        "pane-right",
+        false,
+        "shortcut target reset clears locked modifiers before the next key",
+    );
+    await page.evaluate(`fixture.focusRef.current.setTarget('pane-left');
+        fixture.draw({onShortcut:undefined,surface:{...fixture.props.surface}});`);
+    await settle(page);
+
+    await page.evaluate("fixture.draw({reportAllKeys:true,onShortcut:undefined})");
+    await settle(page);
+    await tap("Control");
+    await tap("a");
+    await tap("ArrowDown");
+    await tap("a");
+    await expectInputs([
+        [{ Char: "a" }, 2, "Press", true],
+        [{ Char: "a" }, 2, "Release", true],
+        ["Down", 0, "Press", true],
+        ["Down", 0, "Release", true],
+        [{ Char: "a" }, 0, "Press", true],
+        [{ Char: "a" }, 0, "Release", true],
+    ]);
+
+    // Hold a real pointer through each context change. Old repeat/release must not leak,
+    // even when the connection epoch changes without changing the boot or pane identity.
+    const transitions = [
+        ["input epoch", "{inputEpoch:2}", "pane-left", false],
+        [
+            "focused pane",
+            "{surface:{...fixture.props.surface,panes:fixture.props.surface.panes.map((p,i)=>({...p,focused:i===1}))}}",
+            "pane-right",
+            false,
+        ],
+        [
+            "popup opens",
+            "{surface:{...fixture.props.surface,popup:fixture.keyboardPopup}}",
+            "keyboard-popup",
+            true,
+        ],
+        [
+            "popup identity",
+            "{surface:{...fixture.props.surface,popup:{...fixture.keyboardPopup,terminal_id:'keyboard-popup-2'}}}",
+            "keyboard-popup-2",
+            true,
+        ],
+        ["popup closes", "{surface:{...fixture.props.surface,popup:null}}", "pane-right", false],
+        ["local target", "fixture.focusRef.current.setTarget('pane-left')", "pane-left", false],
+        ["disabled", "{disabled:true}", "pane-right", false],
+        ["disconnected", "{enabled:false}", "pane-right", false],
+    ] as const;
+
+    await page.evaluate(`fixture.keyboardPopup={terminal_id:'keyboard-popup',title:'Touch popup',
+        frame:{...fixture.props.surface.frame,width:8,height:4,cells:fixture.props.surface.frame.cells.slice(0,32),cursor:null},
+        mouse_reporting:false,sgr_pixel_mouse:false,pixel_width:80,pixel_height:80};`);
+
+    for (const [name, patch, id, popup] of transitions) {
+        for (const label of ["Control", "Alt", "Meta", "Shift"]) {
+            await tap(label);
+            await tap(label);
+            await modifierState(label, true, true);
+        }
+
+        const at = await page.locate({ label: "Backspace" });
+
+        await page.input([{ type: "mouse", action: "down", x: at.x, y: at.y }]);
+        await page.evaluate("await new Promise(resolve=>setTimeout(resolve,700))");
+        assert.equal(
+            await value(
+                page,
+                `fixture.inputs.flatMap(i=>i.events).some(e=>e.Key?.kind==='Repeat')`,
+            ),
+            true,
+            `${name}: holding Backspace delivers real repeat input before cancellation`,
+        );
+        assert.equal(
+            await value(
+                page,
+                `fixture.inputs.flatMap(i=>i.events).every((e,i,events)=>
+                    e.Key?.code==='Backspace' && e.Key.modifiers===15 && e.Key.tracks_release &&
+                    (i%2 ? e.Key.kind==='Release' :
+                        ['Press','Repeat'].includes(e.Key.kind) && events[i+1]?.Key.kind==='Release'))`,
+            ),
+            true,
+            "locked modifiers apply to repeats and every semantic stroke has a paired release",
+        );
+        await page.evaluate(
+            `${name === "local target" ? patch : `fixture.draw(${patch})`};fixture.inputs=[];`,
+        );
+        await page.evaluate("await new Promise(resolve=>setTimeout(resolve,700))");
+        await page.input([{ type: "mouse", action: "up", x: at.x, y: at.y }]);
+        await settle(page);
+        await expectInputs(
+            [],
+            id,
+            popup,
+            `${name}: context change cancels held repeat and release`,
+        );
+
+        if (name === "disabled" || name === "disconnected") {
+            assert.equal(
+                await value(page, "document.querySelector('.terminal-grid-input').disabled"),
+                true,
+            );
+            await page.evaluate("fixture.draw({disabled:false,enabled:true})");
+            await settle(page);
+        }
+
+        for (const label of ["Control", "Alt", "Meta", "Shift"]) {
+            await modifierState(label, false);
+        }
+
+        await tap("a");
+        await expectInputs(
+            [
+                [{ Char: "a" }, 0, "Press", true],
+                [{ Char: "a" }, 0, "Release", true],
+            ],
+            id,
+            popup,
+        );
+        await inputMode();
+    }
+
+    await shot(page, "mobile-keyboard");
+    // The remaining cases intentionally exercise native IME/beforeinput and clipboard events.
+    await page.evaluate("fixture.draw({surface:fixture.keyboardBase,reportAllKeys:false})");
+    await settle(page);
+    await tap("Native keyboard");
+}
+
 async function shot(page: BrowserPage, name: string) {
     const dir = process.env.TERMINAL_GRID_SCREENSHOT_DIR;
 
@@ -689,12 +1338,12 @@ async function shot(page: BrowserPage, name: string) {
 }
 
 test(
-    "Chromium desktop/mobile: canvas, IME, shortcuts, paste, selection, mouse, popups, disabled mode and cleanup",
+    "Chromium desktop/mobile: canvas, IME, shortcuts, paste, selection, mouse, keyboard, popups, disabled mode and cleanup",
     {
         skip: findBrowser() ? false : "No Chromium installed",
-        timeout: 60_000,
+        timeout: 120_000,
     },
-    async () => {
+    async (t) => {
         const fixture = await terminalFixture();
         const dir = mkdtempSync(join(tmpdir(), "terminal-grid-browser-"));
         const browsers = new Browsers({ dataDir: dir });
@@ -723,18 +1372,10 @@ test(
             assert.equal(
                 await value(
                     page,
-                    "getComputedStyle(document.querySelector('.terminal-grid-keybar')).display",
+                    "document.querySelector('.terminal-keyboard') ? getComputedStyle(document.querySelector('.terminal-keyboard')).display : null",
                 ),
                 "none",
-                "desktop helper keys are hidden by CSS",
-            );
-            assert.equal(
-                await value(
-                    page,
-                    "getComputedStyle(document.querySelector('.terminal-grid-tools')).display",
-                ),
-                "none",
-                "desktop has no bottom helper bar",
+                "desktop touch keyboard is hidden by CSS",
             );
             await shot(page, "desktop");
             await shortcuts(page);
@@ -833,30 +1474,10 @@ test(
             );
             await page.setViewport(VIEWPORTS.mobile);
             await settle(page);
-            assert.equal(
-                await value(
-                    page,
-                    "getComputedStyle(document.querySelector('.terminal-grid-keybar')).display",
-                ),
-                "flex",
-                "mobile helper keys remain available",
+            await t.test(
+                "full mobile keyboard: trusted clicks, modifiers, native fallback and context clearing",
+                async () => mobileKeyboard(page),
             );
-            assert.equal(
-                await value(page, "document.documentElement.scrollWidth <= innerWidth"),
-                true,
-            );
-            await page.evaluate(
-                `fixture.inputs=[];document.querySelector('button[aria-label="Control"]').click();`,
-            );
-            await settle(page);
-            await page.evaluate(
-                `const i=document.querySelector('.terminal-grid-input');i.value='c';i.dispatchEvent(new InputEvent('input',{data:'c',bubbles:true}));`,
-            );
-            assert.deepEqual(await value(page, "fixture.inputs[0].events[0].Key.code"), {
-                Char: "c",
-            });
-            assert.equal(await value(page, "fixture.inputs[0].events[0].Key.modifiers"), 2);
-            await shot(page, "mobile");
             await page.evaluate(`fixture.inputs=[]; fixture.draw({reportAllKeys:true});`);
             await settle(page);
             await page.evaluate(`const i=document.querySelector('.terminal-grid-input');i.focus();
