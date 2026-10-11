@@ -5,6 +5,7 @@
 // Real run completion and browser storage/visibility events own the result lifecycle; app tests do not render it.
 // Menu contracts share this fixture: misplaced/right-click navigation, focus loss, omitted actions,
 // coarse-pointer hover-only traps and status text/icon regressions are not reached by app tests.
+// Header geometry owns invisible shortcuts reserving width and capped labels stranding the count.
 // Session-moves UI owns thread menus; this covers project/goal menus through DOM and trusted input.
 // Uses public app/model/browser APIs; no test-only production seams or state flags.
 import {
@@ -349,24 +350,55 @@ async function groupControls(
                 return true;
             };
 
-            return ${JSON.stringify(labels)}.every(label => visible(section.querySelector(
-                ':scope > .project-group-head [aria-label="' + label + '"]',
-            )) === ${shown})
-                && ${goal ? "visible(section.querySelector('.goal-status'))" : "true"};
+            return ${JSON.stringify(labels)}.every(label => {
+                const control = section.querySelector(
+                    ':scope > .project-group-head [aria-label="' + label + '"]',
+                );
+
+                return visible(control) === ${shown}
+                    && Math.abs(control.getBoundingClientRect().width - ${shown ? 40 : 0}) < 1;
+            }) && ${goal ? "visible(section.querySelector('.goal-state'))" : "true"};
         })()`;
 
     await page.input([{ type: "mouse", action: "move", x: 1270, y: 790 }]);
     await page.evaluate(`document.querySelector('${scope} .new-button').focus()`);
-    await until(() => value<boolean>(page, visibility(false)), "idle headers keep shortcuts quiet");
+    await until(
+        () => value<boolean>(page, visibility(false)),
+        "idle headers hide shortcuts without reserving horizontal space",
+    );
+
+    if (!mobile) {
+        assert.equal(
+            await value(
+                page,
+                `(() => {
+                    const header = (${group(scope, name, goal)}).querySelector(':scope > .project-group-head');
+                    const edge = header.getBoundingClientRect().right;
+                    const button = header.querySelector('.group-head');
+                    const head = button.getBoundingClientRect();
+                    const padding = parseFloat(getComputedStyle(button).paddingRight);
+                    const count = header.querySelector('.group-count').getBoundingClientRect();
+
+                    return Math.abs(head.right - edge) < 4
+                        && count.width > 0 && Math.abs(head.right - count.right - padding) < 1;
+                })()`,
+            ),
+            true,
+            "idle project and goal labels/counts use the full header width",
+        );
+    }
+
+    // A real Tab establishes keyboard modality before programmatic focus chooses this header.
+    // Coarse-pointer devices must retain keyboard access, not just their explicit touch Options.
+    await page.press("Tab");
     await page.evaluate(
         `document.querySelector(${JSON.stringify(groupHead(scope, name))}).focus()`,
     );
     await until(
-        () => value<boolean>(page, visibility(!mobile)),
-        mobile
-            ? "touch headers keep hover shortcuts hidden even with focus"
-            : "keyboard focus reveals header shortcuts",
+        () => value<boolean>(page, visibility(true)),
+        "keyboard focus reveals full-width header shortcuts, including on coarse pointers",
     );
+    await page.evaluate(`document.querySelector('${scope} .new-button').focus()`);
     await page.hover({ selector: groupHead(scope, name) });
     await until(
         () => value<boolean>(page, visibility(!mobile)),
@@ -389,21 +421,41 @@ async function goalStatus(
     scope: string,
     name: string,
     state: "Active" | "Completed",
+    interactive = true,
 ) {
     await until(
         () =>
             value<boolean>(
                 page,
                 `(() => {
-                    const status = (${group(scope, name, true)}).querySelector('.goal-status');
+                    const header = (${group(scope, name, true)}).querySelector(':scope > .project-group-head');
+                    const head = header.querySelector('.group-head');
+                    const status = header.querySelector(':scope > .goal-state');
                     const icon = status?.querySelector('svg')?.getBoundingClientRect();
+                    const label = head.querySelector('.group-name').getBoundingClientRect();
+                    const swatch = document.createElement('span');
 
-                    return (status?.getAttribute('aria-label')?.includes(${JSON.stringify(state)})
-                            || status?.title.includes(${JSON.stringify(state)}))
-                        && status.textContent.trim() === '' && icon?.width > 0 && icon?.height > 0;
+                    swatch.style.color = 'var(${state === "Completed" ? "--o-green" : "--muted"})';
+                    head.append(swatch);
+                    const color = status && getComputedStyle(status).color === getComputedStyle(swatch).color;
+
+                    swatch.remove();
+
+                    return status?.getAttribute('aria-label')?.includes(${JSON.stringify(state)})
+                        && status.title.includes(${JSON.stringify(state)})
+                        && ${interactive ? "status.tagName === 'BUTTON'" : "status.tagName !== 'BUTTON' && status.getAttribute('role') === 'img' && status.tabIndex === -1"}
+                        && status.textContent.trim() === '' && icon?.width > 0 && icon?.height > 0
+                        && Boolean(status.querySelector('svg path')?.getAttribute('d'))
+                        && status.getBoundingClientRect().right <= head.getBoundingClientRect().left
+                        && icon.right <= label.left && color;
                 })()`,
             ),
-        `the icon-only goal status exposes ${state} accessibly`,
+        `the leading sibling goal ${interactive ? "control" : "indicator"} exposes ${state} accessibly`,
+    );
+
+    return value<string>(
+        page,
+        `(${group(scope, name, true)}).querySelector(':scope > .project-group-head .goal-state svg path').getAttribute('d')`,
     );
 }
 
@@ -902,14 +954,6 @@ test(
                         String(first.id),
                         "even one Worker retains a distinct goal section with its session",
                     );
-                    assert.equal(
-                        await value(
-                            page,
-                            `Boolean((${group(scope, goal.name, true)}).querySelector(':scope > .project-group-head .group-symbol path')?.getAttribute('d'))`,
-                        ),
-                        true,
-                        "the single-thread goal retains its goal icon",
-                    );
                     assert.equal(await rowTag(page, scope, first.id, "Worker"), false);
                     await alignedRows(page, scope, first.id, standaloneWorker.id);
                     assert.equal(
@@ -919,7 +963,7 @@ test(
                     );
 
                     await groupControls(page, scope, goal.name, viewport === "mobile", true);
-                    await goalStatus(page, scope, goal.name, "Active");
+                    const activeIcon = await goalStatus(page, scope, goal.name, "Active");
 
                     if (viewport === "desktop") {
                         // Mutate a named sidebar object while another, unassigned conversation stays open.
@@ -1102,15 +1146,7 @@ test(
 
                     for (const reader of [peer, participant]) {
                         await waitGroup(reader, scope, goal.name, true);
-                        await goalStatus(reader, scope, goal.name, "Active");
-                        assert.equal(
-                            await value(
-                                reader,
-                                `(${group(scope, goal.name, true)}).querySelector('.goal-status').tagName`,
-                            ),
-                            "SPAN",
-                            "reader status is noninteractive",
-                        );
+                        await goalStatus(reader, scope, goal.name, "Active", false);
                         assert.equal(
                             await value(
                                 reader,
@@ -1121,12 +1157,21 @@ test(
                         );
                     }
 
-                    await groupClick(
+                    const statusControl = `${scope} .goal-section > .project-group-head .goal-state`;
+                    const goalHead = groupHead(scope, goal.name);
+                    const expanded = await value<string>(
                         page,
-                        scope,
-                        goal.name,
-                        `[aria-label=${JSON.stringify(`${goal.name}: Active. Mark completed`)}]`,
-                        true,
+                        `document.querySelector(${JSON.stringify(goalHead)}).getAttribute('aria-expanded')`,
+                    );
+
+                    await page.click({ selector: statusControl });
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector(${JSON.stringify(goalHead)}).getAttribute('aria-expanded')`,
+                        ),
+                        expanded,
+                        "clicking the leading status control does not fold the goal",
                     );
                     await until(
                         () =>
@@ -1136,24 +1181,34 @@ test(
                     );
 
                     for (const reader of [peer, participant]) {
-                        await goalStatus(reader, scope, goal.name, "Completed");
+                        await goalStatus(reader, scope, goal.name, "Completed", false);
                     }
 
-                    assert.equal(
-                        await value(
-                            page,
-                            `(${group(scope, goal.name, true)}).querySelector('.goal-status').tagName`,
-                        ),
-                        "BUTTON",
-                        "owner keeps the status mutation control",
-                    );
                     await shot(page, `${viewport}-completed-goal`);
                     await shot(peer, `${viewport}-reader-completed-goal`);
                     await shot(participant, `${viewport}-scoped-completed-goal`);
 
-                    await goalStatus(page, scope, goal.name, "Completed");
+                    const completedIcon = await goalStatus(page, scope, goal.name, "Completed");
 
-                    // The status icon and Options are distinct entry points; exercise the latter's ID binding.
+                    assert.notEqual(
+                        completedIcon,
+                        activeIcon,
+                        "completion changes the leading glyph",
+                    );
+
+                    // The same status control must not reopen a collapsed goal.
+                    await groupClick(page, scope, goal.name, ".group-head", true);
+                    await disclosure(page, scope, goal.name, false, true);
+                    await page.click({ selector: statusControl });
+                    await disclosure(page, scope, goal.name, false, true);
+                    await goalStatus(page, scope, goal.name, "Active");
+                    await page.click({ selector: statusControl });
+                    await disclosure(page, scope, goal.name, false, true);
+                    await goalStatus(page, scope, goal.name, "Completed");
+                    await groupClick(page, scope, goal.name, ".group-head", true);
+                    await disclosure(page, scope, goal.name, true, true);
+
+                    // Options remains bound to this named goal and updates its leading state icon.
                     for (const status of ["active", "completed"] as const) {
                         goalOptions = await options(
                             page,
@@ -1175,11 +1230,15 @@ test(
                         );
                         await present(page, goalOptions, false);
                         // Durable writes precede the coalesced catalogue event; reopen only after it arrives.
-                        await goalStatus(
-                            page,
-                            scope,
-                            goal.name,
-                            status === "active" ? "Active" : "Completed",
+                        assert.equal(
+                            await goalStatus(
+                                page,
+                                scope,
+                                goal.name,
+                                status === "active" ? "Active" : "Completed",
+                            ),
+                            status === "active" ? activeIcon : completedIcon,
+                            "status transitions restore the matching leading glyph",
                         );
                     }
 
@@ -1373,7 +1432,7 @@ test(
                                         actions: [...element.querySelectorAll('button')]
                                             .map(button => button.textContent.trim()),
                                     })),
-                                statuses: [...document.querySelectorAll('.goal-status')]
+                                statuses: [...document.querySelectorAll('.goal-state')]
                                     .map(element => ({
                                         label: element.getAttribute('aria-label'), title: element.title,
                                         rect: element.getBoundingClientRect().toJSON(),

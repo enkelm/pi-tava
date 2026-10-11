@@ -195,6 +195,34 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
     };
 
     return html`<div class="project-group-head" ref=${ref}>
+        ${
+            goal &&
+            (canStart
+                ? html`<button
+                    class=${`goal-state ${completed ? "completed" : ""}`}
+                    aria-label=${`${goal.name}: ${completed ? "Completed. Mark active" : "Active. Mark completed"}`}
+                    title=${completed ? "Completed. Mark active" : "Active. Mark completed"}
+                    disabled=${busy}
+                    onClick=${(event) => {
+                        event.stopPropagation();
+                        run(() =>
+                            actions.updateProjectGoal(goal.id, {
+                                status: completed ? "active" : "completed",
+                            }),
+                        );
+                    }}
+                >
+                    <${Icon} class="group-symbol" name=${completed ? "check" : "target"} size=${14} />
+                </button>`
+                : html`<span
+                    class=${`goal-state ${completed ? "completed" : ""}`}
+                    role="img"
+                    aria-label=${completed ? "Completed" : "Active"}
+                    title=${completed ? "Completed" : "Active"}
+                >
+                    <${Icon} class="group-symbol" name=${completed ? "check" : "target"} size=${14} />
+                </span>`)
+        }
         <button
             class="group-head"
             data-part="session-group-head"
@@ -202,11 +230,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
             onClick=${onToggle}
             aria-expanded=${!closed}
         >
-            <${Icon}
-                class=${goal ? "group-symbol" : "group-disclosure"}
-                name=${goal ? "target" : "down"}
-                size=${14}
-            />
+            ${!goal && html`<${Icon} class="group-disclosure" name="down" size=${14} />`}
             <span class="group-name" data-part="session-group-name"><${Highlight} text=${group.label} needle=${needle} /></span>
             ${
                 trouble &&
@@ -221,35 +245,6 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
             ${goal && html`<${Icon} class="group-disclosure" name="down" size=${12} />`}
         </button>
         <div class="project-group-actions">
-            ${
-                goal &&
-                canStart &&
-                html`<button
-                    class=${`goal-status ${completed ? "completed" : ""}`}
-                    aria-label=${`${goal.name}: ${completed ? "Completed. Mark active" : "Active. Mark completed"}`}
-                    title=${completed ? "Completed. Mark active" : "Active. Mark completed"}
-                    disabled=${busy}
-                    onClick=${() =>
-                        run(() =>
-                            actions.updateProjectGoal(goal.id, {
-                                status: completed ? "active" : "completed",
-                            }),
-                        )}
-                >
-                    <${Icon} name=${completed ? "check" : "target"} size=${15} />
-                </button>`
-            }
-            ${
-                goal &&
-                !canStart &&
-                html`<span
-                    class=${`goal-status ${completed ? "completed" : ""}`}
-                    aria-label=${`${goal.name}: ${completed ? "Completed" : "Active"}`}
-                    title=${completed ? "Completed" : "Active"}
-                >
-                    <${Icon} name=${completed ? "check" : "target"} size=${15} />
-                </span>`
-            }
             ${
                 canStart &&
                 !goal &&

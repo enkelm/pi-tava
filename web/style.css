@@ -4462,6 +4462,11 @@ button.chip:active:not(:disabled):not(.on) {
     max-width: none;
 }
 
+.project-group-head .group-head .group-name {
+    flex: 1;
+    max-width: none;
+}
+
 .project-group-head .group-head::after {
     display: none;
 }
@@ -4477,6 +4482,7 @@ button.chip:active:not(:disabled):not(.on) {
     height: 40px;
 }
 
+/* Retain the previous goal-control selector for themes and compatible callers. */
 .goal-status {
     display: inline-grid;
     place-items: center;
@@ -4486,6 +4492,19 @@ button.chip:active:not(:disabled):not(.on) {
     color: var(--muted);
 }
 
+.goal-state {
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 24px;
+    height: 40px;
+    color: var(--muted);
+}
+
+.goal-state + .group-head {
+    padding-inline-start: 0;
+}
+
 /* Secondary group actions stay available on keyboard focus; touch uses Options instead of hover. */
 .project-hover-action,
 .sidebar-touch-options {
@@ -4493,8 +4512,18 @@ button.chip:active:not(:disabled):not(.on) {
 }
 
 @media (hover: hover) and (pointer: fine) {
+    .project-group-head:hover {
+        background: var(--hover);
+    }
+
+    .project-group-head:hover .group-head {
+        color: var(--body);
+    }
+
     .project-hover-action {
         display: grid;
+        max-width: 0;
+        overflow: hidden;
         opacity: 0;
         pointer-events: none;
         transition: opacity var(--t-hover) var(--ease-out);
@@ -4502,6 +4531,7 @@ button.chip:active:not(:disabled):not(.on) {
 
     .project-group-head:hover .project-hover-action,
     .project-group-head:focus-within .project-hover-action {
+        max-width: 40px;
         opacity: 1;
         pointer-events: auto;
     }
@@ -4510,6 +4540,10 @@ button.chip:active:not(:disabled):not(.on) {
 @media (hover: none), (pointer: coarse) {
     .sidebar-touch-options {
         display: grid;
+    }
+
+    .goal-state {
+        width: 40px;
     }
 
     .project-group-head,
@@ -4522,11 +4556,16 @@ button.chip:active:not(:disabled):not(.on) {
 /* Keyboard access cannot depend on hover capability; a touch tap does not reveal extra controls. */
 .project-group-head:has(:focus-visible) .project-hover-action {
     display: grid;
+    max-width: 40px;
     opacity: 1;
     pointer-events: auto;
 }
 
 .goal-status.completed {
+    color: var(--o-green);
+}
+
+.goal-state.completed {
     color: var(--o-green);
 }
 
