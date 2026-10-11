@@ -1,14 +1,19 @@
 // Authoring gate: real UI choices must preserve project/goal membership and reach durable state.
 // Regressions: orphan goals, lost creation/rename controls, labelled sidebar chips and stale peers.
 // App tests own storage/access/migration; this owns browser disclosure, forms and event delivery.
-// Uses public app APIs for two standalone fixtures; no test-only production seams or state flags.
+// Sidebar regressions: goal indentation, busy-loader drift, active idle accent and lost result-read marks.
+// Real run completion and browser storage/visibility events own the result lifecycle; app tests do not render it.
+// Uses public app/model/browser APIs; no test-only production seams or state flags.
 import {
     type App,
     cleanUp,
     context,
+    lastText,
+    newSession,
     openApp,
     owner,
     root,
+    say,
     scriptedModel,
     until,
     work,
@@ -18,10 +23,12 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { Browsers } from "../src/server/browser.ts";
 import { findBrowser } from "../src/server/browser/discovery.ts";
-import type { BrowserPage } from "../src/server/browser/page.ts";
+import { Chromium } from "../src/server/browser/cdp.ts";
+import { BrowserPage } from "../src/server/browser/page.ts";
 import { VIEWPORTS } from "../src/server/browser/viewport.ts";
 import { ProjectsDoc } from "../src/server/docs.ts";
 import { createHandler } from "../src/server/http.ts";
@@ -277,6 +284,7 @@ async function rowTag(page: BrowserPage, scope: string, id: number, type: "Chat"
     assert.equal(result.decorated, false, "sidebar type icons have no border or background");
     assert.equal(result.duplicate, false, "thread type no longer crowds the path metadata");
     assert.equal(result.idleOnRight, true, "the idle state marker moves to the right side");
+    await idleState(page, scope, id, false);
     assert.equal(
         result.color,
         true,
@@ -284,6 +292,66 @@ async function rowTag(page: BrowserPage, scope: string, id: number, type: "Chat"
     );
 
     return result.ordinary;
+}
+
+async function idleState(page: BrowserPage, scope: string, id: number, unread: boolean) {
+    const selector = `${scope} .session-row[data-id="${id}"] .session-side .state-idle`;
+
+    await present(page, selector);
+    await until(
+        () =>
+            value<boolean>(
+                page,
+                `(() => {
+                    const marker = document.querySelector(${JSON.stringify(selector)});
+                    const style = getComputedStyle(marker);
+                    const swatch = document.createElement('span');
+
+                    swatch.style.color = 'var(${unread ? "--accent" : "--faint"})';
+                    marker.parentElement.append(swatch);
+                    const color = getComputedStyle(swatch).color;
+
+                    swatch.remove();
+
+                    // Chromium suspends CSS transitions in background tabs; their read classes
+                    // still update. Color assertions belong to the foreground tab's rendered state.
+                    return marker.classList.contains('unread') === ${unread}
+                        && marker.classList.contains('pulse') === ${unread}
+                        && (document.visibilityState === 'hidden' || (
+                            style.borderTopColor === color
+                            && style.backgroundColor === ${unread ? "color" : "'rgba(0, 0, 0, 0)'"}
+                        ));
+                })()`,
+            ),
+        `${id}: ${unread ? "unread accent square" : "neutral read square, even when active"}`,
+    );
+    assert.equal(
+        await value(
+            page,
+            `document.querySelector(${JSON.stringify(selector)}).getAttribute('aria-label')`,
+        ),
+        unread ? "Unread messages" : null,
+        "the unread state is accessible without relying on color or motion",
+    );
+}
+
+async function alignedRows(page: BrowserPage, scope: string, goalId: number, otherId: number) {
+    await until(
+        () =>
+            value<boolean>(
+                page,
+                `(() => {
+                    const goal = document.querySelector('${scope} .session-row[data-id="${goalId}"] .session').getBoundingClientRect();
+                    const other = document.querySelector('${scope} .session-row[data-id="${otherId}"] .session').getBoundingClientRect();
+                    const bar = document.querySelector('${scope} .session-items > .slide-y')?.getBoundingClientRect();
+
+                    return Math.abs(goal.left - other.left) < 1
+                        && Math.abs(goal.right - other.right) < 1
+                        && (!bar || Math.abs(goal.left - bar.left) < 1);
+                })()`,
+            ),
+        "goal thread borders align with other rows and the active bar",
+    );
 }
 
 async function shot(page: BrowserPage, name: string) {
@@ -492,6 +560,23 @@ test(
                     assert.equal(first.projectId, project.id);
                     assert.equal(first.cwd, cwd);
                     assert.equal(first.threadType, "worker");
+
+                    if (viewport === "mobile") {
+                        // The compact drawer retains an active row while the home list does not.
+                        await page.press(
+                            (await value<boolean>(page, "(await import('/ui.js')).APPLE"))
+                                ? "Meta+B"
+                                : "Control+B",
+                        );
+                        const drawer = ".drawer .sessions";
+
+                        await present(page, `${drawer} .session-row.active[data-id="${first.id}"]`);
+                        await idleState(page, drawer, first.id, false);
+                        await alignedRows(page, drawer, first.id, standaloneWorker.id);
+                        await click(page, ".drawer-overlay");
+                        await present(page, ".drawer", false);
+                    }
+
                     await home(page, scope);
                     await waitGroup(page, scope, goal.name, true);
                     await waitGroup(peer, scope, goal.name, true);
@@ -512,6 +597,7 @@ test(
                         "the single-thread goal retains its goal icon",
                     );
                     assert.equal(await rowTag(page, scope, first.id, "Worker"), false);
+                    await alignedRows(page, scope, first.id, standaloneWorker.id);
                     assert.equal(
                         await rowTag(page, scope, standaloneChat.id, "Chat"),
                         true,
@@ -874,6 +960,244 @@ test(
                     await app.close();
                 }
             });
+        }
+    },
+);
+
+test(
+    "Sidebar status: completed results are unread until seen, across reloads, tabs and visibility",
+    { skip: findBrowser() === undefined ? "no Chromium installed" : false, timeout: 90_000 },
+    async () => {
+        let gate: { entered: boolean; wait: Promise<void>; release: () => void } | undefined;
+        const model = scriptedModel(async (request) => {
+            const text = lastText(request as never).text;
+
+            if (text.includes("held") && gate !== undefined) {
+                gate.entered = true;
+                await gate.wait;
+            }
+
+            return fauxAssistantMessage(`result: ${text}`);
+        });
+        const app = await openApp(model, join(root, "sidebar-status-data"));
+        const id = await newSession(app);
+        const old = await newSession(app);
+
+        await say(app, old, "old result");
+        const server = createServer(
+            createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
+        );
+
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        // Two genuine tabs in one temporary profile: localStorage events are delivered by Chromium,
+        // not manually dispatched as in the existing peeks merge-conflict test.
+        const chromium = await Chromium.launch(
+            findBrowser()!,
+            join(root, "sidebar-status-browser"),
+            [],
+        );
+        const pages: BrowserPage[] = [];
+        const desktop = ".sidebar .sessions";
+        const mobile = ".home-list .sessions";
+
+        const openTab = async () => {
+            const { targetId } = await chromium.connection.send("Target.createTarget", {
+                url: "about:blank",
+            });
+            const { sessionId } = await chromium.connection.send("Target.attachToTarget", {
+                targetId,
+                flatten: true,
+            });
+            const page = new BrowserPage({
+                conversationId: pages.length + 1,
+                connection: chromium.connection,
+                session: sessionId,
+                target: targetId,
+                context: undefined,
+                userAgent: chromium.userAgent,
+                viewport: VIEWPORTS.desktop,
+                changed: () => {},
+                saved: () => {},
+            });
+
+            pages.push(page);
+            await page.init();
+            await chromium.connection.send(
+                "Emulation.setEmulatedMedia",
+                { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] },
+                sessionId,
+            );
+
+            return page;
+        };
+
+        const startHeld = async () => {
+            let release = () => {};
+
+            const wait = new Promise<void>((resolve) => {
+                release = resolve;
+            });
+
+            gate = { entered: false, wait, release };
+            const { submissionId } = await app.commands.submit(id, owner(app), {
+                text: "held result",
+                requestId: crypto.randomUUID(),
+            });
+
+            await until(() => gate?.entered === true && app.isBusy(id), "the model held mid-run");
+
+            return async () => {
+                release();
+                await (await app.harness.submission(submissionId, context))!.wait(context);
+                await until(() => !app.isBusy(id), "the completed run");
+            };
+        };
+
+        const spinner = async (page: BrowserPage, scope: string) => {
+            const row = `${scope} .session-row[data-id="${id}"]`;
+
+            await present(page, `${row} .session-side .spinner[role="img"][aria-label="Working"]`);
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelector('${row} .mini-sweep, ${row} .state-idle') === null`,
+                ),
+                true,
+                "busy uses the shared quadrant loader, never the mini-sweep or idle square",
+            );
+        };
+
+        const infinitePulse = (page: BrowserPage, selector: string) =>
+            value<boolean>(
+                page,
+                `getComputedStyle(document.querySelector(${JSON.stringify(selector)})).animationIterationCount.split(', ').includes('infinite')`,
+            );
+
+        try {
+            const page = await openTab();
+
+            await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
+            await idleState(page, desktop, id, false);
+            await idleState(page, desktop, old, false);
+            const since = await value<number>(
+                page,
+                "Number(localStorage.getItem('pocket.peekSince'))",
+            );
+            const peer = await openTab();
+
+            assert.ok(since > 0, "the existing first-look key is retained");
+            await peer.navigate(base);
+            await idleState(peer, desktop, id, false);
+            let finish = await startHeld();
+
+            await chromium.connection.send("Target.activateTarget", { targetId: page.targetId });
+            await spinner(page, desktop);
+            await page.setViewport(VIEWPORTS.mobile);
+            await spinner(page, mobile);
+            await finish();
+            await idleState(page, mobile, id, true);
+            await idleState(peer, desktop, id, true);
+            assert.equal(
+                await infinitePulse(page, `${mobile} .session-row[data-id="${id}"] .state-idle`),
+                true,
+            );
+            await button(page, `${mobile} .sessions-foot`, "Settings");
+            await button(page, "#settings-panel-appearance", "Reduced");
+            await click(page, '[role="dialog"][aria-label="Settings"] [aria-label="Close"]');
+            await present(page, '[role="dialog"]', false);
+            assert.equal(await value(page, "document.documentElement.dataset.motion"), "reduced");
+            await idleState(page, mobile, id, true);
+            assert.equal(
+                await infinitePulse(page, `${mobile} .session-row[data-id="${id}"] .state-idle`),
+                false,
+                "reduced motion retains the unread accent without an infinite pulse",
+            );
+            await page.setViewport(VIEWPORTS.desktop);
+            await page.reload();
+            await idleState(page, desktop, id, true);
+            assert.equal(
+                await value(page, "Number(localStorage.getItem('pocket.peekSince'))"),
+                since,
+            );
+            assert.equal(
+                await value(page, "document.querySelector('.peeks, .peek-strip') === null"),
+                true,
+                "sidebar read tracking works without enabling peek tiles",
+            );
+            await chromium.connection.send("Target.activateTarget", { targetId: peer.targetId });
+            await click(peer, `${desktop} .session-row[data-id="${id}"] .session`);
+            await present(peer, `${desktop} .session-row.active[data-id="${id}"]`);
+            await idleState(peer, desktop, id, false);
+            await idleState(page, desktop, id, false);
+            assert.ok(
+                (await value<number>(
+                    page,
+                    `Number(localStorage.getItem('pocket.peekSeen.${id}'))`,
+                )) >= app.sessions().find((session) => session.id === id)!.endedAt!,
+                "opening in the other tab persists the existing per-session seen key",
+            );
+            await page.reload();
+            await idleState(page, desktop, id, false);
+
+            finish = await startHeld();
+            await spinner(peer, desktop);
+            assert.equal(await value(peer, "document.visibilityState"), "visible");
+            await finish();
+            await idleState(peer, desktop, id, false);
+            await idleState(page, desktop, id, false);
+            await click(peer, `${desktop} .session-row[data-id="${old}"] .session`);
+            await idleState(peer, desktop, id, false);
+            await peer.reload();
+            await idleState(peer, desktop, id, false);
+
+            // An open but hidden conversation has not been seen; restoring visibility reads its result.
+            await click(peer, `${desktop} .session-row[data-id="${id}"] .session`);
+            finish = await startHeld();
+            await spinner(peer, desktop);
+            await peer.evaluate(`
+                Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+                document.dispatchEvent(new Event('visibilitychange'));
+            `);
+            await finish();
+            await idleState(peer, desktop, id, true);
+            await idleState(page, desktop, id, true);
+            await peer.evaluate(`
+                delete document.visibilityState;
+                document.dispatchEvent(new Event('visibilitychange'));
+            `);
+            await idleState(peer, desktop, id, false);
+            await idleState(page, desktop, id, false);
+
+            const { user: chatter } = app.config.addUser("Sidebar chatter", "guest");
+
+            await app.collab.postChat(id, chatter, {
+                text: "People chat still counts as unread",
+                requestId: crypto.randomUUID(),
+            });
+            await idleState(peer, desktop, id, true);
+            await idleState(page, desktop, id, true);
+            await click(peer, ".topbar .people-button");
+            await present(peer, ".chat-msg");
+            await idleState(peer, desktop, id, false);
+            assert.deepEqual(
+                pages
+                    .flatMap((connected) => connected.logs())
+                    .filter((entry) => entry.level === "error"),
+                [],
+                "no browser errors or module-cycle failures",
+            );
+        } finally {
+            gate?.release();
+
+            for (const page of pages) {
+                page.close();
+            }
+
+            await chromium.stop();
+            server.closeAllConnections();
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await app.close();
         }
     },
 );

@@ -4492,8 +4492,9 @@ button.chip:active:not(:disabled):not(.on) {
     transform: rotate(-90deg);
 }
 
+/* Goals stay aligned with their project; keep the selector available to themes. */
 .goal-section {
-    margin-left: 0.7rem;
+    margin-left: 0;
 }
 
 .project-empty {
@@ -4783,7 +4784,14 @@ button.chip:active:not(:disabled):not(.on) {
         border-color var(--t-border) var(--ease-out);
 }
 
+/* Opening a row is not an unread result: read idle marks stay hollow. */
 .session-row.active .state-idle {
+    background: transparent;
+    border-color: var(--faint);
+}
+
+.state-idle.unread,
+.session-row.active .state-idle.unread {
     background: var(--accent);
     border-color: var(--accent);
 }
@@ -4888,6 +4896,11 @@ button.chip:active:not(:disabled):not(.on) {
     height: var(--q);
     background: currentColor;
     animation: state-quadrant 1.6s steps(1, end) infinite;
+}
+
+/* Peek marks stay quiet; sidebar work keeps the shared square-quadrant spinner. */
+.peek .state-mark.working::before {
+    animation: none;
 }
 
 @keyframes state-quadrant {

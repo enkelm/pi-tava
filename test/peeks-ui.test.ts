@@ -24,6 +24,8 @@ import type { ConversationId, TaskId } from "@earendil-works/pi-durable";
 import { Browsers } from "../src/server/browser.ts";
 import { findBrowser } from "../src/server/browser/discovery.ts";
 import type { BrowserPage } from "../src/server/browser/page.ts";
+import { VIEWPORTS } from "../src/server/browser/viewport.ts";
+import { SubagentsDoc } from "../src/server/docs.ts";
 import { createHandler } from "../src/server/http.ts";
 import type { Client } from "../src/server/room.ts";
 
@@ -38,6 +40,19 @@ const route: FauxResponseStep = (request) => {
     const messages = (request as { messages: { role: string; content: unknown }[] }).messages;
     const asked = messages.findLast((message) => message.role === "user");
     const done = messages.slice(messages.indexOf(asked!)).filter((m) => m.role === "toolResult");
+
+    if (role === "user" && text.endsWith("start a helper")) {
+        return fauxAssistantMessage(
+            [fauxToolCall("subagent", { action: "spawn", name: "helper", message: "look around" })],
+            { stopReason: "toolUse" },
+        );
+    }
+
+    if (role === "user" && text === "look around") {
+        return fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 20" })], {
+            stopReason: "toolUse",
+        });
+    }
 
     if (JSON.stringify(asked?.content ?? "").includes("keep working")) {
         const call =
@@ -64,6 +79,8 @@ let base = "";
 const ids = {} as Record<"open" | "idle" | "pinned" | "waiting" | "finished", ConversationId> & {
     working: ConversationId[];
 };
+let approval: Promise<{ allow: boolean; by: string }>;
+const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Run a script in the page and read back the JSON it returns. */
 async function inPage<T>(script: string): Promise<T> {
@@ -178,7 +195,7 @@ before(async () => {
 
     ids.open = await newSession(app);
     await say(app, ids.open, "the session in view");
-    app.approvals.request(
+    approval = app.approvals.request(
         {
             id: "ui-call",
             conversationId: ids.waiting,
@@ -213,6 +230,10 @@ const altP = () =>
         `window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", code: "KeyP", altKey: true, bubbles: true }))`,
     );
 
+/** Start the viewer's independent browser profile with peeks enabled. */
+const peeksOnIn = (other: BrowserPage) =>
+    other.evaluate(`localStorage.setItem("pocket.appearance", JSON.stringify({ peeks: true }))`);
+
 test("the top bar's switch turns them on, and Alt+P off and on again", real, async () => {
     await page.evaluate(`${SWITCH}.click()`);
     assert.equal(await pressed(), "true");
@@ -230,6 +251,8 @@ test("the top bar's switch turns them on, and Alt+P off and on again", real, asy
     await altP();
     await until(async () => (await tiles()).length >= ids.working.length + 2, "the tiles back");
     await sameAsScreen("the tiles live again");
+    // A run that ends after this browser first looked is new to it.
+    await say(app, ids.finished, "one more thing");
 });
 
 after(async () => {
@@ -247,6 +270,362 @@ after(async () => {
     await app?.close();
     cleanUp();
 });
+
+test(
+    "the column shows working, waiting, finished, and pinned sessions, but not idle ones or the open one",
+    real,
+    async () => {
+        let shown: Tile[] = [];
+
+        // The session list marks a tile at once; its lines and buttons come with the session's first peek.
+        await until(async () => {
+            shown = await tiles();
+            const waiting = shown.find((tile) => tile.id === Number(ids.waiting));
+
+            return (
+                shown.some((tile) => tile.id === Number(ids.finished)) &&
+                waiting?.buttons.includes("Allow") === true &&
+                waiting.ask.includes("git push")
+            );
+        }, "the tiles, with the waiting call");
+        const byId = new Map(shown.map((tile) => [tile.id, tile]));
+
+        assert.ok(!byId.has(Number(ids.open)), "not the open session");
+        assert.ok(!byId.has(Number(ids.idle)), "not an idle session");
+        assert.equal(byId.get(Number(ids.waiting))?.label, "needs you");
+        assert.deepEqual(byId.get(Number(ids.waiting))?.buttons.slice(-2), ["Deny", "Allow"]);
+        assert.match(byId.get(Number(ids.waiting))!.ask, /bash\s*git push -u origin deps/);
+        assert.match(byId.get(Number(ids.waiting))!.ask, /pushes to a remote/, "and why it asks");
+        assert.equal(byId.get(Number(ids.pinned))?.label, "pinned");
+        assert.equal(byId.get(Number(ids.finished))?.label, "done · new");
+
+        for (const id of ids.working) {
+            assert.equal(byId.get(Number(id))?.label, "working");
+        }
+
+        // The waiting one comes first; a tile's lines show its calls the way the transcript names them.
+        assert.equal(shown[0]!.id, Number(ids.waiting));
+        await until(
+            async () =>
+                (await tiles()).some((tile) =>
+                    /Read plan\.md|sleep 0\.4 && echo step/.test(tile.lines),
+                ),
+            "a call on a tile",
+        );
+    },
+);
+
+test("only the tiles on screen are live, and scrolling changes which", real, async () => {
+    const before = await sameAsScreen("the server to watch the tiles on screen");
+
+    assert.ok(
+        before.length < (await tiles()).length,
+        "the column scrolls: some tiles are off screen",
+    );
+    await until(
+        async () =>
+            (await tiles())
+                .filter((tile) => before.includes(tile.id))
+                .every((tile) => tile.lines.trim() !== ""),
+        "the tiles on screen to have their lines",
+    );
+    await page.evaluate(`document.querySelector(".peeks-list").scrollTop = 1e6`);
+    const after = await sameAsScreen("the server to follow the scroll");
+
+    assert.notDeepEqual(after, before);
+    // A tile that scrolled away keeps its last lines.
+    const away = before.find((id) => !after.includes(id))!;
+
+    assert.notEqual((await tiles()).find((tile) => tile.id === away)?.lines.trim(), "");
+});
+
+test("a tile waiting out of view has a way back to it", real, async () => {
+    await until(
+        async () =>
+            (await inPage<string>(
+                `return JSON.stringify(document.querySelector(".peeks-jump.up")?.textContent.trim() ?? "")`,
+            )) === "▲ 1 needs you",
+        "the way up",
+    );
+    await page.evaluate(`document.querySelector(".peeks-jump.up").click()`);
+    await until(
+        async () => (await onScreen()).includes(Number(ids.waiting)),
+        "the waiting tile in view",
+    );
+    await until(
+        async () =>
+            (await inPage<boolean>(
+                `return JSON.stringify(document.querySelector(".peeks-jump.up") === null)`,
+            )) === true,
+        "the way up to go once there",
+    );
+});
+
+test("a viewer sees the waiting call on its tile, without the buttons", real, async () => {
+    const { user, token } = app.config.addUser("Vee", "viewer");
+    const viewer = await browsers.open(2);
+
+    try {
+        await viewer.setViewport(DESKTOP);
+        await viewer.navigate(`${base}/login?token=${encodeURIComponent(token)}`);
+        await peeksOnIn(viewer);
+        await viewer.navigate(`${base}/s/${ids.open}`);
+        let tile: { ask: string; label: string; buttons: string[] } | undefined;
+
+        await until(async () => {
+            tile = JSON.parse(
+                await viewer.evaluate(`
+                        const tile = document.querySelector('.peeks .peek[data-peek="${Number(ids.waiting)}"]');
+
+                        return JSON.stringify(tile && {
+                            ask: tile.querySelector(".peek-ask")?.textContent ?? "",
+                            label: tile.querySelector(".peek-status").textContent,
+                            buttons: [...tile.querySelectorAll(".peek-foot button")].map((each) => each.textContent.trim()),
+                        });
+                    `),
+            ) as typeof tile;
+
+            return tile !== null && tile !== undefined && tile.ask.includes("git push");
+        }, "the viewer's tile");
+        assert.deepEqual(tile!.buttons, []);
+        assert.equal(tile!.label, "waiting", "not “needs you”: a viewer cannot answer");
+    } finally {
+        await browsers.close(2);
+        app.config.removeUser(user.id);
+    }
+});
+
+test("Allow on a tile answers the call, and the tile goes", real, async () => {
+    await page.evaluate(`
+        const tile = document.querySelector('.peeks .peek[data-peek="${Number(ids.waiting)}"]');
+
+        [...tile.querySelectorAll("button")].find((button) => button.textContent.trim() === "Allow").click();
+    `);
+    assert.deepEqual(await approval, { allow: true, by: owner(app).name });
+    await until(
+        async () => !(await tiles()).some((tile) => tile.id === Number(ids.waiting)),
+        "the tile to go",
+    );
+});
+
+test(
+    "opening a tile swaps it with the session left, and the new connection keeps the tiles live",
+    real,
+    async () => {
+        const order = (await tiles()).map((tile) => tile.id);
+        const target = Number(ids.working[2]);
+        const at = order.indexOf(target);
+
+        await page.evaluate(
+            `document.querySelector('.peeks .peek[data-peek="${target}"] .peek-head').click()`,
+        );
+        await until(
+            async () =>
+                (await inPage<string>(`return JSON.stringify(location.pathname)`)) ===
+                `/s/${target}`,
+            "the session to open",
+        );
+        let after: Tile[] = [];
+
+        await until(async () => {
+            after = await tiles();
+
+            return after[at]?.id === Number(ids.open);
+        }, "the session left to take the tile's place");
+        assert.equal(after[at]!.label, "just left");
+        assert.deepEqual(
+            after.map((tile) => tile.id).filter((id) => id !== Number(ids.open)),
+            order.filter((id) => id !== target),
+            "the other tiles stay where they were",
+        );
+        // The switch opened a new connection: it got the tiles on screen again.
+        await until(
+            () =>
+                [...app.clients].some(
+                    (client) => client.conversationId === target && (client.peeks?.size ?? 0) > 0,
+                ),
+            "the new connection's tiles",
+        );
+        await sameAsScreen("the tiles on screen, after the switch");
+    },
+);
+
+test("the ✓ on a finished tile marks it seen", real, async () => {
+    const id = Number(ids.finished);
+
+    await page.evaluate(
+        `document.querySelector('.peeks .peek[data-peek="${id}"] .peek-seen').click()`,
+    );
+    await until(async () => !(await tiles()).some((tile) => tile.id === id), "the tile to go");
+    const seen = await inPage<number>(`return localStorage.getItem("pocket.peekSeen.${id}")`);
+
+    assert.ok(seen > 0);
+});
+
+test("a seen mark from another tab of this browser is kept, and shows at once", real, async () => {
+    // Pinned and idle: it shows as pinned, until a run of it ends unseen.
+    const id = Number(ids.pinned);
+
+    await say(app, ids.pinned, "one more look");
+    await until(
+        async () => (await tiles()).find((tile) => tile.id === id)?.label === "done · new",
+        "the pinned session to be new",
+    );
+    // Another tab marks it seen; this tab marks another session seen at the same time.
+    await page.evaluate(`
+        const mark = "pocket.peekSeen.${id}";
+
+        localStorage.setItem(mark, String(Date.now() + 60_000));
+        window.dispatchEvent(new StorageEvent("storage", { key: mark }));
+        (await import("/session-seen.js")).markSeen(${Number(ids.idle)});
+    `);
+    await until(
+        async () => (await tiles()).find((tile) => tile.id === id)?.label === "pinned",
+        "the other tab's mark to show here",
+    );
+    assert.ok(
+        Number(await inPage<string>(`return localStorage.getItem("pocket.peekSeen.${id}")`)) >
+            Date.now(),
+        "and to stay",
+    );
+});
+
+test(
+    "a short command in wide characters still shows whole before it can be allowed",
+    real,
+    async () => {
+        const id = Number(ids.pinned);
+        const subject = `echo ${"全部删除旧的构建文件".repeat(7)} > a`;
+
+        assert.ok(subject.length <= 80, "short enough by count to be allowed");
+        const asked = app.approvals.request(
+            {
+                id: "wide-call",
+                conversationId: ids.pinned,
+                taskId: 4 as unknown as TaskId,
+                tool: "bash",
+                subject,
+                reason: "Overwrites a file",
+                createdAt: Date.now(),
+            },
+            context,
+        );
+        /** Whether the tile offers Allow, and whether its command is cut off anywhere. */
+        const check = (where: string) =>
+            inPage<{ allow: boolean; clipped: boolean } | null>(`
+            const tile = document.querySelector('${where} .peek[data-peek="${id}"]');
+            const what = tile?.querySelector(".peek-ask-what");
+
+            if (!what) {
+                return JSON.stringify(null);
+            }
+
+            const box = what.getBoundingClientRect();
+            const edge = tile.getBoundingClientRect();
+
+            return JSON.stringify({
+                allow: [...tile.querySelectorAll("button")].some((button) => button.textContent.trim() === "Allow"),
+                clipped: what.scrollHeight > what.clientHeight + 1 || what.scrollWidth > what.clientWidth + 1 || box.bottom > edge.bottom + 1 || box.right > edge.right + 1,
+            });
+        `);
+
+        try {
+            for (const [where, viewport] of [
+                [".peeks", DESKTOP],
+                [".peek-strip", VIEWPORTS.mobile],
+            ] as const) {
+                await page.setViewport(viewport);
+                await until(
+                    async () => (await tiles(where)).some((tile) => tile.id === id),
+                    `the tile in ${where}`,
+                );
+                await page.evaluate(
+                    `document.querySelector('${where} .peek[data-peek="${id}"]').scrollIntoView({ block: "nearest", inline: "nearest" })`,
+                );
+                let seen: { allow: boolean; clipped: boolean } | null = null;
+
+                await until(async () => {
+                    seen = await check(where);
+
+                    return seen !== null;
+                }, `the call on the tile in ${where}`);
+                await settle(300);
+                seen = await check(where);
+                assert.equal(seen!.clipped, false, `nothing of the command is cut off in ${where}`);
+                assert.equal(seen!.allow, true, `so it may be allowed in ${where}`);
+            }
+        } finally {
+            await page.setViewport(DESKTOP);
+            app.approvals.answer("wide-call", { allow: false, by: "test" });
+            await asked;
+        }
+    },
+);
+
+test(
+    "Open on a subagent's long call goes to the subagent, where its card shows the command",
+    real,
+    async () => {
+        const parent = await newSession(app);
+
+        await say(app, parent, "please start a helper");
+        const helper = (await app.harness.snapshot(SubagentsDoc, parent, context))!.agents.helper!
+            .conversationId;
+        const asked = app.approvals.request(
+            {
+                id: "helper-long-call",
+                conversationId: helper,
+                taskId: 5 as unknown as TaskId,
+                tool: "bash",
+                subject: `rsync -av --delete ./build/ deploy@staging:/srv/app/ && ${"ssh deploy@staging restart; ".repeat(3)}`,
+                reason: "Deletes files on a server",
+                createdAt: Date.now(),
+            },
+            context,
+        );
+
+        try {
+            await until(
+                async () => (await tiles()).some((tile) => tile.id === Number(parent)),
+                "the parent's tile",
+            );
+            await page.evaluate(
+                `document.querySelector('.peeks .peek[data-peek="${Number(parent)}"]').scrollIntoView({ block: "nearest" })`,
+            );
+            await until(
+                async () =>
+                    (await tiles())
+                        .find((tile) => tile.id === Number(parent))
+                        ?.buttons.includes("Open") === true,
+                "Open on the parent's tile",
+            );
+            await page.evaluate(`
+            const tile = document.querySelector('.peeks .peek[data-peek="${Number(parent)}"]');
+
+            [...tile.querySelectorAll("button")].find((button) => button.textContent.trim() === "Open").click();
+        `);
+            await until(
+                async () =>
+                    (await inPage<string>(`return JSON.stringify(location.pathname)`)) ===
+                    `/s/${helper}`,
+                "the subagent's conversation to open",
+            );
+            await until(
+                async () =>
+                    (
+                        await inPage<string>(
+                            `return JSON.stringify(document.querySelector(".approval")?.textContent ?? "")`,
+                        )
+                    ).includes("rsync -av --delete"),
+                "its card with the whole command",
+            );
+        } finally {
+            app.approvals.answer("helper-long-call", { allow: false, by: "test" });
+            await asked;
+            await app.commands.abort(helper, owner(app));
+        }
+    },
+);
 
 test(
     "a command too long to show whole is not allowed from its tile: Open shows it in its session",

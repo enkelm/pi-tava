@@ -11,6 +11,7 @@ import { sessionForest } from "./session-tree.js";
 import { PrivateList, PrivateTabs } from "./private.js";
 import { projectGroups, rowsInGroups, sessionMatches } from "./project-groups.js";
 import { canMoveSessions, useSessionDrag } from "./session-moves.js";
+import { sessionResultUnread } from "./session-seen.js";
 import { ThreadTypeTag } from "./thread-type.js";
 import {
     actions,
@@ -30,7 +31,6 @@ import {
     workspaceOrder,
 } from "./store.js";
 export { workspaceOrder } from "./store.js";
-import { finishedUnseen } from "./seen.js";
 import { isPinned, prefs, setPrefs, togglePin } from "./theme.js";
 import {
     APPLE,
@@ -40,6 +40,7 @@ import {
     scrimPress,
     shortPath,
     Slide,
+    Spinner,
     timeAgo,
     usePresence,
     useSide,
@@ -427,12 +428,12 @@ export function selectFromList(id) {
 }
 
 /**
- * The square at the start of a session's row: its folder's color, in the shape of where the session is. The first that
- * holds wins: a call waiting for you, Pi or its subagents at work, a failed run (solid while new, drawn once seen),
- * finished since this browser last looked or marked unread (solid), and read or never run (hollow).
+ * The session's state, shared by its row and the home screen. The first that holds wins: a call waiting for you,
+ * Pi or its subagents at work, a failed run (solid while new, drawn once seen), finished since this browser last
+ * looked, unread people-chat or marked unread (solid), and read or never run (hollow).
  */
 function stateMark(session, working, marked) {
-    const fresh = marked || finishedUnseen(session);
+    const fresh = marked || sessionResultUnread(session) || (collab() && sessionUnread(session));
 
     if (session.waiting) {
         return { shape: "waiting", label: "Waiting for approval" };
@@ -448,7 +449,9 @@ function stateMark(session, working, marked) {
             : { shape: "failed seen", label: "Failed" };
     }
 
-    return fresh ? { shape: "fresh", label: "Not read" } : { shape: "seen", label: "" };
+    return fresh
+        ? { shape: "fresh", label: marked ? "Marked unread" : "Unread messages" }
+        : { shape: "seen", label: "" };
 }
 
 /** A row's state for themes (`data-state`), by its square's shape: a documented name that stays when the squares change. */
@@ -494,7 +497,7 @@ function SessionRow({
     const pinned = isPinned(session.id);
     const open = session.id === conversationId && !session.archived;
     const marked = isUnread(session.id);
-    const unread = collab() && sessionUnread(session) && !open;
+    const unread = collab() && sessionUnread(session);
     const moving = store.state.moving[session.id] !== undefined;
     const title = session.title ?? "New session";
     const path = shortPath(session.cwd, server?.home);
@@ -528,25 +531,32 @@ function SessionRow({
     const person = collab() ? (session.people ?? []).find((each) => each.id !== me?.id) : undefined;
     const mark = stateMark(session, live > 0, marked);
     // Finished since this browser last looked: its result is unread, so its title reads bold.
-    const unseen = finishedUnseen(session);
+    const unseen = sessionResultUnread(session);
     // Archive, pin, and mark-unread show on hover; an archived session only comes back, and only for people who steer.
     const acts = (canSteer() ? 1 : 0) + (session.archived ? 0 : 2) + (canMoveSessions() ? 1 : 0);
     const state = html`<span class="session-mark">
-                ${
-                    selected
-                        ? html`<span class="state-check" role="img" aria-label="Selected">
-                              <${Icon} name="check" size=${9} />
-                          </span>`
-                        : html`<span
-                              class=${`state-mark ${mark.shape}`}
-                              data-part="session-mark"
-                              style=${`--folder:${folderColor(session.cwd)}`}
-                              role=${mark.label ? "img" : undefined}
-                              aria-label=${mark.label || undefined}
-                              aria-hidden=${mark.label ? undefined : "true"}
-                          ></span>`
-                }
-            </span>`;
+        ${
+            selected
+                ? html`<span class="state-check" role="img" aria-label="Selected">
+                      <${Icon} name="check" size=${9} />
+                  </span>`
+                : mark.shape === "working"
+                  ? html`<span data-part="session-mark"><${Spinner} /></span>`
+                  : html`<span
+                        class=${
+                            mark.shape === "fresh" || mark.shape === "seen"
+                                ? `state-idle ${mark.shape === "fresh" ? "unread pulse" : ""}`
+                                : `state-mark ${mark.shape} ${mark.shape === "failed" ? "pulse" : ""}`
+                        }
+                        data-part="session-mark"
+                        style=${`--folder:${folderColor(session.cwd)}`}
+                        role=${mark.label ? "img" : undefined}
+                        aria-label=${mark.label || undefined}
+                        aria-hidden=${mark.label ? undefined : "true"}
+                        title=${mark.label || undefined}
+                    ></span>`
+        }
+    </span>`;
 
     return html`<div
         class=${`session-row ${open ? "active" : ""} ${selected ? "selected" : ""} ${pressing ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
@@ -601,23 +611,10 @@ function SessionRow({
                 }
                 ${!fork && person && html`<${Avatar} person=${person} size=${18} />`}
                 ${
-                    session.busy &&
-                    !session.waiting &&
-                    !fork &&
-                    html`<span class="session-working" title="Working"></span>`
-                }
-                ${
                     session.waiting &&
                     html`<span class="session-needs" title="Waiting for approval">
                         ${canSteer() ? "needs you" : "waiting"}
                     </span>`
-                }
-                ${
-                    (unread || marked) &&
-                    html`<span
-                        class="unread-dot"
-                        title=${marked ? "Marked unread" : "New chat messages"}
-                    ></span>`
                 }
                 <span class="session-time">${timeAgo(session.updatedAt)}</span>
                 ${
