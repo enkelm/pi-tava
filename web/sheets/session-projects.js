@@ -9,6 +9,7 @@ import { ProjectForm } from "./project.js";
 export function ProjectSessionPanel({
     projectId: initialProjectId,
     goalId: initialGoalId,
+    newGoal: initialNewGoal = false,
     cwd: initialCwd,
     continuation,
     visible,
@@ -17,7 +18,7 @@ export function ProjectSessionPanel({
     const { projects, projectGoals, projectsLoaded, server } = store.state;
     const [projectId, setProjectId] = useState(initialProjectId ?? null);
     const [goalId, setGoalId] = useState(initialGoalId ?? null);
-    const [newGoal, setNewGoal] = useState(false);
+    const [newGoal, setNewGoal] = useState(initialNewGoal);
     const [chat, setChat] = useState(false);
     const [creating, setCreating] = useState(false);
     const [override, setOverride] = useState(initialCwd ?? null);

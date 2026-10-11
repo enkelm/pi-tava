@@ -62,6 +62,116 @@ async function button(page: BrowserPage, scope: string, text: string) {
 const row = (scope: string, id: ConversationId) => `${scope} .session-row[data-id="${id}"]`;
 const goal = (scope: string, id: string) => `${scope} .goal-section[data-goal-id="${id}"]`;
 const head = (section: string) => `${section} > .project-group-head .group-head`;
+const overlay = (scope: string, id: ConversationId) => `${row(scope, id)} .session-hold`;
+
+async function openMove(page: BrowserPage, scope: string, id: ConversationId, title: string) {
+    await click(page, `${row(scope, id)} [aria-label=${JSON.stringify(`Options for ${title}`)}]`);
+    await present(page, `[role="dialog"][aria-label=${JSON.stringify(title)}]`);
+    await button(page, dialog, "Move to project or goal…");
+    await present(page, '[role="dialog"][aria-label="Move session"]');
+}
+
+async function pause(page: BrowserPage, ms: number) {
+    await page.evaluate(`await new Promise(resolve => setTimeout(resolve, ${ms}))`);
+}
+
+async function beginTouch(page: BrowserPage, scope: string, id: ConversationId) {
+    await present(page, `${row(scope, id)} .session`);
+    await page.evaluate(`
+        await Promise.all(document.getAnimations()
+            .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+            .map(animation => animation.finished.catch(() => {})));
+        document.querySelector(${JSON.stringify(`${row(scope, id)} .session`)})
+            .scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        await new Promise(resolve => {
+            let timer;
+            const done = () => {
+                document.removeEventListener('scroll', quiet, true);
+                resolve();
+            };
+            const quiet = () => {
+                clearTimeout(timer);
+                timer = setTimeout(done, 120);
+            };
+
+            document.addEventListener('scroll', quiet, true);
+            quiet();
+        });
+    `);
+
+    return value<{ x: number; y: number }>(
+        page,
+        `(() => {
+            const target = document.querySelector(${JSON.stringify(`${row(scope, id)} .session`)});
+
+            const rect = target.closest('.session-row').getBoundingClientRect();
+            const point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+
+            window.sessionFinger = { target, point };
+            const finger = new Touch({ identifier: 41, target, clientX: point.x, clientY: point.y });
+            const event = new TouchEvent('touchstart', {
+                bubbles: true, cancelable: true, touches: [finger], changedTouches: [finger],
+            });
+
+            target.dispatchEvent(event);
+
+            if (event.defaultPrevented) {
+                throw new Error('Ordinary touch down must remain available to taps and scrolling');
+            }
+
+            return point;
+        })()`,
+    );
+}
+
+async function finger(
+    page: BrowserPage,
+    type: "touchmove" | "touchend" | "touchcancel" | "touchstart",
+    point?: { x: number; y: number },
+    second = false,
+) {
+    return value<boolean>(
+        page,
+        `(() => {
+            const { target } = window.sessionFinger;
+            const point = ${JSON.stringify(point)} ?? window.sessionFinger.point;
+
+            window.sessionFinger.point = point;
+            const touch = new Touch({ identifier: 41, target, clientX: point.x, clientY: point.y });
+            const thumb = new Touch({ identifier: 42, target, clientX: point.x + 20, clientY: point.y });
+            const touches = ${JSON.stringify(type)} === 'touchend' || ${JSON.stringify(type)} === 'touchcancel'
+                ? [] : ${second} ? [touch, thumb] : [touch];
+            const event = new TouchEvent(${JSON.stringify(type)}, {
+                bubbles: true, cancelable: true, touches, changedTouches: ${second} ? [thumb] : [touch],
+            });
+
+            target.dispatchEvent(event);
+
+            return event.defaultPrevented;
+        })()`,
+    );
+}
+
+async function observeShortcutEscapes(page: BrowserPage) {
+    await page.evaluate(`
+        window.shortcutEscapes = 0;
+        addEventListener('keydown', event => {
+            if (event.key === 'Escape' && !event.defaultPrevented) {
+                window.shortcutEscapes++;
+            }
+        });
+    `);
+}
+
+async function touchDrag(page: BrowserPage, scope: string, id: ConversationId) {
+    const point = await beginTouch(page, scope, id);
+
+    await present(page, overlay(scope, id));
+    assert.equal(await finger(page, "touchmove", { x: point.x - 16, y: point.y }), true);
+    await present(page, `${scope} .session-drop-unassigned`);
+
+    return point;
+}
 
 async function selectRows(page: BrowserPage, scope: string, ids: ConversationId[]) {
     for (const id of ids) {
@@ -124,7 +234,7 @@ async function moved(
     }
 }
 
-async function shot(page: BrowserPage, name: string) {
+async function shot(page: BrowserPage, name: string, settle = true) {
     const directory = process.env.SESSION_MOVES_SCREENSHOT_DIR;
 
     if (directory === undefined) {
@@ -132,9 +242,13 @@ async function shot(page: BrowserPage, name: string) {
     }
 
     mkdirSync(directory, { recursive: true });
-    await page.evaluate(`await Promise.all(document.getAnimations()
-        .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
-        .map(animation => animation.finished.catch(() => {})))`);
+
+    if (settle) {
+        await page.evaluate(`await Promise.all(document.getAnimations()
+            .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+            .map(animation => animation.finished.catch(() => {})))`);
+    }
+
     const captured = await page.screenshot();
 
     writeFileSync(join(directory, `${name}.jpg`), Buffer.from(captured.data, "base64"));
@@ -550,8 +664,7 @@ test(
             }
 
             const open = async () => {
-                await click(page, `${row(home, fixture.worker)} [aria-label="Move session"]`);
-                await present(page, '[role="dialog"][aria-label="Move session"]');
+                await openMove(page, home, fixture.worker, "Worker to move");
             };
 
             const choose = async () => {
@@ -671,13 +784,6 @@ test(
                 ),
                 true,
             );
-            assert.equal(
-                await value<number>(
-                    reader,
-                    `document.querySelectorAll('${home} [aria-label="Move session"]').length`,
-                ),
-                0,
-            );
             await selectRows(reader, home, [fixture.worker]);
             assert.equal(
                 await value<boolean>(
@@ -690,7 +796,583 @@ test(
                 await value(page, "document.documentElement.scrollWidth <= innerWidth"),
                 true,
             );
+            await click(
+                reader,
+                `${row(home, fixture.worker)} [aria-label="Options for Worker to move"]`,
+            );
+            await present(reader, '[role="dialog"][aria-label="Worker to move"]');
+            assert.equal(
+                await value<boolean>(
+                    reader,
+                    `[...document.querySelectorAll('${dialog} button')].some(button => /^(Move|Rename|Archive|Restore)/.test(button.textContent.trim()))`,
+                ),
+                false,
+                "readers retain Options without mutation commands",
+            );
             await shot(reader, "mobile-reader");
+        } finally {
+            await fixture.close();
+        }
+    },
+);
+
+// Hold coverage owns deliberate intent and lifecycle cancellation, not CSS implementation details.
+// Removing the fresh-slide gate, failing to clear any pending timer, or swallowing a later tap
+// must fail at the rendered row/menu boundary; native mouse/picker tests cannot exercise these.
+test(
+    "mobile hold needs a fresh slide and cancels interrupted choices without acting",
+    browserOptions,
+    async () => {
+        const fixture = await setup("hold-intent", "mobile");
+
+        try {
+            const page = await fixture.connect(1, fixture.participant.token);
+            const before = metadata(fixture.app, fixture.worker);
+            const requests = fixture.requests.length;
+            const source = row(home, fixture.worker);
+            const hold = overlay(home, fixture.worker);
+            const path = await value<string>(page, "location.pathname");
+
+            await observeShortcutEscapes(page);
+
+            const assertCancelled = async (name: string) => {
+                await present(page, hold, false);
+                await pause(page, 850);
+                await present(page, dialog, false);
+                await present(page, `${home} .session-drop-unassigned`, false);
+                assert.equal(fixture.requests.length, requests, name);
+                assert.deepEqual(metadata(fixture.app, fixture.worker), before, name);
+            };
+
+            // Movement before reveal is not credit toward the required post-reveal slide.
+            const point = await beginTouch(page, home, fixture.worker);
+
+            assert.equal(
+                await value<boolean>(
+                    page,
+                    `(() => {
+                const target = window.sessionFinger.target;
+                const context = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+                const native = new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() });
+
+                target.dispatchEvent(context);
+                target.dispatchEvent(native);
+
+                return context.defaultPrevented && native.defaultPrevented;
+            })()`,
+                ),
+                true,
+                "native long-press menus and emulated drags cannot steal the pending hold",
+            );
+            await present(page, dialog, false);
+            assert.equal(await finger(page, "touchmove", { x: point.x + 5, y: point.y }), false);
+            await present(page, hold);
+            await shot(page, "mobile-hold-neutral");
+            await finger(page, "touchmove", { x: point.x + 9, y: point.y });
+            await pause(page, 900);
+            await present(page, dialog, false);
+            await present(page, `${home} .session-drop-unassigned`, false);
+            assert.equal(
+                await finger(page, "touchend"),
+                true,
+                "a consumed hold suppresses its release",
+            );
+            await page.evaluate(`document.querySelector(${JSON.stringify(`${source} .session`)})
+            .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))`);
+            assert.equal(
+                await value(page, "location.pathname"),
+                path,
+                "compatibility click cannot open the thread",
+            );
+
+            const interrupts = [
+                "release",
+                "outside row",
+                "second finger",
+                "touchcancel",
+                "blur",
+                "Escape",
+                "scroll",
+            ];
+
+            for (const interrupt of interrupts) {
+                const start = await beginTouch(page, home, fixture.worker);
+
+                await present(page, hold);
+                await finger(page, "touchmove", { x: start.x + 16, y: start.y });
+
+                if (interrupt === "release") {
+                    await finger(page, "touchend");
+                } else if (interrupt === "outside row") {
+                    await finger(page, "touchmove", { x: start.x + 16, y: start.y + 100 });
+                } else if (interrupt === "second finger") {
+                    await finger(page, "touchstart", undefined, true);
+                } else if (interrupt === "touchcancel") {
+                    await finger(page, "touchcancel");
+                } else if (interrupt === "blur") {
+                    await page.evaluate("dispatchEvent(new Event('blur'))");
+                } else if (interrupt === "Escape") {
+                    await page.press("Escape");
+                    assert.equal(
+                        await value(page, "window.shortcutEscapes"),
+                        0,
+                        "hold Escape cannot reach the window's stop-Pi shortcut",
+                    );
+                } else {
+                    await page.evaluate(
+                        `document.querySelector('${home} .session-items').dispatchEvent(new Event('scroll'))`,
+                    );
+                }
+
+                await assertCancelled(interrupt);
+                await finger(page, "touchend");
+            }
+
+            await page.press("Escape");
+            assert.equal(
+                await value(page, "window.shortcutEscapes"),
+                1,
+                "ordinary Escape remains available when there is no hold",
+            );
+
+            const switching = await beginTouch(page, home, fixture.worker);
+
+            await present(page, hold);
+            await finger(page, "touchmove", { x: switching.x + 16, y: switching.y });
+            await pause(page, 400);
+            await finger(page, "touchmove", { x: switching.x - 16, y: switching.y });
+            await present(page, `${hold}[data-choice="drag"][data-phase="expand"]`);
+            await pause(page, 400);
+            await present(page, dialog, false);
+            await present(page, `${home} .session-drop-unassigned`, false);
+            await finger(page, "touchend");
+            await assertCancelled(
+                "switching halves restarts the full dwell, never commits the old choice",
+            );
+
+            const scrolling = await beginTouch(page, home, fixture.worker);
+
+            assert.equal(
+                await finger(page, "touchmove", { x: scrolling.x, y: scrolling.y + 24 }),
+                false,
+                "scroll intent before reveal is never prevented",
+            );
+            await assertCancelled("scroll before hold");
+            await finger(page, "touchend");
+
+            // Options commits only after a fresh slide plus expansion/fill, never on finger release.
+            const options = await beginTouch(page, home, fixture.worker);
+
+            await present(page, hold);
+            await finger(page, "touchmove", { x: options.x + 16, y: options.y });
+            await pause(page, 250);
+            await shot(page, "mobile-hold-expanding", false);
+            await present(page, '[role="dialog"][aria-label="Worker to move"]');
+            await present(page, hold, false);
+            assert.equal(await value(page, "location.pathname"), path, "Options does not navigate");
+            await finger(page, "touchend");
+            await page.evaluate(`await Promise.all(document.getAnimations()
+                .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+                .map(animation => animation.finished.catch(() => {})))`);
+            await page.press("Escape");
+            await present(page, dialog, false);
+            assert.equal(fixture.requests.length, requests);
+            await page.click({ selector: `${source} [aria-label="Options for Worker to move"]` });
+            await present(page, '[role="dialog"][aria-label="Worker to move"]');
+            assert.equal(
+                await value(page, "location.pathname"),
+                path,
+                "a fresh native Options click is not swallowed by the old held contact",
+            );
+            await page.evaluate(`await Promise.all(document.getAnimations()
+                .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+                .map(animation => animation.finished.catch(() => {})))`);
+            await page.press("Escape");
+            await present(page, dialog, false);
+
+            // Options replaces the legacy held-row sheet: its browser-local read actions and
+            // Select must still work, not just appear beside the newer Move/Rename commands.
+            const menu = '[role="dialog"][aria-label="Worker to move"]';
+
+            for (const [label, marked] of [
+                ["Mark unread", true],
+                ["Mark read", false],
+            ] as const) {
+                await click(page, `${source} [aria-label="Options for Worker to move"]`);
+                await present(page, menu);
+                await button(page, menu, label);
+                await present(page, dialog, false);
+                await present(page, `${source}.marked-unread`, marked);
+            }
+
+            await click(page, `${source} [aria-label="Options for Worker to move"]`);
+            await present(page, menu);
+            await button(page, menu, "Select");
+            await present(page, dialog, false);
+            await present(page, `${source}.selected`);
+            await click(page, `${row(home, fixture.chat)} .session`);
+            await present(page, `${row(home, fixture.chat)}.selected`);
+            assert.equal(
+                await value(page, "location.pathname"),
+                path,
+                "Select makes ordinary row taps select more threads without opening them",
+            );
+            assert.equal(fixture.requests.length, requests, "read marks and selection stay local");
+            assert.deepEqual(metadata(fixture.app, fixture.worker), before);
+            await page.press("Escape");
+            await present(page, `${source}.selected`, false);
+            await present(page, `${row(home, fixture.chat)}.selected`, false);
+
+            // Ordinary touch taps remain usable after consumed holds and selection.
+            await beginTouch(page, home, fixture.worker);
+            assert.equal(await finger(page, "touchend"), false);
+            await page.evaluate(`document.querySelector(${JSON.stringify(`${source} .session`)})
+            .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))`);
+            await until(
+                () => value<boolean>(page, `location.pathname === '/s/${fixture.worker}'`),
+                "ordinary tap opens the thread",
+            );
+        } finally {
+            await fixture.close();
+        }
+    },
+);
+
+// Options retains the drawer for legacy Select, but a catalogue update can still detach its row.
+// The original finger must never activate a menu command after that source disappears.
+test(
+    "drawer Options hold consumes the detached finger through lift and compatibility click",
+    browserOptions,
+    async () => {
+        const fixture = await setup("hold-drawer", "mobile");
+
+        try {
+            const page = await fixture.connect(1, fixture.participant.token);
+            const before = metadata(fixture.app, fixture.worker);
+            const requests = fixture.requests.length;
+            const drawer = ".drawer .sessions";
+
+            await click(page, `${row(home, fixture.worker)} .session`);
+            await until(
+                () => value<boolean>(page, `location.pathname === '/s/${fixture.worker}'`),
+                "open thread before drawer",
+            );
+            const shortcut = await value<string>(
+                page,
+                `/Mac|iPhone|iPad/.test(navigator.platform) ? 'Meta+b' : 'Control+b'`,
+            );
+
+            await page.press(shortcut);
+            await present(page, `${row(drawer, fixture.worker)} .session`);
+            const point = await beginTouch(page, drawer, fixture.worker);
+
+            await present(page, overlay(drawer, fixture.worker));
+            await finger(page, "touchmove", { x: point.x + 16, y: point.y });
+            await present(page, '[role="dialog"][aria-label="Worker to move"]');
+            // A real owner edit removes the held row from Projects while its Options stays open.
+            // Do not require opening Options itself to unmount the drawer: Select needs that list.
+            await fixture.app.commands.updateSession(fixture.worker, owner(fixture.app), {
+                archived: true,
+            });
+            await until(
+                () => value<boolean>(page, "!window.sessionFinger.target.isConnected"),
+                "a committed catalogue update detaches the original held row",
+            );
+            const command = await page.locate({ label: "Restore thread" });
+
+            assert.equal(
+                await finger(page, "touchmove", command),
+                true,
+                "detached source move remains consumed",
+            );
+            assert.equal(
+                await finger(page, "touchend", command),
+                true,
+                "detached source release remains consumed",
+            );
+            assert.equal(
+                await value<boolean>(
+                    page,
+                    `(() => {
+            const button = [...document.querySelectorAll('${dialog} button')]
+                .find(button => button.textContent.trim() === 'Restore thread');
+            const event = new MouseEvent('click', {
+                bubbles: true, cancelable: true, detail: 1,
+                clientX: ${command.x}, clientY: ${command.y},
+            });
+
+            button.dispatchEvent(event);
+
+            return event.defaultPrevented;
+        })()`,
+                ),
+                true,
+                "compatibility click cannot restore from the new sheet",
+            );
+            assert.equal(fixture.requests.length, requests);
+            assert.deepEqual(metadata(fixture.app, fixture.worker), { ...before, archived: true });
+            assert.equal(await value(page, "location.pathname"), `/s/${fixture.worker}`);
+            await page.press("Escape");
+            await present(page, dialog, false);
+            await fixture.app.commands.updateSession(fixture.worker, owner(fixture.app), {
+                archived: false,
+            });
+            await present(page, `${row(drawer, fixture.worker)} .session`);
+            assert.deepEqual(metadata(fixture.app, fixture.worker), before);
+            await click(
+                page,
+                `${row(drawer, fixture.worker)} [aria-label="Options for Worker to move"]`,
+            );
+            await present(page, '[role="dialog"][aria-label="Worker to move"]');
+        } finally {
+            await fixture.close();
+        }
+    },
+);
+
+// Touch DnD owns hit testing and tracking across source detach. A stale last highlight, parent
+// fallback for an archived goal, or row-owned tracking fails through real committed metadata.
+test(
+    "mobile touch drag keeps its source across tab hover and recomputes release targets",
+    browserOptions,
+    async () => {
+        const fixture = await setup("touch-placement", "mobile");
+
+        try {
+            const page = await fixture.connect(1, fixture.participant.token);
+            const peer = await fixture.connect(2, fixture.app.config.ownerToken);
+            const before = metadata(fixture.app, fixture.worker);
+            const destination = head(goal(home, fixture.goalId));
+
+            await click(page, destination);
+            await button(page, `${home} .session-tabs:not(.private-tabs)`, "Recent");
+            await touchDrag(page, home, fixture.worker);
+            const tab = await page.locate({
+                selector: `${home} [data-session-projects-tab="true"]`,
+            });
+
+            await finger(page, "touchmove", tab);
+            await until(
+                () =>
+                    value<boolean>(
+                        page,
+                        `document.querySelector('${home} .session-tabs [aria-selected=true]')?.textContent.trim() === 'Projects'`,
+                    ),
+                "touch dwell switches to Projects",
+            );
+            assert.equal(
+                await value(page, "window.sessionFinger.target.isConnected"),
+                false,
+                "Projects hover genuinely detaches the original touch target",
+            );
+            const target = await page.locate({ selector: destination });
+
+            await finger(page, "touchmove", target);
+            await until(
+                () =>
+                    value<boolean>(
+                        page,
+                        `document.querySelector(${JSON.stringify(destination)}).getAttribute('aria-expanded') === 'true'`,
+                    ),
+                "touch dwell expands the closed goal",
+            );
+            const requests = fixture.requests.length;
+
+            await finger(page, "touchend", { x: 1, y: 1 });
+            await present(page, `${home} .session-drop-unassigned`, false);
+            assert.equal(
+                fixture.requests.length,
+                requests,
+                "outside release cannot use the stale highlighted goal",
+            );
+            assert.deepEqual(metadata(fixture.app, fixture.worker), before);
+            // No artificial pause: this genuine mouse press must clear the touch owner's click
+            // suppression while its compatibility-click window is still live.
+            await page.click({ selector: `${row(home, fixture.worker)} .session` });
+            await until(
+                () => value<boolean>(page, `location.pathname === '/s/${fixture.worker}'`),
+                "fresh native click after touch cancellation opens the thread",
+            );
+            await page.evaluate(`await Promise.all(document.getAnimations()
+                .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+                .map(animation => animation.finished.catch(() => {})))`);
+            await page.click({ selector: ".topbar-back" });
+            await present(page, `${row(home, fixture.worker)} .session`);
+
+            // An archived goal consumes the nearest hit instead of silently using its project parent.
+            await touchDrag(page, home, fixture.worker);
+            await button(page, `${home} .session-tabs:not(.private-tabs)`, "Archived");
+            const archived = await page.locate({
+                selector: head(goal(home, fixture.archivedGoal)),
+            });
+
+            await finger(page, "touchmove", archived);
+            await finger(page, "touchend", archived);
+            await present(page, `${home} .session-drop-unassigned`, false);
+            assert.equal(
+                fixture.requests.length,
+                requests,
+                "archived goal is not a project fallback",
+            );
+            assert.deepEqual(metadata(fixture.app, fixture.worker), before);
+            await button(page, `${home} .session-tabs:not(.private-tabs)`, "Projects");
+
+            await touchDrag(page, home, fixture.worker);
+            const release = await page.locate({ selector: destination });
+
+            // No move at this position first: release itself must resolve the nearest destination.
+            await finger(page, "touchend", release);
+            await moved(
+                fixture,
+                [page, peer],
+                home,
+                fixture.worker,
+                before,
+                fixture.beta,
+                fixture.goalId,
+            );
+            await present(page, `${home} .session-drop-unassigned`, false);
+
+            await touchDrag(page, home, fixture.worker);
+            const unassigned = await page.locate({ selector: `${home} .session-drop-unassigned` });
+
+            await finger(page, "touchend", unassigned);
+            await moved(fixture, [page, peer], home, fixture.worker, before, null);
+        } finally {
+            await fixture.close();
+        }
+    },
+);
+
+// Access loss has a distinct owner-level lifecycle risk after the source row disappears;
+// it must cancel without transport, while readers can still use the existing Options menu.
+// Stationary edge autoscroll must use the real scroll container and stop on cancellation.
+test(
+    "touch drag autoscrolls, cancels on interruptions and access loss, and keeps reader Options",
+    browserOptions,
+    async () => {
+        const fixture = await setup("touch-lifecycle", "mobile");
+
+        try {
+            for (let index = 0; index < 20; index++) {
+                await fixture.app.commands.createSession(owner(fixture.app), {
+                    title: `Scroll filler ${index}`,
+                    projectId: fixture.alpha,
+                });
+            }
+
+            const page = await fixture.connect(1, fixture.participant.token);
+            const before = metadata(fixture.app, fixture.worker);
+            const requests = fixture.requests.length;
+
+            await touchDrag(page, home, fixture.worker);
+            const edge = await value<{ x: number; y: number; top: number }>(
+                page,
+                `(() => {
+                const list = document.querySelector('${home} .session-items');
+                const rect = list.getBoundingClientRect();
+
+                list.scrollTop = 0;
+
+                return { x: rect.left + rect.width / 2, y: rect.bottom - 5, top: list.scrollTop };
+            })()`,
+            );
+
+            await finger(page, "touchmove", edge);
+            await until(
+                () =>
+                    value<boolean>(
+                        page,
+                        `document.querySelector('${home} .session-items').scrollTop > ${edge.top} + 10`,
+                    ),
+                "stationary touch at the list edge autoscrolls the actual scroll container",
+            );
+            await finger(page, "touchcancel");
+            await present(page, `${home} .session-drop-unassigned`, false);
+            assert.equal(
+                fixture.requests.length,
+                requests,
+                "autoscroll cancellation sends no placement request",
+            );
+
+            await observeShortcutEscapes(page);
+
+            for (const interrupt of ["second finger", "touchcancel", "blur", "Escape"]) {
+                await touchDrag(page, home, fixture.worker);
+
+                if (interrupt === "second finger") {
+                    await finger(page, "touchstart", undefined, true);
+                } else if (interrupt === "touchcancel") {
+                    await finger(page, "touchcancel");
+                } else if (interrupt === "Escape") {
+                    await page.press("Escape");
+                    assert.equal(
+                        await value(page, "window.shortcutEscapes"),
+                        0,
+                        "drag Escape cannot reach the window's stop-Pi shortcut",
+                    );
+                } else {
+                    await page.evaluate("dispatchEvent(new Event('blur'))");
+                }
+
+                await present(page, `${home} .session-drop-unassigned`, false);
+                const target = await page.locate({ selector: head(goal(home, fixture.goalId)) });
+
+                await finger(page, "touchend", target);
+                assert.equal(fixture.requests.length, requests, interrupt);
+                assert.deepEqual(metadata(fixture.app, fixture.worker), before, interrupt);
+            }
+
+            await touchDrag(page, home, fixture.worker);
+            fixture.app.setAccess(owner(fixture.app), fixture.participant.user.id, {
+                role: "viewer",
+            });
+            await present(page, `${home} .session-drop-unassigned`, false);
+            const target = await page.locate({ selector: head(goal(home, fixture.goalId)) });
+
+            await finger(page, "touchend", target);
+            assert.equal(
+                fixture.requests.length,
+                requests,
+                "revoked steering cancels without a move request",
+            );
+            assert.deepEqual(metadata(fixture.app, fixture.worker), before);
+            const options = await beginTouch(page, home, fixture.worker);
+
+            await present(page, overlay(home, fixture.worker));
+            await finger(page, "touchmove", { x: options.x - 16, y: options.y });
+            await pause(page, 850);
+            await present(page, `${overlay(home, fixture.worker)}[data-phase="choose"]`);
+            await present(page, `${home} .session-drop-unassigned`, false);
+            await present(page, dialog, false);
+            await finger(page, "touchmove", { x: options.x + 16, y: options.y });
+            await present(page, '[role="dialog"][aria-label="Worker to move"]');
+            await finger(page, "touchend");
+            assert.equal(
+                await value<boolean>(
+                    page,
+                    `[...document.querySelectorAll('${dialog} button')].some(button => button.textContent.trim() === 'Move to project or goal…')`,
+                ),
+                false,
+                "reader Options cannot move",
+            );
+            await page.evaluate(`await Promise.all(document.getAnimations()
+                .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+                .map(animation => animation.finished.catch(() => {})))`);
+            await page.press("Escape");
+            await present(page, dialog, false);
+
+            const pending = await beginTouch(page, home, fixture.worker);
+
+            await present(page, overlay(home, fixture.worker));
+            await finger(page, "touchmove", { x: pending.x + 16, y: pending.y });
+            // Source removal before commit must cancel the pending Options timer.
+            await page.evaluate(
+                `document.querySelector(${JSON.stringify(row(home, fixture.worker))}).remove()`,
+            );
+            await pause(page, 850);
+            await present(page, dialog, false);
+            await finger(page, "touchend");
         } finally {
             await fixture.close();
         }

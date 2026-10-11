@@ -10,8 +10,10 @@ import { PipRailButton } from "./pip.js";
 import { sessionForest } from "./session-tree.js";
 import { PrivateList, PrivateTabs } from "./private.js";
 import { projectGroups, rowsInGroups, sessionMatches } from "./project-groups.js";
+import { useSessionHold } from "./session-hold.js";
 import { canMoveSessions, useSessionDrag } from "./session-moves.js";
 import { sessionResultUnread } from "./session-seen.js";
+import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
 import { ThreadTypeTag } from "./thread-type.js";
 import {
     actions,
@@ -130,7 +132,7 @@ export async function setArchived(ids, archived, { undo = true } = {}) {
 }
 
 /** Archive a goal and all its threads through the server's single atomic action. */
-async function setGoalArchived(goal, archived, { undo = true } = {}) {
+export async function setGoalArchived(goal, archived, { undo = true } = {}) {
     const ids = store.state.sessions
         .filter((session) => session.goalId === goal.id)
         .map((session) => session.id);
@@ -174,7 +176,14 @@ async function setGoalArchived(goal, archived, { undo = true } = {}) {
 /** Disclosure and actions are siblings: there are no buttons inside buttons. */
 function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart, trouble }) {
     const [busy, setBusy] = useState(false);
+    const ref = useRef(null);
     const goal = group.goal;
+    const options = (at) =>
+        openSidebarOptions(goal ? "goal" : "project", goal?.id ?? group.project.id, at, {
+            archivedView: archived,
+        });
+
+    useSidebarContext(ref, options, { longPress: canStart, enabled: canStart });
     const count = rowsInGroups([group]).length;
     const completed = goal?.status === "completed";
     const archiveLabel = archived ? "Restore goal and threads" : "Archive goal and all threads";
@@ -185,7 +194,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
         setBusy(false);
     };
 
-    return html`<div class="project-group-head">
+    return html`<div class="project-group-head" ref=${ref}>
         <button
             class="group-head"
             data-part="session-group-head"
@@ -218,7 +227,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                 html`<button
                     class=${`goal-status ${completed ? "completed" : ""}`}
                     aria-label=${`${goal.name}: ${completed ? "Completed. Mark active" : "Active. Mark completed"}`}
-                    title=${completed ? "Mark active" : "Mark completed"}
+                    title=${completed ? "Completed. Mark active" : "Active. Mark completed"}
                     disabled=${busy}
                     onClick=${() =>
                         run(() =>
@@ -227,7 +236,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                             }),
                         )}
                 >
-                    ${completed ? "Completed" : "Active"}
+                    <${Icon} name=${completed ? "check" : "target"} size=${15} />
                 </button>`
             }
             ${
@@ -236,23 +245,20 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                 html`<span
                     class=${`goal-status ${completed ? "completed" : ""}`}
                     aria-label=${`${goal.name}: ${completed ? "Completed" : "Active"}`}
+                    title=${completed ? "Completed" : "Active"}
                 >
-                    ${completed ? "Completed" : "Active"}
+                    <${Icon} name=${completed ? "check" : "target"} size=${15} />
                 </span>`
             }
             ${
                 canStart &&
+                !goal &&
                 html`<button
-                    class="icon-button small"
-                    title=${goal ? "Rename goal" : "Edit project"}
-                    aria-label=${goal ? `Rename goal ${goal.name}` : `Edit ${group.project.name}`}
+                    class="icon-button small project-hover-action"
+                    title="Edit project"
+                    aria-label=${`Edit ${group.project.name}`}
                     disabled=${busy}
-                    onClick=${() =>
-                        openSheet(
-                            goal
-                                ? { type: "project-goal", goalId: goal.id }
-                                : { type: "project", projectId: group.project.id },
-                        )}
+                    onClick=${() => openSheet({ type: "project", projectId: group.project.id })}
                 >
                     <${Icon} name="pencil" size=${14} />
                 </button>`
@@ -264,7 +270,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                     goal.archived ||
                     group.rows.some((row) => row.archivedByGoal === goal.id)) &&
                 html`<button
-                    class="icon-button small"
+                    class="icon-button small project-hover-action"
                     title=${archiveLabel}
                     aria-label=${archiveLabel}
                     disabled=${busy}
@@ -277,7 +283,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                 canStart &&
                 !archived &&
                 html`<button
-                    class="icon-button small"
+                    class="icon-button small project-hover-action"
                     title=${`New Session in ${goal?.name ?? group.project.name}`}
                     aria-label=${`New Session in ${goal?.name ?? group.project.name}`}
                     onClick=${() =>
@@ -288,6 +294,18 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                         })}
                 >
                     <${Icon} name="plus" size=${15} />
+                </button>`
+            }
+            ${
+                canStart &&
+                html`<button
+                    class="icon-button small sidebar-touch-options"
+                    title="Options"
+                    aria-label=${`Options for ${goal?.name ?? group.project.name}`}
+                    aria-haspopup="menu"
+                    onClick=${() => options()}
+                >
+                    <${Icon} name="more" size=${16} />
                 </button>`
             }
         </div>
@@ -408,20 +426,12 @@ function subagentsTip(counts) {
     return `${kinds.map((kind) => `${shown[kind]} ${kind}`).join(" · ")} subagent${total === 1 ? "" : "s"}`;
 }
 
-/**
- * How long a finger rests on a row before its actions open; how far it may stray meanwhile (as far as a scroll, or the
- * drawer's drag); and how long before the row shows the press, so a scroll's start does not light it.
- */
-const PRESS_MS = 450;
-const PRESS_SLOP = 8;
-const PRESS_SHOWS_MS = 100;
-
-/** The list whose row a finger last held: Select in that row's sheet selects there. */
+/** The list that opened a row's actions: Select in Options or SessionActions selects there. */
 let pressedIn = null;
 
 /**
  * Select a session in the list where its row was held, and let taps there select more (or let go), as Ctrl/⌘+click
- * does with a mouse. From the sheet a long press opens.
+ * does with a mouse. Used by Options and the public SessionActions sheet.
  */
 export function selectFromList(id) {
     pressedIn?.current?.(id);
@@ -486,19 +496,34 @@ function SessionRow({
     number,
     needle,
     selected,
-    pressing,
     folders,
     onPick,
     onSelect,
+    onOptions,
     dnd,
     chosen,
 }) {
     const { conversationId, server, me } = store.state;
+    const ref = useRef(null);
+    const options = (at) => onOptions(session.id, at);
+
+    useSidebarContext(ref, options);
     const pinned = isPinned(session.id);
     const open = session.id === conversationId && !session.archived;
     const marked = isUnread(session.id);
     const unread = collab() && sessionUnread(session);
     const moving = store.state.moving[session.id] !== undefined;
+    const canDrag = canMoveSessions() && !moving && !dnd.busy;
+    const { hold, consumeClick } = useSessionHold({
+        ref,
+        enabled: !moving && !dnd.busy,
+        canDrag,
+        onOptions: options,
+        onDragStart: (point) => dnd.startTouch(point, session.id, chosen),
+        onDragMove: (point) => dnd.moveTouch(point),
+        onDragEnd: (point) => dnd.endTouch(point),
+        onDragCancel: () => dnd.cancelTouch(),
+    });
     const title = session.title ?? "New session";
     const path = shortPath(session.cwd, server?.home);
     const where = [
@@ -532,8 +557,8 @@ function SessionRow({
     const mark = stateMark(session, live > 0, marked);
     // Finished since this browser last looked: its result is unread, so its title reads bold.
     const unseen = sessionResultUnread(session);
-    // Archive, pin, and mark-unread show on hover; an archived session only comes back, and only for people who steer.
-    const acts = (canSteer() ? 1 : 0) + (session.archived ? 0 : 2) + (canMoveSessions() ? 1 : 0);
+    // Options joins the existing archive, pin and mark-unread hover actions.
+    const acts = (canSteer() ? 1 : 0) + (session.archived ? 0 : 2) + 1;
     const state = html`<span class="session-mark">
         ${
             selected
@@ -559,7 +584,8 @@ function SessionRow({
     </span>`;
 
     return html`<div
-        class=${`session-row ${open ? "active" : ""} ${selected ? "selected" : ""} ${pressing ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
+        class=${`session-row ${open ? "active" : ""} ${selected ? "selected" : ""} ${hold ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
+        ref=${ref}
         data-part="session-row"
         data-state=${ROW_STATES[mark.shape.split(" ")[0]]}
         data-id=${session.id}
@@ -580,11 +606,11 @@ function SessionRow({
             class=${`session ${unread ? "unread" : ""}`}
             data-part="session-button"
             aria-current=${open ? "page" : undefined}
-            draggable=${canMoveSessions() && !moving && !dnd.busy}
+            draggable=${canDrag && !matchMedia("(pointer: coarse)").matches}
             onDragStart=${(event) => dnd.start(event, session.id, chosen)}
             onPointerDown=${(event) => onSelect(event, session.id)}
-            onClick=${(event) => onPick(event, session.id)}
-            onContextMenu=${(event) => event.ctrlKey && event.preventDefault()}
+            onClick=${(event) => !consumeClick(event) && onPick(event, session.id)}
+            aria-haspopup="menu"
             title=${tip}
         >
             ${projectsAvailable() ? html`<span class="session-state"><${ThreadTypeTag} session=${session} iconOnly=${true} /></span>` : state}
@@ -625,22 +651,22 @@ function SessionRow({
             </span>
         </button>
         <span class="session-actions">
-            ${
-                canMoveSessions() &&
-                html`<button
-                    class="session-act session-move"
-                    title="Move to project or goal"
-                    aria-label="Move session"
-                    disabled=${dnd.busy}
-                    onClick=${() => openSheet({ type: "move-sessions", ids: [session.id] })}
-                >
-                    <${Icon} name="folder" size=${14} />
-                </button>`
-            }
+            <button
+                class="session-act session-options"
+                data-session-hold-action="true"
+                title="Options"
+                aria-label=${`Options for ${session.title ?? "New session"}`}
+                aria-haspopup="menu"
+                disabled=${moving}
+                onClick=${() => options()}
+            >
+                <${Icon} name="settings" size=${16} />
+            </button>
             ${
                 canSteer() &&
                 html`<button
                     class="session-act"
+                    data-session-hold-action="true"
                     title=${session.archived ? "Unarchive" : "Archive"}
                     aria-label=${session.archived ? "Unarchive" : "Archive"}
                     onClick=${() => setArchived([session.id], !session.archived)}
@@ -652,6 +678,7 @@ function SessionRow({
                 !session.archived &&
                 html`<button
                     class=${`session-act session-pin ${pinned ? "on" : ""}`}
+                    data-session-hold-action="true"
                     title=${pinned ? "Unpin" : "Pin to the top"}
                     aria-label=${pinned ? "Unpin" : "Pin"}
                     onClick=${() => togglePin(session.id)}
@@ -663,6 +690,7 @@ function SessionRow({
                 !session.archived &&
                 html`<button
                     class=${`session-act session-unread ${marked ? "on" : ""}`}
+                    data-session-hold-action="true"
                     title=${marked ? "Mark read" : "Mark unread"}
                     aria-label=${marked ? "Mark read" : "Mark unread"}
                     onClick=${() => setUnread(session.id, !marked)}
@@ -671,6 +699,39 @@ function SessionRow({
                 </button>`
             }
         </span>
+        ${
+            hold &&
+            html`<div
+                class="session-hold"
+                data-choice=${hold.choice ?? undefined}
+                data-phase=${hold.phase}
+                style=${`--hold-expand:${hold.expandMs}ms;--hold-fill:${hold.fillMs}ms`}
+                role="group"
+                aria-label="Slide to Drag or Options, then hold"
+            >
+                <button
+                    class=${`session-hold-choice drag ${hold.choice === "drag" ? "selected" : ""}`}
+                    data-session-hold-action="true"
+                    disabled=${!canDrag}
+                    onClick=${() => openSheet({ type: "move-sessions", ids: [session.id] })}
+                >
+                    <span class="session-hold-label">
+                        <${Icon} name="hand-swipe" size=${20} />
+                        Drag
+                    </span>
+                </button>
+                <button
+                    class=${`session-hold-choice options ${hold.choice === "options" ? "selected" : ""}`}
+                    data-session-hold-action="true"
+                    onClick=${() => options()}
+                >
+                    <span class="session-hold-label">
+                        <${Icon} name="settings" size=${20} />
+                        Options
+                    </span>
+                </button>
+            </div>`
+        }
     </div>`;
 }
 
@@ -756,10 +817,8 @@ export function SessionList({ compact = false, home = false }) {
     const [closed, setClosed] = useState(readClosed);
     const [searchClosed, setSearchClosed] = useState(() => new Set());
     const [selected, setSelectedState] = useState(() => new Set());
-    // Taps select rows instead of opening them: a selection started from a long press's sheet, on a touch screen.
+    // Taps select rows instead of opening them after Select in a row's action sheet.
     const [tapSelects, setTapSelects] = useState(false);
-    // The row a finger holds down, before its actions open.
-    const [pressing, setPressing] = useState(null);
     // The selection as drags and clicks see it between renders; the row a Shift+click extends from; the row a Ctrl/⌘ press
     // already selected, whose click then does nothing; the rows in view, in order.
     const picked = useRef(selected);
@@ -796,9 +855,8 @@ export function SessionList({ compact = false, home = false }) {
         }
     };
 
-    // What Select in a held row's sheet does here; and what lets go of a press under way.
+    // What Select in this list's Options or legacy held-row sheet does here.
     const startSelect = useRef(null);
-    const unpress = useRef(null);
 
     startSelect.current = (id) => {
         anchor.current = id;
@@ -808,14 +866,17 @@ export function SessionList({ compact = false, home = false }) {
 
     useEffect(
         () => () => {
-            unpress.current?.();
-
             if (pressedIn === startSelect) {
                 pressedIn = null;
             }
         },
         [],
     );
+
+    const openThreadOptions = (id, at) => {
+        pressedIn = startSelect;
+        openSidebarOptions("thread", id, at, { keepDrawer: true });
+    };
 
     const clearSelection = () => {
         anchor.current = null;
@@ -914,7 +975,7 @@ export function SessionList({ compact = false, home = false }) {
      * Ctrl/⌘+Enter on a focused row selects it or lets it go.
      */
     const pick = (event, id) => {
-        if (dnd.consumeClick()) {
+        if (dnd.consumeClick(event)) {
             return;
         }
 
@@ -958,101 +1019,9 @@ export function SessionList({ compact = false, home = false }) {
     };
 
     /**
-     * A finger (or a pen) held on a row opens its actions in a sheet, as hovering shows them to a mouse: touch screens
-     * have no hover. The row shows the press while it is held; moving (a scroll, a drag) lets it go. The click the lift
-     * may then make, on the row or on the scrim that rose under it, does nothing.
-     */
-    const press = (event, id) => {
-        const session = sessions.find((each) => each.id === id);
-
-        // Nothing to offer: an archived session, for someone who cannot bring it back.
-        if (!event.isPrimary || !session || (session.archived && !canSteer())) {
-            return;
-        }
-
-        const { pointerId, clientX: x, clientY: y } = event;
-        let fired = false;
-        let after = 0;
-        const shows = setTimeout(() => setPressing(id), PRESS_SHOWS_MS);
-
-        const open = setTimeout(() => {
-            // Gone meanwhile (someone deleted it): nothing to open.
-            if (!store.state.sessions.some((each) => each.id === id)) {
-                return stop();
-            }
-
-            fired = true;
-            setPressing(null);
-            pressedIn = startSelect;
-            // Over the drawer, which stays: Select goes on there.
-            store.set({ sheet: { type: "session", id } });
-        }, PRESS_MS);
-
-        const move = (each) => {
-            if (
-                each.pointerId === pointerId &&
-                !fired &&
-                Math.hypot(each.clientX - x, each.clientY - y) >= PRESS_SLOP
-            ) {
-                stop();
-            }
-        };
-
-        const lift = (each) => {
-            if (each.pointerId !== pointerId) {
-                return;
-            }
-
-            if (!fired) {
-                return stop();
-            }
-
-            // The lift's click comes at once, if at all; the next press is someone else's tap.
-            removeEventListener("pointerup", lift, true);
-            removeEventListener("pointercancel", lift, true);
-            addEventListener("pointerdown", stop, true);
-            after = setTimeout(stop, 400);
-        };
-
-        // A finger's click only: Enter on the sheet's item is a click too.
-        const eat = (each) => {
-            if (fired && each.detail > 0) {
-                each.preventDefault();
-                each.stopPropagation();
-                stop();
-            }
-        };
-
-        // Android's own long press: no menu, no text selection.
-        const quiet = (each) => each.preventDefault();
-
-        const stop = () => {
-            unpress.current = null;
-            clearTimeout(shows);
-            clearTimeout(open);
-            clearTimeout(after);
-            setPressing((now) => (now === id ? null : now));
-            removeEventListener("pointermove", move, true);
-            removeEventListener("pointerup", lift, true);
-            removeEventListener("pointercancel", lift, true);
-            removeEventListener("pointerdown", stop, true);
-            removeEventListener("click", eat, true);
-            removeEventListener("contextmenu", quiet, true);
-        };
-
-        unpress.current?.();
-        unpress.current = stop;
-        addEventListener("pointermove", move, true);
-        addEventListener("pointerup", lift, true);
-        addEventListener("pointercancel", lift, true);
-        addEventListener("click", eat, true);
-        addEventListener("contextmenu", quiet, true);
-    };
-
-    /**
      * Ctrl/⌘+press on a row selects it (or, if it was selected, unselects it); dragging on does the same to every row
-     * between it and the pointer. Once the pointer moves, the list scrolls along near its top or bottom edge. A finger
-     * held on a row opens its actions instead.
+     * between it and the pointer. Once the pointer moves, the list scrolls along near its top or bottom edge. Touch
+     * hold/slide intent is handled independently by useSessionHold.
      */
     const select = (event, id) => {
         held.current = null;
@@ -1062,8 +1031,7 @@ export function SessionList({ compact = false, home = false }) {
         }
 
         if (event.pointerType !== "mouse") {
-            press(event, id);
-
+            // Touch intent belongs to useSessionHold, not a second pointer-hold timer.
             return;
         }
 
@@ -1288,6 +1256,8 @@ export function SessionList({ compact = false, home = false }) {
             key=${`${tab}:${group.key}`}
             data-project-id=${group.project?.id}
             data-goal-id=${group.goal?.id}
+            data-session-drop=${destination ? JSON.stringify(destination) : undefined}
+            data-session-drop-closed=${isClosed ? "true" : undefined}
             onDragOver=${
                 destination
                     ? (event) =>
@@ -1342,7 +1312,6 @@ export function SessionList({ compact = false, home = false }) {
                         key=${session.id}
                         session=${session}
                         branches=${branches}
-                        pressing=${pressing === session.id}
                         folders=${tab === "folders" && needle === ""}
                         index=${index++}
                         number=${numbers.get(session.id)}
@@ -1350,6 +1319,7 @@ export function SessionList({ compact = false, home = false }) {
                         selected=${selected.has(session.id)}
                         onPick=${pick}
                         onSelect=${select}
+                        onOptions=${openThreadOptions}
                         dnd=${dnd}
                         chosen=${chosen}
                     />`,
@@ -1458,6 +1428,7 @@ export function SessionList({ compact = false, home = false }) {
                                       class=${tab === key ? "on" : ""}
                                       onClick=${() => setTab(key)}
                                       onDragOver=${key === "projects" && tab !== "projects" ? (event) => dnd.hoverProjects(event, () => setTab("projects")) : undefined}
+                                      data-session-projects-tab=${key === "projects" ? "true" : undefined}
                                       onDragLeave=${key === "projects" ? dnd.leaveProjects : undefined}
                                   >
                                       ${label}
@@ -1477,6 +1448,7 @@ export function SessionList({ compact = false, home = false }) {
                 </p>
                 <div
                     class=${`session-drop-unassigned ${dnd.drag.target?.key === unassigned.key ? "drop-target" : ""}`}
+                    data-session-drop=${JSON.stringify(unassigned)}
                     onDragOver=${(event) => dnd.over(event, unassigned)}
                     onDragLeave=${dnd.leave}
                     onDrop=${(event) => dnd.drop(event, unassigned)}

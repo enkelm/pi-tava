@@ -74,6 +74,7 @@ export function NewSessionSheet({
     initialPreview = null,
     projectId,
     goalId,
+    newGoal,
     cwd,
     continuation,
 }) {
@@ -158,6 +159,7 @@ export function NewSessionSheet({
                     ? html`<${ProjectSessionPanel}
                         projectId=${projectId}
                         goalId=${goalId}
+                        newGoal=${newGoal}
                         cwd=${cwd}
                         continuation=${continuation}
                         visible=${active === "new"}

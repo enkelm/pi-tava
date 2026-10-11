@@ -3,6 +3,9 @@
 // App tests own storage/access/migration; this owns browser disclosure, forms and event delivery.
 // Sidebar regressions: goal indentation, busy-loader drift, active idle accent and lost result-read marks.
 // Real run completion and browser storage/visibility events own the result lifecycle; app tests do not render it.
+// Menu contracts share this fixture: misplaced/right-click navigation, focus loss, omitted actions,
+// coarse-pointer hover-only traps and status text/icon regressions are not reached by app tests.
+// Session-moves UI owns thread menus; this covers project/goal menus through DOM and trusted input.
 // Uses public app/model/browser APIs; no test-only production seams or state flags.
 import {
     type App,
@@ -119,6 +122,288 @@ async function groupClick(
     await waitGroup(page, scope, name, goal);
     await page.evaluate(
         `(${group(scope, name, goal)}).querySelector(${JSON.stringify(selector)}).click()`,
+    );
+}
+
+function groupHead(scope: string, name: string) {
+    return `${scope} .project-group-head > .group-head[title=${JSON.stringify(name)}]`;
+}
+
+function optionsSurface(name: string, mobile: boolean) {
+    return `[role="${mobile ? "dialog" : "menu"}"][aria-label=${JSON.stringify(name)}]`;
+}
+
+async function options(
+    page: BrowserPage,
+    scope: string,
+    name: string,
+    mobile: boolean,
+    goal = false,
+) {
+    await waitGroup(page, scope, name, goal);
+    const before = await value<string>(page, "location.pathname");
+    const expanded = await value<string>(
+        page,
+        `document.querySelector(${JSON.stringify(groupHead(scope, name))}).getAttribute('aria-expanded')`,
+    );
+    const surface = optionsSurface(name, mobile);
+
+    if (mobile) {
+        // These are separate intentional gestures, not a double tap on a just-swapped sheet.
+        await page.evaluate(`await new Promise(resolve => setTimeout(resolve, 300))`);
+        await page.click({
+            selector: `${scope} [aria-label=${JSON.stringify(`Options for ${name}`)}]`,
+        });
+    } else {
+        const point = await value<{ x: number; y: number }>(
+            page,
+            `(() => {
+                const head = document.querySelector(${JSON.stringify(groupHead(scope, name))});
+
+                head.scrollIntoView({ block: 'nearest' });
+                const rect = head.getBoundingClientRect();
+
+                return { x: rect.left + 24, y: rect.top + 12 };
+            })()`,
+        );
+
+        await page.input([{ type: "click", button: "right", ...point }]);
+        await present(page, surface);
+        await until(
+            () =>
+                value<boolean>(
+                    page,
+                    `(() => {
+                        const menu = document.querySelector(${JSON.stringify(surface)}).getBoundingClientRect();
+
+                        return Math.abs(menu.left - ${point.x}) < 2
+                            && Math.abs(menu.top - ${point.y}) < 2;
+                    })()`,
+                ),
+            "desktop options open at the clicked point, not centered or at the active conversation",
+        );
+    }
+
+    await present(page, surface);
+    assert.equal(await value(page, "location.pathname"), before, "options never open the thread");
+    assert.equal(
+        await value(
+            page,
+            `document.querySelector(${JSON.stringify(groupHead(scope, name))}).getAttribute('aria-expanded')`,
+        ),
+        expanded,
+        "opening options does not toggle disclosure",
+    );
+
+    return surface;
+}
+
+async function optionLabels(page: BrowserPage, surface: string, expected: string[]) {
+    assert.deepEqual(
+        await value(
+            page,
+            `[...document.querySelectorAll(${JSON.stringify(`${surface} button:not([aria-label="Close"])`)})]
+                .map(button => button.textContent.trim())`,
+        ),
+        expected,
+        "named options include the existing shortcuts as well as menu-only actions",
+    );
+}
+
+async function keyboardOptions(page: BrowserPage, scope: string, name: string, contextKey = false) {
+    const head = groupHead(scope, name);
+    const surface = optionsSurface(name, false);
+
+    await page.evaluate(`document.querySelector(${JSON.stringify(head)}).focus()`);
+
+    if (contextKey) {
+        // BrowserPage's key table lacks ContextMenu; dispatch its DOM key without a production seam.
+        await page.evaluate(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'ContextMenu', bubbles: true, cancelable: true,
+        }))`);
+    } else {
+        await page.press("Shift+F10");
+    }
+
+    await present(page, surface);
+    const focused = (index: string) =>
+        `document.activeElement === [...document.querySelectorAll(${JSON.stringify(`${surface} [role="menuitem"]`)})].at(${index})`;
+
+    await until(() => value<boolean>(page, focused("0")), "menu focuses its first action");
+    await page.press("ArrowDown");
+    assert.equal(await value(page, focused("1")), true, "ArrowDown reaches the next action");
+    await page.press("ArrowUp");
+    assert.equal(await value(page, focused("0")), true, "ArrowUp reaches the previous action");
+    await page.press("End");
+    assert.equal(await value(page, focused("-1")), true, "End reaches the last action");
+    await page.press("Home");
+    assert.equal(await value(page, focused("0")), true, "Home reaches the first action");
+    await page.press("Escape");
+    await present(page, surface, false);
+    await until(
+        () =>
+            value<boolean>(
+                page,
+                `document.activeElement === document.querySelector(${JSON.stringify(head)})`,
+            ),
+        "Escape returns focus to the originating header",
+    );
+}
+
+async function heldOptions(page: BrowserPage, scope: string, name: string, ghostOnMenu = false) {
+    const head = groupHead(scope, name);
+    const expanded = await value<string>(
+        page,
+        `document.querySelector(${JSON.stringify(head)}).getAttribute('aria-expanded')`,
+    );
+    const before = await value<string>(page, "location.pathname");
+    const surface = optionsSurface(name, true);
+
+    await page.evaluate(`
+        const target = document.querySelector(${JSON.stringify(head)});
+        const rect = target.getBoundingClientRect();
+        const finger = new Touch({
+            identifier: 1, target, clientX: rect.left + 24, clientY: rect.top + 12,
+        });
+
+        target.dispatchEvent(new TouchEvent('touchstart', {
+            bubbles: true, cancelable: true, touches: [finger], changedTouches: [finger],
+        }));
+    `);
+    await present(page, surface);
+    const consumed = await value<boolean>(
+        page,
+        `(() => {
+        const target = document.querySelector(${JSON.stringify(head)});
+        const rect = target.getBoundingClientRect();
+        const finger = new Touch({
+            identifier: 1, target, clientX: rect.left + 24, clientY: rect.top + 12,
+        });
+        const lift = new TouchEvent('touchend', {
+            bubbles: true, cancelable: true, touches: [], changedTouches: [finger],
+        });
+
+        target.dispatchEvent(lift);
+        const recipient = ${
+            ghostOnMenu
+                ? `document.querySelector(${JSON.stringify(surface)}).querySelector('button:not([aria-label="Close"])')`
+                : "target"
+        };
+        const ghost = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 });
+
+        recipient.dispatchEvent(ghost);
+
+        return lift.defaultPrevented && ghost.defaultPrevented;
+    })()`,
+    );
+
+    assert.equal(consumed, true, "a committed hold consumes lift and its compatibility click");
+    await present(page, surface);
+    await until(
+        () =>
+            value<boolean>(
+                page,
+                `Math.abs(document.querySelector(${JSON.stringify(surface)}).getBoundingClientRect().bottom - innerHeight) < 2`,
+            ),
+        "coarse-pointer holds anchor a dialog to the bottom edge, not a centered popup",
+    );
+    assert.equal(await value(page, "location.pathname"), before);
+    assert.equal(
+        await value(
+            page,
+            `document.querySelector(${JSON.stringify(head)}).getAttribute('aria-expanded')`,
+        ),
+        expanded,
+        "the compatibility click after a hold cannot collapse the header",
+    );
+    await page.press("Escape");
+    await present(page, surface, false);
+}
+
+async function groupControls(
+    page: BrowserPage,
+    scope: string,
+    name: string,
+    mobile: boolean,
+    goal = false,
+) {
+    const labels = goal
+        ? [`New Session in ${name}`, "Archive goal and all threads"]
+        : [`New Session in ${name}`, `Edit ${name}`];
+    const visibility = (shown: boolean) =>
+        `(() => {
+            const section = ${group(scope, name, goal)};
+            const visible = element => {
+                if (!element || !element.getBoundingClientRect().width) {
+                    return false;
+                }
+
+                for (let each = element; each; each = each.parentElement) {
+                    const style = getComputedStyle(each);
+
+                    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+                        return false;
+                    }
+                }
+
+                return true;
+            };
+
+            return ${JSON.stringify(labels)}.every(label => visible(section.querySelector(
+                ':scope > .project-group-head [aria-label="' + label + '"]',
+            )) === ${shown})
+                && ${goal ? "visible(section.querySelector('.goal-status'))" : "true"};
+        })()`;
+
+    await page.input([{ type: "mouse", action: "move", x: 1270, y: 790 }]);
+    await page.evaluate(`document.querySelector('${scope} .new-button').focus()`);
+    await until(() => value<boolean>(page, visibility(false)), "idle headers keep shortcuts quiet");
+    await page.evaluate(
+        `document.querySelector(${JSON.stringify(groupHead(scope, name))}).focus()`,
+    );
+    await until(
+        () => value<boolean>(page, visibility(!mobile)),
+        mobile
+            ? "touch headers keep hover shortcuts hidden even with focus"
+            : "keyboard focus reveals header shortcuts",
+    );
+    await page.hover({ selector: groupHead(scope, name) });
+    await until(
+        () => value<boolean>(page, visibility(!mobile)),
+        mobile
+            ? "coarse pointers never reveal hover-only shortcuts"
+            : "desktop hover reveals header shortcuts",
+    );
+    assert.equal(
+        await value(
+            page,
+            `(${group(scope, name, goal)}).querySelectorAll(':scope > .project-group-head [aria-label^="Rename goal "]').length`,
+        ),
+        0,
+        "goal rename lives in options, not a hover control",
+    );
+}
+
+async function goalStatus(
+    page: BrowserPage,
+    scope: string,
+    name: string,
+    state: "Active" | "Completed",
+) {
+    await until(
+        () =>
+            value<boolean>(
+                page,
+                `(() => {
+                    const status = (${group(scope, name, true)}).querySelector('.goal-status');
+                    const icon = status?.querySelector('svg')?.getBoundingClientRect();
+
+                    return (status?.getAttribute('aria-label')?.includes(${JSON.stringify(state)})
+                            || status?.title.includes(${JSON.stringify(state)}))
+                        && status.textContent.trim() === '' && icon?.width > 0 && icon?.height > 0;
+                })()`,
+            ),
+        `the icon-only goal status exposes ${state} accessibly`,
     );
 }
 
@@ -470,12 +755,19 @@ test(
                     assert.ok(project, "the real project form persisted a project");
                     assert.equal(project.cwd, cwd);
                     await waitGroup(peer, scope, initialName);
-                    await groupClick(
+                    const projectOptions = await options(
                         page,
                         scope,
                         initialName,
-                        `[aria-label=${JSON.stringify(`Edit ${initialName}`)}]`,
+                        viewport === "mobile",
                     );
+
+                    await optionLabels(page, projectOptions, [
+                        "New Session here…",
+                        "New goal…",
+                        "Edit project…",
+                    ]);
+                    await button(page, projectOptions, "Edit project…");
                     await fill(page, projectNameField, name);
                     await button(page, ".project-form", "Save project");
                     await present(page, '[role="dialog"]', false);
@@ -545,9 +837,31 @@ test(
                     );
                     assert.equal(app.sessions().length, 2);
 
-                    await click(page, `${scope} .new-button[aria-label="New session"]`);
-                    await chooseProject(page, name);
-                    await button(page, `${panel} .project-goal-choices`, "New Goal");
+                    await groupControls(page, scope, name, viewport === "mobile");
+
+                    if (viewport === "desktop") {
+                        await click(
+                            page,
+                            `${scope} .session-row[data-id="${standaloneChat.id}"] .session`,
+                        );
+                        await keyboardOptions(page, scope, name);
+                    } else {
+                        await heldOptions(page, scope, name);
+                    }
+
+                    const newGoalOptions = await options(page, scope, name, viewport === "mobile");
+
+                    await button(page, newGoalOptions, "New goal…");
+                    await present(page, `${panel} .session-destination`);
+                    await destination(page, cwd);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${panel} .project-goal-choices [aria-pressed=true]')?.textContent.trim()`,
+                        ),
+                        "New Goal",
+                        "the named project's New goal shortcut preselects creation intent",
+                    );
                     const first = await start(page, app, "Worker");
                     const createdGoal = app.projects
                         .list(user)
@@ -604,9 +918,41 @@ test(
                         "sharing a cwd never assigns a standalone Chat to the project",
                     );
 
-                    const renameControl = `[aria-label=${JSON.stringify(`Rename goal ${goal.name}`)}]`;
+                    await groupControls(page, scope, goal.name, viewport === "mobile", true);
+                    await goalStatus(page, scope, goal.name, "Active");
 
-                    await groupClick(page, scope, goal.name, renameControl, true);
+                    if (viewport === "desktop") {
+                        // Mutate a named sidebar object while another, unassigned conversation stays open.
+                        await click(
+                            page,
+                            `${scope} .session-row[data-id="${standaloneChat.id}"] .session`,
+                        );
+                        await keyboardOptions(page, scope, goal.name, true);
+                    } else {
+                        // The ghost click now lands on the newly shown sheet, not its original header.
+                        await heldOptions(page, scope, goal.name, true);
+                        // Landscape crosses the ordinary centered-Sheet breakpoint without gaining hover.
+                        await page.setViewport({ ...VIEWPORTS.mobile, width: 820, height: 600 });
+                        await groupControls(page, scope, goal.name, true, true);
+                        await heldOptions(page, scope, goal.name, true);
+                        await page.setViewport(VIEWPORTS.mobile);
+                    }
+
+                    let goalOptions = await options(
+                        page,
+                        scope,
+                        goal.name,
+                        viewport === "mobile",
+                        true,
+                    );
+
+                    await optionLabels(page, goalOptions, [
+                        "New Session here…",
+                        "Rename goal…",
+                        "Mark completed",
+                        "Archive goal and all threads",
+                    ]);
+                    await button(page, goalOptions, "Rename goal…");
                     await present(page, renameDialog);
                     assert.equal(
                         await value(page, `document.querySelector('${goalNameField}').value`),
@@ -640,7 +986,14 @@ test(
 
                     const renamedGoal = `Deliver ${viewport}`;
 
-                    await groupClick(page, scope, goal.name, renameControl, true);
+                    goalOptions = await options(
+                        page,
+                        scope,
+                        goal.name,
+                        viewport === "mobile",
+                        true,
+                    );
+                    await button(page, goalOptions, "Rename goal…");
                     await fill(page, goalNameField, `  ${renamedGoal}  `);
                     await button(page, renameDialog, "Save");
                     await present(page, renameDialog, false);
@@ -658,13 +1011,20 @@ test(
                     assert.ok(savedGoal);
                     goal = savedGoal;
 
-                    await groupClick(
-                        page,
-                        scope,
-                        goal.name,
-                        `[aria-label=${JSON.stringify(`New Session in ${goal.name}`)}]`,
-                        true,
-                    );
+                    if (viewport === "desktop") {
+                        // The hover shortcut stays usable; touch reaches the same action in Options.
+                        await page.hover({ selector: groupHead(scope, goal.name) });
+                        await page.evaluate(
+                            `await new Promise(resolve => setTimeout(resolve, 300))`,
+                        );
+                        await page.click({
+                            selector: `${scope} [aria-label=${JSON.stringify(`New Session in ${goal.name}`)}]`,
+                        });
+                    } else {
+                        goalOptions = await options(page, scope, goal.name, true, true);
+                        await button(page, goalOptions, "New Session here…");
+                    }
+
                     await present(page, `${panel} .session-destination`);
                     await destination(page, cwd);
                     assert.equal(
@@ -673,7 +1033,7 @@ test(
                             `document.querySelector('${panel} .project-goal-choices [aria-pressed=true]')?.textContent.trim()`,
                         ),
                         goal.name,
-                        "goal + preselects its project and goal",
+                        "the goal shortcut preselects its project and goal",
                     );
                     await button(page, `${panel} .session-path`, "Change");
                     await present(page, `${panel} .dir-list`);
@@ -693,12 +1053,14 @@ test(
                     );
                     await home(page, scope);
                     await present(peer, `${scope} .session-row[data-id="${second.id}"]`);
-                    await groupClick(
+                    const newSessionOptions = await options(
                         page,
                         scope,
                         name,
-                        `[aria-label=${JSON.stringify(`New Session in ${name}`)}]`,
+                        viewport === "mobile",
                     );
+
+                    await button(page, newSessionOptions, "New Session here…");
                     await present(page, `${panel} .session-destination`);
                     // Desktop still shows the overridden Worker beside the sidebar here.
                     await destination(page, cwd);
@@ -708,7 +1070,7 @@ test(
                             `document.querySelector('${panel} .project-goal-choices [aria-pressed=true]')?.textContent.trim()`,
                         ),
                         "No goal",
-                        "project + preselects only the project",
+                        "project options preselect only the named project, not the open thread's goal",
                     );
                     await closeDialog(page);
 
@@ -740,14 +1102,7 @@ test(
 
                     for (const reader of [peer, participant]) {
                         await waitGroup(reader, scope, goal.name, true);
-                        await until(
-                            () =>
-                                value<boolean>(
-                                    reader,
-                                    `(${group(scope, goal.name, true)}).querySelector('.goal-status')?.textContent.trim() === 'Active'`,
-                                ),
-                            "readers see the active goal state",
-                        );
+                        await goalStatus(reader, scope, goal.name, "Active");
                         assert.equal(
                             await value(
                                 reader,
@@ -781,14 +1136,7 @@ test(
                     );
 
                     for (const reader of [peer, participant]) {
-                        await until(
-                            () =>
-                                value<boolean>(
-                                    reader,
-                                    `(${group(scope, goal.name, true)}).querySelector('.goal-status')?.textContent.trim() === 'Completed'`,
-                                ),
-                            "readers receive the completed goal state",
-                        );
+                        await goalStatus(reader, scope, goal.name, "Completed");
                     }
 
                     assert.equal(
@@ -803,13 +1151,52 @@ test(
                     await shot(peer, `${viewport}-reader-completed-goal`);
                     await shot(participant, `${viewport}-scoped-completed-goal`);
 
-                    await groupClick(
+                    await goalStatus(page, scope, goal.name, "Completed");
+
+                    // The status icon and Options are distinct entry points; exercise the latter's ID binding.
+                    for (const status of ["active", "completed"] as const) {
+                        goalOptions = await options(
+                            page,
+                            scope,
+                            goal.name,
+                            viewport === "mobile",
+                            true,
+                        );
+                        await button(
+                            page,
+                            goalOptions,
+                            status === "active" ? "Mark active" : "Mark completed",
+                        );
+                        await until(
+                            () =>
+                                app.projects.list(user).goals.find((item) => item.id === goal.id)
+                                    ?.status === status,
+                            `named goal options persist ${status}`,
+                        );
+                        await present(page, goalOptions, false);
+                        // Durable writes precede the coalesced catalogue event; reopen only after it arrives.
+                        await goalStatus(
+                            page,
+                            scope,
+                            goal.name,
+                            status === "active" ? "Active" : "Completed",
+                        );
+                    }
+
+                    goalOptions = await options(
                         page,
                         scope,
                         goal.name,
-                        '[aria-label="Archive goal and all threads"]',
+                        viewport === "mobile",
                         true,
                     );
+                    await optionLabels(page, goalOptions, [
+                        "New Session here…",
+                        "Rename goal…",
+                        "Mark active",
+                        "Archive goal and all threads",
+                    ]);
+                    await button(page, goalOptions, "Archive goal and all threads");
                     await until(
                         () =>
                             [first.id, second.id].every(
@@ -829,13 +1216,19 @@ test(
                     await present(page, `${scope} .session-row[data-id="${second.id}"]`);
                     await tab(peer, scope, "Archived");
                     await waitGroup(peer, scope, goal.name, true);
-                    await groupClick(
+                    goalOptions = await options(
                         page,
                         scope,
                         goal.name,
-                        '[aria-label="Restore goal and threads"]',
+                        viewport === "mobile",
                         true,
                     );
+                    await optionLabels(page, goalOptions, [
+                        "Rename goal…",
+                        "Mark active",
+                        "Restore goal and threads",
+                    ]);
+                    await button(page, goalOptions, "Restore goal and threads");
                     await until(
                         () =>
                             [first.id, second.id].every(
@@ -860,13 +1253,14 @@ test(
 
                     // Individual restore reveals the goal; restoring its remaining marked row is not invertible
                     // by archiving the whole goal again. The restore notice must only dismiss when tapped.
-                    await groupClick(
+                    goalOptions = await options(
                         page,
                         scope,
                         goal.name,
-                        '[aria-label="Archive goal and all threads"]',
+                        viewport === "mobile",
                         true,
                     );
+                    await button(page, goalOptions, "Archive goal and all threads");
                     await until(
                         () =>
                             [first.id, second.id].every(
@@ -889,13 +1283,14 @@ test(
                                 ?.archived === false,
                         "individual restore leaves the other bulk-archived row untouched",
                     );
-                    await groupClick(
+                    goalOptions = await options(
                         page,
                         scope,
                         goal.name,
-                        '[aria-label="Restore goal and threads"]',
+                        viewport === "mobile",
                         true,
                     );
+                    await button(page, goalOptions, "Restore goal and threads");
                     await until(
                         () => app.sessionMeta(second.id as ConversationId)?.archived === false,
                         "remaining bulk-archived row restored",
@@ -953,6 +1348,49 @@ test(
                         [],
                         "no browser errors",
                     );
+                } catch (error) {
+                    // Preserve real DOM placement/action evidence before the fixture closes its pages.
+                    try {
+                        const page = await browsers.open(1);
+                        const snapshot = await value(
+                            page,
+                            `await (async () => {
+                            const { store } = await import('/store.js');
+                            const sheet = store.state.sheet;
+
+                            return {
+                                path: location.pathname,
+                                sheet: sheet && {
+                                    type: sheet.type, kind: sheet.kind, id: sheet.id,
+                                    at: sheet.at, archivedView: sheet.archivedView,
+                                },
+                                surfaces: [...document.querySelectorAll('[role="menu"], [role="dialog"]')]
+                                    .map(element => ({
+                                        role: element.getAttribute('role'),
+                                        name: element.getAttribute('aria-label'),
+                                        rect: element.getBoundingClientRect().toJSON(),
+                                        css: element.style.cssText,
+                                        actions: [...element.querySelectorAll('button')]
+                                            .map(button => button.textContent.trim()),
+                                    })),
+                                statuses: [...document.querySelectorAll('.goal-status')]
+                                    .map(element => ({
+                                        label: element.getAttribute('aria-label'), title: element.title,
+                                        rect: element.getBoundingClientRect().toJSON(),
+                                    })),
+                            };
+                        })()`,
+                        );
+
+                        console.error(
+                            "Sidebar Options failure snapshot:",
+                            JSON.stringify(snapshot),
+                        );
+                    } catch (diagnosticError) {
+                        console.error("Could not capture Options failure:", diagnosticError);
+                    }
+
+                    throw error;
                 } finally {
                     await browsers.closeAll({ final: true });
                     server.closeAllConnections();

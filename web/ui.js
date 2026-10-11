@@ -881,6 +881,9 @@ const ICONS = {
         "M10 3h4l.5 3 2 .9 2.6-1.1 2 3.4-2.3 1.9v2.2l2.3 1.9-2 3.4-2.6-1.1-2 .9-.5 3h-4l-.5-3-2-.9-2.6 1.1-2-3.4 2.3-1.9v-2.2L2.9 9.2l2-3.4L7.5 6.9l2-.9zM15 12a3 3 0 11-6 0 3 3 0 016 0z",
     users: "M16 20v-1a4 4 0 00-4-4H6a4 4 0 00-4 4v1M9 11a4 4 0 100-8 4 4 0 000 8zM22 20v-1a4 4 0 00-3-3.9M16 3.1a4 4 0 010 7.8",
     target: "M21 12a9 9 0 11-18 0 9 9 0 0118 0zM17 12a5 5 0 11-10 0 5 5 0 0110 0zM13 12a1 1 0 11-2 0 1 1 0 012 0z",
+    "hand-swipe":
+        "M8 14V8a1.5 1.5 0 013 0v5l1-1 5 1a2 2 0 011.5 2.4l-1 4.6H10l-4-5a1.5 1.5 0 012-2l2 2M14 5h7M18 2l3 3-3 3",
+    link: "M10 13a4 4 0 006 0l4-4a4 4 0 00-6-6l-2 2M14 11a4 4 0 00-6 0l-4 4a4 4 0 006 6l2-2",
     bot: "M12 8V4H9M6 8h12a2 2 0 012 2v9a2 2 0 01-2 2H6a2 2 0 01-2-2v-9a2 2 0 012-2zM2 13v4M22 13v4M8 13h.01M16 13h.01M9 17h6",
     reply: "M9 5l-6 6 6 6M3 11h10a8 8 0 018 8",
     sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z",
@@ -1321,6 +1324,7 @@ export function Sheet({
     onClose,
     children,
     wide = false,
+    bottom = false,
     actions = null,
     class: panelClass = "",
     className = panelClass,
@@ -1329,7 +1333,7 @@ export function Sheet({
     const onBack = useContext(SheetBack);
     const info = useContext(SheetInfo);
 
-    useDragToClose(ref, { dir: "down", onClose, enabled: BOTTOM_SHEETS.matches });
+    useDragToClose(ref, { dir: "down", onClose, enabled: bottom || BOTTOM_SHEETS.matches });
 
     // Not the Esc that ends an input method's composing, which belongs to the field.
     useEffect(() => {
@@ -1360,13 +1364,13 @@ export function Sheet({
     }, []);
 
     return html`<div
-        class="overlay"
+        class=${`overlay ${bottom ? "bottom-overlay" : ""}`}
         data-part="scrim"
         data-for="sheet"
         onMouseDown=${scrimPress(onClose)}
     >
         <section
-            class=${`sheet ${wide ? "wide" : ""} ${className}`}
+            class=${`sheet ${wide ? "wide" : ""} ${bottom ? "bottom-sheet" : ""} ${className}`}
             data-part="sheet"
             data-sheet=${info?.type ?? undefined}
             data-size=${wide ? "wide" : undefined}
@@ -1530,9 +1534,15 @@ export function Switch({ on, disabled, label, onChange }) {
     </button>`;
 }
 
-/** A row in a menu: a label, an optional hint on the right, and what a tap does. */
-export function item(label, run, hint) {
-    return html`<button class="list-item" onClick=${run}>
+/** A row in a menu, with optional button attributes for menu roles and keyboard navigation. */
+export function item(label, run, hint, { role, tabIndex, ...options } = {}) {
+    return html`<button
+        class="list-item"
+        ...${options}
+        role=${role}
+        tabindex=${tabIndex}
+        onClick=${run}
+    >
         <span>${label}</span>
         ${hint && html`<span class="muted small">${hint}</span>`}
     </button>`;

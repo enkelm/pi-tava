@@ -4478,12 +4478,52 @@ button.chip:active:not(:disabled):not(.on) {
 }
 
 .goal-status {
-    display: inline-flex;
-    align-items: center;
+    display: inline-grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 40px;
     min-height: 40px;
-    padding-inline: 0.25rem;
     color: var(--muted);
-    font-size: 0.65rem;
+}
+
+/* Secondary group actions stay available on keyboard focus; touch uses Options instead of hover. */
+.project-hover-action,
+.sidebar-touch-options {
+    display: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .project-hover-action {
+        display: grid;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity var(--t-hover) var(--ease-out);
+    }
+
+    .project-group-head:hover .project-hover-action,
+    .project-group-head:focus-within .project-hover-action {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
+
+@media (hover: none), (pointer: coarse) {
+    .sidebar-touch-options {
+        display: grid;
+    }
+
+    .project-group-head,
+    .session-row {
+        -webkit-touch-callout: none;
+        user-select: none;
+    }
+}
+
+/* Keyboard access cannot depend on hover capability; a touch tap does not reveal extra controls. */
+.project-group-head:has(:focus-visible) .project-hover-action {
+    display: grid;
+    opacity: 1;
+    pointer-events: auto;
 }
 
 .goal-status.completed {
@@ -5247,13 +5287,23 @@ button.chip:active:not(:disabled):not(.on) {
     color: var(--accent);
 }
 
-/* Touch keeps Move explicit; archive, pin, and mark-unread stay in the long-press menu, without invisible tap targets. */
+.session-options {
+    display: none;
+}
+
+/* Touch has an explicit Options fallback; holding the row still offers Drag or Options. */
 @media (hover: none), (pointer: coarse) {
     .session-actions {
         display: none;
     }
 
     .session-actions:has(.session-move) {
+        display: flex;
+        margin-top: -20px;
+        right: 0;
+    }
+
+    .session-actions:has(.session-options) {
         display: flex;
         margin-top: -20px;
         right: 0;
@@ -5273,6 +5323,20 @@ button.chip:active:not(:disabled):not(.on) {
         background: transparent;
     }
 
+    .session-actions .session-options {
+        display: grid;
+        width: 40px;
+        height: 40px;
+        opacity: 1;
+        transform: none;
+        border: none;
+        background: transparent;
+    }
+
+    .session-actions:has(.session-options) .session-move {
+        display: none;
+    }
+
     .session-row:has(.session-move) {
         --session-actions-width: 40px;
     }
@@ -5281,25 +5345,42 @@ button.chip:active:not(:disabled):not(.on) {
         min-height: 40px;
         padding-right: 44px;
     }
+
+    .session-row:has(.session-options) {
+        --session-actions-width: 40px;
+    }
+
+    .session-row:has(.session-options) .session {
+        min-height: 40px;
+        padding-right: 44px;
+    }
 }
 
 /* The buttons take the right side's place, widened so a long title ends before them (one to four 26px buttons). */
 @media (hover: hover) and (pointer: fine) {
-    /* Count the rendered buttons: Move is additive to archive, pin, and mark-unread. */
+    /* Options is touch-only: exclude its hidden button and gap from the desktop reserve. */
+    .session-row:has(> .session-actions > .session-options) {
+        --session-hidden-action-width: 30px;
+    }
+
     .session-row:has(> .session-actions > .session-act) {
-        --session-actions-width: 26px;
+        --session-actions-width: max(0px, calc(26px - var(--session-hidden-action-width, 0px)));
     }
 
     .session-row:has(> .session-actions > .session-act:nth-child(2)) {
-        --session-actions-width: 56px;
+        --session-actions-width: calc(56px - var(--session-hidden-action-width, 0px));
     }
 
     .session-row:has(> .session-actions > .session-act:nth-child(3)) {
-        --session-actions-width: 86px;
+        --session-actions-width: calc(86px - var(--session-hidden-action-width, 0px));
     }
 
     .session-row:has(> .session-actions > .session-act:nth-child(4)) {
-        --session-actions-width: 116px;
+        --session-actions-width: calc(116px - var(--session-hidden-action-width, 0px));
+    }
+
+    .session-row:has(> .session-actions > .session-act:nth-child(5)) {
+        --session-actions-width: calc(146px - var(--session-hidden-action-width, 0px));
     }
 
     .session-row:hover .session-act {
@@ -5340,6 +5421,110 @@ button.chip:active:not(:disabled):not(.on) {
 
 .session-row.three-acts:has(:focus-visible) .session-side {
     min-width: var(--session-actions-width, 86px);
+}
+
+/* The hold chooser is local to its row. Clip paths widen the chosen surface without stretching its label. */
+.session-hold {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    overflow: hidden;
+    border: 1px solid var(--accent-line);
+    background: var(--panel);
+    touch-action: none;
+}
+
+.session-hold-choice {
+    position: absolute;
+    inset: 0;
+    background: var(--raised);
+    color: var(--text);
+    transition:
+        clip-path var(--hold-expand, 600ms) linear,
+        opacity var(--t-hover) var(--ease-out);
+}
+
+.session-hold-choice.drag {
+    clip-path: inset(0 50% 0 0);
+}
+
+.session-hold-choice.options {
+    clip-path: inset(0 0 0 50%);
+}
+
+.session-hold-choice::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--accent-fill);
+    opacity: 0;
+    transition: opacity var(--hold-fill, 140ms) linear;
+}
+
+.session-hold-label {
+    position: absolute;
+    inset-block: 0;
+    width: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    transition: transform var(--hold-expand, 600ms) linear;
+}
+
+.session-hold-choice.drag .session-hold-label {
+    left: 0;
+}
+
+.session-hold-choice.options .session-hold-label {
+    right: 0;
+}
+
+.session-hold-choice.selected {
+    z-index: 1;
+    clip-path: inset(0);
+    background: var(--accent-soft);
+}
+
+.session-hold-choice.selected.drag .session-hold-label {
+    transform: translateX(50%);
+}
+
+.session-hold-choice.selected.options .session-hold-label {
+    transform: translateX(-50%);
+}
+
+.session-hold[data-choice] .session-hold-choice:not(.selected) {
+    opacity: 0;
+}
+
+.session-hold[data-phase="fill"] .session-hold-choice.selected::before {
+    opacity: 1;
+}
+
+.session-hold[data-phase="fill"] .session-hold-choice.selected {
+    color: var(--accent-ink);
+}
+
+.session-hold-choice:disabled {
+    color: var(--muted);
+}
+
+:root[data-motion="reduced"] .session-hold-choice,
+:root[data-motion="reduced"] .session-hold-label {
+    transition: none;
+}
+
+:root[data-motion="reduced"] .session-hold-choice.selected {
+    clip-path: none;
+}
+
+:root[data-motion="reduced"] .session-hold-choice.selected .session-hold-label {
+    transform: none;
+}
+
+:root[data-motion="reduced"] .session-hold-choice.selected::before {
+    transition: opacity var(--hold-fill, 140ms) linear;
 }
 
 /* While Ctrl/⌘ drags a selection, rows do not show their buttons. */
@@ -5906,6 +6091,105 @@ button.chip:active:not(:disabled):not(.on) {
     to {
         transform: translateX(-100%);
     }
+}
+
+/* Sidebar Options uses the same sheet surface on every touch viewport, including landscape. */
+.overlay.bottom-overlay {
+    align-items: flex-end;
+    padding: 0 var(--safe-right) 0 var(--safe-left);
+}
+
+.sheet.bottom-sheet {
+    border: 1px solid var(--line);
+    border-top: 2px solid var(--accent);
+    border-bottom: 0;
+    animation: sheet-up 200ms var(--ease-out);
+}
+
+.leaving .sheet.bottom-sheet {
+    animation: sheet-down var(--t-out) var(--ease-out) forwards;
+}
+
+/* ─── Sidebar context menus ───────────────────────────────── */
+.pop-menu.sidebar-options-menu {
+    width: min(280px, calc(100vw - var(--safe-left) - var(--safe-right) - 16px));
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    transform-origin: top left;
+    animation-duration: 160ms;
+}
+
+.sidebar-options-title {
+    padding: 0.6rem 0.75rem;
+    color: var(--muted);
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
+    border-bottom: 1px solid var(--line);
+}
+
+.sidebar-option {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    width: 100%;
+    min-height: 40px;
+    padding: 0.6rem 0.75rem;
+    color: var(--text);
+    text-align: left;
+}
+
+.sidebar-option span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.sidebar-option .icon {
+    flex-shrink: 0;
+    color: var(--muted);
+}
+
+.sidebar-option.danger,
+.sidebar-option.danger .icon {
+    color: var(--err);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .sidebar-option:hover:not(:disabled) {
+        background: var(--hover);
+    }
+}
+
+.sidebar-option:active:not(:disabled) {
+    background: var(--pressed);
+}
+
+.sidebar-option:focus-visible {
+    outline-offset: -2px;
+    background: var(--accent-soft);
+}
+
+.sidebar-options-sheet .sidebar-option {
+    min-height: 44px;
+    padding-inline: 0;
+}
+
+.sidebar-options-error {
+    padding: 0.5rem 0.75rem;
+}
+
+.sidebar-options-menu[data-keyboard="true"] {
+    animation: none;
+}
+
+:root[data-motion="reduced"] .pop-menu.sidebar-options-menu,
+:root[data-motion="reduced"] .sheet.sidebar-options-sheet {
+    animation: fade 160ms var(--ease-out);
+}
+
+:root[data-motion="reduced"] .leaving .pop-menu.sidebar-options-menu,
+:root[data-motion="reduced"] .leaving .sheet.sidebar-options-sheet {
+    animation: fade-out var(--t-out) linear forwards;
 }
 
 /* ─── Pop-up menus: the model and branch pickers ───────────── */

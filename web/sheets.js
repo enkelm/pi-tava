@@ -30,6 +30,7 @@ import { NewSessionSheet, SessionActions } from "./sheets/session.js";
 import { ProjectSheet } from "./sheets/project.js";
 import { ProjectGoalSheet } from "./sheets/project-goal.js";
 import { SessionMoveSheet } from "./sheets/session-move.js";
+import { SidebarOptions } from "./sheets/sidebar-options.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
 import { TextSheet } from "./sheets/text.js";
 import { ArtifactsSheet, ArtifactViewer, ImageViewer } from "./sheets/viewers.js";
@@ -213,6 +214,7 @@ function sheetBody(sheet) {
                 initialPreview=${sheet.initialPreview}
                 projectId=${sheet.projectId}
                 goalId=${sheet.goalId}
+                newGoal=${sheet.newGoal}
                 cwd=${sheet.cwd}
                 continuation=${sheet.continuation}
             />`;
@@ -222,6 +224,14 @@ function sheetBody(sheet) {
             break;
         case "project-goal":
             body = html`<${ProjectGoalSheet} key=${sheet.goalId} goalId=${sheet.goalId} />`;
+            break;
+        case "sidebar-options":
+            body = html`<${SidebarOptions}
+                kind=${sheet.kind}
+                id=${sheet.id}
+                at=${sheet.at}
+                archivedView=${sheet.archivedView}
+            />`;
             break;
         case "move-sessions":
             body = html`<${SessionMoveSheet} key=${sheet.ids.join(",")} ids=${sheet.ids} />`;
@@ -321,14 +331,23 @@ function sheetBody(sheet) {
         case "chat":
             body = view.conversation ? html`<${ChatSheet} />` : null;
             break;
-        case "rename":
-            body = html`<${TextSheet}
+
+        case "rename": {
+            const session = sheet.id
+                ? store.state.sessions.find((each) => each.id === sheet.id)
+                : view.conversation;
+
+            body = session
+                ? html`<${TextSheet}
                 title="Rename"
                 label="Session title"
-                initial=${view.conversation?.title ?? ""}
-                submit=${(value) => actions.updateSession(view.conversation.id, { title: value })}
-            />`;
+                initial=${session.title ?? ""}
+                submit=${(value) => actions.updateSession(session.id, { title: value })}
+            />`
+                : null;
             break;
+        }
+
         case "worktree":
             body = html`<${WorktreeSheet} />`;
             break;
