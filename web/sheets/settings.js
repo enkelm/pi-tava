@@ -103,7 +103,7 @@ export function SettingsSheet({ tab = "appearance" }) {
                     hidden=${active !== id}
                 >
                     <h3>${label}</h3>
-                    ${(active === id || visited.has(id)) && html`<${body} />`}
+                    ${(active === id || visited.has(id)) && html`<${body} active=${active === id} />`}
                 </section>`,
             )}
         </div>

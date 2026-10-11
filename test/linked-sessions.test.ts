@@ -10,15 +10,26 @@ import {
     openApp,
     owner,
     recordCost,
+    root,
     say,
     scriptedModel,
     until,
+    work,
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { ConversationId } from "@earendil-works/pi-durable";
-import { LinkedSessionCallsDoc, LinkedSessionRelayDoc, TurnsDoc } from "../src/server/docs.ts";
+import {
+    LinkedSessionCallsDoc,
+    LinkedSessionRelayDoc,
+    type SessionMeta,
+    SessionsDoc,
+    TurnsDoc,
+} from "../src/server/docs.ts";
+import { importFixture } from "./import-fixtures.ts";
 
 let app: App;
 
@@ -54,6 +65,154 @@ const sent = async (id: ConversationId) =>
     (await modelTexts(app, id)).filter(
         (text) => text.includes("<linked-session-message>") && !text.includes("echo:"),
     ).length;
+
+test("a linked session from an owner-only import stays hidden from other people, including after reopen", async () => {
+    const data = join(root, "linked-private-data");
+    const directory = join(work, "linked-private-import");
+    const model = scriptedModel();
+    let isolated = await openApp(model, data);
+
+    mkdirSync(directory, { recursive: true });
+
+    try {
+        const fixture = importFixture(directory);
+        const preview = await isolated.imports.preview(owner(isolated), { path: fixture.path });
+        const imported = await isolated.imports.create(owner(isolated), {
+            path: preview.path,
+            sha256: preview.sha256,
+            leafId: preview.leafId,
+            stopped: true,
+            acknowledged: true,
+            model: "faux/faux-vision",
+            thinkingLevel: "off",
+        });
+        const guest = isolated.config.addUser("Private team outsider", "guest").user;
+
+        assert.equal(isolated.sessionMeta(imported.id)?.ownerOnly, true);
+        assert.equal(isolated.canSee(guest, imported.id), false);
+        await say(isolated, imported.id, "Owner continuation");
+        const { session: child } = await isolated.linkedSessions.start(
+            imported.id,
+            { message: "PRIVATE_LINKED_TASK" },
+            "private-start",
+        );
+
+        assert.equal(isolated.canSee(guest, child), false, "linking must not publish private work");
+        assert.equal(isolated.canSee(owner(isolated), child), true);
+        assert.equal(
+            isolated.sessions(guest).some((entry) => entry.id === Number(child)),
+            false,
+        );
+        await assert.rejects(
+            isolated.commands.submit(child, guest, { text: "Not shared", requestId: "outsider" }),
+            /not shared/,
+        );
+        await until(
+            async () =>
+                (await modelTexts(isolated, child)).some((text) =>
+                    text.includes("PRIVATE_LINKED_TASK"),
+                ),
+            "the linked task is actually delivered",
+        );
+
+        await isolated.close();
+        isolated = await openApp(model, data);
+        assert.equal(isolated.canSee(guest, child), false);
+        assert.equal(isolated.sessionMeta(child)?.ownerOnly, true);
+        assert.equal(
+            isolated.sessions(guest).some((entry) => entry.id === Number(child)),
+            false,
+        );
+    } finally {
+        await isolated.close();
+    }
+});
+
+test("new linked roots are explicit Chats and stay independent Chats after reopen", async () => {
+    const data = join(root, "linked-chat-data");
+    const model = scriptedModel();
+    let isolated = await openApp(model, data);
+
+    try {
+        const origin = await newSession(isolated);
+
+        await say(isolated, origin, "Start ordinary independent work");
+        const { session: child } = await isolated.linkedSessions.start(
+            origin,
+            { message: "A linked task" },
+            "chat-start",
+        );
+
+        assert.equal(isolated.sessionMeta(child)?.threadType, "chat");
+        assert.equal(isolated.rootOf(child), child, "a link is not Durable parentage");
+        assert.equal(isolated.cwdOf(child), isolated.cwdOf(origin));
+        await isolated.close();
+        isolated = await openApp(model, data);
+        assert.equal(isolated.sessionMeta(child)?.threadType, "chat");
+        assert.equal(isolated.sessionMeta(child)?.linkedFrom?.id, Number(origin));
+        assert.equal(isolated.rootOf(child), child);
+    } finally {
+        await isolated.close();
+    }
+});
+
+test("legacy untyped links migrate to Chats while ordinary legacy and explicit types retain their meaning", async () => {
+    const data = join(root, "linked-migration-data");
+    const model = scriptedModel();
+    let isolated = await openApp(model, data);
+
+    try {
+        // Store the old catalogue shape through Durable's public API, as the legacy project migration tests do.
+        const create = async (metadata: Partial<SessionMeta> = {}) => {
+            const conversation = await isolated.harness.createConversation(
+                {
+                    ownership: { kind: "ownerless" },
+                    agent: { cwd: work },
+                    init: async (tx, id) => {
+                        (await tx.doc(SessionsDoc)).items[String(id)] = {
+                            cwd: work,
+                            createdAt: 100,
+                            updatedAt: 100,
+                            ...metadata,
+                        };
+                    },
+                },
+                context,
+            );
+
+            return conversation.id;
+        };
+
+        const ordinary = await create();
+        const linked = await create({ linkedFrom: { id: Number(ordinary) } });
+        const explicitChat = await create({ threadType: "chat" });
+        const explicitWorker = await create({
+            linkedFrom: { id: Number(ordinary) },
+            threadType: "worker",
+        });
+
+        await isolated.close();
+        isolated = await openApp(model, data);
+        assert.equal(
+            isolated.sessionMeta(linked)?.threadType,
+            "chat",
+            "legacy links stay unmanaged",
+        );
+        assert.equal(isolated.sessionMeta(ordinary)?.threadType, "worker");
+        assert.equal(isolated.sessionMeta(explicitChat)?.threadType, "chat");
+        assert.equal(isolated.sessionMeta(explicitWorker)?.threadType, "worker");
+        const durable = await isolated.harness.snapshot(SessionsDoc, context);
+
+        assert.equal(durable?.items[String(linked)]?.threadType, "chat", "migration is durable");
+        assert.equal(durable?.items[String(ordinary)]?.threadType, "worker");
+        await isolated.close();
+        isolated = await openApp(model, data);
+        assert.equal(isolated.sessionMeta(linked)?.threadType, "chat");
+        assert.equal(isolated.sessionMeta(explicitWorker)?.threadType, "worker");
+    } finally {
+        await isolated.close();
+    }
+});
 
 test("a repeated start or send makes one session or one message", async () => {
     const id = await source();

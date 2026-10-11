@@ -691,13 +691,14 @@ export class PocketApp {
     async #recover(storage: Storage): Promise<ConversationId[]> {
         const savedSessions = (await this.harness.snapshot(SessionsDoc, context))?.items ?? {};
 
-        // Existing Collab threads become Workers once; explicitly typed new Chats are never rewritten.
+        // Untyped legacy links stay independent Chats; other legacy threads become Workers.
+        // Explicit types are never rewritten.
         if (Object.values(savedSessions).some((meta) => meta.threadType === undefined)) {
             await this.harness.commit(async (tx) => {
                 const sessions = await tx.doc(SessionsDoc);
 
                 for (const meta of Object.values(sessions.items)) {
-                    meta.threadType ??= "worker";
+                    meta.threadType ??= meta.linkedFrom === undefined ? "worker" : "chat";
                 }
             }, context);
         }

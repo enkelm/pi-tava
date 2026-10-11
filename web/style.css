@@ -1,6 +1,6 @@
 /*
  * Pi Coop's theme. theme.js sets the --o-* variables from a bundled palette; surfaces mix the foreground over the
- * background for quiet fills. Square tiles, 2px window borders, no shadows or blur, and JetBrains Mono throughout.
+ * background for quiet fills. Square tiles, 2px window borders, no shadows or blur; JetBrains Mono is the default.
  */
 /*
  * Contents, in the order the cascade reads them. Search for "─── " and a name to jump to a section. A rule later in
@@ -191,7 +191,9 @@
     --mono:
         "Pocket Mono", "JetBrains Mono", "JetBrainsMono Nerd Font", ui-monospace, "SF Mono", Menlo,
         Consolas, monospace;
-    --sans: var(--mono);
+    /* UI choices never rewrite the bundled code/terminal stack. */
+    --font: var(--mono);
+    --sans: var(--font);
     color-scheme: dark;
 }
 
@@ -409,6 +411,12 @@ kbd {
     font-family: var(--mono);
 }
 
+/* UI font choices do not reach code or read-only terminal snapshots. */
+pre,
+code {
+    font-family: var(--mono);
+}
+
 .muted {
     color: var(--muted);
 }
@@ -559,7 +567,7 @@ kbd {
     gap: 1.1rem;
     height: 100dvh;
     padding: 1.5rem;
-    font-family: var(--mono);
+    font-family: var(--font);
     color: var(--muted);
     text-align: center;
     background: var(--bg);
@@ -2415,7 +2423,7 @@ pre.diff .del {
 .report-name {
     color: var(--text);
     font-weight: 600;
-    font-family: var(--mono);
+    font-family: var(--font);
 }
 
 .report-why {
@@ -3576,6 +3584,7 @@ button.chip:active:not(:disabled):not(.on) {
     padding-top: calc(3px + 5px * var(--space-y));
     font-size: 11.5px;
     line-height: 16px;
+    font-family: var(--font);
     color: var(--muted);
     white-space: nowrap;
 }
@@ -4117,12 +4126,12 @@ button.chip:active:not(:disabled):not(.on) {
 }
 
 .brand span {
-    font: 700 1rem var(--mono);
+    font: 700 1rem var(--font);
     color: var(--text);
 }
 
 .brand small {
-    font: 500 0.62rem var(--mono);
+    font: 500 0.62rem var(--font);
     color: var(--muted);
     letter-spacing: 0.08em;
     text-transform: lowercase;
@@ -9863,6 +9872,7 @@ textarea.notes {
     position: relative;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
     text-align: left;
     gap: 8px;
     padding: 8px 8px 10px;
@@ -9881,8 +9891,13 @@ textarea.notes {
     }
 }
 
+/* Assignment buttons must not shrink the entire card when pressed. */
 .theme-card:active {
-    transform: scale(0.97);
+    transform: none;
+}
+
+.tc-select:active {
+    background: color-mix(in srgb, var(--o-fg) 8%, var(--o-bg));
 }
 
 .theme-card.on {
@@ -9892,6 +9907,19 @@ textarea.notes {
         0 0 0 4px var(--o-accent);
 }
 
+.tc-select {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    width: 100%;
+    text-align: left;
+}
+
+.tc-select:focus-visible {
+    outline: 2px solid var(--o-accent);
+    outline-offset: -2px;
+}
+
 .tc-desk {
     display: flex;
     gap: 5px;
@@ -9899,6 +9927,7 @@ textarea.notes {
     padding: 6px;
     border-radius: 9px;
     background: var(--o-bg-darker);
+    transition: opacity var(--t-hover) ease;
 }
 
 .tc-win {
@@ -9949,12 +9978,24 @@ textarea.notes {
     display: flex;
     align-items: center;
     gap: 0.35rem;
+    height: 28px;
+    width: 100%;
+    padding: 0.35rem 0.45rem 0.1rem;
     font-size: 13px;
     font-weight: 500;
     color: var(--o-fg-bright, var(--o-fg));
     white-space: nowrap;
+    transition: transform var(--t-hover) var(--ease-out);
+}
+
+.tc-name span {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.theme-card.on .tc-name {
+    padding-right: 22px;
 }
 
 .tc-name small {
@@ -9967,12 +10008,178 @@ textarea.notes {
 .tc-dots {
     display: flex;
     gap: 4px;
+    height: 20px;
+    padding: 0.2rem 0.45rem 0.45rem;
+    transition: opacity var(--t-hover) ease;
 }
 
 .tc-dots i {
     width: 10px;
     height: 10px;
     border-radius: 3px;
+}
+
+.tc-assignments {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+    color: var(--o-fg-bright);
+}
+
+.tc-modes {
+    position: absolute;
+    inset: auto 0 0;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    background: var(--o-bg);
+    border-top: 1px solid color-mix(in srgb, var(--o-fg) 22%, var(--o-bg));
+    visibility: hidden;
+    opacity: 0;
+    transform: translateY(4px);
+    transition:
+        opacity var(--t-hover) ease,
+        transform var(--t-hover) var(--ease-out),
+        visibility var(--t-hover);
+}
+
+.tc-modes button {
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    min-height: 42px;
+    color: var(--o-fg-bright);
+    border-bottom: 2px solid transparent;
+}
+
+.tc-modes button + button {
+    border-left: 1px solid color-mix(in srgb, var(--o-fg) 15%, var(--o-bg));
+}
+
+.tc-modes button[aria-pressed="true"] {
+    color: var(--o-accent);
+    background: color-mix(in srgb, var(--o-accent) 15%, var(--o-bg));
+    border-bottom-color: var(--o-accent);
+}
+
+.tc-modes button:focus-visible {
+    outline: 2px solid var(--o-accent);
+    outline-offset: -3px;
+}
+
+.tc-modes button:active {
+    background: color-mix(in srgb, var(--o-fg) 18%, var(--o-bg));
+}
+
+.theme-card:is(.revealed, :has(:focus-visible)) .tc-name {
+    transform: translateY(-58px);
+}
+
+.theme-card:is(.revealed, :has(:focus-visible)) .tc-desk {
+    opacity: 0.25;
+}
+
+.theme-card:is(.revealed, :has(:focus-visible)) .tc-dots {
+    opacity: 0;
+}
+
+.theme-card:is(.revealed, :has(:focus-visible)) .tc-modes {
+    visibility: visible;
+    opacity: 1;
+    transform: translateY(0);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .theme-card:hover .tc-name {
+        transform: translateY(-58px);
+    }
+
+    .theme-card:hover .tc-desk {
+        opacity: 0.25;
+    }
+
+    .theme-card:hover .tc-dots {
+        opacity: 0;
+    }
+
+    .theme-card:hover .tc-modes {
+        visibility: visible;
+        opacity: 1;
+        transform: translateY(0);
+    }
+
+    .tc-modes button:hover {
+        background: color-mix(in srgb, var(--o-fg) 12%, var(--o-bg));
+    }
+}
+
+/* Keyboard disclosure is immediate; reduced motion also removes positional interpolation. */
+.theme-card:has(:focus-visible) :is(.tc-name, .tc-desk, .tc-dots, .tc-modes) {
+    transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .theme-card :is(.tc-name, .tc-modes) {
+        transition: opacity var(--t-hover) ease;
+    }
+}
+
+.theme-mode-hint {
+    margin: -0.2rem 0 0.45rem;
+    color: var(--muted);
+    font-size: 0.74rem;
+}
+
+.theme-choices {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.85rem;
+    margin: 0 0 0.65rem;
+    font-size: 0.74rem;
+    color: var(--body);
+}
+
+.theme-choices span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.color-modes button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    min-height: 40px;
+}
+
+.font-picker {
+    width: min(60%, 240px);
+    max-width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    flex: none;
+}
+
+.font-preview {
+    margin: 0;
+    padding: 0.75rem 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 420px) {
+    .setting-row:has(.color-modes) {
+        flex-wrap: wrap;
+    }
+
+    .color-modes {
+        width: 100%;
+    }
+
+    .color-modes button {
+        flex: 1;
+    }
 }
 
 .setting-row {
@@ -11334,7 +11541,7 @@ textarea.notes {
 
 .dv-reading {
     color: var(--muted);
-    font: 11.5px var(--mono);
+    font: 11.5px var(--font);
 }
 
 /* A note under a line ("No newline at end of file") starts where the code does: past the numbers, and the sign. */

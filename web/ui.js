@@ -912,6 +912,8 @@ const ICONS = {
     phone: "M8 3h8a1 1 0 011 1v16a1 1 0 01-1 1H8a1 1 0 01-1-1V4a1 1 0 011-1zM11 18h2",
     tablet: "M5 4h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1zM11 17h2",
     monitor: "M3 4h18v12H3zM8 20h8M12 16v4",
+    moon: "M20.9 13A9 9 0 0111 3.1 9 9 0 1020.9 13z",
+    sun: "M16 12a4 4 0 11-8 0 4 4 0 018 0zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
     terminal: "M4 5h16v14H4zM8 10l2 2-2 2M12 14h4",
     fit: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
     // Compact: two rules, and what is between them pressed toward the middle.

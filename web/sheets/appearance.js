@@ -1,5 +1,5 @@
 // Appearance: the theme and the colors, and how the app looks and moves.
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { Fragment } from "preact";
 import {
     actions,
@@ -13,10 +13,13 @@ import {
     store,
 } from "../store.js";
 import {
+    assignTheme,
     BASE_LOOK,
     chooseLook,
+    chooseMode,
     chooseTheme,
     colorsOnly,
+    FONTS,
     folderPaletteIds,
     lookIds,
     paletteOf,
@@ -34,36 +37,159 @@ import { galleryAvailable } from "./gallery.js";
 // Key hints are for people with a keyboard: a touch screen has none.
 const touch = matchMedia("(pointer: coarse)").matches;
 
-/** A theme as a card: tiny tiled windows drawn in its own colors. */
-function ThemeCard({ id, index = 0 }) {
+const MODES = [
+    { value: "system", label: "System", icon: "monitor" },
+    { value: "dark", label: "Dark", icon: "moon" },
+    { value: "light", label: "Light", icon: "sun" },
+];
+
+/** A theme as a card: tiny tiled windows, with mode controls on hover, keyboard focus or touch hold. */
+function ThemeCard({ id, index = 0, revealed, onReveal, active }) {
+    const p = prefs();
+    const on = p.theme === id;
     const palette = paletteOf(id);
     const vars = varsStyle(themeVars(palette));
-    const on = prefs().theme === id;
+    const name = palette.name;
     const dots = ["--o-red", "--o-yellow", "--o-green", "--o-cyan", "--o-blue", "--o-magenta"];
-    const desk = html`<div class="tc-desk">
-        <div class="tc-win"><i></i><i></i><i class="lit"></i></div>
-        <div class="tc-win"><i></i><i></i><i class="lit"></i></div>
-    </div>`;
-    const name = html`<div class="tc-name">
-        ${palette.name} ${palette.colors.mode === "light" && html`<small>light</small>`}
-    </div>`;
+    const press = useRef(null);
+    const timer = useRef(null);
 
-    return html`<button
-        class=${`theme-card ${on ? "on" : ""}`}
-        aria-pressed=${on}
+    const clearTimer = () => {
+        clearTimeout(timer.current);
+        timer.current = null;
+    };
+
+    useLayoutEffect(() => {
+        if (!active) {
+            clearTimer();
+            press.current = null;
+        }
+
+        return clearTimer;
+    }, [active]);
+
+    const finish = (event) => {
+        if (press.current?.pointerId === event.pointerId) {
+            clearTimer();
+        }
+    };
+
+    const cancel = (event) => {
+        if (press.current?.pointerId !== event.pointerId) {
+            return;
+        }
+
+        clearTimer();
+
+        if (press.current) {
+            press.current.cancelled = true;
+        }
+    };
+
+    const start = (event) => {
+        if (!event.isPrimary || event.button !== 0) {
+            return;
+        }
+
+        clearTimer();
+        press.current = null;
+
+        if (event.pointerType === "mouse") {
+            return;
+        }
+
+        press.current = {
+            pointerId: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            held: false,
+            cancelled: false,
+        };
+        timer.current = setTimeout(() => {
+            press.current.held = true;
+            onReveal(id);
+        }, 450);
+    };
+
+    const move = (event) => {
+        const at = press.current;
+
+        if (
+            at?.pointerId === event.pointerId &&
+            Math.hypot(event.clientX - at.x, event.clientY - at.y) > 10
+        ) {
+            cancel(event);
+        }
+    };
+
+    const select = (event) => {
+        const at = press.current;
+
+        // A hold only discloses controls; scrolling/cancellation must never choose a palette.
+        if (event.detail !== 0 && at && (at.held || at.cancelled)) {
+            event.preventDefault();
+            press.current = null;
+
+            return;
+        }
+
+        chooseTheme(id, event);
+    };
+
+    return html`<div
+        class=${`theme-card ${on ? "on" : ""} ${revealed ? "revealed" : ""}`}
         style=${`${vars};--i:${index}`}
-        title=${palette.name}
-        onMouseEnter=${() => matchMedia("(hover: hover) and (pointer: fine)").matches && preview(id)}
-        onMouseLeave=${() => preview(null)}
-        onFocus=${() => preview(id)}
-        onBlur=${() => preview(null)}
-        onClick=${(event) => chooseTheme(id, event)}
+        title=${name}
+        role="group"
+        aria-label=${name}
     >
-        ${desk} ${name}
-        <div class="tc-dots">
-            ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
+        <button
+            class="tc-select"
+            aria-label=${`Use ${name} theme`}
+            aria-pressed=${on}
+            aria-describedby="theme-mode-hint"
+            onClick=${select}
+            onPointerDown=${start}
+            onPointerMove=${move}
+            onPointerUp=${finish}
+            onPointerCancel=${cancel}
+            onPointerLeave=${finish}
+            onContextMenu=${(event) => event.preventDefault()}
+        >
+            <div class="tc-desk" aria-hidden="true">
+                <div class="tc-win"><i></i><i></i><i class="lit"></i></div>
+                <div class="tc-win"><i></i><i></i><i class="lit"></i></div>
+            </div>
+            <div class="tc-name">
+                <span>${name}</span>
+                ${palette.colors.mode === "light" && html`<small>light</small>`}
+            </div>
+            <div class="tc-dots" aria-hidden="true">
+                ${dots.map((dot) => html`<i style=${`background:var(${dot})`}></i>`)}
+                <span class="tc-assignments">
+                    ${MODES.filter(({ value }) => p[`${value}Theme`] === id).map(
+                        ({ icon }) => html`<${Icon} name=${icon} size=${12} />`,
+                    )}
+                </span>
+            </div>
+        </button>
+        <div class="tc-modes" role="group" aria-label=${`${name} theme assignments`}>
+            ${MODES.filter(({ value }) => value !== "system").map(
+                ({ value, label, icon }) => html`<button
+                    type="button"
+                    title=${`Save for ${label} mode`}
+                    aria-label=${`Use ${name} for ${label} mode`}
+                    aria-pressed=${p[`${value}Theme`] === id}
+                    onClick=${(event) => {
+                        event.stopPropagation();
+                        assignTheme(value, id);
+                    }}
+                >
+                    <${Icon} name=${icon} size=${16} />
+                </button>`,
+            )}
         </div>
-    </button>`;
+    </div>`;
 }
 
 /** A theme folder as the server lists it, or the app's own look. */
@@ -262,7 +388,7 @@ function ColorsTools() {
         ) &&
         attempt(async () => {
             await api(`themes/${encodeURIComponent(own.id)}`, undefined, { method: "DELETE" });
-            setPrefs({ theme: "tokyo-night" });
+            chooseTheme("tokyo-night");
         });
 
     return html`<div class="look-tools">
@@ -350,26 +476,110 @@ function SettingRow({ title, detail, children }) {
     </div>`;
 }
 
-export function AppearanceSettings() {
+export function AppearanceSettings({ active = true }) {
     const p = prefs();
+    const [revealed, setRevealed] = useState(null);
+
+    useLayoutEffect(() => {
+        if (!active) {
+            setRevealed(null);
+
+            return;
+        }
+
+        const dismiss = (event) => {
+            if (!event.target.closest(".theme-card.revealed")) {
+                setRevealed(null);
+            }
+        };
+
+        const escape = (event) => {
+            if (event.key === "Escape" && revealed !== null) {
+                event.preventDefault();
+                event.stopPropagation();
+                setRevealed(null);
+            }
+        };
+
+        document.addEventListener("pointerdown", dismiss, true);
+        document.addEventListener("keydown", escape, true);
+
+        return () => {
+            document.removeEventListener("pointerdown", dismiss, true);
+            document.removeEventListener("keydown", escape, true);
+        };
+    }, [revealed, active]);
 
     useEffect(() => () => preview(null), []);
 
     return html`<${Fragment}>
+        <${SettingRow} title="Color mode" detail="System follows your device">
+            <div class="segmented color-modes" role="group" aria-label="Color mode">
+                ${MODES.map(
+                    ({ value, label, icon }) => html`<button
+                        class=${p.mode === value ? "on" : ""}
+                        aria-pressed=${p.mode === value}
+                        onClick=${(event) => chooseMode(value, event)}
+                    >
+                        <${Icon} name=${icon} size=${15} /> ${label}
+                    </button>`,
+                )}
+            </div>
+        <//>
+        <${SettingRow} title="Font" detail="Code and terminals stay monospace">
+            <select
+                class="font-picker"
+                aria-label="Font"
+                value=${p.font}
+                onChange=${(event) => setPrefs({ font: event.currentTarget.value })}
+            >
+                ${Object.entries(FONTS).map(
+                    ([value, font]) => html`<option value=${value}>${font.name}</option>`,
+                )}
+            </select>
+        <//>
+        <p class="font-preview">The quick brown fox · Aa 0123</p>
         <div class="label">Theme</div>
         <div class="look-grid">
             ${lookIds().map((id) => html`<${LookCard} key=${id} id=${id} />`)}
         </div>
         ${store.state.me?.role === "owner" && html`<${LookTools} />`}
         <div class="label">Colors</div>
+        <p class="theme-mode-hint" id="theme-mode-hint">
+            Click to switch now. Hover or long-press to save a theme for Dark or Light.
+        </p>
+        <p class="theme-choices">
+            <span><${Icon} name="moon" size=${12} /> Dark: ${paletteOf(p.darkTheme).name}</span>
+            <span><${Icon} name="sun" size=${12} /> Light: ${paletteOf(p.lightTheme).name}</span>
+        </p>
         <div class="theme-grid">
             ${[...themeIds(), ...folderPaletteIds()].map(
-                (id, index) => html`<${ThemeCard} key=${id} id=${id} index=${index} />`,
+                (id, index) => html`<${ThemeCard}
+                    key=${id}
+                    id=${id}
+                    index=${index}
+                    revealed=${revealed === id}
+                    onReveal=${setRevealed}
+                    active=${active}
+                />`,
             )}
         </div>
         ${store.state.me?.role === "owner" && html`<${ColorsTools} />`}
         ${store.state.me?.role === "owner" && html`<${DefaultTools} />`}
         <div class="label">Layout and motion</div>
+        <${SettingRow} title="Text size">
+            <div class="segmented">
+                ${[12, 13, 14, 15, 16, 17].map(
+                    (size) => html`<button
+                        class=${p.text === size ? "on" : ""}
+                        aria-pressed=${p.text === size}
+                        onClick=${() => setPrefs({ text: size })}
+                    >
+                        ${size}
+                    </button>`,
+                )}
+            </div>
+        <//>
         <div class="sheet-list">
             <${SettingRow}
                 title="Tiled windows"
@@ -428,20 +638,6 @@ export function AppearanceSettings() {
                                 onClick=${() => setPrefs({ motion: value })}
                             >
                                 ${label}
-                            </button>`,
-                    )}
-                </div>
-            <//>
-            <${SettingRow} title="Text size">
-                <div class="segmented">
-                    ${[13, 14, 15, 16, 17].map(
-                        (size) =>
-                            html`<button
-                                class=${p.text === size ? "on" : ""}
-                                aria-pressed=${p.text === size}
-                                onClick=${() => setPrefs({ text: size })}
-                            >
-                                ${size}
                             </button>`,
                     )}
                 </div>

@@ -376,6 +376,8 @@ export class LinkedSessions implements LinkedSessionsApi {
             });
             sessions.items[String(child.id)] = {
                 cwd,
+                threadType: "chat",
+                ...(sessions.items[String(source)]?.ownerOnly === true ? { ownerOnly: true } : {}),
                 title,
                 createdAt: now,
                 updatedAt: now,

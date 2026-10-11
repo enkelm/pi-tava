@@ -1,4 +1,4 @@
-// Appearance: Coop's bundled palettes and saved layout, with explicitly selected optional theme folders.
+// Appearance: Coop's palettes, saved color modes, UI fonts and layout, with optional theme folders.
 // No desktop-theme or wallpaper synchronization. Theme CSS still participates in safe mode.
 import { THEMES } from "./themes.js";
 import { onSafeModeEnd, safeMode } from "./safe-mode.js";
@@ -14,16 +14,41 @@ const FALLBACK = "tokyo-night";
 /** The app's own look, which every theme builds on: it loads no stylesheet. */
 export const BASE_LOOK = "pocket";
 
+/** Local font stacks; code and terminals keep the bundled monospace face. */
+export const FONTS = {
+    "jetbrains-mono": {
+        name: "JetBrains Mono",
+        family: '"Pocket Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace',
+    },
+    "system-sans": {
+        name: "System sans",
+        family: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    },
+    "system-mono": {
+        name: "System mono",
+        family: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    },
+    serif: {
+        name: "Serif",
+        family: 'Charter, "Bitstream Charter", Georgia, serif',
+    },
+};
+
 const DEFAULTS = {
     /** A key of the bundled THEMES. */
     theme: FALLBACK,
     /** Optional theme-folder CSS; the standalone app loads no extra stylesheet by default. */
     look: BASE_LOOK,
+    /** "system" activates saved palette choices as the device changes its color scheme. */
+    mode: "dark",
+    darkTheme: FALLBACK,
+    lightTheme: "catppuccin-latte",
+    font: "jetbrains-mono",
     /** Wide screens: the sidebar and the conversation as tiled windows, with gaps and borders. */
     tiling: true,
     /** "auto" follows the system's reduced-motion setting. */
     motion: "auto",
-    /** The conversation's text in pixels, 13 to 17; the rest of the app keeps its own sizes. */
+    /** The conversation's text in pixels, 12 to 17; the rest of the app keeps its own sizes. */
     text: 14,
     /** How much room the spacing takes: "comfortable", "compact", or "tight". Font sizes stay. */
     density: "comfortable",
@@ -59,7 +84,7 @@ function readJson(key, fallback) {
 }
 
 const reduceQuery = matchMedia("(prefers-reduced-motion: reduce)");
-// Only an explicitly selected optional folder's paired palettes follow this; bundled palettes stay selected.
+// System mode and explicitly selected paired folder palettes follow the device's color scheme.
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
 
 /**
@@ -78,21 +103,23 @@ const WIDTHS = {
 /** The standalone sidebar's width, matching its drag and reset controls. */
 const sidebarWidth = (p) => `${Math.min(520, Math.max(260, p.sidebarWidth))}px`;
 
+/** Keep selected folder palettes while their listing is pending, including reloads without a palette cache. */
+function knownPalette(id) {
+    return (
+        typeof id === "string" &&
+        id !== "desktop" &&
+        (Object.hasOwn(THEMES, id) ||
+            folderColors(id) !== undefined ||
+            readJson(CACHE, {}).attrs?.colors === id ||
+            !Array.isArray(store.state.themeList))
+    );
+}
+
 /** Retired desktop settings fall back to Tokyo Night without resetting saved Coop layout choices. */
 function normalizePrefs(saved) {
     const appearance = { ...DEFAULTS, ...saved };
-    const id = appearance.theme;
-    const cached = readJson(CACHE, {});
-    // Keep a selected folder palette while waiting for its listing, including reloads without a palette cache.
-    const cachedFolder = typeof id === "string" && id !== "desktop" && cached.attrs?.colors === id;
-    const known =
-        typeof id === "string" &&
-        (Object.hasOwn(THEMES, id) ||
-            folderColors(id) !== undefined ||
-            cachedFolder ||
-            !Array.isArray(store.state.themeList));
 
-    if (id === "desktop" || !known) {
+    if (!knownPalette(appearance.theme)) {
         appearance.theme = FALLBACK;
     }
 
@@ -105,6 +132,47 @@ function normalizePrefs(saved) {
     appearance.sidebarWidth = Number.isFinite(width)
         ? Math.min(520, Math.max(260, width))
         : DEFAULTS.sidebarWidth;
+    const palette = paletteOf(appearance.theme);
+    const cached = readJson(CACHE, {});
+    const paired = palette.pair || (cached.attrs?.colors === appearance.theme && cached.pair);
+    const nativeMode =
+        cached.attrs?.colors === appearance.theme &&
+        !Object.hasOwn(THEMES, appearance.theme) &&
+        !folderColors(appearance.theme)
+            ? cached.attrs.mode
+            : palette.colors.mode === "light"
+              ? "light"
+              : "dark";
+
+    if (!["system", "dark", "light"].includes(saved.mode)) {
+        appearance.mode = paired ? "system" : nativeMode === "light" ? "light" : "dark";
+
+        if (paired) {
+            appearance.systemPalette = appearance.theme;
+        }
+    }
+
+    for (const mode of ["dark", "light"]) {
+        const key = `${mode}Theme`;
+
+        if (!knownPalette(saved[key])) {
+            appearance[key] = paired
+                ? `${appearance.theme}@${mode}`
+                : nativeMode === mode
+                  ? appearance.theme
+                  : DEFAULTS[key];
+        }
+    }
+
+    // Native pairs follow their own halves; System's saved palette slots remain independent.
+    if (appearance.mode !== "system" || !knownPalette(appearance.systemPalette)) {
+        delete appearance.systemPalette;
+    }
+
+    if (!Object.hasOwn(FONTS, appearance.font)) {
+        appearance.font = DEFAULTS.font;
+    }
+
     delete appearance.wallpaper;
 
     return appearance;
@@ -117,6 +185,11 @@ let followsDefault =
     following === "1" || (following === null && localStorage.getItem(KEY) === null);
 let own = normalizePrefs(readJson(KEY, {}));
 
+// Resolve System in memory: startup must not rewrite this browser's saved preference record.
+if (own.mode === "system") {
+    own.theme = themeForMode("system", own);
+}
+
 if (followsDefault) {
     localStorage.setItem(FOLLOW_DEFAULT, "1");
 }
@@ -127,7 +200,15 @@ const ownerDefault = () => (store.state.server ? themeDefault() : readJson(DEFAU
 function inForce() {
     const current = followsDefault ? ownerDefault() : null;
 
-    return current ? normalizePrefs({ ...own, look: current.look, theme: current.colors }) : own;
+    return current
+        ? normalizePrefs({
+              ...own,
+              look: current.look,
+              theme: current.colors,
+              mode: undefined,
+              systemPalette: undefined,
+          })
+        : own;
 }
 
 localStorage.removeItem("pocket.desktopTheme");
@@ -314,7 +395,7 @@ export function chooseLook(id, event) {
     const look = store.state.themeList?.find((each) => each.id === id);
 
     transition(() => {
-        setPrefs({ look: id, ...(look?.colors ? { theme: id } : {}) });
+        setPrefs({ look: id, ...(look?.colors ? paletteChoice(id) : {}) });
 
         return sheetsLoaded;
     }, at);
@@ -468,6 +549,7 @@ export function apply() {
     // Width other than Comfortable is the person's choice, inline over the theme's; Comfortable leaves it to the theme.
     const width = WIDTHS[p.width];
     const inline = {
+        "--font": FONTS[p.font].family,
         "--text-size": `${p.text}px`,
         "--sidebar-w": sidebarWidth(p),
         ...(width ?? {}),
@@ -567,21 +649,70 @@ function transition(change, at) {
     run.finished.finally(() => mine === transitions && root.classList.remove("theme-vt"));
 }
 
-/** Switch theme, with the reveal starting from where the person clicked. */
-export function chooseTheme(id, event) {
+function themeForMode(mode, p = prefs()) {
+    if (mode === "system" && p.systemPalette) {
+        return p.systemPalette;
+    }
+
+    const resolved = mode === "system" ? (lightQuery.matches ? "light" : "dark") : mode;
+    const id = p[`${resolved}Theme`];
+
+    return folderColors(id)?.pair ? `${id}@${resolved}` : id;
+}
+
+function paletteChoice(id) {
+    const palette = paletteOf(id);
+
+    return {
+        theme: id,
+        mode: palette.pair ? "system" : modeOf(palette),
+        systemPalette: palette.pair ? id : undefined,
+    };
+}
+
+function changeTheme(id, mode, event, systemPalette) {
     const at =
         event && "clientX" in event && (event.clientX || event.clientY)
             ? { x: event.clientX, y: event.clientY }
             : undefined;
 
-    if (id === prefs().theme) {
-        // Choosing the inherited palette still opts out of future owner-default changes.
-        setPrefs({ theme: id });
+    if (id === prefs().theme && mode === prefs().mode) {
+        // Choosing the inherited palette/mode still makes it this browser's own choice.
+        setPrefs({ theme: id, mode, systemPalette });
 
         return;
     }
 
-    transition(() => setPrefs({ theme: id }), at);
+    transition(() => setPrefs({ theme: id, mode, systemPalette }), at);
+}
+
+/** Choose a live palette, independently of the saved Dark/Light assignments and optional look. */
+export function chooseTheme(id, event) {
+    if (!knownPalette(id)) {
+        return;
+    }
+
+    const choice = paletteChoice(id);
+
+    if (previewing === id) {
+        setPrefs(choice);
+    } else {
+        changeTheme(id, choice.mode, event, choice.systemPalette);
+    }
+}
+
+/** Activate a saved palette slot; System follows later device changes. */
+export function chooseMode(mode, event) {
+    if (["system", "dark", "light"].includes(mode)) {
+        changeTheme(themeForMode(mode, { ...prefs(), systemPalette: undefined }), mode, event);
+    }
+}
+
+/** Assign a palette for later mode changes without replacing the live palette or following mode. */
+export function assignTheme(mode, id) {
+    if (["dark", "light"].includes(mode) && knownPalette(id)) {
+        setPrefs({ [`${mode}Theme`]: id });
+    }
 }
 
 /** Look at a theme without choosing it, as the launcher does while arrowing through themes. null goes back. */
@@ -611,7 +742,24 @@ export function startTheme() {
 
     started = true;
     reduceQuery.addEventListener?.("change", apply);
-    lightQuery.addEventListener?.("change", apply);
+    lightQuery.addEventListener?.("change", () => {
+        if (followsDefault) {
+            store.set({ appearance: inForce() });
+        } else if (prefs().mode === "system") {
+            const theme = themeForMode("system");
+
+            if (theme !== prefs().theme) {
+                setPrefs({ theme });
+            }
+        }
+
+        apply();
+        // A launcher preview stays temporary while a System choice changes underneath it.
+        const id = previewing;
+
+        previewing = null;
+        preview(id);
+    });
     onSafeModeEnd(apply);
     // Optional folder/default changes never replace a personal selection or write the appearance record.
     let list = store.state.themeList;
@@ -636,6 +784,14 @@ export function startTheme() {
         if (changed) {
             if (followsDefault) {
                 store.set({ appearance: inForce() });
+            } else if (own.mode === "system") {
+                // A pending folder assignment can now resolve to its explicit light/dark half, without rewriting a save.
+                const theme = themeForMode("system", own);
+
+                if (theme !== own.theme) {
+                    own = { ...own, theme };
+                    store.set({ appearance: own });
+                }
             }
 
             apply();

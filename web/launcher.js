@@ -31,6 +31,7 @@ import {
 import {
     BASE_LOOK,
     chooseLook,
+    chooseTheme,
     folderPaletteIds,
     lookIds,
     paletteOf,
@@ -759,16 +760,12 @@ export function Launcher({ leaving, returnTo }) {
         close();
 
         if (item.kind === "theme") {
-            preview(null);
-
             if (item.look) {
+                preview(null);
                 chooseLook(item.look, event);
-
-                return;
-            }
-
-            if (item.theme !== prefs().theme) {
-                setPrefs({ theme: item.theme });
+            } else {
+                chooseTheme(item.theme, event);
+                preview(null);
             }
 
             return;
