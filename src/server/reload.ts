@@ -57,10 +57,12 @@ const ORDER = [
     "triggers.ts",
     "gallery.ts",
 ];
+/** Core-backed modules listed by the app, not imported or hot-reloaded from either folder. */
+const RESTART_ONLY_MODULE_FILES = new Set(["pi-providers.ts"]);
 
 /** The built-in modules' names (their files' without `.ts`): a drop-in with one of them is never loaded. */
 export const BUILT_IN_MODULES: ReadonlySet<string> = new Set(
-    ORDER.map((file) => file.replace(/\.ts$/, "")),
+    [...ORDER, ...RESTART_ONLY_MODULE_FILES].map((file) => file.replace(/\.ts$/, "")),
 );
 /** Modules the app cannot work without: always on. */
 const REQUIRED = new Set(["prompt.ts"]);
@@ -147,6 +149,11 @@ export interface ExtensionInfo {
      * access of the two, and its commands (`conversation /name`, `global /name`).
      */
     web?: { routes: string[]; client?: WebAccess; access?: WebAccess; commands?: string[] };
+    /** Core-backed modules whose requested selection takes effect only at startup. */
+    restartOnly?: boolean;
+    /** The module's running state, separate from a requested restart-only selection. */
+    active?: boolean;
+    restartRequired?: boolean;
     /** Why the module is not loaded, when it failed. */
     error?: string;
 }
@@ -329,7 +336,9 @@ export class ExtensionLoader {
 
     /** Every module, built-in ones first in install order. A drop-in with a built-in's name is left out. */
     #modules(): Module[] {
-        const present = moduleFiles(this.#builtIn);
+        const present = moduleFiles(this.#builtIn).filter(
+            (file) => !RESTART_ONLY_MODULE_FILES.has(file),
+        );
         const builtIn = [
             ...ORDER.filter((file) => present.includes(file)),
             ...present.filter((file) => !ORDER.includes(file)).sort(),
@@ -343,7 +352,7 @@ export class ExtensionLoader {
                 source: "built-in" as const,
             })),
             ...dropIns
-                .filter((file) => !builtIn.includes(file))
+                .filter((file) => !builtIn.includes(file) && !RESTART_ONLY_MODULE_FILES.has(file))
                 .map((file) => ({ file, directory: this.#dropIn!, source: "drop-in" as const })),
         ];
     }
@@ -358,7 +367,7 @@ export class ExtensionLoader {
             return;
         }
 
-        const builtIn = moduleFiles(this.#builtIn);
+        const builtIn = [...moduleFiles(this.#builtIn), ...RESTART_ONLY_MODULE_FILES];
 
         for (const file of moduleFiles(this.#dropIn)) {
             if (!builtIn.includes(file) || this.#clashes.has(file)) {

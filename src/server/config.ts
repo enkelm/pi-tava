@@ -9,7 +9,7 @@ export const APP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 /** Where Pi Pocket keeps its database, users, uploads, and logs. */
 export function dataDir(): string {
-    return process.env.PI_POCKET_DIR ?? join(homedir(), ".pi-pocket");
+    return process.env.PI_POCKET_DIR ?? join(homedir(), ".pi-durable-app");
 }
 
 /** owner: everything. guest: steers Pi (which can run commands here). viewer: reads, chats, and reacts, never steers. */
@@ -57,6 +57,32 @@ export interface ModelChoice {
     thinkingLevel?: string;
 }
 
+/** Public provider configuration only. Credentials remain in the provider host's auth store. */
+export interface ProviderPackageSettings {
+    baseUrl?: string;
+    aliases?: Record<string, string>;
+}
+
+export interface ProviderPackageRelease {
+    id: string;
+    version: string;
+    source: string;
+}
+
+export interface ProviderPackageSelection {
+    name: string;
+    enabled: boolean;
+    release: ProviderPackageRelease;
+    previous?: ProviderPackageRelease;
+    settings?: ProviderPackageSettings;
+}
+
+export interface ProviderPackageState {
+    packages: ProviderPackageSelection[];
+    /** Last metadata-verified startup selection; requested changes do not mutate this. */
+    applied?: { enabled: boolean; packages: ProviderPackageSelection[] };
+}
+
 interface PocketConfig {
     version: 1;
     /** Printed in the login URL at every start. Keep this file private. */
@@ -83,6 +109,7 @@ interface PocketConfig {
      * always use this as an extra-model allowlist: absent or empty means parent only.
      */
     subagentModels?: string[];
+    providerPackages?: ProviderPackageState;
 }
 
 /** Who may allow a risky tool call: anyone who can steer, or (for guests) only someone other than who asked. */
@@ -227,6 +254,24 @@ export class ConfigStore {
         }
 
         this.save();
+    }
+
+    get providerPackages(): ProviderPackageState {
+        return structuredClone(this.#config.providerPackages ?? { packages: [] });
+    }
+
+    set providerPackages(state: ProviderPackageState) {
+        const previous = this.#config.providerPackages;
+
+        this.#config.providerPackages = structuredClone(state);
+
+        try {
+            this.save();
+        } catch (error) {
+            this.#config.providerPackages = previous;
+
+            throw error;
+        }
     }
 
     get disabledExtensions(): readonly string[] {

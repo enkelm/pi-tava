@@ -52,6 +52,7 @@ import {
     openSheet,
     panelsBeside,
     peopleDocked,
+    projectsAvailable,
     scoped,
     start,
     store,
@@ -59,6 +60,7 @@ import {
 } from "./store.js";
 import { prefs, setPrefs, startTheme } from "./theme.js";
 import { Transcript } from "./transcript.js";
+import { ThreadTypeTag } from "./thread-type.js";
 import {
     APPLE,
     Boot,
@@ -144,6 +146,7 @@ function Topbar() {
             ></button>
             <span class="title-main" data-part="topbar-title" aria-hidden="true">${title}</span>
             <span class="title-sub" data-part="topbar-sub">
+                ${projectsAvailable() && conversation?.kind === "session" && html`<${ThreadTypeTag} session=${conversation} />`}
                 ${
                     folder &&
                     html`<span

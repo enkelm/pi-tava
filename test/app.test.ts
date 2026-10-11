@@ -556,7 +556,15 @@ test("anyone signed in can list extensions; only the owner can change them", asy
         });
 
     try {
-        assert.equal((await call(guest.token, "extensions")).status, 200);
+        const listed = await call(guest.token, "extensions");
+
+        assert.equal(listed.status, 200);
+        assert.deepEqual(
+            ((await listed.json()) as { modules: { file: string }[] }).modules.map(
+                (module) => module.file,
+            ),
+            [...app.loader.list().map((module) => module.file), "pi-providers.ts"],
+        );
         assert.equal(
             (await call(guest.token, "extensions/guard.ts", { enabled: false })).status,
             403,

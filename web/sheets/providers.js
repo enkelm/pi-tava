@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { api, attempt, closeSignIn, signInAnswered, store } from "../store.js";
 import { html, Icon, Loader, Sheet } from "../ui.js";
 import { RefreshModels } from "../model-refresh.js";
+import { ProviderPackagesSettings } from "./provider-packages.js";
 
 /** Models past this many get a box to find them by. */
 const MODEL_SEARCH_AT = 8;
@@ -145,6 +146,7 @@ export function ProvidersSettings() {
     const [providers, setProviders] = useState(null);
     const [query, setQuery] = useState("");
     const loginButton = useRef(null);
+    const [refreshing, setRefreshing] = useState(null);
     const load = () => attempt(async () => setProviders(await api("providers")));
 
     useEffect(() => {
@@ -172,6 +174,15 @@ export function ProvidersSettings() {
             await api(`providers/${encodeURIComponent(provider.id)}/logout`, {});
             load();
         });
+
+    const refresh = (provider) => {
+        setRefreshing(provider.id);
+        attempt(async () => {
+            await api(`providers/${encodeURIComponent(provider.id)}/refresh`, {});
+            await load();
+        }).finally(() => setRefreshing(null));
+    };
+
     const needle = query.trim().toLowerCase();
     const list = (providers ?? [])
         .filter(
@@ -189,6 +200,7 @@ export function ProvidersSettings() {
         <p class="muted small">
             Pi Coop shares Pi's sign-ins (<span class="mono">~/.pi/agent/auth.json</span>). ${owner ? "" : "Only the owner can change them."}
         </p>
+        ${owner && store.state.server?.providerPackages >= 1 && html`<${ProviderPackagesSettings} />`}
         <${RefreshModels} />
         ${
             owner &&
@@ -254,6 +266,18 @@ export function ProvidersSettings() {
                                     onClick=${(event) => login(provider, "api_key", event.currentTarget)}
                                 >
                                     API key
+                                </button>`
+                            }
+                            ${
+                                provider.hosted &&
+                                html`<button
+                                    class="button small ghost"
+                                    aria-label=${`Refresh models for ${provider.name}`}
+                                    aria-busy=${refreshing === provider.id}
+                                    disabled=${refreshing !== null}
+                                    onClick=${() => refresh(provider)}
+                                >
+                                    ${refreshing === provider.id ? "Refreshing…" : "Refresh models"}
                                 </button>`
                             }
                             ${

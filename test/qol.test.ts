@@ -9,6 +9,7 @@ import {
     newSession,
     openApp,
     owner,
+    recordCost,
     root,
     say,
     scriptedModel,
@@ -20,10 +21,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { ProviderDoc, UsageDoc } from "@earendil-works/pi-durable";
 import type { ClientEntry } from "../src/server/projection.ts";
-import { cleanTitle, TITLE_PROMPT } from "../src/server/titles.ts";
+import { cleanTitle, TITLE_PROMPT, writeTitle } from "../src/server/titles.ts";
 
 /**
  * Echoes, except that it names sessions when asked to: a command by what it sends, and with a model that thinks aloud,
@@ -379,7 +380,7 @@ test("a long first message gets a short written title; a short one is the title"
     assert.equal(cleanTitle("<think>\nA title for it.\n</think>\n\nFix Login"), "Fix Login");
     const id = await newSession(app, folder);
 
-    // The session's own model writes its title, not the first or default one: its usage is the title's too.
+    // Without an eligible small model, the title falls back to the session's own model, not the first or default.
     await app.commands.configure(id, owner(app), {
         model: { provider: "faux", modelId: "faux-2" },
     });
@@ -407,7 +408,113 @@ test("a long first message gets a short written title; a short one is the title"
     );
 });
 
-test("a reply that is no title leaves the first message's", async () => {
+test("session titles choose the cheapest available text-capable small model from the same provider", async () => {
+    const cost = (value: number) => ({
+        input: value,
+        output: value,
+        cacheRead: 0,
+        cacheWrite: 0,
+    });
+    const provider = fauxProvider({
+        tokensPerSecond: 2000,
+        models: [
+            { id: "faux-1", cost: cost(9) },
+            { id: "faux-mini", cost: cost(2) },
+            { id: "faux-small-image", input: ["image"], cost: cost(0) },
+            { id: "faux-nano", cost: cost(1) },
+        ],
+    });
+    const other = fauxProvider({
+        provider: "other",
+        api: "other-faux",
+        models: [{ id: "other-mini", cost: cost(0) }],
+    });
+    const calls: { model: string; sessionId?: string; cacheRetention?: string }[] = [];
+
+    const answer: FauxResponseStep = (request, options, _state, model) => {
+        const naming = lastText(request as never).text.startsWith(TITLE_PROMPT);
+
+        if (naming) {
+            calls.push({
+                model: `${model.provider}/${model.id}`,
+                sessionId: options?.sessionId,
+                cacheRetention: options?.cacheRetention,
+            });
+        }
+
+        return route(request, options, _state, model);
+    };
+
+    provider.setResponses(Array.from({ length: 10 }, () => answer));
+    other.setResponses(Array.from({ length: 10 }, () => answer));
+    const isolated = await openApp(provider, join(root, "qol-small-title"));
+
+    try {
+        isolated.models.registerNativeProvider(other.provider);
+        const id = await newSession(isolated, folder);
+
+        await say(
+            isolated,
+            id,
+            "please look at the release script and tidy it up so the tags come out right",
+        );
+        await until(
+            () => isolated.sessionMeta(id)?.title === "Tidy The Release Script",
+            "the small model's written title",
+        );
+        const usage = (await isolated.harness.snapshot(UsageDoc, id, context))!.models;
+
+        assert.deepEqual(calls, [
+            {
+                model: "faux/faux-nano",
+                sessionId: (await isolated.harness.snapshot(ProviderDoc, id, context))?.sessionId,
+                cacheRetention: "none",
+            },
+        ]);
+        assert.equal(typeof calls[0]?.sessionId, "string");
+        assert.deepEqual(Object.keys(usage).sort(), ["faux/faux-1", "faux/faux-nano"]);
+        assert.ok(usage["faux/faux-nano"]!.totalTokens > 0);
+        assert.ok(usage["faux/faux-1"]!.totalTokens > 0);
+    } finally {
+        await isolated.close();
+    }
+});
+
+test("title writing respects a reached session budget before making an auxiliary request", async () => {
+    const id = await newSession(app, folder);
+    const provisional = "Original title";
+    const text = "please look at the release script and tidy it up so the tags come out right";
+    const complete = app.models.completeSimple;
+    let calls = 0;
+
+    await app.commands.updateSession(id, owner(app), { title: provisional });
+    await app.spend.setSessionBudget(owner(app), id, 1);
+    await recordCost(app, id, 1);
+    await until(() => app.spend.sessionSpent(id) === 1, "the session to reach its budget");
+    const before = await app.harness.snapshot(UsageDoc, id, context);
+
+    app.models.completeSimple = async function (...args) {
+        calls++;
+
+        return complete.apply(app.models, args);
+    } as typeof complete;
+
+    try {
+        // Ordinary submission would reject first; call the production title writer to exercise its own guard.
+        await writeTitle(app, id, text, provisional);
+        assert.equal(calls, 0);
+        assert.equal(app.sessionMeta(id)?.title, provisional);
+        assert.deepEqual(await app.harness.snapshot(UsageDoc, id, context), before);
+        await app.spend.setSessionBudget(owner(app), id, 2);
+        await writeTitle(app, id, text, provisional);
+        assert.equal(calls, 1, "raising the budget permits the same title request");
+        assert.equal(app.sessionMeta(id)?.title, "Tidy The Release Script");
+    } finally {
+        app.models.completeSimple = complete;
+    }
+});
+
+test("a reply that is no title or arrives after a rename leaves the existing title", async () => {
     const title = (id: unknown) => app.sessions().find((each) => each.id === Number(id))?.title;
     const tokens = async (id: unknown) =>
         (await app.harness.snapshot(UsageDoc, id as never, context))?.models["faux/faux-1"]
@@ -427,19 +534,24 @@ test("a reply that is no title leaves the first message's", async () => {
     } as typeof complete;
 
     try {
-        for (const text of [
-            "please think aloud, then tidy up the release script's tags",
-            "please go on and on, then tidy up the release script's tags",
-        ]) {
+        for (const [text, renamed] of [
+            ["please think aloud, then tidy up the release script's tags", undefined],
+            ["please go on and on, then tidy up the release script's tags", undefined],
+            ["please look at the release script and tidy it up for me", "My chosen title"],
+        ] as const) {
             const id = await newSession(app, folder);
 
             await say(app, id, text);
             await until(() => waiting.length > 0, "the title request");
             const answered = await tokens(id);
 
+            if (renamed !== undefined) {
+                await app.commands.updateSession(id, owner(app), { title: renamed });
+            }
+
             letGo();
             await until(async () => (await tokens(id)) > answered, "the title's usage");
-            assert.equal(title(id), text);
+            assert.equal(title(id), renamed ?? text);
             // With the session's identity with the provider, which OpenCode Go requires, as Pi Durable's summaries.
             assert.equal(
                 options?.sessionId,

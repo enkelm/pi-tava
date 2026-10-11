@@ -10,7 +10,9 @@ Source shorthand (each citation gives an exact file and line range):
 - `D/` = repository `node_modules/@earendil-works/pi-durable/`
 - Other paths are relative to `/Users/enkelm/Projects/pi-coop/`.
 
-## Bottom line — recommendation
+**Superseded packaging conclusion:** the library-only recommendation below is not the implemented approach. No new upstream export or provider fork is required: Pi's public extension loader and `ExtensionRunner` can execute LiteLLM's ordinary supported entry, including its private auth/discovery/policies. Fresh isolated lanes make its provider-keyed cost map reusable without copying it. See [the revised feasibility analysis](litellm-extension-host-feasibility.md) and [current implementation contract](../provider-extensions.md). Plain-Node deep imports remain unsuitable; that is not a blocker to public Pi-extension loading.
+
+## Historical recommendation — library-only approach
 
 Reuse the **native Provider + discovery implementation**, not the ordinary Pi extension object. The factory is a useful core, **not a complete integration or supported library export**. Extract/publish host-neutral auth/config and request/final-message transformations alongside it, with thin Pi and Coop adapters.
 

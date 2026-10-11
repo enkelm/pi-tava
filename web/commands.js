@@ -5,7 +5,16 @@ import { branchAvailable } from "./sheets/branch.js";
 import { memoryAvailable, remember } from "./sheets/memory.js";
 import { togglePeeks } from "./peeks.js";
 import { askPip, openPip, pipAvailable } from "./pip.js";
-import { actions, collab, navigate, notify, openSheet, scoped, store } from "./store.js";
+import {
+    actions,
+    collab,
+    navigate,
+    notify,
+    openSheet,
+    projectsAvailable,
+    scoped,
+    store,
+} from "./store.js";
 import {
     BASE_LOOK,
     chooseLook,
@@ -175,6 +184,12 @@ async function setThinking(arg) {
 }
 
 async function newSession(arg) {
+    if (projectsAvailable()) {
+        openSheet({ type: "new-session", ...(arg === "" ? {} : { cwd: pathFrom(arg) }) });
+
+        return;
+    }
+
     const cwd = arg === "" ? agent()?.cwd : pathFrom(arg);
     const created = await actions.createSession(cwd);
 

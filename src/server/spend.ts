@@ -40,6 +40,7 @@ export class Spend {
     #timer: NodeJS.Timeout | undefined;
     /** Told when the owner changes a limit: work held back by one may go now. */
     readonly #limits = new Set<() => void>();
+    #enforcing = false;
 
     constructor(app: PocketApp) {
         this.#app = app;
@@ -81,6 +82,16 @@ export class Spend {
         }
 
         await this.#count();
+    }
+
+    /** Enable budget aborts only after startup is ready; accounting itself does not request progress. */
+    startEnforcement(): void {
+        if (this.#app.providerExtensions.recoveryRequired) {
+            return;
+        }
+
+        this.#enforcing = true;
+        this.#stopOverLimit();
     }
 
     /** Add spend in a conversation to a person, to be stored with the next count. */
@@ -310,6 +321,11 @@ export class Spend {
     /** Stop every run that goes on past its session's limit or its payer's. */
     #stopOverLimit(): void {
         const app = this.#app;
+
+        // Conversation.abort enables Durable's global scheduler, even for a different pending run.
+        if (!this.#enforcing || app.providerExtensions.recoveryRequired) {
+            return;
+        }
 
         for (const id of app.busyConversations()) {
             if (this.#stopping.has(id)) {

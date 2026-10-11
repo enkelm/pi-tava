@@ -68,6 +68,8 @@ async function describeTask(
 
         case "pi.compaction":
             return { label: "compacting the context" };
+        case "pocket.project-goal-name":
+            return { label: "naming the project goal" };
         case "pocket.subagent-reporter":
             return { label: "waiting for a subagent's answer" };
         case "pocket.follow-failure":

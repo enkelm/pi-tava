@@ -326,6 +326,7 @@ export class Imports {
 
                 sessions.items[String(id)] = {
                     cwd,
+                    threadType: "chat",
                     title: source.title,
                     createdAt: Date.now(),
                     updatedAt: Date.now(),

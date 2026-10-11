@@ -7,6 +7,8 @@ import {
     closeSheet,
     insertIntoComposer,
     navigate,
+    openSheet,
+    projectsAvailable,
     scoped,
     store,
 } from "./store.js";
@@ -82,12 +84,19 @@ export function ShareSheet({ share }) {
         insertIntoComposer(share.text, share.files);
     };
 
-    const startNew = () =>
-        attempt(async () => {
+    const startNew = () => {
+        if (projectsAvailable()) {
+            openSheet({ type: "new-session", continuation: { type: "share", share } });
+
+            return;
+        }
+
+        return attempt(async () => {
             const created = await actions.createSession(recent[0]?.cwd ?? server?.defaultCwd);
 
             deliver(created.id);
         });
+    };
 
     return html`<${Sheet} title="Share to Pi" onClose=${closeSheet}>
         ${share.text && html`<p class="share-text">${share.text}</p>`}

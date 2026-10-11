@@ -20,6 +20,7 @@ import {
     quickTunnelHost,
 } from "../auth.ts";
 import type { User } from "../config.ts";
+import type { CreateSessionRequest, SessionPatch } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { ImportRequest } from "../imports.ts";
 import type { PrivateRequest } from "../private-sessions.ts";
@@ -31,6 +32,7 @@ import { createEventStreams } from "./events.ts";
 import { extensionRoute } from "./extension-routes.ts";
 import { type ApiRequest, conversationId, type HttpOptions, json, readJson } from "./io.ts";
 import { pushRoutes } from "./push-routes.ts";
+import { providerPackageRoutes } from "./provider-package-routes.ts";
 
 /** This machine's non-internal IPv4 addresses, for invite links other devices on its networks can open. */
 function lanAddresses(): string[] {
@@ -140,9 +142,25 @@ export function createApi(options: HttpOptions, auth: Auth) {
 
         const [first, second, third, fourth] = parts;
         const route: ApiRequest = { app, request, response, url, user };
+        const providerRecoveryRoute =
+            ["provider-packages", "providers", "auth", "restart"].includes(first ?? "") ||
+            (first === "extensions" && second === "pi-providers.ts");
+
+        // Durable progress calls resume its scheduler, not just the named conversation. During a
+        // failed provider startup only read-only views and owner recovery/auth routes may run.
+        if (method !== "GET" && app.providerExtensions.recoveryRequired && !providerRecoveryRoute) {
+            throw new HttpError(
+                503,
+                "Durable work is paused after provider startup failed. The owner must fix Providers and restart.",
+            );
+        }
 
         if (first === "browser-profiles" && third === undefined) {
             return browserProfileRoutes(route, second);
+        }
+
+        if (first === "provider-packages" && second === undefined) {
+            return providerPackageRoutes(route);
         }
 
         if (first === "events" && method === "GET") {
@@ -564,6 +582,46 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return;
         }
 
+        if (first === "projects" && second === undefined && method === "GET") {
+            return json(response, 200, app.projects.list(user));
+        }
+
+        if (first === "projects" && second === undefined && method === "POST") {
+            const body = await readJson<{ name?: unknown; cwd?: unknown; requestId?: unknown }>(
+                request,
+            );
+
+            return json(response, 200, await app.projects.create(user, body));
+        }
+
+        if (
+            first === "projects" &&
+            second !== undefined &&
+            third === undefined &&
+            method === "POST"
+        ) {
+            const body = await readJson<{ name?: unknown; cwd?: unknown }>(request);
+
+            await app.projects.update(user, second, body);
+
+            return json(response, 200, { ok: true });
+        }
+
+        if (
+            first === "project-goals" &&
+            second !== undefined &&
+            third === undefined &&
+            method === "POST"
+        ) {
+            const body = await readJson<{ name?: unknown; status?: unknown; archived?: unknown }>(
+                request,
+            );
+
+            await app.projects.updateGoal(user, second, body);
+
+            return json(response, 200, { ok: true });
+        }
+
         if (first === "sessions" && second === undefined && method === "GET") {
             return json(response, 200, app.sessions(user));
         }
@@ -596,15 +654,13 @@ export function createApi(options: HttpOptions, auth: Auth) {
         }
 
         if (first === "sessions" && second === undefined && method === "POST") {
-            const body = await readJson<{ cwd?: string; title?: string; worktree?: unknown }>(
-                request,
-            );
+            const body = await readJson<CreateSessionRequest>(request);
 
             return json(response, 200, await app.commands.createSession(user, body));
         }
 
         if (first === "sessions" && second !== undefined && method === "POST") {
-            const body = await readJson<{ title?: string; archived?: boolean }>(request);
+            const body = await readJson<SessionPatch>(request);
 
             await app.commands.updateSession(conversationId(second), user, body);
 
@@ -830,6 +886,31 @@ export function createApi(options: HttpOptions, auth: Auth) {
         ) {
             requireOwner(user);
             await app.providers.logout(second);
+
+            return json(response, 200, { ok: true });
+        }
+
+        if (
+            first === "providers" &&
+            second !== undefined &&
+            third === "refresh" &&
+            fourth === undefined &&
+            method === "POST"
+        ) {
+            requireOwner(user);
+
+            try {
+                await app.providers.refresh(second);
+            } catch (error) {
+                if (error instanceof HttpError) {
+                    throw error;
+                }
+
+                throw new HttpError(
+                    409,
+                    "Hosted model refresh failed. Try again when the provider is idle.",
+                );
+            }
 
             return json(response, 200, { ok: true });
         }

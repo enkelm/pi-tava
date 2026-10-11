@@ -24,6 +24,12 @@ export type SessionMeta = {
     updatedAt: number;
     createdBy?: string;
     archived?: boolean;
+    /** Only a goal bulk archive sets this; direct archive edits clear it. */
+    archivedByGoal?: string;
+    projectId?: string;
+    goalId?: string;
+    /** Legacy catalogue entries are marked worker at startup; new unassigned threads default to chat. */
+    threadType?: "chat" | "worker";
     /** The initial import slice is restricted to the owner, including forks and subagents. */
     ownerOnly?: boolean;
     imported?: boolean;
@@ -99,6 +105,57 @@ export const LinkedSessionCallsDoc = defineDoc<{
     scope: "conversation",
     history: "latest",
     fork: "initial",
+    initial: () => ({ items: {} }),
+});
+
+/** A project's path is metadata, never its identity or a grant of access to its threads. */
+export type Project = {
+    id: string;
+    name: string;
+    /** Omitted in projections for people invited to particular sessions. */
+    cwd?: string;
+    createdAt: number;
+    updatedAt: number;
+    createdBy: string;
+};
+
+/** Thread grouping, distinct from the conversation's executable "Done when" Goal. */
+export type ProjectGoal = {
+    id: string;
+    projectId: string;
+    name: string;
+    status: "active" | "completed";
+    archived?: boolean;
+    namingThreadId?: number;
+    namingTaskId?: number;
+    named?: boolean;
+    createdAt: number;
+    updatedAt: number;
+    createdBy: string;
+};
+
+export type Projects = {
+    projects: Record<string, Project & { cwd: string }>;
+    goals: Record<string, ProjectGoal>;
+    /** Project-creation receipts are user-scoped hashes with input fingerprints. */
+    requests: Record<string, { id: string; fingerprint: string }>;
+};
+
+/** One application-wide catalogue; never projected directly into a room. */
+export const ProjectsDoc = defineDoc<Projects>({
+    kind: "pocket.projects",
+    version: 1,
+    scope: "session",
+    initial: () => ({ projects: {}, goals: {}, requests: {} }),
+});
+
+/** Session-creation retries publish their result in the same commit as the new session. */
+export const SessionCreatesDoc = defineDoc<{
+    items: Record<string, { id: number; input: string }>;
+}>({
+    kind: "pocket.session-creates",
+    version: 1,
+    scope: "session",
     initial: () => ({ items: {} }),
 });
 

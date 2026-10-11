@@ -9,14 +9,19 @@ import { PeeksRailButton } from "./peeks.js";
 import { PipRailButton } from "./pip.js";
 import { sessionForest } from "./session-tree.js";
 import { PrivateList, PrivateTabs } from "./private.js";
+import { projectGroups, rowsInGroups, sessionMatches } from "./project-groups.js";
+import { canMoveSessions, useSessionDrag } from "./session-moves.js";
+import { ThreadTypeTag } from "./thread-type.js";
 import {
     actions,
+    attempt,
     canSteer,
     collab,
     navigate,
     notify,
     isUnread,
     openSheet,
+    projectsAvailable,
     scoped,
     sessionUnread,
     setUnread,
@@ -31,7 +36,6 @@ import {
     APPLE,
     html,
     Icon,
-    Keys,
     railState,
     scrimPress,
     shortPath,
@@ -122,6 +126,171 @@ export async function setArchived(ids, archived, { undo = true } = {}) {
             }
         },
     );
+}
+
+/** Archive a goal and all its threads through the server's single atomic action. */
+async function setGoalArchived(goal, archived, { undo = true } = {}) {
+    const ids = store.state.sessions
+        .filter((session) => session.goalId === goal.id)
+        .map((session) => session.id);
+    const open = store.state.conversationId;
+
+    // A restore may intentionally leave threads archived before the goal; do not dim those rows.
+    if (archived) {
+        markMoving(ids, archived);
+    }
+
+    try {
+        await actions.updateProjectGoal(goal.id, { archived });
+    } catch (error) {
+        unmarkMoving(ids, archived);
+
+        throw error;
+    }
+
+    const left = archived && ids.includes(open);
+
+    if (left) {
+        navigate(null);
+    }
+
+    if (undo && !archived) {
+        // Bulk restore can leave already-active threads untouched; archiving everything is not its inverse.
+        notify("info", "Restored goal.");
+    } else if (undo) {
+        notify("info", "Archived goal and all threads. Tap to undo.", () =>
+            attempt(async () => {
+                await setGoalArchived(goal, !archived, { undo: false });
+
+                if (left && store.state.conversationId === null) {
+                    navigate(open);
+                }
+            }),
+        );
+    }
+}
+
+/** Disclosure and actions are siblings: there are no buttons inside buttons. */
+function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart, trouble }) {
+    const [busy, setBusy] = useState(false);
+    const goal = group.goal;
+    const count = rowsInGroups([group]).length;
+    const completed = goal?.status === "completed";
+    const archiveLabel = archived ? "Restore goal and threads" : "Archive goal and all threads";
+
+    const run = async (operation) => {
+        setBusy(true);
+        await attempt(operation);
+        setBusy(false);
+    };
+
+    return html`<div class="project-group-head">
+        <button
+            class="group-head"
+            data-part="session-group-head"
+            title=${group.label}
+            onClick=${onToggle}
+            aria-expanded=${!closed}
+        >
+            <${Icon}
+                class=${goal ? "group-symbol" : "group-disclosure"}
+                name=${goal ? "target" : "down"}
+                size=${14}
+            />
+            <span class="group-name" data-part="session-group-name"><${Highlight} text=${group.label} needle=${needle} /></span>
+            ${
+                trouble &&
+                html`<span
+                    class=${`group-trouble ${trouble}`}
+                    role="img"
+                    aria-label=${trouble === "waiting" ? "A session needs you" : "A session failed"}
+                    title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
+                ></span>`
+            }
+            <span class="group-count" data-part="session-group-count">${count}</span>
+            ${goal && html`<${Icon} class="group-disclosure" name="down" size=${12} />`}
+        </button>
+        <div class="project-group-actions">
+            ${
+                goal &&
+                canStart &&
+                html`<button
+                    class=${`goal-status ${completed ? "completed" : ""}`}
+                    aria-label=${`${goal.name}: ${completed ? "Completed. Mark active" : "Active. Mark completed"}`}
+                    title=${completed ? "Mark active" : "Mark completed"}
+                    disabled=${busy}
+                    onClick=${() =>
+                        run(() =>
+                            actions.updateProjectGoal(goal.id, {
+                                status: completed ? "active" : "completed",
+                            }),
+                        )}
+                >
+                    ${completed ? "Completed" : "Active"}
+                </button>`
+            }
+            ${
+                goal &&
+                !canStart &&
+                html`<span
+                    class=${`goal-status ${completed ? "completed" : ""}`}
+                    aria-label=${`${goal.name}: ${completed ? "Completed" : "Active"}`}
+                >
+                    ${completed ? "Completed" : "Active"}
+                </span>`
+            }
+            ${
+                canStart &&
+                html`<button
+                    class="icon-button small"
+                    title=${goal ? "Rename goal" : "Edit project"}
+                    aria-label=${goal ? `Rename goal ${goal.name}` : `Edit ${group.project.name}`}
+                    disabled=${busy}
+                    onClick=${() =>
+                        openSheet(
+                            goal
+                                ? { type: "project-goal", goalId: goal.id }
+                                : { type: "project", projectId: group.project.id },
+                        )}
+                >
+                    <${Icon} name="pencil" size=${14} />
+                </button>`
+            }
+            ${
+                goal &&
+                canStart &&
+                (!archived ||
+                    goal.archived ||
+                    group.rows.some((row) => row.archivedByGoal === goal.id)) &&
+                html`<button
+                    class="icon-button small"
+                    title=${archiveLabel}
+                    aria-label=${archiveLabel}
+                    disabled=${busy}
+                    onClick=${() => run(() => setGoalArchived(goal, !archived))}
+                >
+                    <${Icon} name=${archived ? "unarchive" : "archive"} size=${14} />
+                </button>`
+            }
+            ${
+                canStart &&
+                !archived &&
+                html`<button
+                    class="icon-button small"
+                    title=${`New Session in ${goal?.name ?? group.project.name}`}
+                    aria-label=${`New Session in ${goal?.name ?? group.project.name}`}
+                    onClick=${() =>
+                        openSheet({
+                            type: "new-session",
+                            projectId: group.project.id,
+                            ...(goal ? { goalId: goal.id } : {}),
+                        })}
+                >
+                    <${Icon} name="plus" size=${15} />
+                </button>`
+            }
+        </div>
+    </div>`;
 }
 
 /**
@@ -318,6 +487,8 @@ function SessionRow({
     folders,
     onPick,
     onSelect,
+    dnd,
+    chosen,
 }) {
     const { conversationId, server, me } = store.state;
     const pinned = isPinned(session.id);
@@ -359,10 +530,26 @@ function SessionRow({
     // Finished since this browser last looked: its result is unread, so its title reads bold.
     const unseen = finishedUnseen(session);
     // Archive, pin, and mark-unread show on hover; an archived session only comes back, and only for people who steer.
-    const acts = (canSteer() ? 1 : 0) + (session.archived ? 0 : 2);
+    const acts = (canSteer() ? 1 : 0) + (session.archived ? 0 : 2) + (canMoveSessions() ? 1 : 0);
+    const state = html`<span class="session-mark">
+                ${
+                    selected
+                        ? html`<span class="state-check" role="img" aria-label="Selected">
+                              <${Icon} name="check" size=${9} />
+                          </span>`
+                        : html`<span
+                              class=${`state-mark ${mark.shape}`}
+                              data-part="session-mark"
+                              style=${`--folder:${folderColor(session.cwd)}`}
+                              role=${mark.label ? "img" : undefined}
+                              aria-label=${mark.label || undefined}
+                              aria-hidden=${mark.label ? undefined : "true"}
+                          ></span>`
+                }
+            </span>`;
 
     return html`<div
-        class=${`session-row ${open ? "active" : ""} ${selected ? "selected" : ""} ${pressing ? "pressing" : ""} ${moving ? "moving" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts"][acts]}`}
+        class=${`session-row ${open ? "active" : ""} ${selected ? "selected" : ""} ${pressing ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
         data-part="session-row"
         data-state=${ROW_STATES[mark.shape.split(" ")[0]]}
         data-id=${session.id}
@@ -383,27 +570,14 @@ function SessionRow({
             class=${`session ${unread ? "unread" : ""}`}
             data-part="session-button"
             aria-current=${open ? "page" : undefined}
+            draggable=${canMoveSessions() && !moving && !dnd.busy}
+            onDragStart=${(event) => dnd.start(event, session.id, chosen)}
             onPointerDown=${(event) => onSelect(event, session.id)}
             onClick=${(event) => onPick(event, session.id)}
             onContextMenu=${(event) => event.ctrlKey && event.preventDefault()}
             title=${tip}
         >
-            <span class="session-mark">
-                ${
-                    selected
-                        ? html`<span class="state-check" role="img" aria-label="Selected">
-                              <${Icon} name="check" size=${9} />
-                          </span>`
-                        : html`<span
-                              class=${`state-mark ${mark.shape}`}
-                              data-part="session-mark"
-                              style=${`--folder:${folderColor(session.cwd)}`}
-                              role=${mark.label ? "img" : undefined}
-                              aria-label=${mark.label || undefined}
-                              aria-hidden=${mark.label ? undefined : "true"}
-                          ></span>`
-                }
-            </span>
+            ${projectsAvailable() ? html`<span class="session-state"><${ThreadTypeTag} session=${session} iconOnly=${true} /></span>` : state}
             <span class=${`session-title ${hit ? "with-hit" : ""}`}>
                 ${
                     hit
@@ -415,6 +589,7 @@ function SessionRow({
                 }
             </span>
             <span class="session-side">
+                ${projectsAvailable() && state}
                 ${
                     fork &&
                     html`<span
@@ -453,6 +628,18 @@ function SessionRow({
             </span>
         </button>
         <span class="session-actions">
+            ${
+                canMoveSessions() &&
+                html`<button
+                    class="session-act session-move"
+                    title="Move to project or goal"
+                    aria-label="Move session"
+                    disabled=${dnd.busy}
+                    onClick=${() => openSheet({ type: "move-sessions", ids: [session.id] })}
+                >
+                    <${Icon} name="folder" size=${14} />
+                </button>`
+            }
             ${
                 canSteer() &&
                 html`<button
@@ -526,6 +713,12 @@ function groupsOf(shown, { tab, needle, home, pinned }) {
     return [...groups, ...byKey.values()];
 }
 
+const PROJECT_TABS = [
+    ["projects", "Projects"],
+    ["recent", "Recent"],
+    ["archived", "Archived"],
+];
+
 const TABS = [
     ["recent", "Recent"],
     ["folders", "Folders"],
@@ -539,12 +732,32 @@ const TABS = [
 const listKept = { query: "", scroll: 0 };
 
 export function SessionList({ compact = false, home = false }) {
-    const { sessions, sessionsLoaded, server, me, pinned } = store.state;
+    const { sessions, sessionsLoaded, server, me, pinned, projects, projectGoals, projectsLoaded } =
+        store.state;
+    const organized = projectsAvailable();
+    const tabChoices = organized ? PROJECT_TABS : TABS;
     const privateTab = me?.role === "owner" && store.state.sidebarTab === "private";
     const canStart = canSteer() && !scoped();
     const [query, setQueryState] = useState(() => (compact ? "" : listKept.query));
-    const [tab, setTabState] = useState(() => (prefs().group === "folder" ? "folders" : "recent"));
+    const [tab, setTabState] = useState(() =>
+        organized
+            ? (prefs().projectGroup ?? "projects")
+            : prefs().group === "folder"
+              ? "folders"
+              : "recent",
+    );
+
+    useEffect(() => {
+        setTabState(
+            organized
+                ? (prefs().projectGroup ?? "projects")
+                : prefs().group === "folder"
+                  ? "folders"
+                  : "recent",
+        );
+    }, [organized]);
     const [closed, setClosed] = useState(readClosed);
+    const [searchClosed, setSearchClosed] = useState(() => new Set());
     const [selected, setSelectedState] = useState(() => new Set());
     // Taps select rows instead of opening them: a selection started from a long press's sheet, on a touch screen.
     const [tapSelects, setTapSelects] = useState(false);
@@ -567,6 +780,7 @@ export function SessionList({ compact = false, home = false }) {
         }
 
         setQueryState(next);
+        setSearchClosed(new Set());
     };
 
     // Scrolled back to where it was, once its rows are there.
@@ -616,37 +830,78 @@ export function SessionList({ compact = false, home = false }) {
         clearSelection();
 
         if (next !== "archived") {
-            setPrefs({ group: next === "folders" ? "folder" : "recent" });
+            setPrefs(
+                organized
+                    ? { projectGroup: next }
+                    : { group: next === "folders" ? "folder" : "recent" },
+            );
         }
     };
 
-    const shown = sessions.filter(
+    const hierarchical = organized && (tab === "projects" || archived);
+    const matching = sessions.filter(
         (session) =>
             Boolean(session.archived) === archived &&
-            (needle === "" ||
-                `${session.title ?? ""} ${session.cwd} ${shortPath(session.cwd, server?.home)} ${session.model ?? ""}`
-                    .toLowerCase()
-                    .includes(needle)),
+            sessionMatches(session, needle, {
+                home: server?.home,
+                project: organized ? projects.find((each) => each.id === session.projectId) : null,
+                goal: organized ? projectGoals.find((each) => each.id === session.goalId) : null,
+            }),
     );
-    const forest = sessionForest(shown, { pinned, folders: tab === "folders" });
-    const groups = groupsOf(forest.roots, { tab, needle, home: server?.home, pinned }).map(
-        (group) => ({
-            ...group,
-            rows: group.rows.flatMap((root) => forest.rows.get(root.id)),
-        }),
-    );
+    const forest = sessionForest(matching, { pinned, folders: tab === "folders" });
+    const rawGroups = hierarchical
+        ? projectGroups(sessions, projects, projectGoals, {
+              archived,
+              needle,
+              pinned,
+              home: server?.home,
+          })
+        : groupsOf(forest.roots, { tab, needle, home: server?.home, pinned });
 
-    visible.current = groups.flatMap((group) =>
-        closed.has(group.key) && group.key !== "flat"
-            ? []
-            : group.rows.map(({ session }) => session.id),
-    );
+    // Linked sessions remain independent placements: only nest families inside the same project/goal section.
+    // Keep raw session rows for project counts/moves, alongside their branch guides for rendering.
+    const linkGroup = (group) => {
+        const linked = hierarchical ? sessionForest(group.rows, { pinned }) : forest;
+        let roots = hierarchical ? linked.roots : group.rows;
+
+        if (hierarchical && group.key === "flat") {
+            const pins = pinned
+                .map((id) => roots.find((session) => session.id === id))
+                .filter(Boolean);
+
+            roots = [...pins, ...roots.filter((session) => !pins.includes(session))];
+        }
+
+        const linkedRows = roots.flatMap((session) => linked.rows.get(session.id));
+
+        return {
+            ...group,
+            rows: linkedRows.map((row) => row.session),
+            linkedRows,
+            children: (group.children ?? []).map(linkGroup),
+        };
+    };
+
+    const groups = rawGroups.map(linkGroup);
+    const shown = rowsInGroups(groups);
+    const groupClosed = (group) =>
+        (needle ? searchClosed : closed).has(group.key) && group.key !== "flat";
+
+    visible.current = rowsInGroups(groups, groupClosed).map((session) => session.id);
     const chosen = privateTab
         ? []
         : shown.filter((session) => selected.has(session.id)).map((session) => session.id);
     // Taps select while the bar shows: not for rows selected and then hidden (archived, or searched away).
     const tapping = tapSelects && chosen.length > 0;
     const numbers = new Map(workspaceOrder().map((session, index) => [session.id, index]));
+    const dnd = useSessionDrag({
+        enabled: organized && canStart && !privateTab,
+        list,
+        selected: picked,
+        onMoved: (ids) =>
+            setSelected(new Set([...picked.current].filter((id) => !ids.includes(id)))),
+    });
+    const unassigned = { key: "unassigned", projectId: null, goalId: null, label: "No project" };
 
     /** The rows from `from` to `to` as they show, or just `to` when either is out of view. */
     const span = (from, to) => {
@@ -662,6 +917,10 @@ export function SessionList({ compact = false, home = false }) {
      * Ctrl/⌘+Enter on a focused row selects it or lets it go.
      */
     const pick = (event, id) => {
+        if (dnd.consumeClick()) {
+            return;
+        }
+
         // The press already selected, even if Ctrl/⌘ was let go before the button.
         if (held.current === id && event.detail > 0) {
             held.current = null;
@@ -979,7 +1238,7 @@ export function SessionList({ compact = false, home = false }) {
     }, [selecting]);
 
     const toggleGroup = (key) => {
-        const next = new Set(closed);
+        const next = new Set(needle ? searchClosed : closed);
 
         if (next.has(key)) {
             next.delete(key);
@@ -987,13 +1246,123 @@ export function SessionList({ compact = false, home = false }) {
             next.add(key);
         }
 
-        localStorage.setItem(CLOSED_KEY, JSON.stringify([...next]));
-        setClosed(next);
+        if (needle) {
+            setSearchClosed(next);
+        } else {
+            localStorage.setItem(CLOSED_KEY, JSON.stringify([...next]));
+            setClosed(next);
+        }
     };
 
     const tabBar = useSlide(tabs, "button.on", "x");
-    const count = sessions.filter((session) => !session.archived).length;
     let index = 0;
+
+    const renderGroup = (group) => {
+        const isClosed = groupClosed(group);
+        const trouble = isClosed
+            ? rowsInGroups([group])
+                  .map((session) => sessionMark(session).shape)
+                  .find((shape) => shape === "waiting" || shape === "failed")
+            : undefined;
+        const destination = group.project
+            ? {
+                  key: group.key,
+                  projectId: group.project.id,
+                  goalId: group.goal?.id ?? null,
+                  label: group.goal
+                      ? `${group.project.name} / ${group.goal.name}`
+                      : group.project.name,
+              }
+            : null;
+        const dropTarget = destination && dnd.drag?.target?.key === group.key;
+        const groupClass = [
+            "session-group",
+            group.project && "project-section",
+            group.goal && "goal-section",
+            isClosed && "closed",
+            dropTarget && "drop-target",
+        ]
+            .filter(Boolean)
+            .join(" ");
+
+        return html`<section
+            class=${groupClass}
+            data-part="session-group"
+            key=${`${tab}:${group.key}`}
+            data-project-id=${group.project?.id}
+            data-goal-id=${group.goal?.id}
+            onDragOver=${
+                destination
+                    ? (event) =>
+                          dnd.over(
+                              event,
+                              destination,
+                              isClosed ? () => toggleGroup(group.key) : null,
+                          )
+                    : undefined
+            }
+            onDragLeave=${destination ? dnd.leave : undefined}
+            onDrop=${destination ? (event) => dnd.drop(event, destination) : undefined}
+        >
+            ${
+                group.project
+                    ? html`<${ProjectGroupHead}
+                    group=${group}
+                    closed=${isClosed}
+                    archived=${archived}
+                    needle=${needle}
+                    onToggle=${() => toggleGroup(group.key)}
+                    canStart=${canStart}
+                    trouble=${trouble}
+                />`
+                    : (group.key !== "flat" || (needle && !hierarchical)) &&
+                      html`<button
+                    class="group-head"
+                    data-part="session-group-head"
+                    onClick=${() => group.key !== "flat" && toggleGroup(group.key)}
+                    aria-expanded=${!isClosed}
+                >
+                    <span class="group-name" data-part="session-group-name">
+                        ${typeof group.label === "string" ? html`<b>${group.label}</b>` : group.label}
+                    </span>
+                    ${
+                        trouble &&
+                        html`<span
+                        class=${`group-trouble ${trouble}`}
+                        role="img"
+                        aria-label=${trouble === "waiting" ? "A session needs you" : "A session failed"}
+                        title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
+                    ></span>`
+                    }
+                    <span class="group-count" data-part="session-group-count">${group.rows.length}</span>
+                    ${group.key !== "flat" && html`<${Icon} name="down" size=${12} />`}
+                </button>`
+            }
+            <div class="group-body" inert=${isClosed}>
+                <div>
+                    ${group.linkedRows.map(
+                        ({ session, branches }) => html`<${SessionRow}
+                        key=${session.id}
+                        session=${session}
+                        branches=${branches}
+                        pressing=${pressing === session.id}
+                        folders=${tab === "folders" && needle === ""}
+                        index=${index++}
+                        number=${numbers.get(session.id)}
+                        needle=${needle}
+                        selected=${selected.has(session.id)}
+                        onPick=${pick}
+                        onSelect=${select}
+                        dnd=${dnd}
+                        chosen=${chosen}
+                    />`,
+                    )}
+                    ${(group.children ?? []).map(renderGroup)}
+                    ${group.project && group.rows.length === 0 && !group.children?.length && html`<div class="project-empty muted small">No threads yet.</div>`}
+                </div>
+            </div>
+        </section>`;
+    };
 
     return html`<div class=${`sessions ${compact ? "compact" : ""}`} data-part="session-list">
         <div class="sessions-head">
@@ -1026,8 +1395,8 @@ export function SessionList({ compact = false, home = false }) {
                       <label class=${`search ${query ? "filled" : ""}`} data-part="session-search">
                           <${Icon} name="search" size=${14} />
                           <input
-                              placeholder="Search sessions"
-                              aria-label="Search sessions"
+                              placeholder=${organized ? "Search sessions, projects, goals" : "Search sessions"}
+                              aria-label=${organized ? "Search sessions, projects, goals" : "Search sessions"}
                               value=${query}
                               onInput=${(event) => setQuery(event.currentTarget.value)}
                               onKeyDown=${(event) => {
@@ -1084,105 +1453,61 @@ export function SessionList({ compact = false, home = false }) {
                           </button>`
                       }
                       <div class="session-tabs" data-part="session-tabs" role="tablist" ref=${tabs}>
-                          ${TABS.map(
+                          ${tabChoices.map(
                               ([key, label]) =>
                                   html`<button
                                       role="tab"
                                       aria-selected=${tab === key}
                                       class=${tab === key ? "on" : ""}
                                       onClick=${() => setTab(key)}
+                                      onDragOver=${key === "projects" && tab !== "projects" ? (event) => dnd.hoverProjects(event, () => setTab("projects")) : undefined}
+                                      onDragLeave=${key === "projects" ? dnd.leaveProjects : undefined}
                                   >
                                       ${label}
                                   </button>`,
                           )}
                           <${Slide} box=${tabBar} axis="x" />
                       </div>
+        <div class="session-drag-tools" key="drag-tools" hidden=${!dnd.drag}>
+            ${
+                dnd.drag &&
+                html`<p class="session-drag-status small" role="status">
+                    ${
+                        dnd.drag.target
+                            ? `Move to ${dnd.drag.target.label}`
+                            : `Drag ${dnd.drag.ids.length === 1 ? "session" : `${dnd.drag.ids.length} sessions`} to a project or goal`
+                    }
+                </p>
+                <div
+                    class=${`session-drop-unassigned ${dnd.drag.target?.key === unassigned.key ? "drop-target" : ""}`}
+                    onDragOver=${(event) => dnd.over(event, unassigned)}
+                    onDragLeave=${dnd.leave}
+                    onDrop=${(event) => dnd.drop(event, unassigned)}
+                >
+                    <${Icon} name="folder" size=${14} /> No project
+                </div>`
+            }
+        </div>
                       <div
                           class="session-items"
+                          key="session-items"
+                          onDragOverCapture=${dnd.scroll}
+                          onDragLeaveCapture=${dnd.leaveList}
                           ref=${list}
                           onScroll=${(event) => !compact && (listKept.scroll = event.currentTarget.scrollTop)}
                       >
                           ${!sessionsLoaded && html`<${LoadingSessions} />`}
                           ${
                               sessionsLoaded &&
+                              (!hierarchical || projectsLoaded) &&
                               shown.length === 0 &&
+                              !groups.some((group) => group.project) &&
                               html`<div class="sessions-empty">
                                   ${archived ? "No archived sessions." : needle ? "No matches." : "No sessions yet. Start one with New Session."}
                               </div>`
                           }
-                          ${groups.map((group) => {
-                              const isClosed = closed.has(group.key) && group.key !== "flat";
-                              // A folded group hides its rows' marks: say when one waits for you or its run failed.
-                              const trouble = isClosed
-                                  ? group.rows
-                                        .map((row) => sessionMark(row.session).shape)
-                                        .find((shape) => shape === "waiting" || shape === "failed")
-                                  : undefined;
-
-                              return html`<section
-                                  class=${`session-group ${isClosed ? "closed" : ""}`}
-                                  data-part="session-group"
-                                  key=${`${tab}:${group.key}`}
-                              >
-                                  ${
-                                      group.key !== "flat" || needle
-                                          ? html`<button
-                                                class="group-head"
-                                                data-part="session-group-head"
-                                                onClick=${() => group.key !== "flat" && toggleGroup(group.key)}
-                                                aria-expanded=${!isClosed}
-                                            >
-                                                <span
-                                                    class="group-name"
-                                                    data-part="session-group-name"
-                                                >
-                                                    ${
-                                                        typeof group.label === "string"
-                                                            ? html`<b>${group.label}</b>`
-                                                            : group.label
-                                                    }
-                                                </span>
-                                                ${
-                                                    trouble &&
-                                                    html`<span
-                                                        class=${`group-trouble ${trouble}`}
-                                                        role="img"
-                                                        aria-label=${trouble === "waiting" ? "A session needs you" : "A session failed"}
-                                                        title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
-                                                    ></span>`
-                                                }
-                                                <span
-                                                    class="group-count"
-                                                    data-part="session-group-count"
-                                                >
-                                                    ${group.rows.length}
-                                                </span>
-                                                ${group.key !== "flat" && html`<${Icon} name="down" size=${11} />`}
-                                            </button>`
-                                          : null
-                                  }
-                                  <div class="group-body" inert=${isClosed}>
-                                      <div>
-                                          ${group.rows.map(
-                                              ({ session, branches }) =>
-                                                  html`<${SessionRow}
-                                                      key=${session.id}
-                                                      session=${session}
-                                                      branches=${branches}
-                                                      index=${index++}
-                                                      number=${numbers.get(session.id)}
-                                                      needle=${needle}
-                                                      selected=${selected.has(session.id)}
-                                                      pressing=${pressing === session.id}
-                                                      folders=${tab === "folders" && needle === ""}
-                                                      onPick=${pick}
-                                                      onSelect=${select}
-                                                  />`,
-                                          )}
-                                      </div>
-                                  </div>
-                              </section>`;
-                          })}
+                          ${hierarchical && !projectsLoaded && html`<div class="muted pad" role="status">Loading projects…</div>`}
+                          ${groups.map(renderGroup)}
                       </div>
                   `
         }
@@ -1229,6 +1554,16 @@ export function SessionList({ compact = false, home = false }) {
                             <b>${chosen.length}</b>
                             <span class="select-word"> selected</span>
                         </span>
+                        ${
+                            canMoveSessions() &&
+                            html`<button
+                                class="button small"
+                                disabled=${dnd.busy}
+                                onClick=${() => openSheet({ type: "move-sessions", ids: chosen })}
+                            >
+                                Move…
+                            </button>`
+                        }
                         ${
                             canSteer() &&
                             html`<button class="button small" onClick=${archiveChosen}>

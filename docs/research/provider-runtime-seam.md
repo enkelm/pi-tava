@@ -2,6 +2,8 @@
 
 2026-10-11. Source inspection against installed `@earendil-works` 1.1.0 packages. No implementation, tests, live auth, credential-file inspection, inference, extension activation, or restart. Only this note was written; unrelated changes were preserved.
 
+**Implementation follow-up:** the startup-only seam is now implemented by `ProviderPackages`, `ProviderExtensions` and the child-worker Pi provider host. The virtual `pi-providers.ts` module does not expose `ModelRuntime` to Durable drop-ins. Failed candidates fall back to last-applied releases; without one, a global recovery barrier keeps Durable scheduling paused. See [the current contract](../provider-extensions.md). The source inspection below remains the original research record.
+
 ## Conclusion — recommendation
 
 **Native pi-ai `Provider` already supplies the shared inference/auth/catalog interface.** Reuse provider implementations with small ordinary-Pi and Coop adapters; do not invent a replacement provider schema or expose the entire `ModelRuntime` through `PocketHost`.

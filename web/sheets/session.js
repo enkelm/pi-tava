@@ -1,11 +1,21 @@
 // Session creation/import and the separate held-row actions share this module, not a sheet contract.
 import { useEffect, useState } from "preact/hooks";
 import { selectFromList, setArchived } from "../sessions.js";
-import { canSteer, closeSheet, isUnread, openSheet, setUnread, store } from "../store.js";
+import {
+    canSteer,
+    closeSheet,
+    insertIntoComposer,
+    isUnread,
+    openSheet,
+    projectsAvailable,
+    setUnread,
+    store,
+} from "../store.js";
 import { isPinned, togglePin } from "../theme.js";
 import { html, item, Sheet } from "../ui.js";
 import { FolderPicker } from "./folder.js";
 import { ImportPanel } from "./import.js";
+import { ProjectSessionPanel } from "./session-projects.js";
 
 /**
  * What a finger held on a row offers: pin it, mark it unread (or read), archive it or bring it back, or select it to
@@ -59,7 +69,14 @@ const TABS = [
     { id: "import", label: "Import" },
 ];
 
-export function NewSessionSheet({ tab = "new", initialPreview = null }) {
+export function NewSessionSheet({
+    tab = "new",
+    initialPreview = null,
+    projectId,
+    goalId,
+    cwd,
+    continuation,
+}) {
     const owner = store.state.me?.role === "owner";
     const active = owner && tab === "import" ? "import" : "new";
     const [visited, setVisited] = useState(() => new Set([active]));
@@ -135,7 +152,19 @@ export function NewSessionSheet({ tab = "new", initialPreview = null }) {
             aria-labelledby=${owner ? "session-tab-new" : undefined}
             hidden=${active !== "new"}
         >
-            ${(active === "new" || visited.has("new")) && html`<${FolderPicker} mode="new" />`}
+            ${
+                (active === "new" || visited.has("new")) &&
+                (projectsAvailable()
+                    ? html`<${ProjectSessionPanel}
+                        projectId=${projectId}
+                        goalId=${goalId}
+                        cwd=${cwd}
+                        continuation=${continuation}
+                        visible=${active === "new"}
+                        onBusyChange=${setBusy}
+                    />`
+                    : html`<${FolderPicker} mode="new" />`)
+            }
         </section>
         ${
             owner &&
@@ -152,6 +181,14 @@ export function NewSessionSheet({ tab = "new", initialPreview = null }) {
                         initialPreview=${initialPreview}
                         visible=${active === "import"}
                         onBusyChange=${setBusy}
+                        onCreated=${() => {
+                            if (continuation?.type === "share") {
+                                insertIntoComposer(
+                                    continuation.share.text,
+                                    continuation.share.files,
+                                );
+                            }
+                        }}
                     />`
                 }
             </section>`

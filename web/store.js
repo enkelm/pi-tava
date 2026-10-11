@@ -77,6 +77,9 @@ export const store = {
         sessions: [],
         /** This person's favorite folders, in shortcut order, sent by the server to every signed-in device. */
         folderFavorites: [],
+        projects: [],
+        projectGoals: [],
+        projectsLoaded: false,
         /** False until the server's first session list arrives: an empty list until then means "not here yet". */
         sessionsLoaded: false,
         /** Sessions on their way into the archive (true) or out of it (false), by id, until the list catches up (`sessions.js`). */
@@ -315,6 +318,8 @@ export function workspaceOrder(state = store.state) {
 
 /** Server features the web app may use. `collab` 2 adds roles, take turns, reactions, pins, notes, mentions, push. */
 export const collab = () => (store.state.server?.collab ?? 0) >= 2;
+/** Project organization is unavailable until the server has restarted with this capability. */
+export const projectsAvailable = () => (store.state.server?.projects ?? 0) >= 1;
 /** Viewers read and chat; they never steer Pi. */
 export const canSteer = () => store.state.me?.role !== "viewer";
 
@@ -659,6 +664,8 @@ const handlers = {
             moving: stillMoving(state.moving, sessions),
         })),
     "folder-favorites": (folderFavorites) => store.set({ folderFavorites }),
+    projects: (data) =>
+        store.set({ projects: data.projects, projectGoals: data.goals, projectsLoaded: true }),
     models: (models) => store.set({ models }),
     // A theme folder came, went, or changed (`theme.js` loads its new version).
     themes: (themeList) => store.set({ themeList }),
@@ -1200,9 +1207,23 @@ export const actions = {
     watchPr: (pr) => api(`c/${current()}/watch`, pr ? { pr } : {}),
     unwatchPr: () => api(`c/${current()}/watch`, { stop: true }),
     approve: (id, allow) => api(`approvals/${encodeURIComponent(id)}`, { allow }),
-    /** `worktree`: the session works in a git worktree of its own, made from the folder. */
-    createSession: (cwd, { worktree = false } = {}) =>
-        api("sessions", { cwd, ...(worktree ? { worktree } : {}) }),
+    /** Project defaults are resolved server-side; an explicit cwd overrides them. */
+    createSession: (cwd, { worktree = false, ...organization } = {}) =>
+        api("sessions", {
+            cwd,
+            ...(worktree ? { worktree } : {}),
+            ...(projectsAvailable() ? { requestId: uid(), ...organization } : {}),
+        }),
+    loadProjects: async () => {
+        const data = await api("projects");
+
+        store.set({ projects: data.projects, projectGoals: data.goals, projectsLoaded: true });
+
+        return data;
+    },
+    createProject: (request) => api("projects", { requestId: uid(), ...request }),
+    updateProject: (id, patch) => api(`projects/${encodeURIComponent(id)}`, patch),
+    updateProjectGoal: (id, patch) => api(`project-goals/${encodeURIComponent(id)}`, patch),
     updateSession: (id, patch) => api(`sessions/${id}`, patch),
     upload: (file) => api(`c/${current()}/upload?name=${encodeURIComponent(file.name)}`, file),
     fullEntry: (entryId) => api(`c/${current()}/entry/${entryId}`),

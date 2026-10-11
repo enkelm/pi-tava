@@ -27,6 +27,9 @@ import { HooksSheet } from "./sheets/hooks.js";
 import { SchedulesSheet } from "./sheets/schedules.js";
 import { SettingsSheet } from "./sheets/settings.js";
 import { NewSessionSheet, SessionActions } from "./sheets/session.js";
+import { ProjectSheet } from "./sheets/project.js";
+import { ProjectGoalSheet } from "./sheets/project-goal.js";
+import { SessionMoveSheet } from "./sheets/session-move.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
 import { TextSheet } from "./sheets/text.js";
 import { ArtifactsSheet, ArtifactViewer, ImageViewer } from "./sheets/viewers.js";
@@ -208,7 +211,20 @@ function sheetBody(sheet) {
             body = html`<${NewSessionSheet}
                 tab=${sheet.tab}
                 initialPreview=${sheet.initialPreview}
+                projectId=${sheet.projectId}
+                goalId=${sheet.goalId}
+                cwd=${sheet.cwd}
+                continuation=${sheet.continuation}
             />`;
+            break;
+        case "project":
+            body = html`<${ProjectSheet} projectId=${sheet.projectId} />`;
+            break;
+        case "project-goal":
+            body = html`<${ProjectGoalSheet} key=${sheet.goalId} goalId=${sheet.goalId} />`;
+            break;
+        case "move-sessions":
+            body = html`<${SessionMoveSheet} key=${sheet.ids.join(",")} ids=${sheet.ids} />`;
             break;
         case "settings":
         case "appearance":
@@ -234,7 +250,13 @@ function sheetBody(sheet) {
         case "cwd":
             body =
                 sheet.mode === "new"
-                    ? html`<${NewSessionSheet} tab=${sheet.tab} />`
+                    ? html`<${NewSessionSheet}
+                        tab=${sheet.tab}
+                        projectId=${sheet.projectId}
+                        goalId=${sheet.goalId}
+                        cwd=${sheet.cwd}
+                        continuation=${sheet.continuation}
+                    />`
                     : html`<${CwdSheet} mode=${sheet.mode} />`;
             break;
         case "artifacts":

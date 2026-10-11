@@ -41,7 +41,9 @@ import {
     NotesDoc,
     PinsDoc,
     PlanDoc,
+    ProjectsDoc,
     type Schedule,
+    SessionCreatesDoc,
     SessionsDoc,
     STOPPED,
     type SubagentRecord,
@@ -80,6 +82,24 @@ import {
 const context = BACKGROUND_CONTEXT;
 
 export type Attachment = { path: string; name: string; mime: string; size: number };
+
+export type CreateSessionRequest = {
+    cwd?: string;
+    title?: string;
+    worktree?: unknown;
+    projectId?: unknown;
+    goalId?: unknown;
+    newGoal?: unknown;
+    threadType?: unknown;
+    requestId?: string;
+};
+
+export type SessionPatch = {
+    title?: string;
+    archived?: boolean;
+    projectId?: unknown;
+    goalId?: unknown;
+};
 
 export interface SubmitRequest {
     text: string;
@@ -312,6 +332,10 @@ export class Commands {
      * says who dealt with the failure. A message left in the queue by a run that failed ends it, settling nothing.
      */
     readonly followTask: Task<Followed, { phase: "wait" }, null, object>;
+    readonly #creating = new Map<
+        string,
+        { input: string; promise: Promise<{ id: ConversationId }> }
+    >();
 
     constructor(app: PocketApp) {
         this.#app = app;
@@ -357,24 +381,99 @@ export class Commands {
         });
     }
 
-    /** Start a session in a folder; with `worktree`, in a git worktree of its own made from that folder. */
+    /** Start a typed thread, deriving its directory from the project unless explicitly overridden. */
     async createSession(
         user: User,
-        request: { cwd?: string; title?: string; worktree?: unknown },
+        request: CreateSessionRequest,
         { projectDefaults = true }: { projectDefaults?: boolean } = {},
     ): Promise<{ id: ConversationId }> {
-        const app = this.#app;
+        this.#requireCreate(user);
+        const asked = optionalText(request.requestId, "requestId");
+        const key = asked === undefined ? undefined : `${user.id}:${clientKey(asked)}`;
+        const input = JSON.stringify({
+            cwd: optionalText(request.cwd, "cwd"),
+            title: optionalText(request.title, "title"),
+            worktree: request.worktree === true,
+            projectId: request.projectId,
+            goalId: request.goalId,
+            newGoal: request.newGoal,
+            threadType: request.threadType,
+        });
 
-        app.requireSteer(user);
+        if (key === undefined) {
+            return this.#createSession(user, request, undefined, projectDefaults);
+        }
+
+        const pending = this.#creating.get(key);
+
+        if (pending !== undefined) {
+            if (pending.input !== input) {
+                throw new HttpError(
+                    409,
+                    "This creation request already has a different destination.",
+                );
+            }
+
+            return pending.promise;
+        }
+
+        const promise = this.#createSession(user, request, { key, input }, projectDefaults);
+
+        this.#creating.set(key, { input, promise });
+
+        try {
+            return await promise;
+        } finally {
+            this.#creating.delete(key);
+        }
+    }
+
+    #requireCreate(supplied: User): void {
+        const user = this.#app.config.userById(supplied.id);
+
+        if (user === undefined) {
+            throw new HttpError(401, "Your access was removed");
+        }
+
+        this.#app.requireSteer(user);
 
         if (user.sessions !== undefined) {
             throw new HttpError(403, "You were invited to one session and cannot start new ones.");
         }
+    }
 
+    async #createSession(
+        user: User,
+        request: CreateSessionRequest,
+        receipt?: { key: string; input: string },
+        projectDefaults = true,
+    ): Promise<{ id: ConversationId }> {
+        const app = this.#app;
+
+        if (receipt !== undefined) {
+            const saved = (await app.harness.snapshot(SessionCreatesDoc, context))?.items[
+                receipt.key
+            ];
+
+            if (saved !== undefined) {
+                if (saved.input !== receipt.input) {
+                    throw new HttpError(
+                        409,
+                        "This creation request already has a different destination.",
+                    );
+                }
+
+                app.requireSee(user, saved.id as ConversationId);
+
+                return { id: saved.id as ConversationId };
+            }
+        }
+
+        const selection = app.projects.prepare(user, request);
         const given = optionalText(request.title, "title");
         const title = (given === undefined ? undefined : oneLine(given)) || undefined;
         const folder = app.workspace.checkDirectory(
-            optionalText(request.cwd, "cwd") ?? app.defaultCwd,
+            optionalText(request.cwd, "cwd") ?? selection.cwd ?? app.defaultCwd,
         );
         const now = Date.now();
 
@@ -383,6 +482,7 @@ export class Commands {
             request.worktree === true,
             title ?? basename(folder),
             async ({ cwd, worktree }) => {
+                this.#requireCreate(user);
                 // An internal caller about to apply a person's explicit model keeps its previous starting pair.
                 const initial = this.#defaultModel(undefined, projectDefaults ? cwd : undefined);
                 const conversation = await app.harness.createConversation(
@@ -396,16 +496,28 @@ export class Commands {
                                 : { thinkingLevel: initial.thinkingLevel }),
                         },
                         init: async (tx, id) => {
+                            this.#requireCreate(user);
+                            const placement = await app.projects.place(tx, id, selection);
                             const sessions = await tx.doc(SessionsDoc);
 
                             sessions.items[String(id)] = {
                                 cwd,
+                                ...placement,
                                 createdAt: now,
                                 updatedAt: now,
                                 createdBy: user.id,
                                 ...(title === undefined ? {} : { title }),
                                 ...(worktree === undefined ? {} : { worktree }),
                             };
+
+                            if (receipt !== undefined) {
+                                const creates = await tx.doc(SessionCreatesDoc);
+
+                                creates.items[receipt.key] = {
+                                    id: Number(id),
+                                    input: receipt.input,
+                                };
+                            }
                         },
                     },
                     context,
@@ -641,11 +753,7 @@ export class Commands {
         };
     }
 
-    async updateSession(
-        id: ConversationId,
-        user: User,
-        patch: { title?: string; archived?: boolean },
-    ): Promise<void> {
+    async updateSession(id: ConversationId, user: User, patch: SessionPatch): Promise<void> {
         const app = this.#app;
 
         app.requireSee(user, id);
@@ -657,6 +765,17 @@ export class Commands {
         }
 
         const before = app.sessionMeta(id);
+        const placing = Object.hasOwn(patch, "projectId") || Object.hasOwn(patch, "goalId");
+
+        if (placing) {
+            if (patch.title !== undefined || patch.archived !== undefined) {
+                throw new HttpError(400, "Move a thread separately from renaming or archiving it.");
+            }
+
+            await app.projects.assign(user, id, patch);
+
+            return;
+        }
 
         await app.harness.commit(async (tx) => {
             const sessions = await tx.doc(SessionsDoc);
@@ -674,6 +793,18 @@ export class Commands {
 
             if (patch.archived !== undefined) {
                 meta.archived = patch.archived;
+                delete meta.archivedByGoal;
+
+                // Restoring one thread reveals its goal, without restoring the goal's other archived threads.
+                if (!patch.archived && meta.goalId !== undefined) {
+                    const projects = await tx.doc(ProjectsDoc);
+                    const goal = projects.goals[meta.goalId];
+
+                    if (goal?.archived === true) {
+                        goal.archived = false;
+                        goal.updatedAt = Date.now();
+                    }
+                }
             }
         }, context);
         const title = patch.title === undefined ? undefined : oneLine(patch.title);
@@ -1016,6 +1147,7 @@ export class Commands {
             return;
         }
 
+        const goalText = await this.#app.goalNames.firstMessage(id);
         let provisional: string | undefined;
 
         await this.#app.harness.commit(async (tx) => {
@@ -1030,6 +1162,8 @@ export class Commands {
             if (meta.title === undefined && text !== "") {
                 meta.title = provisional = text.replace(/\s+/g, " ").slice(0, 80);
             }
+
+            await this.#app.goalNames.schedule(tx, id, goalText ?? text);
         }, context);
 
         if (provisional !== undefined && (expanded !== undefined || wantsTitle(text))) {
@@ -1963,6 +2097,10 @@ export class Commands {
 
         const init: ConversationCreateOptions["init"] = async (tx, forked) => {
             const sessions = await tx.doc(SessionsDoc);
+            const sourceMeta = sessions.items[String(id)];
+            const projects = await tx.doc(ProjectsDoc);
+            const sourceGoal =
+                sourceMeta?.goalId === undefined ? undefined : projects.goals[sourceMeta.goalId];
 
             sessions.items[String(forked)] = {
                 cwd: place.cwd,
@@ -1970,6 +2108,12 @@ export class Commands {
                 createdAt: now,
                 updatedAt: now,
                 createdBy: user.id,
+                threadType: sourceMeta?.threadType ?? "worker",
+                ...(sourceMeta?.projectId === undefined ? {} : { projectId: sourceMeta.projectId }),
+                ...(sourceMeta?.goalId === undefined ? {} : { goalId: sourceMeta.goalId }),
+                ...(sourceGoal?.archived === true
+                    ? { archived: true, archivedByGoal: sourceGoal.id }
+                    : {}),
                 forkedFrom: { id: Number(id), ...(at === undefined ? {} : { entryId: at }) },
                 ...(app.sessionMeta(app.rootOf(id))?.ownerOnly === true ? { ownerOnly: true } : {}),
                 ...(place.worktree === undefined ? {} : { worktree: place.worktree }),

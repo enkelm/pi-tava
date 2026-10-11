@@ -38,6 +38,8 @@ const DEFAULTS = {
     sidebarWidth: 300,
     /** How the session list groups: "recent" (by day) or "folder". */
     group: "recent",
+    /** Project-capable Collab lists default to Projects, without changing the old-server preference. */
+    projectGroup: "projects",
     /** Other sessions' live work as peek tiles beside the session (a strip on narrow screens). Off until turned on. */
     peeks: false,
     /** How fast the last answer came, in the status line under the message box. Off until turned on. */

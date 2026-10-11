@@ -235,6 +235,7 @@ export function ImportPanel({
     fromPrivate = false,
     visible = true,
     onBusyChange,
+    onCreated,
 }) {
     const [mode, setMode] = useState("running");
     const [historyVisited, setHistoryVisited] = useState(false);
@@ -455,6 +456,7 @@ export function ImportPanel({
                 if (alive.current) {
                     closeSheet();
                     navigate(result.id);
+                    onCreated?.(result.id);
                 }
             }
         } catch (failure) {

@@ -1,4 +1,7 @@
 // New Session and import flows in real browser views, with isolated contexts and a scripted model.
+// Chooser adaptation protects retained drafts/Back and non-owner creation, not project storage.
+// Regression: new Chat/browse layers lose drafts or accidentally expose owner-only Import controls.
+// Real rendered controls only; no new production seams or duplicate project/migration coverage.
 import { cleanUp, openApp, root, scriptedModel, until, work } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { copyFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -53,6 +56,19 @@ async function sessionTab(page: BrowserPage, tab: "new" | "import") {
             ),
         `${tab} session panel`,
     );
+}
+
+async function chatFolder(page: BrowserPage) {
+    await present(page, "#session-panel-new .one-time-chat-button");
+    await page.evaluate(
+        `document.querySelector('#session-panel-new .one-time-chat-button').click()`,
+    );
+    await present(page, "#session-panel-new .session-path button");
+    await page.evaluate(`
+        [...document.querySelectorAll('#session-panel-new .session-path button')]
+            .find(button => button.textContent.trim() === 'Change').click();
+    `);
+    await present(page, "#session-panel-new .dir-list");
 }
 
 async function savedFileMode(page: BrowserPage) {
@@ -113,7 +129,7 @@ async function wideNewButton(page: BrowserPage, scope: string) {
         `(() => {
             const list = document.querySelector(${JSON.stringify(scope)} + " .sessions");
             const button = list.querySelector('.new-button[aria-label="New session"]');
-            const search = list.querySelector('[placeholder="Search sessions"]').closest('.search');
+            const search = list.querySelector('.search input').closest('.search');
             const bounds = button.getBoundingClientRect();
             const searchBounds = search.getBoundingClientRect();
             const style = getComputedStyle(list);
@@ -240,7 +256,7 @@ test(
                 `document.querySelector('.home-list .new-button[aria-label="New session"]').click()`,
             );
             await present(first, '[role="dialog"][aria-label="New Session"]');
-            await present(first, "#session-panel-new .dir-list");
+            await chatFolder(first);
             assert.deepEqual(
                 await value(
                     first,
@@ -278,7 +294,7 @@ test(
                 folderDraft,
             );
             await first.evaluate(
-                `document.querySelector('#session-panel-new .check input[type="checkbox"]').click()`,
+                `document.querySelector('#session-panel-new .session-destination > .check input[type="checkbox"]').click()`,
             );
             await sessionTab(first, "import");
             await savedFileMode(first);
@@ -290,7 +306,7 @@ test(
                     first,
                     `({
                     path: document.querySelector('#session-panel-new input[aria-label="Working directory"]').value,
-                    worktree: document.querySelector('#session-panel-new .check input[type="checkbox"]').checked,
+                    worktree: document.querySelector('#session-panel-new .session-destination > .check input[type="checkbox"]').checked,
                 })`,
                 ),
                 { path: folderDraft, worktree: true },
@@ -308,6 +324,10 @@ test(
                 ),
                 { path: fixture.path, leaf: "draft-branch", dialogs: 1 },
                 "switching tabs keeps the saved-file draft in the same dialog",
+            );
+            await until(
+                () => value(first, `history.state?.pocket?.layers === 1`),
+                "Import is active after Chat and folder layers leave the Back stack",
             );
             await first.evaluate("history.back()");
             await until(
@@ -538,7 +558,7 @@ test(
                 `document.querySelector('.new-button[aria-label="New session"]').click()`,
             );
             await present(guestPage, '[role="dialog"][aria-label="New Session"]');
-            await present(guestPage, "#session-panel-new .dir-list");
+            await chatFolder(guestPage);
             assert.equal(
                 await value(
                     guestPage,
@@ -552,9 +572,24 @@ test(
                 '#session-panel-new input[aria-label="Working directory"]',
                 folder,
             );
-            await guestPage.evaluate(
-                `document.querySelector('#session-panel-new .button.primary.wide').click()`,
+            await guestPage.evaluate(`
+                [...document.querySelectorAll('#session-panel-new .button.primary.wide')]
+                    .find(button => button.textContent.trim().startsWith('Use ')).click();
+            `);
+            await until(
+                () =>
+                    value(
+                        guestPage,
+                        `document.querySelector('#session-panel-new .dir-list') === null &&
+                         document.querySelector('#session-panel-new .session-path .mono')?.title === ${JSON.stringify(folder)}`,
+                    ),
+                "guest folder selection returns to the Chat destination",
             );
+            assert.equal(app.sessions().length, 0, "picking a folder does not create a Chat yet");
+            await guestPage.evaluate(`
+                [...document.querySelectorAll('#session-panel-new .button.primary.wide')]
+                    .find(button => button.textContent.trim() === 'Start Chat').click();
+            `);
             await until(
                 () =>
                     value(
@@ -568,6 +603,7 @@ test(
 
             assert.ok(created, "the created session is in the catalogue");
             assert.equal(created.cwd, folder);
+            assert.equal(created.threadType, "chat");
             assert.equal(created.createdBy, guest.user.id);
             await guestPage.evaluate(`document.querySelector('[aria-label="Menu"]').click()`);
             await present(guestPage, ".sheet .list-item");
@@ -634,6 +670,15 @@ test(
                 ),
                 false,
                 "the viewer menu has no legacy Import entry",
+            );
+            // The sheet's keyboard handler and autofocus mount after paint, not with its DOM rows.
+            await until(
+                () =>
+                    value(
+                        viewerPage,
+                        `document.activeElement === document.querySelector('[role="dialog"]')`,
+                    ),
+                "viewer menu is ready for keyboard dismissal",
             );
             await viewerPage.press("Escape");
 

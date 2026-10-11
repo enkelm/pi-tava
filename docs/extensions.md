@@ -96,6 +96,10 @@ These examples work. `npm test` runs them (`test/docs-examples.test.ts`):
 - [examples/no-force-push.ts](examples/no-force-push.ts): a hook that stops some bash calls, and a prompt section that tells Pi so.
 - [examples/server-status.ts](examples/server-status.ts) with [examples/server-status.js](examples/server-status.js): a page on the rail, with a route that reads the machine's load and memory, and events that keep it live.
 
+## Ordinary Pi provider packages
+
+Pi coding-agent extensions are not Durable drop-ins. The separate **Pi provider compatibility** module hosts explicitly supported provider packages through Pi's public loader/runner; the first profile is LiteLLM API-key chat. Its owner controls live in Settings → Providers. Selection, enablement, configuration, update and rollback wait for restart. `pi-providers.ts` is a reserved virtual module identity, not a file to create in either extension folder, and it has no Reload action. See [provider-extensions.md](provider-extensions.md).
+
 ## Rules that are easy to break
 
 - **Nothing two times.** A restart can run a hook or a safe tool again. Some work must occur one time only: a message that you send, money that you spend, a line that you add to a file. Put it behind `api.memo`, or behind a key that lets a second run find the first.

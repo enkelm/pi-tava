@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
+    type CreateModelRuntimeOptions,
     getAgentDir,
     ModelRuntime,
     resolveModelScopeWithDiagnostics,
@@ -59,6 +60,7 @@ import {
     DecisionsDoc,
     FolderFavoritesDoc,
     MemoryDoc,
+    ProjectsDoc,
     type SessionMeta,
     SessionsDoc,
     type SubagentRecord,
@@ -113,6 +115,10 @@ import { Watches } from "./watches.ts";
 import { Workspace } from "./workspace.ts";
 import { LanguageServices } from "./language-services.ts";
 import { Reviews } from "./reviews.ts";
+import { Projects } from "./projects.ts";
+import { GoalNames } from "./goal-names.ts";
+import { PI_PROVIDERS_FILE, ProviderPackages } from "./provider-packages.ts";
+import { ProviderExtensions } from "./provider-extensions.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -261,6 +267,8 @@ export class PocketApp {
     harness!: Harness;
     models!: ModelRuntime;
     settings!: SettingsManager;
+    readonly providerPackages: ProviderPackages;
+    providerExtensions!: ProviderExtensions;
     loader!: ExtensionLoader;
     readonly commands = new Commands(this);
     readonly extensionCommands = new ExtensionCommands(this);
@@ -270,6 +278,8 @@ export class PocketApp {
     readonly privateTerminals = new PrivateTerminals(this);
     readonly collab = new Collab(this);
     readonly reviews = new Reviews(this);
+    readonly projects = new Projects(this);
+    readonly goalNames = new GoalNames(this);
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
     readonly schedules = new Schedules(this);
@@ -354,6 +364,7 @@ export class PocketApp {
         this.defaultCwd = options.defaultCwd;
         this.supervised = options.supervised;
         this.config = new ConfigStore(options.dataDir);
+        this.providerPackages = new ProviderPackages(this.config, this.dataDir, getAgentDir());
         this.#lockFile = join(options.dataDir, "harness.lock");
         this.#log = options.log ?? ((line) => console.log(line));
         this.browsers = new Browsers({
@@ -493,10 +504,25 @@ export class PocketApp {
             this.#log(`HTTP setup failed, using Node defaults: ${describe(error)}`);
         }
 
-        this.models = await ModelRuntime.create();
-        this.providers.modelRefresh.watch(this.models);
+        // The initial profile must not let models.json's global-API fallback bypass hosted hooks.
+        // Ordinary custom model configuration stays unchanged and is used when the module is off.
+        const modelOptions: Readonly<CreateModelRuntimeOptions> = Object.freeze({
+            ...(this.config.extensionChoice(PI_PROVIDERS_FILE) === true
+                ? { modelsPath: null }
+                : {}),
+        });
+
+        this.models = await ModelRuntime.create(modelOptions);
+        this.providers.modelRefresh.watch(this.models, modelOptions);
         this.#configureModels?.(this.models);
         measureModelStreams(this.models);
+        this.providerExtensions = new ProviderExtensions(
+            this.providerPackages,
+            this.models,
+            join(getAgentDir(), "auth.json"),
+            (message) => this.#log(message),
+        );
+        await this.providerExtensions.open();
         await this.models.getAvailable().catch(() => []);
 
         const registry = createRegistry();
@@ -509,6 +535,7 @@ export class PocketApp {
                 tasks: [
                     ResendTask,
                     this.shell.task,
+                    this.goalNames.task,
                     this.commands.followTask,
                     this.extensionCommands.task,
                 ],
@@ -646,8 +673,14 @@ export class PocketApp {
             void this.guard.warm().catch(() => {});
         }
 
-        // Work a previous process left unfinished continues now.
-        this.harness.resume();
+        // Repair a first-message admission cut off before its goal naming task was reserved.
+        await this.goalNames.recover();
+
+        // Work a previous process left unfinished continues only with a usable provider runtime.
+        if (!this.providerExtensions.recoveryRequired) {
+            this.spend.startEnforcement();
+            this.harness.resume();
+        }
     }
 
     /**
@@ -656,7 +689,21 @@ export class PocketApp {
      * written back, in one commit. Returns every conversation's id.
      */
     async #recover(storage: Storage): Promise<ConversationId[]> {
+        const savedSessions = (await this.harness.snapshot(SessionsDoc, context))?.items ?? {};
+
+        // Existing Collab threads become Workers once; explicitly typed new Chats are never rewritten.
+        if (Object.values(savedSessions).some((meta) => meta.threadType === undefined)) {
+            await this.harness.commit(async (tx) => {
+                const sessions = await tx.doc(SessionsDoc);
+
+                for (const meta of Object.values(sessions.items)) {
+                    meta.threadType ??= "worker";
+                }
+            }, context);
+        }
+
         this.#sessions = { ...((await this.harness.snapshot(SessionsDoc, context))?.items ?? {}) };
+        await this.projects.recover();
         const conversations: ConversationId[] = [];
         const unrecorded = new Map<ConversationId, Missing[]>();
         let cursor: Cursor | undefined;
@@ -861,6 +908,9 @@ export class PocketApp {
             );
         } else if (kind === MemoryDoc.definition.kind) {
             this.memory.committed();
+        } else if (kind === ProjectsDoc.definition.kind) {
+            this.projects.committed(change.value);
+            sessionsChanged = true;
         } else if (ROOM_DOCS.has(kind) && id !== undefined) {
             if (kind === ChatDoc.definition.kind) {
                 if (
@@ -1057,6 +1107,8 @@ export class PocketApp {
         if (client.user.role === "owner" && this.themes.failure !== undefined) {
             client.send("notice", { level: "warning", message: this.themes.failure });
         }
+
+        client.send("projects", this.projects.list(client.user));
 
         if (arriving) {
             this.#peopleChanged(client.user.id);
@@ -1505,6 +1557,13 @@ export class PocketApp {
                 "You can view this session but not steer Pi. Ask the owner for steering rights.",
             );
         }
+
+        if (this.providerExtensions?.recoveryRequired) {
+            throw new HttpError(
+                503,
+                "Durable work is paused after provider startup failed. The owner must fix Providers and restart.",
+            );
+        }
     }
 
     /** While take turns is on, only the driver sends to Pi or changes its settings. */
@@ -1763,6 +1822,11 @@ export class PocketApp {
                 collab: 2,
                 // Comment-first reviews and session-folder-scoped live diffs, including viewers.
                 localReviews: 2,
+                // Durable project/goal organization and independently typed threads.
+                projects: 1,
+                // Owner-managed, restart-only Pi provider package compatibility.
+                providerPackages: 1,
+                providerRecovery: this.providerExtensions.recoveryRequired,
                 reactions: REACTIONS,
                 approvalRule: this.config.approvalRule,
                 // The model and thinking level new sessions start with, or null for the last one picked.
@@ -1831,6 +1895,8 @@ export class PocketApp {
                         ),
                     );
                 }
+
+                client.send("projects", this.projects.list(client.user));
             }
         }, 400);
     }
@@ -1892,6 +1958,7 @@ export class PocketApp {
                     id: Number(id),
                     ...shown,
                     ...linkage,
+                    threadType: meta.threadType ?? "worker",
                     busy,
                     waiting: waiting.has(id),
                     ...(endedAt === undefined ? {} : { endedAt }),
@@ -1964,6 +2031,13 @@ export class PocketApp {
             archived: meta?.archived === true,
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
+            ...(meta === undefined
+                ? {}
+                : {
+                      threadType: meta.threadType ?? "worker",
+                      ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
+                      ...(meta.goalId === undefined ? {} : { goalId: meta.goalId }),
+                  }),
             ...(meta?.imported === true ? { imported: true } : {}),
             ...(meta?.ownerOnly === true ? { ownerOnly: true } : {}),
             ...(room.parent === undefined ? {} : { parent: room.parent }),
@@ -2223,6 +2297,8 @@ export class PocketApp {
                 client.boardSent = undefined;
                 this.#sendBoard(client, this.subagents(user));
             }
+
+            client.send("projects", this.projects.list(user));
         }
     }
 
@@ -2389,22 +2465,37 @@ export class PocketApp {
     ): Promise<{ modules: ExtensionInfo[]; guard: GuardStatus; dropIns?: string }> {
         const owner = user.role === "owner";
         // A load error can name the server's folders too.
-        // Modules' routes are the owner's to know: others see only whose tabs load a browser module.
-        const modules = this.loader.list().map(({ path, error, web, ...module }) =>
-            owner
-                ? {
-                      ...module,
-                      ...(path === undefined ? {} : { path }),
-                      ...(web === undefined ? {} : { web }),
-                      ...(error === undefined ? {} : { error }),
-                  }
-                : {
-                      ...module,
-                      ...(web?.client === undefined || !mayUse(user, web.client)
-                          ? {}
-                          : { web: { routes: [], client: web.client } }),
-                      ...(error === undefined ? {} : { error: "It failed to load." }),
-                  },
+        const packages = this.providerPackages.moduleState();
+        const compatibility: ExtensionInfo = {
+            file: PI_PROVIDERS_FILE,
+            title: "Pi provider compatibility",
+            source: "built-in",
+            summary:
+                "Hosts supported Pi provider packages headlessly. Changes apply after restart.",
+            enabled: packages.enabled,
+            active: packages.activeEnabled,
+            required: false,
+            restartOnly: true,
+            restartRequired: packages.restartRequired,
+            extensions: [],
+            ...(packages.error === undefined ? {} : { error: packages.error }),
+        };
+        const modules = [...this.loader.list(), compatibility].map(
+            ({ path, error, web, ...module }) =>
+                owner
+                    ? {
+                          ...module,
+                          ...(path === undefined ? {} : { path }),
+                          ...(web === undefined ? {} : { web }),
+                          ...(error === undefined ? {} : { error }),
+                      }
+                    : {
+                          ...module,
+                          ...(web?.client === undefined || !mayUse(user, web.client)
+                              ? {}
+                              : { web: { routes: [], client: web.client } }),
+                          ...(error === undefined ? {} : { error: "It failed to load." }),
+                      },
         );
 
         // The guard row shows Pi's own setting, so the owner can tell "off here" from "off everywhere".
@@ -2417,6 +2508,18 @@ export class PocketApp {
 
     /** Turn an extension module on or off for every session, now and after restarts. */
     async setExtensionEnabled(user: User, file: string, enabled: boolean): Promise<void> {
+        if (file === PI_PROVIDERS_FILE) {
+            if (user.role !== "owner") {
+                throw new HttpError(403, "Only the owner can manage provider packages.");
+            }
+
+            await this.providerPackages.setModuleEnabled(enabled);
+            await this.#refreshClients();
+            this.notice("info", "Pi provider compatibility selection saved; restart to apply it.");
+
+            return;
+        }
+
         const module = this.loader.list().find((each) => each.file === file);
 
         if (module === undefined) {
@@ -2463,6 +2566,10 @@ export class PocketApp {
     }
 
     async reloadExtension(file: string): Promise<void> {
+        if (file === PI_PROVIDERS_FILE) {
+            throw new HttpError(409, "Pi provider compatibility changes require a server restart.");
+        }
+
         const module = this.loader.list().find((each) => each.file === file);
 
         if (module === undefined) {
@@ -2866,7 +2973,11 @@ export class PocketApp {
 
             try {
                 // Close writes no outcome: running work resumes when the next process opens the storage.
-                await this.harness?.close(context);
+                try {
+                    await this.harness?.close(context);
+                } finally {
+                    await this.providerExtensions?.close();
+                }
 
                 for (const env of this.#envs.values()) {
                     await env.cleanup(context);

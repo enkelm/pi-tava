@@ -22,6 +22,10 @@ The user chose Herdr GPUI as the model for private desktop terminal behavior, na
 
 ## Capabilities and constraints
 
+- Shared work is organized as Projects, optional Active/Completed goals and typed threads. Projects open first in Collab. A project's default path is only a new-thread default; worktrees and overrides do not determine membership.
+- Existing Collab threads become Workers without automatic project assignment. New one-time Chats are an explicit escape from project selection. Type and organization remain independent.
+- New goals are named by AI from their first Worker's message, without asking for a name during creation. A goal can be archived with all its threads; history is retained. Future agent tools should use the same durable organization module rather than UI-specific paths.
+
 - The app owner alone can discover, read or control private Herdr content.
 - Chat and Terminal are views of the existing process, not separate agent runs.
 - Use Herdr's structured client protocol for Terminal, with GPUI feature parity as the target. A polling text snapshot or ANSI-only replacement does not meet that target.

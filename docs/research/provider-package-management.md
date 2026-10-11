@@ -1,0 +1,71 @@
+# Provider packages without provider forks
+
+Research only, 2026-10-11. Inspected installed Pi 1.1.0 SDK/source and LiteLLM 4.2.0; checked LiteLLM's official upstream README/package metadata. No installs, updates, activation, credentials, inference, tests, UI changes or restart. Only this note was written.
+
+**Superseded host boundary:** this note originally required a provider-library export. That is not required by the implemented public Pi loader/runner host; LiteLLM's ordinary `pi.extensions` entry is the supported loading boundary. The immutable-install, trust, peer-binding and restart guidance still applies. The library-only rejection below is historical, not the current compatibility decision. See [revised feasibility](litellm-extension-host-feasibility.md) and [the implementation contract](../provider-extensions.md).
+
+## Historical bottom line — library-only approach
+
+**Reuse Pi's public package installer, not its whole extension runtime.** Coop can install owner-selected, version-pinned dependencies without maintaining their provider source. But the dependency must offer a **supported provider-only library entry**. Current `pi-provider-litellm` does not. Package management cannot turn its Pi extension into a host-neutral provider. [1][2][6]
+
+The viable arrangement is upstream-owned provider implementation + a small Coop-owned package/lifecycle integration. No general `ExtensionAPI` shim, copied provider implementation, deep-source adapter or local provider fork. If upstream will not publish the required entry, this approach is blocked for that package—not fixed by adding an Update button.
+
+## What can be reused today?
+
+| Boundary                          | Evidence / implication                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Public installer SDK**          | Root exports `DefaultPackageManager`, `PackageManager`, progress types and `SettingsManager`. Construct with `cwd`, `agentDir`, `settingsManager`; no agent session or `ExtensionAPI` required. Public methods include `install`, `getInstalledPath`, `listConfiguredPackages`, `update`, progress callbacks and settings persistence. The concrete class also publicly declares `checkForAvailableUpdates`. [1]                                                                                                                                    |
+| **Separate owner storage**        | `SettingsManager.inMemory` or `fromStorage` can receive Coop-selected declarations. Use a dedicated Coop-controlled package root as `agentDir`, not the owner's ordinary Pi directory or a conversation's workspace. User-scope npm installation goes under `agentDir/npm`; project storage has separate trust checks. Avoid `installAndPersist` against real Pi settings. Coop still owns durable selection/version records. [2][3]                                                                                                                |
+| **Resolver is resource-oriented** | `resolve()` returns extensions/skills/prompts/themes, not providers or library exports; it also discovers local resources. It can install missing/mismatched npm sources by default. `resolve(onMissing)` can refuse installation, but offline mode can skip missing packages before that callback. Prefer startup verification of the already-installed root/version and explicit library-entry resolution; never mistake absence from resolved resources for successful activation. `resolveExtensionSources` has no missing-source callback. [2] |
+| **Pinned versions**               | Exact npm versions are pinned; `update()` skips them. It reconciles configured floating/ranged sources, rather than treating an argument's new version as a replacement declaration. `checkForAvailableUpdates()` skips pinned packages and reports package identities, not candidate versions. An owner Update action must discover/select a concrete new release, install that exact source in staging, then record the new pin. Version lookup helpers are private. [2][4]                                                                       |
+| **No activation transaction**     | Installs mutate one npm tree per scope; versions share a package-name path. There is no SDK stage/activate/rollback or active-request draining API. Retain separate immutable release directories and let Coop own the activation pointer. [2][3]                                                                                                                                                                                                                                                                                                   |
+
+These are exported APIs in the installed release, not a guarantee that Pi offers a provider-package product or future compatibility contract. Use root imports, pin Pi, and avoid internal `dist/core/...` imports. [1]
+
+## Jiti does not remove the provider-interface requirement
+
+Pi's internal extension loader imports TypeScript through Jiti, then invokes `default(ExtensionAPI)`. In unbundled Node builds it supplies private aliases; bundled builds use virtual modules. Aliases bind Pi packages to the host—including legacy names and the `pi-ai` compatibility entry. The installer suppresses automatic peer dependency installation because that loader supplies host modules. [5]
+
+**There is no public standalone “import a provider library with Pi's aliases” API.** `getAliases`, module import/cache helpers and virtual-module plumbing are internal; root-exposed extension discovery/runtime is the broader extension system, not a provider-only loader. Jiti itself can be used without `ExtensionAPI`, but Coop would then own a loader and host-module mapping contract. That still does not expose private LiteLLM auth or run necessary Pi hooks. [1][5][6]
+
+For ordinary native ESM, peer suppression does not magically make host packages resolvable from a separate install tree. Require either a documented host-injected core with no runtime Pi imports, or deliberate binding of compatible peers to Coop's actual packages. Do not let a second Pi dependency tree appear silently; Pi's own docs warn that physical copies can bypass mapping in compiled ESM. Prefer published JavaScript and supported exports over TypeScript internals. [5][7]
+
+## What upstream provider packages must provide
+
+This is a proposed package contract, **not an existing Pi package standard**:
+
+- A documented, semver-supported JavaScript export, e.g. `package/provider`, with declarations, supported Node/Pi versions and a host-neutral factory returning native `Provider` instance(s). No Pi session, UI, tools or event-hook runtime prerequisite. Native registration already exists in Coop's `ModelRuntime`. [6][8]
+- Provider-owned auth/config/root-resolution and required request/final-message behavior accessible through that entry. Host inputs should be narrow: configuration, auth interaction/storage bridge, supported transport helpers if needed, cancellation/cache/logging. Optional telemetry can be absent. Coop must not recreate private SSO or provider policies to make the factory usable. [6]
+- Stable provider/model IDs, bounded initialization/discovery, explicit cleanup for owned resources, and documented concurrency/credential semantics. A module-level lifecycle wrapper can accompany `Provider`; native `Provider` alone does not define disposal. [8]
+- Runtime dependencies published normally; host Pi APIs as compatible peers or injected capabilities, not bundled runtimes. A Pi extension entry may coexist as a thin adapter to the same core. [5][7]
+
+**LiteLLM is currently blocked:** official upstream `main` metadata still says 4.2.0, publishes `src`, and declares only `pi.extensions: ["./src/index.ts"]`, without `main`, `types` or `exports`. Its README explicitly removes the former library import and supports only Pi-extension loading. The source factory requires caller-provided auth/root/discovery; `createProviderAuth` and relevant resolution helpers remain private. A supported upstream core release is required—not just repackaging the existing factory. [6]
+
+## Manual update and safe activation — recommended design
+
+1. **Owner approval:** select trusted npm provider packages and exact versions. Show active/candidate version, permissions warning and restart requirement. No project discovery, agent-triggered installation, automatic startup updating or default loading of bundled skills/tools.
+2. **Stage:** on the owner's Update click, resolve a concrete release and install in a fresh Coop-owned release directory. Record exact top-level pins, the full dependency lockfile/integrities and compatibility requirements. Preserve the previous complete tree; top-level pins alone do not freeze transitive dependencies.
+3. **Validate before selection:** check metadata, supported entry/ABI, peer bindings and conflicts; any later import/initialization check must execute in an isolated controlled process without production credentials. Imports execute code; this is not a sandbox or proof of safety. Only validated candidates become “ready—restart required.”
+4. **Keep running code untouched:** do not update/uninstall the active npm tree while inference, discovery, login, pollers or lazy dependency imports may still reference it. Stage while busy; activate only after an owner-approved coordinated shutdown/restart. Native provider replacement does not cancel or drain in-flight inference. [8]
+5. **Activate at startup:** durably journal previous/candidate/last-good releases. Load and await bounded provider initialization before opening/resuming Durable work; mark last-good only after that startup gate passes. On failure, clean candidate resources and start a fresh process with the retained last-good tree. Do not resume with a missing provider or silently substitute another one. [8]
+6. **Rollback limits:** package rollback cannot undo install-script side effects, requests already sent, changed credentials or cache/data migrations. Require backward-compatible data or explicit migration policy. Retain old releases until no live process uses them; fail closed with an owner-visible recovery path if no safe last-good release exists.
+
+**Trusted code warning:** providers execute with server rights and receive credentials. Pi's installer runs package-manager installs and does not add `--ignore-scripts`; lifecycle scripts can therefore run before activation under npm's default policy. Peer suppression is not sandboxing. Adopt an explicit no-install-scripts policy where feasible (Pi's configurable `npmCommand` can carry command arguments), and require additional owner approval for packages needing scripts. Validate behavior for the chosen manager; scripts-disabled installation can break packages. Even with scripts disabled, imported provider code remains trusted executable code. [5][7][9]
+
+## The actual maintenance tradeoff
+
+This removes **provider implementation maintenance**, not all maintenance. Upstream must own reusable auth/protocol/discovery/policy behavior and its release compatibility. Coop still owns a small, durable installer/selection/host-binding/startup/rollback boundary, owner authorization and diagnostics. Future conforming providers reuse that boundary without provider-specific source forks. Nonconforming Pi-only extensions are not automatically supported. The hard prerequisite is upstream packaging/API support, not installation machinery.
+
+## Primary sources
+
+Local paths below are relative to the repo unless absolute. `C/` means `node_modules/@earendil-works/pi-coding-agent/`.
+
+1. `C/package.json:3,14–26`; `C/dist/index.d.ts:9,16–17,22`; `C/dist/core/package-manager.d.ts:39–111`; `C/docs/sdk.md` (SDK and exported declarations).
+2. `C/dist/core/package-manager.js:615–678,704–806,833–1048`; `C/docs/packages.md` (sources, scopes and resource filters).
+3. `C/dist/core/settings-manager.d.ts:205–213`; `C/dist/core/package-manager.js:1709–1740,1768–1795` (managed roots and legacy-global fallback; verify the selected root is actually Coop-owned).
+4. `C/dist/core/package-manager.js:861–985,1172–1251` (pin parsing, checks and private version lookup).
+5. `C/dist/core/extensions/loader.js:23–83,459–482,510–516`; `C/dist/core/package-manager.js:1443–1530` (peer suppression/install arguments).
+6. [Official LiteLLM provider README](https://github.com/balcsida/pi-provider-litellm/blob/main/README.md), lines 25–33,339; [official package metadata](https://github.com/balcsida/pi-provider-litellm/blob/main/package.json), checked 2026-10-11 (mutable `main`). Installed `/Users/enkelm/.pi/agent/npm/node_modules/pi-provider-litellm/src/provider.ts:18–29`; `src/index.ts:96,114,392,1531`. Earlier detailed evidence: [LiteLLM reuse](litellm-provider-reuse.md).
+7. `C/docs/packages.md`, “Declare dependencies” and trust warning; `node_modules/@earendil-works/pi-ai/package.json` (public core/compat exports).
+8. `C/dist/core/model-runtime.d.ts:110–121`; `node_modules/@earendil-works/pi-ai/dist/models.d.ts:7–128`; runtime/lifecycle source citations collected in [provider runtime seam](provider-runtime-seam.md); `docs/architecture.md`, “Startup”.
+9. `C/docs/settings.md:141` (`npmCommand`); [official npm install docs](https://docs.npmjs.com/cli/v11/commands/npm-install#ignore-scripts) (script control).

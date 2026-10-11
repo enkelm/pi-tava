@@ -1,5 +1,5 @@
 /** Manual model-list refresh: local configuration first, then independent, bounded provider catalogs. */
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { type CreateModelRuntimeOptions, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { PocketApp } from "./app.ts";
 
 export interface ModelRefreshResult {
@@ -20,6 +20,7 @@ export class ModelRefresh {
     #closed = false;
     #epoch = 0;
     #refreshRuntime: ModelRuntime["refresh"] | undefined;
+    #runtimeOptions: Readonly<CreateModelRuntimeOptions> = Object.freeze({});
     readonly #controllers = new Set<AbortController>();
 
     constructor(app: PocketApp, timeoutMs = 8_000) {
@@ -28,7 +29,8 @@ export class ModelRefresh {
     }
 
     /** Pi suppresses internally cancelled refresh errors. Track outside refreshes and credential changes so we can retry. */
-    watch(models: ModelRuntime): void {
+    watch(models: ModelRuntime, options: Readonly<CreateModelRuntimeOptions> = {}): void {
+        this.#runtimeOptions = Object.freeze({ ...options });
         this.#refreshRuntime = models.refresh.bind(models);
 
         const changed =
@@ -85,9 +87,12 @@ export class ModelRefresh {
             };
         };
 
-        // Pi treats an invalid models.json as empty. Check through its public API before reloading the live runtime,
-        // so a typo does not remove working custom providers. No credentials, cache restoration or network here.
-        const checked = await this.#bounded(() => ModelRuntime.create({ refreshOnCreate: false }));
+        // Pi treats an invalid models.json as empty. Validate using the live runtime's startup options, not requested
+        // settings: hosted mode ignores this file until restart, including recovery with no active provider hosts.
+        // Ordinary mode still protects working custom providers from a typo. No refresh or network here.
+        const checked = await this.#bounded(() =>
+            ModelRuntime.create({ ...this.#runtimeOptions, refreshOnCreate: false }),
+        );
 
         if (this.#closed) {
             return result();

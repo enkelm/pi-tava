@@ -128,11 +128,13 @@ export function CwdSheet({ mode }) {
 }
 
 /** Folder selection shared by New Session and Working directory. */
-export function FolderPicker({ mode }) {
+export function FolderPicker({ mode, initialPath, onUse }) {
     const { view, server, folderFavorites: favorites } = store.state;
     const changing = mode === "change";
     const initial =
-        (changing ? (view.agent?.cwd ?? server?.defaultCwd) : server?.defaultCwd) ?? "~";
+        initialPath ??
+        (changing ? (view.agent?.cwd ?? server?.defaultCwd) : server?.defaultCwd) ??
+        "~";
     const [listing, setListing] = useState(null);
     const [failed, setFailed] = useState(null);
     // The folder a click selected (mouse only): Open takes it over the one you are in.
@@ -255,7 +257,9 @@ export function FolderPicker({ mode }) {
         setBusy(true);
 
         try {
-            if (changing) {
+            if (onUse) {
+                onUse(path);
+            } else if (changing) {
                 await actions.configure({ cwd: path });
                 closeSheet();
             } else {
@@ -651,6 +655,7 @@ export function FolderPicker({ mode }) {
             <div class="fp-options">
                 ${
                     !changing &&
+                    !onUse &&
                     html`<label
                         class="check"
                         title="The session gets a branch of its own, apart from this folder"

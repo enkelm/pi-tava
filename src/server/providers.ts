@@ -261,6 +261,7 @@ export class Providers {
                 ...(expired === undefined
                     ? {}
                     : { needsSignIn: owner ? expired : "its provider would not renew it" }),
+                hosted: this.#app.providerExtensions.owns(provider.id),
             };
         });
     }
@@ -320,9 +321,23 @@ export class Providers {
             })
             .then(
                 async () => {
-                    await app.models.getAvailable().catch(() => []);
                     this.#signedInOrOut(providerId);
-                    send({ step: "done", ok: true });
+
+                    try {
+                        if (app.providerExtensions.owns(providerId)) {
+                            await app.providerExtensions.refresh(providerId);
+                        }
+
+                        await app.models.getAvailable().catch(() => []);
+                        send({ step: "done", ok: true });
+                    } catch {
+                        send({
+                            step: "done",
+                            ok: false,
+                            error: "Credentials were saved, but hosted model discovery failed. Refresh models when the provider is idle.",
+                        });
+                    }
+
                     this.#changed();
                 },
                 (error: unknown) =>
@@ -389,6 +404,16 @@ export class Providers {
         await this.#app.models.logout(providerId);
         await this.#app.models.getAvailable().catch(() => []);
         this.#signedInOrOut(providerId);
+        this.#changed();
+    }
+
+    /** Refresh a hosted catalog through its package host, retaining provider health and scoped model projections. */
+    async refresh(providerId: string): Promise<void> {
+        if (!this.#app.providerExtensions.owns(providerId)) {
+            throw new HttpError(404, "This provider is not hosted by a Pi package.");
+        }
+
+        await this.#app.providerExtensions.refresh(providerId);
         this.#changed();
     }
 

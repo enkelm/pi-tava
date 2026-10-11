@@ -1,12 +1,12 @@
 /**
  * Session titles. A session is named after its first message at once; when that message is long, or is a command (a
- * skill or prompt template), the session's own model writes a short title in its place, unless someone
- * renamed the session first. Never another model picked on the side, such as a cheaper one of the same provider: nobody
- * chose that one, and it may cost what nobody agreed to. A reply that is no title (the model thinking aloud, or cut off)
- * leaves the first one. What it costs counts as the session's spend, like Pi's own requests.
+ * skill or prompt template), a small available model of the same provider writes a short title, or the session's
+ * own when none is available, unless someone renamed the session first. This retains Coop's naming behavior.
+ * A reply that is no title (the model thinking aloud, or cut off) leaves the first one. What it costs counts as the
+ * session's spend, like Pi's own requests.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 import { type ConversationId, ProviderDoc, UsageDoc } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import { SessionsDoc } from "./docs.ts";
@@ -31,6 +31,7 @@ const REASONING = /^\s*<(think|thinking|reasoning)>[\s\S]*?(<\/\1>|$)/i;
 const REASONING_END = /^[\s\S]*?<\/(think|thinking|reasoning)>[^\S\n]*(\n|$)/i;
 /** How much of the first message the model reads. */
 const READ_CHARS = 3000;
+const SMALL = /(^|[-_./])(haiku|mini|flash|nano|lite|small)([-_.]|$)/i;
 
 /** What the model is asked, before the first message. */
 export const TITLE_PROMPT =
@@ -41,6 +42,20 @@ export function wantsTitle(text: string): boolean {
     const words = text.trim().split(/\s+/).length;
 
     return words >= LONG_WORDS || text.trim().includes("\n");
+}
+
+/** The cheapest small model of the same provider that is available, or the session's own. */
+export function titleModel(models: readonly Model<Api>[], current: Model<Api>): Model<Api> {
+    const small = models
+        .filter(
+            (model) =>
+                model.provider === current.provider &&
+                model.input.includes("text") &&
+                SMALL.test(model.id),
+        )
+        .sort((a, b) => a.cost.input + a.cost.output - (b.cost.input + b.cost.output));
+
+    return small[0] ?? current;
 }
 
 /**
@@ -95,14 +110,16 @@ export async function writeTitle(
         }
 
         const agent = await app.agentState(id);
-        const model =
+        const current =
             agent?.model === undefined
                 ? undefined
                 : app.models.getModel(agent.model.provider, agent.model.modelId);
 
-        if (model === undefined) {
+        if (current === undefined) {
             return;
         }
+
+        const model = titleModel(app.models.getAvailableSnapshot(), current);
 
         // The conversation's own identity with the provider, as Pi Durable sends with its summaries: some providers
         // (OpenCode Go) refuse a request without one.

@@ -261,15 +261,26 @@ export function ExtensionsSettings() {
             return;
         }
 
+        if (
+            module.restartOnly &&
+            !module.enabled &&
+            !confirm(
+                `Turn on ${module.title}?\n\nThird-party provider packages run with the server's rights and can access provider credentials. Only use packages you trust. This change applies after server restart.`,
+            )
+        ) {
+            return;
+        }
+
         setConfirmGuard(false);
-        change(module, "", { enabled: !module.enabled });
+        change(module, "", {
+            enabled: !module.enabled,
+            ...(module.restartOnly && !module.enabled ? { trusted: true } : {}),
+        });
     };
 
     return html`<${Fragment}>
         <p class="muted small">
-            Extensions give Pi its tools and checks in Pi Coop, and can add pages and buttons to the
-            app. A change applies to every session right away and stays after
-            restarts.${owner ? "" : " Only the owner can change them."}
+            Extensions give Pi its tools and checks in Pi Coop, and can add pages and buttons to the app. Most changes apply to every session right away; restart-only modules queue changes until you restart the server. Settings stay after restarts.${owner ? "" : " Only the owner can change them."}
         </p>
         <${SafeMode} />
         ${
@@ -326,6 +337,13 @@ export function ExtensionsSettings() {
                                                 ${module.error && html` <span class="warn small">· failed to load</span>`}
                                             </div>
                                             ${module.summary && html`<div class="muted small">${module.summary}</div>`}
+                                            ${
+                                                module.restartOnly &&
+                                                html`<div class=${`small ${module.restartRequired ? "warn" : "muted"}`}>
+                                                    ${module.restartRequired ? "Change queued · applies after server restart." : "Changes apply after server restart."}
+                                                    ${typeof module.active === "boolean" ? ` Currently ${module.active ? "active" : "inactive"}.` : ""}
+                                                </div>`
+                                            }
                                             ${
                                                 note &&
                                                 html`<div class=${`small ${note.warn ? "warn" : "ok"}`}>
@@ -413,6 +431,7 @@ export function ExtensionsSettings() {
                                             ${
                                                 owner &&
                                                 module.enabled &&
+                                                !module.restartOnly &&
                                                 html`<button
                                                 class="link small"
                                                 disabled=${busy !== null}
