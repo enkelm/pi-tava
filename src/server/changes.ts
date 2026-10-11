@@ -374,17 +374,30 @@ export async function changesIn(
 
 /**
  * The diff of one changed file of the repository `cwd` is in, against the last commit; a new file's whole content.
- * Only files that git lists as changed: the path cannot point anywhere else. With `onlyHere`, only files in `cwd`.
+ * Only files that git lists as changed: the path cannot point anywhere else. With `onlyHere`, both rename paths
+ * must be in `cwd`. `completeBytes` returns a complete bounded diff or throws, never the viewer's truncated output.
  */
-export async function diffOf(cwd: string, path: string, onlyHere = false): Promise<string> {
+export async function diffOf(
+    cwd: string,
+    path: string,
+    onlyHere = false,
+    completeBytes?: number,
+): Promise<string> {
     const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
     const change = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
     ).find((each) => each.path === path);
 
     // A file outside the folder is as unknown as one without changes.
-    if (change === undefined || (onlyHere && !path.startsWith(await prefixOf(cwd)))) {
-        throw new Error("That file has no uncommitted changes");
+    const prefix = onlyHere ? await prefixOf(cwd) : "";
+
+    if (
+        change === undefined ||
+        (onlyHere &&
+            (!path.startsWith(prefix) ||
+                (change.from !== undefined && !change.from.startsWith(prefix))))
+    ) {
+        throw new Error("That file has no uncommitted changes in this folder");
     }
 
     const hasHead = await git(root, ["rev-parse", "--verify", "--quiet", "HEAD"]).then(
@@ -394,12 +407,26 @@ export async function diffOf(cwd: string, path: string, onlyHere = false): Promi
     // `--no-index` exits with 1 when the files differ, which is the point. A renamed file is both its paths: given
     // both, git shows what changed in it, not a whole new file.
     const paths = change.from === undefined ? [path] : [change.from, path];
+    const options = completeBytes === undefined ? {} : { maxBuffer: completeBytes + 1 };
     const diff =
         change.code === "??" || !hasHead
             ? await git(root, ["diff", "--no-index", "-U3", ...DIFF_FLAGS, "--", devNull, path], {
+                  ...options,
                   allowExit: [1],
               })
-            : await git(root, ["diff", "HEAD", "-M", "-U3", ...DIFF_FLAGS, "--", ...paths]);
+            : await git(
+                  root,
+                  ["diff", "HEAD", "-M", "-U3", ...DIFF_FLAGS, "--", ...paths],
+                  options,
+              );
+
+    if (completeBytes !== undefined) {
+        if (Buffer.byteLength(diff) > completeBytes) {
+            throw new Error("The complete review diff exceeds the snapshot byte limit");
+        }
+
+        return diff;
+    }
 
     return diff.length > MAX_DIFF
         ? `${diff.slice(0, MAX_DIFF)}\n… the rest of the diff is left out …\n`

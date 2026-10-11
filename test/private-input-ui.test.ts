@@ -363,7 +363,10 @@ test(
             const uploading = hold();
 
             uploadGate = uploading.promise;
-            await attach(page, "paste", "private notes.txt", notes, "text/plain");
+            const notesName = `${"adjacent-private-notes-".repeat(7)}.txt`;
+            const imageName = `${"removable-private-image-".repeat(7)}.png`;
+
+            await attach(page, "paste", notesName, notes, "text/plain");
             await until(() => uploads().length === 2, "pasted file starts a private upload");
             assert.equal(await value(page, `document.querySelector('${send}').disabled`), true);
             await submit();
@@ -371,8 +374,127 @@ test(
             uploading.resolve();
             uploadGate = undefined;
             await ready();
-            await attach(page, "change", "private-image.png", image, "image/png");
+            await attach(page, "change", imageName, image, "image/png");
             await ready();
+            await page.setViewport(VIEWPORTS.mobile);
+            await t.test(
+                "mobile-native private attachment removal owns a reachable 40px target",
+                async () => {
+                    // Probe the actual painted/hit-tested chip, including its clipping ancestors.
+                    // A pseudo-element's declared size alone cannot prove its target survives overflow:hidden.
+                    const targets = await value<
+                        {
+                            name: string;
+                            width: number;
+                            height: number;
+                            above: boolean;
+                            below: boolean;
+                            labelOwns: boolean;
+                            truncated: boolean;
+                            x: number;
+                            y: number;
+                        }[]
+                    >(
+                        page,
+                        `(() => {
+                    return ${JSON.stringify([notesName, imageName])}.map(name => {
+                        const button = [...document.querySelectorAll('.private-attachments button')]
+                            .find(button => button.getAttribute('aria-label') === 'Remove ' + name);
+                        const box = button.getBoundingClientRect();
+                        const x = box.left + box.width / 2;
+                        const y = box.top + box.height / 2;
+                        const owns = (px, py) => {
+                            const at = document.elementFromPoint(px, py);
+
+                            return at === button || button.contains(at);
+                        };
+                        const reach = (dx, dy) => {
+                            let distance = 0;
+
+                            while (distance < 50 && owns(x + dx * (distance + 1), y + dy * (distance + 1))) {
+                                distance++;
+                            }
+
+                            return distance;
+                        };
+                        const label = button.closest('.chip').querySelector('.private-attachment-name');
+                        const labelBox = label.getBoundingClientRect();
+                        const labelHit = document.elementFromPoint(labelBox.left + labelBox.width / 2,
+                            labelBox.top + labelBox.height / 2);
+
+                        return { name, width: reach(-1, 0) + reach(1, 0) + 1,
+                            height: reach(0, -1) + reach(0, 1) + 1,
+                            above: owns(x, y - 19), below: owns(x, y + 19),
+                            labelOwns: labelHit === label || label.contains(labelHit),
+                            truncated: label.scrollWidth > label.clientWidth, x, y };
+                    });
+                })()`,
+                    );
+
+                    t.diagnostic(JSON.stringify(targets));
+                    assert.equal(
+                        await value(page, "document.documentElement.scrollWidth <= innerWidth"),
+                        true,
+                    );
+
+                    for (const target of targets) {
+                        assert.ok(
+                            target.width >= 40 &&
+                                target.height >= 40 &&
+                                target.above &&
+                                target.below,
+                            `${target.name}: reachable target, including above/below icon: ${JSON.stringify(target)}`,
+                        );
+                        assert.equal(
+                            target.labelOwns,
+                            true,
+                            "the enlarged target does not steal adjacent filename text",
+                        );
+                        assert.equal(
+                            target.truncated,
+                            true,
+                            "long filenames still truncate inside the chip",
+                        );
+                    }
+
+                    const intended = targets[1]!;
+                    const deletedBefore = requests.filter(
+                        (request) => request.method === "DELETE",
+                    ).length;
+
+                    // Hit the upper edge, not the icon's visual center, through trusted Chromium input.
+                    await page.click({ x: intended.x, y: intended.y - 19 });
+                    await present(
+                        page,
+                        `.private-attachments [aria-label=${JSON.stringify(`Remove ${imageName}`)}]`,
+                        false,
+                    );
+                    await present(
+                        page,
+                        `.private-attachments [aria-label=${JSON.stringify(`Remove ${notesName}`)}]`,
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            "document.querySelectorAll('.private-attachments button').length",
+                        ),
+                        1,
+                        "only the intended attachment is removed",
+                    );
+                    assert.equal(await draft(), ordinary);
+                    await until(() => {
+                        const deleted = requests.filter((request) => request.method === "DELETE");
+
+                        return (
+                            deleted.length === deletedBefore + 1 && deleted.at(-1)?.status === 200
+                        );
+                    }, "the removal callback discards a real staged upload");
+                    // Restore the existing two-file scenario in the same order for byte-exact dispatch below.
+                    await attach(page, "change", imageName, image, "image/png");
+                    await ready();
+                },
+            );
+            await page.setViewport(VIEWPORTS.desktop);
             assert.equal(
                 await value(
                     page,

@@ -1476,8 +1476,11 @@ export function popAnchor(selector) {
         return null;
     }
 
-    const width = Math.min(420, innerWidth - 16);
-    const left = Math.max(8, Math.min(rect.left, innerWidth - width - 8));
+    const rootStyle = getComputedStyle(document.documentElement);
+    const safeLeft = Math.max(0, parseFloat(rootStyle.getPropertyValue("--safe-left")) || 0);
+    const safeRight = Math.max(0, parseFloat(rootStyle.getPropertyValue("--safe-right")) || 0);
+    const width = Math.min(420, Math.max(0, innerWidth - safeLeft - safeRight - 16));
+    const left = Math.max(safeLeft + 8, Math.min(rect.left, innerWidth - safeRight - width - 8));
     const at = Math.min(rect.top, bottom - 8);
     const above = at - top - 14;
 

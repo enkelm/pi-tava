@@ -172,6 +172,9 @@
     --space-y: 1;
     --space-x: 1;
     --leading: 1.65;
+    /* Horizontal platform insets belong to edge-owning shells, not their nested controls. */
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
 
     /* Motion curves and durations in milliseconds. */
     --ease-out: cubic-bezier(0.23, 1, 0.32, 1); /* easeOutQuint */
@@ -245,8 +248,35 @@ body {
     -webkit-tap-highlight-color: transparent;
 }
 
+/* Only the application has captive scrolling; server-rendered plain pages keep native scrolling.
+ * Leave horizontal overscroll alone so the browser's Back gesture remains available. */
+html:has(#app),
+body:has(> #app),
+#app {
+    overscroll-behavior-y: none;
+}
+
 #app {
     height: 100dvh;
+}
+
+/* Suppress label selection/callouts on controls, never on messages, filenames or editor content.
+ * Specialized browser/terminal gesture surfaces retain their own touch-action rules. */
+#app :is(button, a.button, a.list-item, a.artifact-link, .search-keys, .check, .dv-viewed, .grip),
+#app
+    :is(
+        .rv-audit,
+        .rv-manage,
+        .rv-own-verdict,
+        .rv-thread.resolved,
+        .private-terminal,
+        .private-terminal-help
+    )
+    > summary {
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
 }
 
 button,
@@ -264,13 +294,13 @@ button {
     cursor: pointer;
 }
 
-/* iOS zooms into any text field smaller than 16px when it takes focus. Important, so a theme's size for a field (in a
- * later layer, which beats this one) does not bring the zoom back on touch screens. */
+/* iOS zooms into fields smaller than 16px. Keep the floor above optional-theme layers; the coarse component rules
+ * below use the same priority so a larger selected font is not reduced to 16px. */
 @media (pointer: coarse) {
     input,
     textarea,
     select {
-        font-size: 16px !important;
+        font-size: max(16px, 1rem) !important;
     }
 }
 
@@ -289,7 +319,7 @@ select {
         background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     input:hover,
     textarea:hover,
     select:hover {
@@ -349,7 +379,7 @@ a {
     background-clip: padding-box;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     ::-webkit-scrollbar-thumb:hover {
         background-color: var(--muted);
     }
@@ -671,6 +701,8 @@ kbd {
 .layout {
     display: flex;
     height: 100dvh;
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
     background: var(--bg);
 }
 
@@ -792,7 +824,8 @@ kbd {
     }
 
     :root[data-tiling="on"] .layout {
-        padding: var(--gap-out);
+        padding: var(--gap-out) calc(var(--gap-out) + var(--safe-right)) var(--gap-out)
+            calc(var(--gap-out) + var(--safe-left));
         gap: calc(var(--gap-in) * 2);
         background: var(--desk);
     }
@@ -864,7 +897,7 @@ kbd {
     transform: none;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .resize-handle:hover::before {
         opacity: 1;
         transform: none;
@@ -923,7 +956,7 @@ kbd {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .topbar .icon-button:hover {
         color: var(--text);
     }
@@ -1030,7 +1063,7 @@ kbd {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .title:has(> .title-open:hover) {
         background: var(--hover);
     }
@@ -1045,6 +1078,12 @@ kbd {
 
 .title-open:focus-visible {
     outline-offset: -1px;
+}
+
+/* The title is now a container; its opening button, not the nested branch control, owns press feedback. */
+button.title:active:not(:disabled),
+.title:has(> .title-open:active:not(:disabled)) {
+    background: var(--pressed);
 }
 
 .title-main {
@@ -1126,7 +1165,7 @@ kbd {
     z-index: 1;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .title-sub > button.title-branch:hover {
         color: var(--accent);
         background: var(--card-2);
@@ -1148,7 +1187,7 @@ kbd {
     .title-branch .icon {
         display: none;
     }
-    @media (hover: hover) {
+    @media (hover: hover) and (pointer: fine) {
         .title-sub > button.title-branch:hover {
             background: none;
         }
@@ -1190,7 +1229,7 @@ kbd {
     transition: border-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .changes-button:hover {
         border-color: var(--hair-2);
     }
@@ -1241,7 +1280,7 @@ kbd {
 }
 
 /* Not on touch screens, where a tapped button would keep the fill. */
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .icon-button:hover {
         background: var(--hover);
         color: var(--text);
@@ -1385,7 +1424,7 @@ kbd {
     text-align: left;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .parent-session:hover {
         background: var(--hover);
     }
@@ -1428,7 +1467,7 @@ kbd {
     cursor: pointer;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .user-row > .prompt.tappable:hover {
         background: var(--card-2);
     }
@@ -1762,7 +1801,7 @@ kbd {
         background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .code-head .copy:hover {
         color: var(--text);
         background: var(--hover);
@@ -1862,7 +1901,7 @@ kbd {
     font: 11.5px var(--mono);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .reaction:hover {
         border-color: var(--edge);
     }
@@ -1891,7 +1930,7 @@ kbd {
         opacity var(--t-fade) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .answer-actions > button.answer-tool:hover,
     .reaction.add:hover {
         color: var(--text);
@@ -1940,7 +1979,7 @@ kbd {
     line-height: 1;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .reaction-picker button:hover {
         background: var(--hover);
     }
@@ -1988,7 +2027,7 @@ kbd {
     border-bottom: 1px solid var(--hair);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .activity-head:hover {
         color: var(--text);
         background: var(--hover);
@@ -2074,7 +2113,7 @@ kbd {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .step-head:hover {
         background: var(--hover);
     }
@@ -2198,7 +2237,7 @@ kbd {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .step-open:hover {
         background: var(--hover);
     }
@@ -2330,7 +2369,7 @@ pre.diff .del {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .artifact-link:hover {
         background: var(--hover);
     }
@@ -2463,7 +2502,7 @@ pre.diff .del {
     color: var(--text);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .approval-actions .button.deny:hover {
         color: var(--err);
     }
@@ -2590,7 +2629,7 @@ pre.diff .del {
     transform: rotate(-90deg);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .live-fold:hover {
         color: var(--body);
     }
@@ -2717,7 +2756,7 @@ pre.diff .del {
         transform 90ms var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .jump:hover {
         border-color: var(--accent-line);
         color: var(--accent);
@@ -2846,9 +2885,11 @@ pre.diff .del {
     border-radius: var(--radius);
 }
 
-.queue-toggle:hover {
-    background: var(--hover);
-    border-color: var(--accent);
+@media (hover: hover) and (pointer: fine) {
+    .queue-toggle:hover {
+        background: var(--hover);
+        border-color: var(--accent);
+    }
 }
 
 .queue-toggle svg {
@@ -3025,7 +3066,7 @@ pre.diff .del {
     background: var(--hover);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .command:hover {
         background: var(--hover);
     }
@@ -3188,7 +3229,7 @@ pre.diff .del {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .model-chip:hover {
         background: var(--card-2);
     }
@@ -3268,6 +3309,11 @@ pre.diff .del {
     flex: none;
 }
 
+button.chip:active:not(:disabled):not(.on) {
+    background: var(--pressed);
+    color: var(--text);
+}
+
 .files .chip > .chip-name {
     flex: 0 1 auto;
     min-width: 0;
@@ -3275,7 +3321,7 @@ pre.diff .del {
     text-overflow: ellipsis;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     button.chip:hover {
         border-color: var(--edge);
         color: var(--text);
@@ -3304,7 +3350,7 @@ pre.diff .del {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .composer-row .plan-chip:hover {
         color: var(--text);
     }
@@ -3337,7 +3383,7 @@ pre.diff .del {
         background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .mode-switch button:hover {
         color: var(--text);
     }
@@ -3372,7 +3418,7 @@ pre.diff .del {
     background: var(--err-soft);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .stop-button:hover {
         background: color-mix(in srgb, var(--o-red) 22%, transparent);
     }
@@ -3402,7 +3448,7 @@ pre.diff .del {
     cursor: pointer;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .send-button.ready:hover {
         background: color-mix(in oklab, var(--accent-fill) 85%, var(--text));
     }
@@ -3412,7 +3458,7 @@ pre.diff .del {
     transition: transform var(--t-in) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .send-button.ready:hover .icon {
         transform: translateY(-2px);
     }
@@ -3488,7 +3534,7 @@ pre.diff .del {
     color: var(--accent-ink);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .round.send:not(:disabled):hover {
         background: color-mix(in oklab, var(--accent-fill) 85%, var(--text));
     }
@@ -3498,7 +3544,7 @@ pre.diff .del {
     transition: transform var(--t-in) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .round.send:not(:disabled):hover .icon {
         transform: translateY(-2px);
     }
@@ -3761,7 +3807,7 @@ pre.diff .del {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     button.rail-brand:hover {
         background: var(--hover);
     }
@@ -3774,7 +3820,7 @@ pre.diff .del {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .rail-button:hover {
         background: var(--hover);
         color: var(--text);
@@ -3924,7 +3970,7 @@ pre.diff .del {
         background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .ws:hover {
         color: var(--text);
         background: var(--hover);
@@ -3986,8 +4032,10 @@ pre.diff .del {
     transition: transform var(--t-in) var(--ease-out);
 }
 
-.rail:not([data-part="rail"]) .rail-brand:hover {
-    transform: rotate(-8deg) scale(1.08);
+@media (hover: hover) and (pointer: fine) {
+    .rail:not([data-part="rail"]) .rail-brand:hover {
+        transform: rotate(-8deg) scale(1.08);
+    }
 }
 
 .rail:not([data-part="rail"]) .rail-items {
@@ -4113,7 +4161,7 @@ pre.diff .del {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .new-button:hover {
         background: color-mix(in oklab, var(--accent-fill) 85%, var(--text));
     }
@@ -4141,7 +4189,7 @@ pre.diff .del {
         background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .search:hover {
         border-color: var(--line-strong);
     }
@@ -4199,7 +4247,7 @@ pre.diff .del {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .sessions .search:hover {
         border-color: var(--hair-2);
     }
@@ -4257,7 +4305,7 @@ pre.diff .del {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .search-clear:hover {
         background: var(--hover);
         color: var(--text);
@@ -4311,7 +4359,7 @@ pre.diff .del {
     transition: color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .session-tabs button:hover {
         color: var(--text);
     }
@@ -4340,7 +4388,7 @@ pre.diff .del {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: contain;
     display: flex;
     flex-direction: column;
     margin: 4px -4px 0;
@@ -4385,7 +4433,7 @@ pre.diff .del {
     transition: color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .group-head:hover {
         color: var(--text);
     }
@@ -4548,7 +4596,7 @@ pre.diff .del {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .session:hover {
         background: var(--hover);
     }
@@ -4954,7 +5002,7 @@ pre.diff .del {
         border-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .session-act:hover {
         color: var(--accent);
         border-color: var(--accent-line);
@@ -4974,16 +5022,15 @@ pre.diff .del {
 }
 
 /* Touch screens archive, pin, and mark-unread from a long press on the row instead: an unseen button would take taps meant for it. */
-@media (hover: none) {
+@media (hover: none), (pointer: coarse) {
     .session-actions {
         display: none;
     }
 }
 
 /* The buttons take the right side's place, widened so a long title ends before them (one to three 26px buttons). */
-@media (hover: hover) {
-    .session-row:hover .session-act,
-    .session-act:focus-visible {
+@media (hover: hover) and (pointer: fine) {
+    .session-row:hover .session-act {
         opacity: 1;
         transform: none;
     }
@@ -4994,34 +5041,43 @@ pre.diff .del {
     .session-row.one-act:hover .session-side {
         min-width: 26px;
     }
-    /* Three live buttons: archive, pin, and mark-unread. */
     .session-row.three-acts:hover .session-side {
         min-width: 86px;
     }
-    /* Keyboard focus in the row shows them too, not the focus a click leaves on the open session's row. Kept apart
-       from the rules above: a browser without :has() drops only these. */
-    .session-row:has(:focus-visible) .session-act {
-        opacity: 1;
-        transform: none;
-    }
-    .session-row:not(.no-acts):has(:focus-visible) .session-side {
-        opacity: 0;
-        min-width: 56px;
-    }
-    .session-row.one-act:has(:focus-visible) .session-side {
-        min-width: 26px;
-    }
-    .session-row.three-acts:has(:focus-visible) .session-side {
-        min-width: 86px;
-    }
-    /* While Ctrl/⌘ drags a selection, rows do not show their buttons. */
-    :root.selecting .session-row .session-act {
-        opacity: 0;
-    }
-    :root.selecting .session-row .session-side {
-        opacity: 1;
-        min-width: 0;
-    }
+}
+
+.session-act:focus-visible {
+    opacity: 1;
+    transform: none;
+}
+
+/* Keyboard focus works independently of hover support. A browser without :has() drops only these rules. */
+.session-row:has(:focus-visible) .session-act {
+    opacity: 1;
+    transform: none;
+}
+
+.session-row:not(.no-acts):has(:focus-visible) .session-side {
+    opacity: 0;
+    min-width: 56px;
+}
+
+.session-row.one-act:has(:focus-visible) .session-side {
+    min-width: 26px;
+}
+
+.session-row.three-acts:has(:focus-visible) .session-side {
+    min-width: 86px;
+}
+
+/* While Ctrl/⌘ drags a selection, rows do not show their buttons. */
+:root.selecting .session-row .session-act {
+    opacity: 0;
+}
+
+:root.selecting .session-row .session-side {
+    opacity: 1;
+    min-width: 0;
 }
 
 /* On its way into or out of the archive: dimmed until the server's list moves it. */
@@ -5091,7 +5147,7 @@ pre.diff .del {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .select-clear:hover {
         background: var(--hover);
         color: var(--text);
@@ -5340,7 +5396,7 @@ pre.diff .del {
     transition: transform var(--t-in) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .fetch-colors span:hover {
         transform: translateY(-3px);
     }
@@ -5366,7 +5422,7 @@ pre.diff .del {
     font-weight: 500;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .splash-actions .button:hover {
         border-color: var(--hair-2);
         background: var(--card-2);
@@ -5380,7 +5436,7 @@ pre.diff .del {
     font-weight: 600;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .splash-actions .button.primary:hover {
         border-color: transparent;
         background: color-mix(in oklab, var(--accent-fill) 85%, var(--text));
@@ -5430,7 +5486,7 @@ pre.diff .del {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .splash-row:hover {
         background: var(--hover);
     }
@@ -5470,6 +5526,8 @@ pre.diff .del {
 .overlay {
     position: fixed;
     inset: 0;
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
     background: var(--scrim);
     z-index: 20;
     display: flex;
@@ -5524,7 +5582,7 @@ pre.diff .del {
 @media (min-width: 700px) {
     .overlay {
         align-items: flex-start;
-        padding: 7vh 16px 16px;
+        padding: 7vh calc(16px + var(--safe-right)) 16px calc(16px + var(--safe-left));
     }
     .sheet {
         max-width: 500px;
@@ -5542,6 +5600,8 @@ pre.diff .del {
 
 /* The drawer: the session list sliding in from the left on narrow screens. Over `.overlay`'s place for sheets. */
 .overlay.drawer-overlay {
+    /* The drawer owns its left inset; do not pad the overlay a second time. */
+    padding: 0;
     align-items: stretch;
     justify-content: flex-start;
 }
@@ -5550,6 +5610,7 @@ pre.diff .del {
     display: flex;
     width: min(86vw, 340px);
     height: 100dvh;
+    padding-left: var(--safe-left);
     background: var(--panel);
     border-radius: 0 var(--r-sheet) var(--r-sheet) 0;
     box-shadow:
@@ -5595,10 +5656,11 @@ pre.diff .del {
     animation: pop 0.25s var(--ease-out);
 }
 
-/* No chip to open from: in the middle of the screen. */
+/* Anchored menus escape the overlay's padding; popAnchor() clamps their box to the safe edges.
+ * No chip to open from: free menus stay in the middle of the overlay's safe bounds. */
 .pop-menu.free {
     position: relative;
-    width: min(420px, calc(100vw - 16px));
+    width: min(420px, calc(100vw - var(--safe-left) - var(--safe-right) - 16px));
     max-height: 80dvh;
     margin: auto;
 }
@@ -5652,7 +5714,7 @@ pre.diff .del {
     transition: color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .pop-menu-link:hover {
         color: var(--accent);
     }
@@ -5779,8 +5841,10 @@ pre.diff .del {
     text-align: left;
 }
 
-.model-provider-toggle:hover {
-    background: var(--card-2);
+@media (hover: hover) and (pointer: fine) {
+    .model-provider-toggle:hover {
+        background: var(--card-2);
+    }
 }
 
 .model-provider-toggle > .icon {
@@ -6042,7 +6106,7 @@ pre.diff .del {
     color: var(--text);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .segmented.model-levels button:not(.on):hover {
         color: var(--text);
     }
@@ -6129,7 +6193,7 @@ pre.diff .del {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: contain;
     padding: calc(16px * var(--space-y)) calc(20px * var(--space-x)) calc(20px * var(--space-y));
     display: flex;
     flex-direction: column;
@@ -6200,7 +6264,7 @@ pre.diff .del {
         padding var(--t-in) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .list-item:hover {
         background: var(--card);
     }
@@ -6323,8 +6387,10 @@ pre.diff .del {
     background: none;
 }
 
-.import-history-session > .button:hover {
-    background: var(--raised);
+@media (hover: hover) and (pointer: fine) {
+    .import-history-session > .button:hover {
+        background: var(--raised);
+    }
 }
 
 .import-history-session > .button:focus-visible {
@@ -6501,7 +6567,7 @@ pre.diff .del {
         transform 90ms var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .button:hover {
         background: var(--raised);
     }
@@ -6518,7 +6584,7 @@ pre.diff .del {
     font-weight: 600;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .button.primary:hover {
         background: color-mix(in oklab, var(--accent-fill) 85%, var(--text));
     }
@@ -6537,7 +6603,7 @@ pre.diff .del {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .button.ghost:hover {
         background: var(--hover);
         color: var(--err);
@@ -6599,7 +6665,7 @@ pre.diff .del {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .segmented button:hover {
         background: var(--hover);
         color: var(--text);
@@ -6699,7 +6765,7 @@ pre.diff .del {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .fp-crumb:hover {
         background: var(--hover);
         color: var(--accent);
@@ -6832,7 +6898,7 @@ pre.diff .del {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .fp-place:hover {
         background: var(--hover);
     }
@@ -6898,7 +6964,7 @@ pre.diff .del {
     user-select: none;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .fp-row:hover {
         background: var(--hover);
     }
@@ -7293,6 +7359,8 @@ pre.diff .del {
 .viewer {
     position: fixed;
     inset: 0;
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
     z-index: 30;
     background: var(--bg);
     display: flex;
@@ -7324,7 +7392,7 @@ pre.diff .del {
     text-align: left;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .artifact-card:hover {
         border-color: var(--accent-line);
     }
@@ -7530,8 +7598,8 @@ pre.diff .del {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: calc(env(safe-area-inset-top) + 3.2rem) 0.5rem
-        calc(env(safe-area-inset-bottom) + 0.5rem);
+    padding: calc(env(safe-area-inset-top) + 3.2rem) calc(0.5rem + var(--safe-right))
+        calc(env(safe-area-inset-bottom) + 0.5rem) calc(0.5rem + var(--safe-left));
     animation: fade var(--t-fade) var(--ease-almost);
     cursor: zoom-out;
 }
@@ -7556,7 +7624,8 @@ pre.diff .del {
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    padding: calc(env(safe-area-inset-top) + 0.4rem) 0.4rem 0.4rem 0.9rem;
+    padding: calc(env(safe-area-inset-top) + 0.4rem) calc(0.4rem + var(--safe-right)) 0.4rem
+        calc(0.9rem + var(--safe-left));
     background: linear-gradient(color-mix(in srgb, var(--desk) 80%, transparent), transparent);
     cursor: default;
 }
@@ -7583,13 +7652,14 @@ pre.diff .del {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    width: min(calc(100vw - 20px), 440px);
+    width: min(calc(100vw - var(--safe-left) - var(--safe-right) - 20px), 440px);
+    margin-left: calc((var(--safe-left) - var(--safe-right)) / 2);
     pointer-events: none;
 }
 
 @media (min-width: 700px) {
     .notices {
-        width: min(92vw, 400px);
+        width: min(92vw, 400px, calc(100vw - var(--safe-left) - var(--safe-right) - 20px));
     }
 }
 
@@ -7653,7 +7723,7 @@ pre.diff .del {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .notice:hover {
         background:
             linear-gradient(
@@ -7728,7 +7798,7 @@ pre.diff .del {
 .plain {
     max-width: 440px;
     margin: 0 auto;
-    padding: 3rem 1.2rem;
+    padding: 3rem calc(1.2rem + var(--safe-right)) 3rem calc(1.2rem + var(--safe-left));
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
@@ -7796,7 +7866,7 @@ body.plain-page {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .people-button:hover {
         background: var(--hover);
         color: var(--text);
@@ -8742,7 +8812,8 @@ textarea.notes {
     display: flex;
     justify-content: center;
     align-items: flex-start;
-    padding: calc(env(safe-area-inset-top) + 11vh) 10px 10px;
+    padding: calc(env(safe-area-inset-top) + 11vh) calc(10px + var(--safe-right)) 10px
+        calc(10px + var(--safe-left));
     background: var(--scrim);
     animation: fade var(--t-fade) var(--ease-almost);
 }
@@ -8825,7 +8896,7 @@ textarea.notes {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .launcher-close:hover {
         background: var(--hover);
     }
@@ -8859,7 +8930,7 @@ textarea.notes {
     color: var(--text);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .launcher-types button:hover {
         background: var(--card-2);
         border-color: var(--hair-2);
@@ -8906,7 +8977,7 @@ textarea.notes {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: contain;
     padding: 4px 8px 8px;
     scroll-padding: 8px;
 }
@@ -9129,7 +9200,8 @@ textarea.notes {
 
 @media (pointer: coarse) {
     .launcher-overlay {
-        padding: calc(env(safe-area-inset-top) + 16px) 8px calc(env(safe-area-inset-bottom) + 16px);
+        padding: calc(env(safe-area-inset-top) + 16px) calc(8px + var(--safe-right))
+            calc(env(safe-area-inset-bottom) + 16px) calc(8px + var(--safe-left));
     }
     .launcher {
         max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 32px);
@@ -9232,9 +9304,11 @@ textarea.notes {
     flex: none;
 }
 
-.settings-tabs button:hover {
-    background: var(--hover);
-    color: var(--text);
+@media (hover: hover) and (pointer: fine) {
+    .settings-tabs button:hover {
+        background: var(--hover);
+        color: var(--text);
+    }
 }
 
 .settings-tabs button[aria-selected="true"] {
@@ -9421,7 +9495,7 @@ textarea.notes {
         box-shadow var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .theme-card:hover {
         border-color: var(--o-accent);
     }
@@ -9602,7 +9676,7 @@ textarea.notes {
     transition: border-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .look-card:not(:disabled):hover {
         border-color: var(--accent-line);
     }
@@ -9709,7 +9783,7 @@ textarea.notes {
     transition: opacity var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .search-keys:hover {
         opacity: 1;
     }
@@ -10065,6 +10139,16 @@ textarea.notes {
     transition: border-color var(--t-hover) var(--ease-out);
 }
 
+@media (hover: hover) and (pointer: fine) {
+    .peek:hover {
+        border-color: var(--accent-line);
+    }
+}
+
+.peek:focus-within {
+    border-color: var(--accent-line);
+}
+
 .peek.waiting {
     border-color: var(--warn-line);
 }
@@ -10082,7 +10166,7 @@ textarea.notes {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .peek-head:hover {
         background: var(--hover);
     }
@@ -10320,7 +10404,7 @@ textarea.notes {
     font-weight: 500;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .peek-actions .button.small:hover:not(:disabled) {
         color: var(--err);
     }
@@ -10333,7 +10417,7 @@ textarea.notes {
     font-weight: 600;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .peek-actions .button.small.primary:hover:not(:disabled) {
         background: color-mix(in oklab, var(--accent-fill) 85%, var(--text));
         color: var(--accent-ink);
@@ -10442,6 +10526,14 @@ textarea.notes {
     :root[data-tiling="on"] .peeks .peek {
         background: var(--bg);
     }
+    @media (hover: hover) and (pointer: fine) {
+        :root[data-tiling="on"] .peeks .peek:hover {
+            border-image: var(--active) 1;
+        }
+    }
+    :root[data-tiling="on"] .peeks .peek:focus-within {
+        border-image: var(--active) 1;
+    }
 }
 
 /* ─── Diff viewer ──────────────────────────────────────────── */
@@ -10497,7 +10589,7 @@ textarea.notes {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .dv-fold:hover {
         background: var(--hover);
         color: var(--text);
@@ -10600,7 +10692,7 @@ textarea.notes {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .dv-tool.icon-button:hover {
         color: var(--text);
     }
@@ -10642,7 +10734,7 @@ textarea.notes {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .dv-viewed:hover {
         color: var(--text);
     }
@@ -10744,7 +10836,7 @@ textarea.notes {
     cursor: pointer;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .dv-n.go:hover {
         color: var(--accent);
         text-decoration: underline;
@@ -10854,7 +10946,7 @@ textarea.notes {
     font: 11.5px var(--mono);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .dv-gap button:hover {
         background: var(--hover);
     }
@@ -10962,7 +11054,7 @@ textarea.notes {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     button.dr-branch:hover {
         background: var(--card-2);
         color: var(--accent);
@@ -11077,7 +11169,7 @@ textarea.notes {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .dr-row:hover,
     .ft-row:hover {
         background: var(--hover);
@@ -11187,6 +11279,17 @@ textarea.notes {
 
 /* Over the conversation, below 1100px: no frame of its own. */
 @media (max-width: 1099px) {
+    /* Fixed panels escape the layout's padding and own their viewport edges themselves. */
+    .files-tile,
+    .browser {
+        padding-left: var(--safe-left);
+        padding-right: var(--safe-right);
+    }
+    /* The absolute typing bar ignores its parent's padding box; inset it once. */
+    .browser-type.hidden {
+        left: var(--safe-left);
+        right: var(--safe-right);
+    }
     :root[data-tiling="on"] .files-tile.window {
         border: 0;
         border-radius: 0;
@@ -11232,7 +11335,7 @@ textarea.notes {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .files-bar .icon-button:hover {
         color: var(--text);
     }
@@ -11274,7 +11377,7 @@ textarea.notes {
         color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .files-tabs button:hover,
     .dr-layout button:hover {
         color: var(--text);
@@ -11361,7 +11464,7 @@ textarea.notes {
     color: var(--muted);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .ft-tools .icon-button:hover {
         color: var(--text);
     }
@@ -11683,7 +11786,13 @@ textarea.notes {
     font-size: inherit;
 }
 
-.file-edit-lsp-chip:hover,
+@media (hover: hover) and (pointer: fine) {
+    .file-edit-lsp-chip:hover {
+        background: var(--hover);
+        color: var(--text);
+    }
+}
+
 .file-edit-lsp-chip[aria-expanded="true"] {
     background: var(--hover);
     color: var(--text);
@@ -11743,9 +11852,11 @@ textarea.notes {
     cursor: default;
 }
 
-.file-edit-shortcut:hover:not(:disabled) {
-    background: var(--hover);
-    color: var(--text);
+@media (hover: hover) and (pointer: fine) {
+    .file-edit-shortcut:hover:not(:disabled) {
+        background: var(--hover);
+        color: var(--text);
+    }
 }
 
 .file-edit-shortcut:focus-visible,
@@ -12197,7 +12308,7 @@ textarea.notes {
     text-align: left;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .browser-server:hover {
         background: var(--card);
     }
@@ -12359,7 +12470,7 @@ textarea.notes {
     text-underline-offset: 3px;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .md code[data-path]:hover {
         color: var(--accent);
     }
@@ -12531,7 +12642,7 @@ textarea.notes {
     background: var(--hover);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .find-result:hover {
         background: var(--hover);
     }
@@ -12646,7 +12757,7 @@ textarea.notes {
         background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .rich-tabs button:hover,
     .rich-run:hover {
         color: var(--text);
@@ -12663,7 +12774,7 @@ textarea.notes {
     color: var(--ok);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .rich-run:hover {
         color: var(--ok);
     }
@@ -12729,7 +12840,7 @@ textarea.notes {
     font: 12px var(--mono);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .code-more:hover {
         background: var(--hover);
     }
@@ -12795,14 +12906,14 @@ textarea.notes {
     font-size: 13.5px;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .nav-menu .list-item:hover,
     .places-sheet .list-item:hover {
         background: var(--hover);
     }
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .nav-menu .list-item:hover > span:first-child,
     .places-sheet .list-item:hover > span:first-child {
         color: var(--text);
@@ -12900,7 +13011,7 @@ textarea.notes {
         transform 90ms var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .place:hover {
         border-color: var(--hair-2);
         background: var(--card-2);
@@ -13135,6 +13246,14 @@ textarea.notes {
 
 /* Under a file that covers the whole tile, the tile's bar is out of reach of taps, keys, and screen readers too. */
 @media (max-width: 1099px) {
+    /* This absolute screen ignores the tile's padding; override inset above, not interior padding. */
+    .ft:not(.side) > .ft-view {
+        left: var(--safe-left);
+        right: var(--safe-right);
+    }
+    .ft-view .file-tools {
+        flex-wrap: wrap;
+    }
     .files-tile:has(> .files-body:not([hidden]) > .ft:not(.side) > .ft-view:not(.leaving))
         > .files-bar {
         visibility: hidden;
@@ -13157,6 +13276,17 @@ textarea.notes {
 
 /* Touch: rows and controls a thumb tall. */
 @media (pointer: coarse) {
+    /* Component font rules must not defeat the touch-field floor at smaller text preferences. */
+    .new-folder input {
+        font-size: max(16px, 0.85rem) !important;
+    }
+    .dr-filter,
+    .ft-filter {
+        font-size: max(16px, 0.8rem) !important;
+    }
+    .launcher-input input {
+        font-size: max(16px, 1.02rem) !important;
+    }
     .files-tabs button {
         height: 40px;
         padding: 0 14px;
@@ -13635,13 +13765,13 @@ textarea.notes {
     border-top: 0;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .pi-session:hover {
         background: var(--card-2);
     }
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .pi-session:hover .pi-session-title {
         color: var(--accent);
     }
@@ -13944,7 +14074,7 @@ textarea.notes {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .agent-open:hover {
         background: var(--hover);
     }
@@ -14289,7 +14419,7 @@ textarea.notes {
     border-color: var(--hair-2);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .board-filter:hover {
         background: var(--card-2);
         border-color: var(--hair-2);
@@ -14376,7 +14506,7 @@ textarea.notes {
     transition: color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .board-session:hover .board-session-name {
         color: var(--accent);
     }
@@ -14435,7 +14565,7 @@ textarea.notes {
     transition: opacity var(--t-fade) var(--ease-almost);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .board-cell:hover {
         border-color: var(--state);
     }
@@ -14559,7 +14689,7 @@ textarea.notes {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .board-need:hover {
         background: var(--hover);
     }
@@ -14662,7 +14792,7 @@ textarea.notes {
     text-overflow: ellipsis;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .board-link:hover {
         text-decoration: underline;
         text-underline-offset: 2px;
@@ -14712,7 +14842,7 @@ textarea.notes {
     font-size: 13px;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .board-stop:hover {
         border-color: var(--err);
         color: var(--err);
@@ -15338,7 +15468,7 @@ textarea.notes {
     cursor: default;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .pip-chip:not(:disabled):hover {
         border-color: var(--accent-line);
         color: var(--text);
@@ -15389,7 +15519,7 @@ textarea.notes {
     text-align: left;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .pip-memory .button:hover {
         background: var(--card-2);
     }
@@ -15733,7 +15863,7 @@ textarea.notes {
     transition: background-color var(--t-hover) var(--ease-out);
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .gallery-row:hover {
         background: var(--card-2);
     }
@@ -15845,7 +15975,7 @@ textarea.notes {
     }
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .gallery-tag:hover {
         background: var(--hover);
         color: var(--text);
@@ -16173,9 +16303,11 @@ pre.gallery-code {
     }
 }
 
-.private-space-row:hover,
-.private-pane-row:hover {
-    background: var(--hover);
+@media (hover: hover) and (pointer: fine) {
+    .private-space-row:hover,
+    .private-pane-row:hover {
+        background: var(--hover);
+    }
 }
 
 .private-space-row.active,
@@ -16382,8 +16514,27 @@ pre.gallery-code {
     max-width: 100%;
 }
 
+/* v14 keeps attachment children whole by default; the private filename must still yield to its removal target. */
+.private-attachments .chip > .private-attachment-name {
+    flex: 0 1 auto;
+}
+
 .private-attachments .chip > :not(.private-attachment-name) {
     flex-shrink: 0;
+}
+
+@media (pointer: coarse) {
+    /* A real target inside the clipped chip, with no invisible layer stealing adjacent taps. */
+    .private-attachments .chip > .icon-button.small {
+        width: 40px;
+        height: 40px;
+    }
+    .private-attachments .chip > .icon-button.small::before {
+        content: none;
+    }
+    .private-attachments .chip > .icon-button.small:active:not(:disabled) {
+        transform: none;
+    }
 }
 
 .private-composer .command {
@@ -16418,9 +16569,18 @@ pre.gallery-code {
     color: var(--body);
 }
 
-.private-terminal-footer > button:hover {
+@media (hover: hover) and (pointer: fine) {
+    .private-terminal-footer > button:hover {
+        color: var(--text);
+        background: var(--hover);
+    }
+}
+
+.private-terminal-footer > button:active:not(:disabled):not([aria-pressed="true"]),
+.private-mobile-terminal-nav
+    button:active:not(:disabled):not([aria-pressed="true"]):not([aria-current]) {
     color: var(--text);
-    background: var(--hover);
+    background: var(--pressed);
 }
 
 .private-terminal-status {
@@ -16446,8 +16606,10 @@ pre.gallery-code {
     border-right: 1px solid var(--line);
 }
 
-.private-mobile-terminal-nav button:hover {
-    background: var(--hover);
+@media (hover: hover) and (pointer: fine) {
+    .private-mobile-terminal-nav button:hover {
+        background: var(--hover);
+    }
 }
 
 .private-grid-host {
@@ -16492,7 +16654,7 @@ pre.gallery-code {
     bottom: calc(100% + 4px);
     right: 0;
     z-index: 5;
-    width: min(480px, calc(100vw - 24px));
+    width: min(480px, calc(100vw - var(--safe-left) - var(--safe-right) - 24px));
     max-height: min(60dvh, 560px);
     overflow-y: auto;
     padding: 14px;
@@ -16529,8 +16691,10 @@ pre.gallery-code {
     background: none;
 }
 
-.private-agent-row:hover {
-    background: var(--hover);
+@media (hover: hover) and (pointer: fine) {
+    .private-agent-row:hover {
+        background: var(--hover);
+    }
 }
 
 .private-import {

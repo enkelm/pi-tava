@@ -4,6 +4,8 @@ Where things are in Pi Coop, for agents working on it. Internal Pocket names rem
 
 ## Fork additions
 
+- `src/server/reviews.ts`: immutable, session-folder-only local review rounds, assigned reviewers' independent verdicts, threaded comments, owner administration and durable retry receipts. `ReviewDoc` metadata is live in `Room.reviews`; complete diffs stay in the separate `ReviewSnapshotDoc` family and load through `/api/c/:id/reviews/:rid/diff`. `test/reviews.test.ts` owns real app/HTTP authorization, collaboration, capture bounds, persistence, fork isolation and concurrency checks.
+
 - `src/server/private-sessions.ts`: owner-only local Herdr hierarchy, pane views, guarded agent prompts and preview of import into a shared conversation. It shares transport, identity checks and the pane-operation lock with takeover.
 - `src/server/private-sessions/journal.ts`: bounded read-only display and current model metadata from the last persisted Pi branch, using Pocket projection and adapted Collie text helpers. Never used as executable import input.
 - `web/private.js`: owner-only Private navigation, repo/worktree grouping and Chat view, isolated from Durable rooms. Chat reuses `transcript.js` read-only entries and the shared `message-box.js` presentation; private drafts and delivery stay separate. Native snapshots refresh workspace metadata; local folds do not change Herdr.

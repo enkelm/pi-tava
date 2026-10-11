@@ -35,6 +35,8 @@ import {
     PlanDoc,
     type PrWatch,
     ReactionsDoc,
+    ReviewDoc,
+    type ReviewRound,
     type Schedule,
     ScheduleDoc,
     type SubagentRecord,
@@ -76,6 +78,7 @@ export const ROOM_DOCS = new Set(
         ScheduleDoc,
         GoalDoc,
         WatchDoc,
+        ReviewDoc,
     ].map((doc) => doc.definition.kind),
 );
 /** A typing indicator lasts this long unless the browser renews it. */
@@ -90,8 +93,8 @@ const HEAD_MS = 3000;
 const PEEK_SUBJECT = 500;
 const PEEK_REASON = 300;
 /**
- * How much of a waiting message the queue gets: its row shows one line. A long paste or a batch of subagents' reports
- * can be megabytes, which every open tab would download each time the queue changes.
+ * Bounded command-card previews and report-detection cache keys. Submitted messages retain their full text and
+ * editing metadata; their collapsed preview is a presentation concern.
  */
 const QUEUED_TEXT = 500;
 
@@ -292,7 +295,7 @@ export class Room {
     /** The branch this view last read, as JSON. */
     #head = "";
     readonly #projected = new Map<number, ClientEntry | null>();
-    /** Each waiting message's text for the queue, and the subagents it reports from: what it says does not change. */
+    /** Each waiting message's bounded cache key and report names; full editable text comes from the inbox. */
     readonly #queued = new Map<number, { text: string; reports: string[] | undefined }>();
     authors: Record<string, string> = {};
     artifacts: Record<string, ArtifactMeta> = {};
@@ -311,6 +314,7 @@ export class Room {
     schedules: Record<string, Schedule> = {};
     goal: Goal | undefined;
     watch: PrWatch | undefined;
+    reviews: ReviewRound[] = [];
     /** Who is typing where, by user id. Memory only: it means nothing after a restart. */
     readonly #typing = new Map<string, { where: TypingPlace; timer: NodeJS.Timeout }>();
     parent: { id: ConversationId; title: string } | undefined;
@@ -365,6 +369,9 @@ export class Room {
         };
         this.goal = (await harness.snapshot(GoalDoc, this.id, context))?.goal;
         this.watch = (await harness.snapshot(WatchDoc, this.id, context))?.watch;
+        this.reviews = [
+            ...((await harness.snapshot(ReviewDoc, this.id, context))?.items ?? []),
+        ] as ReviewRound[];
 
         if (owner !== undefined) {
             const siblings =
@@ -436,6 +443,8 @@ export class Room {
             this.goal = (value?.goal as Goal | undefined) ?? undefined;
         } else if (kind === WatchDoc.definition.kind) {
             this.watch = (value?.watch as PrWatch | undefined) ?? undefined;
+        } else if (kind === ReviewDoc.definition.kind) {
+            this.reviews = [...((value?.items as ReviewRound[]) ?? [])];
         }
 
         if (kind === AuthorsDoc.definition.kind) {
@@ -562,6 +571,7 @@ export class Room {
             subagentsHeld: this.#reporting.size > 0 ? (this.#held ?? null) : null,
             authors: this.authors,
             reactions: this.reactions,
+            reviews: this.reviews,
             pins: this.pins,
             turns: this.turns,
             decisions: this.decisions,
@@ -645,7 +655,7 @@ export class Room {
         });
     }
 
-    /** The queue as its rows show it: each message's start, who sent it, and the subagents a message of reports is from. */
+    /** Full submitted text/editing metadata, bounded command previews, attribution and subagent report names. */
     #inbox(items: InboxItem[]) {
         const waiting = new Set<number>();
         const rows = items.map((item) => {

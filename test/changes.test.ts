@@ -67,7 +67,7 @@ const gitIn = (...args: string[]) => execFileSync("git", args, { cwd: repo, enco
 
 before(async () => {
     mkdirSync(repo, { recursive: true });
-    gitIn("init", "-q");
+    gitIn("init", "-q", "--initial-branch=main");
     gitIn("config", "user.email", "t@example.com");
     gitIn("config", "user.name", "T");
     writeFileSync(join(repo, "keep.txt"), "a\nb\n");
@@ -93,7 +93,7 @@ test("a session's changes list git's uncommitted files, mark Pi's, and give each
     const changes = await app.workspace.changes(id, owner(app));
 
     assert.equal(changes.repo?.root, realpathSync(repo));
-    assert.match(changes.repo?.branch ?? "", /^(main|master)$/);
+    assert.equal(changes.repo?.branch, "main");
     assert.deepEqual(
         changes.files.map(({ path, kind, added, removed, byPi }) => ({
             path,

@@ -17,11 +17,16 @@ const WIDTH_KEY = "pocket.filesWidth";
 /** Tree and viewer side by side from this width of the tile; one at a time below it. */
 const SIDE_BY_SIDE = 600;
 
-/** The tile is for people who can steer: the viewer reads files as Pi would. */
-export const filesAvailable = () => canSteer() && store.state.conversationId !== null;
+/** Viewers can review scoped changes; the file tree and editor still require steering rights. */
+export const filesAvailable = () =>
+    store.state.conversationId !== null && (canSteer() || store.state.server?.localReviews >= 1);
 
 /** Show or hide the tile. It takes the Browser and People panels' place. */
 export function setFilesOpen(open, tab) {
+    if (open && !canSteer()) {
+        tab = "changes";
+    }
+
     if (open) {
         sessionStorage.setItem(OPEN_KEY, "1");
         sessionStorage.removeItem("pocket.browser");
@@ -646,11 +651,12 @@ function FilesTab({ changes, covering }) {
 }
 
 export function FilesPanel({ leaving = false }) {
-    const { filesTab, view, server } = store.state;
+    const { view, server } = store.state;
     const root = view.agent?.cwd ?? view.conversation?.cwd ?? "";
-    const { changes } = useChanges(true);
+    const filesTab = canSteer() ? store.state.filesTab : "changes";
+    const { changes } = useChanges(canSteer());
     // Pi's edits git does not list count too: outside a repository, they are all there is.
-    const count = changes ? changes.files.length + changes.piOnly.length : 0;
+    const count = canSteer() && changes ? changes.files.length + changes.piOnly.length : 0;
 
     const beside = panelsBeside();
 
@@ -682,15 +688,18 @@ export function FilesPanel({ leaving = false }) {
                 </button>`
             }
             <div class="files-tabs" role="tablist">
-                <button
-                    type="button"
-                    role="tab"
-                    aria-selected=${filesTab === "files" ? "true" : "false"}
-                    class=${filesTab === "files" ? "on" : ""}
-                    onClick=${() => setTab("files")}
-                >
-                    Files
-                </button>
+                ${
+                    canSteer() &&
+                    html`<button
+                        type="button"
+                        role="tab"
+                        aria-selected=${filesTab === "files" ? "true" : "false"}
+                        class=${filesTab === "files" ? "on" : ""}
+                        onClick=${() => setTab("files")}
+                    >
+                        <${Icon} name="folder" size=${15} /> Files
+                    </button>`
+                }
                 <button
                     type="button"
                     role="tab"
@@ -716,9 +725,12 @@ export function FilesPanel({ leaving = false }) {
                 </button>`
             }
         </header>
-        <div class="files-body" role="tabpanel" aria-label="Files" hidden=${filesTab !== "files"}>
-            <${FilesTab} changes=${changes} covering=${!beside && !leaving} />
-        </div>
+        ${
+            canSteer() &&
+            html`<div class="files-body" role="tabpanel" aria-label="Files" hidden=${filesTab !== "files"}>
+                <${FilesTab} changes=${changes} covering=${!beside && !leaving} />
+            </div>`
+        }
         <div
             class="files-body"
             role="tabpanel"

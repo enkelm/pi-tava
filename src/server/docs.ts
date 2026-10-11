@@ -15,6 +15,7 @@ import {
 import type { Repeat } from "./when.ts";
 import type { ActivePi } from "./imports/herdr.ts";
 import type { Worktree } from "./worktrees.ts";
+import type { Changes } from "./changes.ts";
 
 export type SessionMeta = {
     title?: string;
@@ -187,6 +188,82 @@ export const AuthorsDoc = defineDoc<{
     history: "latest",
     fork: "current",
     initial: () => ({ requests: {}, entries: {} }),
+});
+
+export type ReviewState = "pending" | "commented" | "approved" | "changes_requested" | "dismissed";
+
+export type ReviewMessage = {
+    id: string;
+    userId: string;
+    name: string;
+    text: string;
+    at: number;
+};
+
+export type ReviewThread = ReviewMessage & {
+    path?: string;
+    side?: "old" | "new";
+    line?: number;
+    resolved: boolean;
+    resolvedBy?: string;
+    replies: ReviewMessage[];
+};
+
+export type ReviewRound = {
+    id: string;
+    title: string;
+    status: "open" | "closed";
+    createdBy: string;
+    name: string;
+    createdAt: number;
+    /** Original app cwd at capture; saved diffs do not follow a later cwd change. */
+    cwd: string;
+    /** Git path prefix of the canonical capture folder; empty at repo root, otherwise ends in '/'. */
+    scopePrefix: string;
+    /** Incremented on every mutation; clients may guard actions with expectedRevision. */
+    rev: number;
+    snapshot: Changes;
+    reviewers: Record<
+        string,
+        {
+            userId: string;
+            name: string;
+            active: boolean;
+            state: ReviewState;
+            text?: string;
+            at?: number;
+        }
+    >;
+    threads: ReviewThread[];
+    events: { userId: string; name: string; text: string; at: number }[];
+};
+
+/** Local review metadata and collaboration. A fork starts without its parent's reviews. */
+export const ReviewDoc = defineDoc<{
+    items: ReviewRound[];
+    /** Opaque receipts for retried review actions; never projected into a room. */
+    requests: Record<string, string>;
+}>({
+    kind: "pocket.reviews",
+    version: 1,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ items: [], requests: {} }),
+});
+
+/** Immutable complete diffs, keyed by review id. Not in ROOM_DOCS or inherited by forks. */
+export const ReviewSnapshotDoc = defineDocFamily<
+    { diffs: Record<string, string> },
+    Record<string, never>
+>({
+    kind: "pocket.review-snapshot",
+    version: 1,
+    family: true,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ diffs: {} }),
 });
 
 export type ArtifactType = "html" | "markdown" | "svg";

@@ -62,6 +62,7 @@ const emptyView = () => ({
     watch: null,
     branch: null,
     subagentsHeld: null,
+    reviews: [],
 });
 
 export const store = {
@@ -537,6 +538,7 @@ function mergeView(current, data) {
         decisions: data.decisions ?? base.decisions,
         plan: data.plan ?? base.plan,
         schedules: data.schedules ?? base.schedules,
+        reviews: data.reviews ?? base.reviews,
         // No goal is null, which the server sends too: only a missing field keeps the last value.
         goal: data.goal === undefined ? base.goal : data.goal,
         // The session's PR watch, or null: the same.
@@ -1068,6 +1070,20 @@ export const actions = {
     view: (path) => api(`c/${current()}/view?path=${encodeURIComponent(path)}`),
     /** What changed in the session's folder: git's uncommitted changes, and Pi's edits. */
     changes: (id = current()) => api(`c/${id}/changes`),
+    /** Saved local review rounds; requests capture their session so navigation cannot retarget a send. */
+    createReview: (request, id = current()) => api(`c/${id}/reviews`, request),
+    manageReview: (reviewId, request, id = current()) =>
+        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/manage`, request),
+    submitReview: (reviewId, request, id = current()) =>
+        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/submit`, request),
+    reviewComment: (reviewId, request, id = current()) =>
+        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/comment`, request),
+    resolveReviewThread: (reviewId, request, id = current()) =>
+        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/resolve`, request),
+    reviewDiff: (id, reviewId, path) =>
+        api(
+            `c/${id}/reviews/${encodeURIComponent(reviewId)}/diff?path=${encodeURIComponent(path)}`,
+        ),
     branches: () => api(`c/${current()}/branches`),
     switchBranch: (target) => api(`c/${current()}/branch`, target),
     /** Undo the uncommitted changes to one file. */
@@ -1212,8 +1228,8 @@ function sheetChange(sheet, state) {
 }
 
 /**
- * The Files tile shows now: asked for, in a conversation, for someone who can steer, and not in the Browser panel's
- * place (one panel at a time). `App` draws it by this, and `openFile` opens files in it by this.
+ * The Files tile shows now: asked for, in a conversation, and not in the Browser panel's place (one panel at a time).
+ * Viewers get saved Changes reviews only; the tile keeps its file tree and editor restricted to people who can steer.
  */
 export function filesShown(state = store.state) {
     // `browserAvailable()` (browser.js), which imports this module.
@@ -1224,7 +1240,7 @@ export function filesShown(state = store.state) {
         state.filesOpen &&
         state.conversationId !== null &&
         !state.missing &&
-        state.me?.role !== "viewer" &&
+        (state.me?.role !== "viewer" || state.server?.localReviews >= 1) &&
         !browsing
     );
 }

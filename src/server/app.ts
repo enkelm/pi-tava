@@ -112,6 +112,7 @@ import { Transcripts } from "./transcripts.ts";
 import { Watches } from "./watches.ts";
 import { Workspace } from "./workspace.ts";
 import { LanguageServices } from "./language-services.ts";
+import { Reviews } from "./reviews.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -268,6 +269,7 @@ export class PocketApp {
     readonly privateSessions = new PrivateSessions(this);
     readonly privateTerminals = new PrivateTerminals(this);
     readonly collab = new Collab(this);
+    readonly reviews = new Reviews(this);
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
     readonly schedules = new Schedules(this);
@@ -1759,6 +1761,8 @@ export class PocketApp {
                 now: Date.now(),
                 // Collaboration features: 2 adds roles, take turns, reactions, pins, notes, mentions, and push.
                 collab: 2,
+                // Saved local review rounds and multiplayer verdicts, distinct from live Changes.
+                localReviews: 1,
                 reactions: REACTIONS,
                 approvalRule: this.config.approvalRule,
                 // The model and thinking level new sessions start with, or null for the last one picked.

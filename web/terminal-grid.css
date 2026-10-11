@@ -151,6 +151,18 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+/* Only terminal controls suppress native label selection; the selection textarea stays copyable.
+ * The keyboard's parent pan-y policy still owns scroll/cancel semantics. */
+.terminal-keyboard button,
+.terminal-grid-clipboard-offer button,
+.terminal-grid-selection-actions button,
+.terminal-grid-selection-actions a {
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
 .terminal-keyboard-toolbar button {
     min-height: 36px;
     padding-inline: 10px;
@@ -175,7 +187,7 @@
     font-size: 20px;
 }
 
-.terminal-keyboard button:active:not(:disabled) {
+.terminal-keyboard button:active:not(:disabled):not([aria-pressed="true"]) {
     background: var(--pressed, #39414b);
 }
 
@@ -210,7 +222,7 @@
     text-align: center;
 }
 
-@media (hover: hover) {
+@media (hover: hover) and (pointer: fine) {
     .terminal-keyboard button:hover:not(:disabled):not([aria-pressed="true"]) {
         background: var(--hover, #39414b);
     }

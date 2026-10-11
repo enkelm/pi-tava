@@ -1,0 +1,504 @@
+/* Local review rounds extend the compact, square Changes interface. */
+.rv-panel {
+    min-width: 0;
+    padding-bottom: 0.7rem;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.82rem;
+    color: var(--body);
+}
+
+.rv-selector-row,
+.rv-input-row,
+.rv-heading,
+.rv-reviewer-head,
+.rv-comment-meta,
+.rv-actions,
+.rv-thread-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.65rem;
+    min-width: 0;
+}
+
+.rv-selector-row {
+    align-items: end;
+}
+
+.rv-selector {
+    display: flex;
+    flex: 1 1 12rem;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.rv-panel label,
+.rv-threads label {
+    color: var(--text);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+}
+
+.rv-panel :is(input, textarea, select),
+.rv-threads :is(input, textarea, select) {
+    min-width: 0;
+    min-height: 42px;
+    padding: 0.45rem 0.6rem;
+    border-radius: 0;
+    caret-color: var(--accent);
+}
+
+.rv-panel textarea,
+.rv-threads textarea {
+    display: block;
+    width: 100%;
+    resize: vertical;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
+.rv-input-row select {
+    flex: 1 1 10rem;
+    width: 0;
+}
+
+.rv-button.button {
+    min-height: 42px;
+    min-width: 42px;
+    max-width: 100%;
+    border-radius: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+}
+
+.rv-button.button:active:not(:disabled) {
+    transform: none;
+    background: var(--pressed);
+}
+
+.rv-button.button.primary:active:not(:disabled) {
+    background: var(--accent-fill);
+}
+
+.rv-panel :disabled,
+.rv-threads :disabled {
+    cursor: not-allowed;
+}
+
+.rv-panel :is(input, textarea, select):disabled,
+.rv-threads :is(input, textarea, select):disabled {
+    opacity: 0.65;
+}
+
+.rv-panel :focus-visible,
+.rv-threads :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.rv-details {
+    margin-top: 0.9rem;
+    min-width: 0;
+}
+
+.rv-heading h3 {
+    margin: 0;
+    flex: 1 1 12rem;
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.rv-panel h4,
+.rv-threads h4 {
+    margin: 0 0 0.4rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.rv-status {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border: 1px solid var(--line-strong);
+    color: var(--body);
+    font-size: 0.72rem;
+    line-height: 1.5;
+}
+
+.rv-status.open {
+    color: var(--accent);
+}
+
+.rv-hint,
+.rv-time,
+.rv-location {
+    color: var(--body);
+    font-size: 0.76rem;
+    overflow-wrap: anywhere;
+}
+
+p.rv-hint {
+    margin: 0.3rem 0;
+}
+
+.rv-time {
+    display: inline-block;
+    font-variant-numeric: tabular-nums;
+}
+
+.rv-notice,
+.rv-error {
+    margin: 0.55rem 0;
+    padding: 0.5rem 0.65rem;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
+.rv-notice {
+    background: var(--warn-soft);
+    color: var(--warn);
+    border: 1px solid var(--warn-line);
+}
+
+.rv-error {
+    background: var(--err-soft);
+    color: var(--err);
+    border: 1px solid var(--err-line);
+}
+
+.rv-form {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+    min-width: 0;
+    margin-top: 0.6rem;
+}
+
+.rv-form .rv-hint,
+.rv-form .rv-error {
+    margin: 0;
+}
+
+.rv-actions {
+    margin-top: 0.25rem;
+}
+
+.rv-reviewers,
+.rv-own-verdict,
+.rv-discussion {
+    margin-top: 0.9rem;
+}
+
+.rv-reviewer-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.rv-reviewer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.2rem 0.6rem;
+    min-width: 0;
+    padding: 0.25rem 0;
+    border-top: 1px solid var(--line);
+}
+
+.rv-reviewer-head {
+    flex: 1 1 10rem;
+    order: 0;
+}
+
+.rv-reviewer > .rv-actions {
+    flex: 0 1 auto;
+    order: 1;
+    margin-top: 0;
+}
+
+.rv-reviewer > :is(.rv-text, .rv-form, .rv-error) {
+    flex: 1 1 100%;
+    order: 2;
+}
+
+.rv-name {
+    color: var(--text);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.rv-verdict {
+    font-size: 0.76rem;
+    color: var(--body);
+}
+
+.rv-verdict.commented {
+    color: var(--accent);
+}
+
+.rv-verdict.approved {
+    color: var(--ok);
+}
+
+.rv-verdict.changes_requested {
+    color: var(--warn);
+}
+
+.rv-verdict.historical,
+.rv-reviewer.removed .rv-name {
+    color: var(--body);
+}
+
+.rv-text {
+    margin: 0.3rem 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--body);
+    line-height: 1.65;
+    max-width: 75ch;
+}
+
+.rv-assignment {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.6rem;
+    min-width: 0;
+}
+
+.rv-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: start;
+    gap: 0.4rem 1rem;
+    margin-top: 0.6rem;
+    padding-top: 0.35rem;
+    border-top: 1px solid var(--line);
+}
+
+.rv-audit {
+    flex: 1 1 8rem;
+}
+
+.rv-audit[open] {
+    flex-basis: 100%;
+}
+
+.rv-lifecycle {
+    flex: 1 1 10rem;
+    min-width: 0;
+}
+
+.rv-audit summary,
+.rv-manage summary,
+.rv-own-verdict summary,
+.rv-thread.resolved summary {
+    min-height: 42px;
+    padding: 0.55rem 0;
+    color: var(--body);
+    cursor: pointer;
+    font-size: 0.78rem;
+    overflow-wrap: anywhere;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .rv-audit summary:hover,
+    .rv-manage summary:hover,
+    .rv-own-verdict summary:hover,
+    .rv-thread.resolved summary:hover {
+        color: var(--text);
+    }
+}
+
+.rv-audit summary::marker,
+.rv-manage summary::marker,
+.rv-own-verdict summary::marker,
+.rv-thread.resolved summary::marker {
+    color: var(--muted);
+}
+
+.rv-audit ol {
+    margin: 0.1rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.rv-audit li {
+    padding: 0.35rem 0;
+    border-top: 1px solid var(--line);
+    font-size: 0.76rem;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.rv-audit .rv-time {
+    margin-left: 0.4rem;
+}
+
+.rv-threads {
+    min-width: 0;
+    font-size: 0.82rem;
+}
+
+.rv-threads.rv-empty {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem 0.65rem;
+}
+
+.rv-threads.rv-empty > h4 {
+    margin: 0;
+}
+
+.rv-threads.rv-empty > .rv-thread-list {
+    display: none;
+}
+
+.rv-threads.rv-empty > .rv-form {
+    flex: 1 1 100%;
+}
+
+.dr-file > .rv-threads,
+.dr-file > :not(.dv) > .rv-threads {
+    padding: 0.7rem;
+    border-top: 1px solid var(--line);
+}
+
+.rv-thread-list {
+    min-width: 0;
+}
+
+.rv-thread {
+    margin-top: 0.5rem;
+    border-top: 1px solid var(--line);
+    min-width: 0;
+}
+
+.rv-thread-body {
+    min-width: 0;
+    padding: 0.6rem 0;
+}
+
+.rv-thread.resolved > summary .icon {
+    vertical-align: middle;
+    margin-right: 0.3rem;
+}
+
+.rv-thread.resolved > summary .rv-hint {
+    margin-left: 0.45rem;
+}
+
+.rv-comment-meta {
+    align-items: baseline;
+}
+
+.rv-location {
+    display: block;
+    margin-bottom: 0.4rem;
+}
+
+.rv-replies {
+    margin-left: 0.7rem;
+    padding-left: 0.7rem;
+    border-left: 1px solid var(--line);
+}
+
+.rv-replies:empty {
+    display: none;
+}
+
+.rv-replies > .rv-comment {
+    margin-top: 0.7rem;
+}
+
+.rv-thread-controls {
+    align-items: start;
+    margin-top: 0.5rem;
+}
+
+.rv-reply-form {
+    flex: 1 1 100%;
+    margin-top: 0;
+}
+
+.rv-cancel-line {
+    align-self: start;
+    min-height: 42px;
+    padding: 0.35rem 0;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .rv-cancel-line:hover {
+        text-decoration: underline;
+        text-underline-offset: 2px;
+    }
+}
+
+/* Saved-snapshot line numbers are real, labeled buttons; keep existing number-column widths. */
+.dv-n.commentable {
+    padding: 0;
+}
+
+.dv-n.commentable::before {
+    content: none;
+}
+
+.dv-comment-line {
+    display: block;
+    width: 100%;
+    min-height: 24px;
+    padding: 0 0.45rem;
+    font: inherit;
+    color: var(--body);
+    text-align: right;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+}
+
+.dv-comment-line::before {
+    content: attr(data-n);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .dv-comment-line:hover {
+        color: var(--accent);
+        background: var(--hover);
+    }
+}
+
+.dv-comment-line:active {
+    background: var(--pressed);
+}
+
+.dv-comment-line:focus-visible {
+    position: relative;
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+@media (pointer: coarse) {
+    .rv-panel :is(input, textarea, select),
+    .rv-threads :is(input, textarea, select) {
+        font-size: 16px;
+    }
+
+    .dv-comment-line {
+        min-height: 40px;
+    }
+}
