@@ -35,8 +35,8 @@ import {
     PlanDoc,
     type PrWatch,
     ReactionsDoc,
-    ReviewDoc,
-    type ReviewRound,
+    CommentReviewDoc,
+    type ChangeReviews,
     type Schedule,
     ScheduleDoc,
     type SubagentRecord,
@@ -78,7 +78,7 @@ export const ROOM_DOCS = new Set(
         ScheduleDoc,
         GoalDoc,
         WatchDoc,
-        ReviewDoc,
+        CommentReviewDoc,
     ].map((doc) => doc.definition.kind),
 );
 /** A typing indicator lasts this long unless the browser renews it. */
@@ -314,7 +314,7 @@ export class Room {
     schedules: Record<string, Schedule> = {};
     goal: Goal | undefined;
     watch: PrWatch | undefined;
-    reviews: ReviewRound[] = [];
+    reviews: ChangeReviews = { threads: [], rev: 0 };
     /** Who is typing where, by user id. Memory only: it means nothing after a restart. */
     readonly #typing = new Map<string, { where: TypingPlace; timer: NodeJS.Timeout }>();
     parent: { id: ConversationId; title: string } | undefined;
@@ -369,9 +369,12 @@ export class Room {
         };
         this.goal = (await harness.snapshot(GoalDoc, this.id, context))?.goal;
         this.watch = (await harness.snapshot(WatchDoc, this.id, context))?.watch;
-        this.reviews = [
-            ...((await harness.snapshot(ReviewDoc, this.id, context))?.items ?? []),
-        ] as ReviewRound[];
+        const reviews = await harness.snapshot(CommentReviewDoc, this.id, context);
+
+        this.reviews = {
+            threads: [...(reviews?.threads ?? [])],
+            rev: reviews?.rev ?? 0,
+        } as ChangeReviews;
 
         if (owner !== undefined) {
             const siblings =
@@ -443,8 +446,11 @@ export class Room {
             this.goal = (value?.goal as Goal | undefined) ?? undefined;
         } else if (kind === WatchDoc.definition.kind) {
             this.watch = (value?.watch as PrWatch | undefined) ?? undefined;
-        } else if (kind === ReviewDoc.definition.kind) {
-            this.reviews = [...((value?.items as ReviewRound[]) ?? [])];
+        } else if (kind === CommentReviewDoc.definition.kind) {
+            this.reviews = {
+                threads: [...((value?.threads as ChangeReviews["threads"]) ?? [])],
+                rev: (value?.rev as number | undefined) ?? 0,
+            };
         }
 
         if (kind === AuthorsDoc.definition.kind) {

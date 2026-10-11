@@ -4,6 +4,7 @@
 import { Component } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { Avatar, initials, personColor } from "./avatar.js";
+import { reviewPeople } from "./reviews.js";
 import {
     actions,
     attempt,
@@ -20,6 +21,7 @@ import {
     openSheet,
     peopleDocked,
     revealEntry,
+    revealReviewReviewer,
     store,
     typing,
 } from "./store.js";
@@ -753,6 +755,40 @@ function PeopleRoster() {
     }`;
 }
 
+/** Review status belongs to people, whether or not their browser is still connected. */
+function ReviewPeople() {
+    if (!(store.state.server?.localReviews >= 2)) {
+        return null;
+    }
+
+    const people = reviewPeople();
+
+    if (people.length === 0) {
+        return null;
+    }
+
+    return html`<section class="rv-people" aria-label="Review statuses">
+        <h3>Reviews</h3>
+        <div class="rv-people-list">
+            ${people.map(
+                (person) => html`<button
+                    key=${person.userId}
+                    type="button"
+                    class="rv-person-link"
+                    aria-label=${`Show ${person.name}'s review`}
+                    onClick=${() => revealReviewReviewer(person.userId)}
+                >
+                    <${Avatar} person=${{ id: person.userId, name: person.name }} size=${22} />
+                    <strong>${person.name}${person.userId === store.state.me?.id ? " (you)" : ""}</strong>
+                    <span class="rv-person-status">
+                        ${person.unresolved > 0 ? `${person.unresolved} open` : "Resolved"}
+                    </span>
+                </button>`,
+            )}
+        </div>
+    </section>`;
+}
+
 /** Chat, pinned, and notes: the People sheet's on phones, the People panel's on wide screens. `ask` picks what shows first. */
 function PeopleTabs({ ask, focus }) {
     const { view, users } = store.state;
@@ -780,6 +816,7 @@ function PeopleTabs({ ask, focus }) {
     return html`<div class="people-content">
         <${PeopleRoster} />
         ${tabs}
+        <${ReviewPeople} />
         ${
             tab === "chat" &&
             featured &&

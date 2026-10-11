@@ -64,6 +64,7 @@ const DIFF_FLAGS = [
     "--no-color",
     "--src-prefix=a/",
     "--dst-prefix=b/",
+    "--no-relative",
 ];
 
 const EDITORS = new Set(["write", "edit"]);
@@ -227,8 +228,8 @@ export function parseNumstat(output: string): Map<string, { added?: number; remo
     const counts = new Map<string, { added?: number; removed?: number }>();
 
     for (let at = 0; at < fields.length; at++) {
-        const [added = "", removed = "", ...parts] = fields[at]!.split("\t");
-        const path = parts.join("\t");
+        const [added = "", removed = "", ...nameParts] = fields[at]!.split("\t");
+        const path = nameParts.join("\t");
 
         if (added === "") {
             continue;
@@ -260,7 +261,7 @@ async function versionOf(file: string): Promise<string | undefined> {
 
 /** Where a folder is in its repository, as git writes paths: `app/` for the folder app, empty at the top. */
 async function prefixOf(cwd: string): Promise<string> {
-    return (await git(cwd, ["rev-parse", "--show-prefix"])).trim();
+    return (await git(cwd, ["rev-parse", "--show-prefix"])).replace(/\n$/, "");
 }
 
 /**
@@ -275,7 +276,7 @@ export async function changesIn(
     let root: string;
 
     try {
-        root = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+        root = (await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
     } catch {
         const edits = piEdits(entries, cwd);
 
@@ -298,7 +299,10 @@ export async function changesIn(
     const prefix = onlyHere ? await prefixOf(cwd) : "";
     const changed = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    ).filter(({ path }) => path.startsWith(prefix));
+    ).filter(
+        ({ path, from }) =>
+            path.startsWith(prefix) && (from === undefined || from.startsWith(prefix)),
+    );
     const status = changed.slice(0, MAX_FILES);
     // Without a first commit there is nothing to compare with: every file is new.
     const counts =
@@ -375,15 +379,10 @@ export async function changesIn(
 /**
  * The diff of one changed file of the repository `cwd` is in, against the last commit; a new file's whole content.
  * Only files that git lists as changed: the path cannot point anywhere else. With `onlyHere`, both rename paths
- * must be in `cwd`. `completeBytes` returns a complete bounded diff or throws, never the viewer's truncated output.
+ * must be in `cwd`. Large diffs are truncated to the viewer's limit.
  */
-export async function diffOf(
-    cwd: string,
-    path: string,
-    onlyHere = false,
-    completeBytes?: number,
-): Promise<string> {
-    const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+export async function diffOf(cwd: string, path: string, onlyHere = false): Promise<string> {
+    const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
     const change = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
     ).find((each) => each.path === path);
@@ -407,26 +406,12 @@ export async function diffOf(
     // `--no-index` exits with 1 when the files differ, which is the point. A renamed file is both its paths: given
     // both, git shows what changed in it, not a whole new file.
     const paths = change.from === undefined ? [path] : [change.from, path];
-    const options = completeBytes === undefined ? {} : { maxBuffer: completeBytes + 1 };
     const diff =
         change.code === "??" || !hasHead
             ? await git(root, ["diff", "--no-index", "-U3", ...DIFF_FLAGS, "--", devNull, path], {
-                  ...options,
                   allowExit: [1],
               })
-            : await git(
-                  root,
-                  ["diff", "HEAD", "-M", "-U3", ...DIFF_FLAGS, "--", ...paths],
-                  options,
-              );
-
-    if (completeBytes !== undefined) {
-        if (Buffer.byteLength(diff) > completeBytes) {
-            throw new Error("The complete review diff exceeds the snapshot byte limit");
-        }
-
-        return diff;
-    }
+            : await git(root, ["diff", "HEAD", "-M", "-U3", ...DIFF_FLAGS, "--", ...paths]);
 
     return diff.length > MAX_DIFF
         ? `${diff.slice(0, MAX_DIFF)}\n… the rest of the diff is left out …\n`
@@ -439,7 +424,7 @@ export async function diffOf(
  * `cwd`. A renamed file is left alone, as undoing it changes two paths.
  */
 export async function revertFile(cwd: string, path: string, onlyHere = false): Promise<ChangeKind> {
-    const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+    const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
     const change = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
     ).find((each) => each.path === path);

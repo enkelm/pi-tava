@@ -19,6 +19,8 @@ The initial importer retained Durable as the only runtime and copied no Collie o
 
 The private journal display adapts text-block handling and text caps from Collie's `bridge/journal/{pi,text}.ts`. Its snapshot hierarchy and pane-read protocol follow `bridge/mux/herdr/client.ts`, at revision `cfaf95a93df3c9404a03f5f840bf222f0cd6c2ee`. Copyright (c) 2026 Altan Sarisin; the full MIT notice is preserved in [LICENSES/Collie-MIT.txt](LICENSES/Collie-MIT.txt). Pocket's projection/rendering and the existing local Herdr transport are reused rather than importing Collie's Bun/React stack.
 
+The theme-colored `web/herdr-mark.svg` adapts the ram-and-terminal silhouette from GPUI's `assets/icons/herdr-ui-icon-clean.svg` at revision `e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf`. It removes the ivory tile and retains the upstream Herdr logo attribution in its metadata; the Apache-2.0 license is preserved at `native/herdr-web/LICENSE-APACHE`.
+
 The first mirror used GPUI only as a reference. The user then chose GPUI's structured protocol for full Terminal mode and its desktop navigation as the design reference. `native/herdr-web` now links the unmodified `herdr-client` and `herdr-protocol` crates at GPUI revision `e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf`. Cargo.toml pins that Git revision and Cargo.lock pins transitive dependencies. Adapted protocol declarations, renderer rules and synthetic fixtures retain attribution. See [native/herdr-web/NOTICE.md](native/herdr-web/NOTICE.md), its [Apache-2.0 license](native/herdr-web/LICENSE-APACHE), and the preserved protocol notice.
 
 The Node gateway adds pinned `ws` for authenticated WebSocket transport. It does not add a second terminal emulator or source-journal writer. The reference worktrees remain unchanged.

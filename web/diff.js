@@ -123,12 +123,20 @@ const FILE_TEXTS = 40;
  * A file's lines in the folder now, for the lines a diff leaves out: read once per path while its diff stays the same.
  * null until read, and false when the file cannot give them (not text, or too big to read whole).
  */
-function useFileText(path, key, wanted) {
-    const id = `${store.state.conversationId}\u0000${path}\u0000${key}`;
+function useFileText(path, key, wanted, reviewPath = null) {
+    const conversationId = store.state.conversationId;
+    const readPath = reviewPath ?? path;
+    const id = [
+        conversationId,
+        reviewPath === null ? "file" : "review",
+        reviewCwd(),
+        readPath,
+        key,
+    ].join("\u0000");
     const [, setRead] = useState(0);
 
     useEffect(() => {
-        if (!wanted || !path || fileTexts.has(id)) {
+        if (!wanted || !readPath || fileTexts.has(id)) {
             return;
         }
 
@@ -146,14 +154,19 @@ function useFileText(path, key, wanted) {
             }
         };
 
-        // Cut short (a big file), the text cannot say what the lines past its end are.
-        actions.view(path).then(
-            (file) =>
-                keep(
-                    file.kind === "text" && !file.truncated
-                        ? file.text.replace(/\n$/, "").split("\n")
-                        : false,
-                ),
+        // Review context is a bounded, complete-text read of this changed file, not generic Files access.
+        // Other diff consumers keep the usual file reader, but cut-short text cannot reveal omitted lines.
+        const read =
+            reviewPath !== null
+                ? actions.reviewContext(conversationId, reviewPath).then((file) => file.text)
+                : actions
+                      .view(path)
+                      .then((file) =>
+                          file.kind === "text" && !file.truncated ? file.text : false,
+                      );
+
+        read.then(
+            (text) => keep(typeof text === "string" ? text.replace(/\n$/, "").split("\n") : false),
             () => keep(false),
         );
 
@@ -255,7 +268,7 @@ function LineNo({ line, side, onLine, onComment, kind = "" }) {
                 data-n=${number}
                 aria-label=${`Comment on ${side} line ${number}`}
                 title=${`Comment on ${side} line ${number}`}
-                onClick=${() => onComment({ side, line: number })}
+                onClick=${() => onComment({ side, line: number, context: line.text.slice(0, 1000) })}
             ></button>`
         }
     </td>`;
@@ -293,7 +306,7 @@ const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&
 const escapeText = (text) => text.replace(/[&<>"']/g, (char) => ESCAPES[char]);
 
 /** The rows of one hunk, unified: unchanged lines, then each run of removed lines before the lines that replaced it. */
-function UnifiedRows({ rows, colored, marks, onLine, onComment }) {
+function UnifiedRows({ rows, colored, marks, onLine, onComment, afterLine }) {
     const out = [];
 
     for (let at = 0; at < rows.length; at++) {
@@ -316,6 +329,7 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment }) {
                 />
                 <${Code} line=${row.left} colored=${colored} marks=${marks} kind="ctx" />
             </tr>`);
+            out.push(afterLine?.(row.left, row.right, 3));
             continue;
         }
 
@@ -340,6 +354,7 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment }) {
                     />
                     <${Code} line=${each.left} colored=${colored} marks=${marks} kind="del" />
                 </tr>`);
+                out.push(afterLine?.(each.left, null, 3));
             }
         }
 
@@ -355,6 +370,7 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment }) {
                     />
                     <${Code} line=${each.right} colored=${colored} marks=${marks} kind="add" />
                 </tr>`);
+                out.push(afterLine?.(null, each.right, 3));
             }
         }
 
@@ -365,7 +381,7 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment }) {
 }
 
 /** The rows of one hunk side by side: old on the left, new on the right, changed lines paired across. */
-function SplitRows({ rows, colored, marks, onLine, onComment }) {
+function SplitRows({ rows, colored, marks, onLine, onComment, afterLine }) {
     return rows.map((row) => {
         if (row.kind === "note") {
             return html`<tr class="dv-note">
@@ -411,7 +427,7 @@ function SplitRows({ rows, colored, marks, onLine, onComment }) {
                       />`
                     : html`<td class="dv-code none"></td>`
             }
-        </tr>`;
+        </tr>${afterLine?.(left, right, 4)}`;
     });
 }
 
@@ -459,14 +475,16 @@ function GapRow({ left, columns, onShow, first, last }) {
 }
 
 /**
- * One file's diff. `path` is where the file is now, for opening it at a line and for the lines the diff leaves out
- * (`expand`, read again whenever `version` changes); `head` draws its header bar, with `tools` (buttons) at its end;
- * `open` and `onToggle` fold it; `loading` says its lines are on their way, `error` that they did not come. Colors, pairs, and rows are worked out only
- * for a diff that is drawn, and the table is made again only when what it shows changes.
+ * One file's diff. `path` opens the file at a line; optional `reviewPath` reads omitted context through scoped review
+ * access instead of generic Files (`expand`, read again whenever `version` changes). `head` draws its header bar,
+ * with `tools` (buttons) at its end. `open` and `onToggle` fold it; `loading` says its lines are on their way,
+ * `error` that they did not come. Colors, pairs, and rows are worked out only for a diff that is drawn, and the table
+ * is made again only when what it shows changes.
  */
 function DiffFile({
     file,
     path = "",
+    reviewPath = null,
     version = "",
     expand = false,
     head = true,
@@ -479,16 +497,46 @@ function DiffFile({
     loading = false,
     error = null,
     onComment = null,
+    discussion = null,
 }) {
     const ref = useRef(null);
     const width = useWidth(ref);
     const split = layoutFor(width) === "split";
+
+    // The file header may be stuck above a scrolled diff. Its new composer lives at the file's
+    // natural start, so reveal the mounted form rather than leaving it offscreen above that header.
+    useLayoutEffect(() => {
+        if (!discussion?.anchor || discussion.anchor.line || !open) {
+            return;
+        }
+
+        const host = ref.current;
+        const form = host?.querySelector(":scope > .rv-threads > .rv-form");
+
+        if (!form) {
+            return;
+        }
+
+        const index = host.closest(".dr")?.querySelector(".dr-review-index");
+        const header = host.querySelector(".dv-head");
+        const margin =
+            (index?.getBoundingClientRect().height ?? 0) +
+            (header?.getBoundingClientRect().height ?? 0) +
+            8;
+
+        form.style.scrollMarginTop = `${margin}px`;
+        form.scrollIntoView({ block: "start", behavior: "instant" });
+    }, [discussion?.anchor, open]);
     const lang = langOf(file.path);
     const size = file.added + file.removed;
     const [force, setForce] = useState(false);
     const [shown, setShown] = useState({});
     const drawn =
-        open && !loading && !file.binary && file.hunks.length > 0 && (size <= BIG_DIFF || force);
+        open &&
+        !loading &&
+        !file.binary &&
+        file.hunks.length > 0 &&
+        (size <= BIG_DIFF || force || discussion?.threads.length > 0 || discussion?.target);
     const colored = useMemo(
         () => (drawn ? highlightHunks(file, lang) : new Map()),
         [drawn, file, lang],
@@ -500,12 +548,41 @@ function DiffFile({
     useEffect(() => setShown({}), [file]);
     // A diff cut short cannot say where its last hunk ends, so the lines after it are not known either.
     const canExpand =
-        expand && path !== "" && file.hunks.length > 0 && !wholeFile(file) && !file.truncated;
+        expand &&
+        Boolean(reviewPath ?? path) &&
+        file.hunks.length > 0 &&
+        !wholeFile(file) &&
+        !file.truncated;
     const asked = Object.values(shown).some((each) => each.top + each.bottom > 0);
+    const hunkLines = useMemo(() => {
+        const lines = new Map();
+
+        for (const hunk of file.hunks) {
+            for (const line of hunk.lines) {
+                if (line.type !== "note") {
+                    for (const side of ["old", "new"]) {
+                        if (line[side] !== undefined) {
+                            lines.set(`${side}:${line[side]}`, line);
+                        }
+                    }
+                }
+            }
+        }
+
+        return lines;
+    }, [file]);
+    const hunkLine = (anchor) => hunkLines.get(`${anchor.side}:${anchor.line}`);
+    const needsContext =
+        open &&
+        canExpand &&
+        discussion?.threads.some(
+            (thread) => thread.line && thread.cwd === discussion.cwd && !hunkLine(thread),
+        );
     const fetched = useFileText(
         path,
         version || `${file.added}:${file.removed}`,
-        canExpand && asked,
+        canExpand && (asked || needsContext),
+        reviewPath,
     );
     // The file as it is now must still read as the diff says, or its other lines would be shown in the wrong places.
     const matches = useMemo(
@@ -528,6 +605,158 @@ function DiffFile({
         () => (expandable ? gapsOf(file, text?.length ?? endOf(file)) : []),
         [file, expandable, text?.length],
     );
+
+    // Never attach an old comment to different text merely because its line number still exists.
+    const locate = (anchor) => {
+        if (!anchor?.line || typeof anchor.context !== "string") {
+            return null;
+        }
+
+        const line = hunkLine(anchor);
+
+        if (line) {
+            return line.text.slice(0, 1000) === anchor.context ? { line, gap: -1 } : null;
+        }
+
+        if (!text || !expandable) {
+            return null;
+        }
+
+        for (let index = 0; index < gaps.length; index++) {
+            const gap = gaps[index];
+            const number = anchor.side === "old" ? anchor.line + gap.shift : anchor.line;
+
+            if (
+                number >= gap.from &&
+                number <= gap.to &&
+                text[number - 1]?.slice(0, 1000) === anchor.context
+            ) {
+                return {
+                    line: {
+                        type: "ctx",
+                        old: number - gap.shift,
+                        new: number,
+                        text: text[number - 1],
+                    },
+                    gap: index,
+                };
+            }
+        }
+
+        return null;
+    };
+
+    const placed = new Map();
+    const inlineThreads = new Map();
+    const outdated = [];
+    const fileThreads = [];
+    const waitingForContext = needsContext && fetched === null;
+
+    for (const thread of discussion?.threads ?? []) {
+        if (thread.cwd !== discussion.cwd) {
+            outdated.push(thread);
+        } else if (!thread.line) {
+            fileThreads.push(thread);
+        } else {
+            const location = locate(thread);
+
+            if (location) {
+                placed.set(thread.id, location);
+                const key = `${thread.side}:${thread.line}`;
+                const group = inlineThreads.get(key) ?? [];
+
+                group.push(thread);
+                inlineThreads.set(key, group);
+            } else if (!loading && !waitingForContext) {
+                outdated.push(thread);
+            }
+        }
+    }
+
+    const anchor = discussion?.anchor;
+    const anchorLocation = locate(anchor);
+    const afterLine = discussion
+        ? (left, right, columns) =>
+              [
+                  ["old", left],
+                  ["new", right],
+              ].map(([side, line]) => {
+                  const number = line?.[side];
+
+                  if (number === undefined) {
+                      return null;
+                  }
+
+                  const threads = inlineThreads.get(`${side}:${number}`) ?? [];
+                  const composing =
+                      anchorLocation && anchor?.side === side && anchor.line === number;
+
+                  if (threads.length === 0 && !composing) {
+                      return null;
+                  }
+
+                  return html`<tr class="dv-review-row" key=${`${side}:${number}`}>
+                      <td colspan=${columns}>
+                          <${ReviewThreads}
+                              path=${file.path}
+                              side=${side}
+                              line=${number}
+                              context=${line.text.slice(0, 1000)}
+                              threads=${[]}
+                              composing=${Boolean(composing)}
+                              onCancel=${discussion.onCancel}
+                          />
+                          <${ReviewThreads}
+                              path=${file.path}
+                              side=${side}
+                              line=${number}
+                              context=${line.text.slice(0, 1000)}
+                              threads=${threads}
+                          />
+                      </td>
+                  </tr>`;
+              })
+        : null;
+    const headerThreads =
+        discussion &&
+        html`
+        <${ReviewThreads}
+            key="file-composer"
+            path=${file.path}
+            threads=${[]}
+            composing=${Boolean(anchor && !anchor.line)}
+            onCancel=${discussion.onCancel}
+        />
+        <${ReviewThreads} key="file" path=${file.path} threads=${fileThreads} />
+        ${outdated.map(
+            (thread) => html`<${ReviewThreads}
+            key=${thread.id}
+            path=${file.path}
+            side=${thread.side ?? null}
+            line=${thread.line ?? null}
+            context=${thread.context ?? ""}
+            threads=${[thread]}
+            outdated=${true}
+        />`,
+        )}
+        ${
+            !loading &&
+            !waitingForContext &&
+            anchor?.line &&
+            !anchorLocation &&
+            html`<${ReviewThreads}
+            key="outdated-composer"
+            path=${file.path}
+            side=${anchor.side}
+            line=${anchor.line}
+            context=${anchor.context}
+            threads=${[]}
+            composing=${true}
+            outdated=${true}
+            onCancel=${discussion.onCancel}
+        />`
+        }
+    `;
 
     const table = useMemo(() => {
         if (!drawn) {
@@ -567,6 +796,8 @@ function DiffFile({
                 colored=${extra}
                 marks=${none}
                 onLine=${onLine}
+                onComment=${onComment}
+                afterLine=${afterLine}
             />`;
         };
 
@@ -594,17 +825,40 @@ function DiffFile({
                 </tr>`;
             }
 
-            const { top, bottom, left } = gapLines(gap, shown[index], text);
+            const { top, bottom } = gapLines(gap, shown[index], text);
+            const from = gap.from + top.length;
+            const to = gap.to - bottom.length;
+            // Reveal commented context without drawing thousands of unrelated hidden lines.
+            const extra = new Map();
 
-            return html`${contextRows(top)}
-                <${GapRow}
-                    left=${left}
-                    columns=${columns}
-                    first=${index === 0}
-                    last=${index === gaps.length - 1}
-                    onShow=${(how) => show(index, how)}
-                />
-                ${contextRows(bottom)}`;
+            for (const location of [...placed.values(), anchorLocation]) {
+                if (
+                    location?.gap === index &&
+                    location.line.new >= from &&
+                    location.line.new <= to
+                ) {
+                    extra.set(location.line.new, location.line);
+                }
+            }
+
+            let next = from;
+            const middle = [];
+            const hidden = (start, end) => html`<${GapRow}
+                left=${end - start + 1}
+                columns=${columns}
+                first=${index === 0}
+                last=${index === gaps.length - 1}
+                onShow=${(how) => show(index, how)}
+            />`;
+
+            for (const [number, line] of [...extra].sort(([a], [b]) => a - b)) {
+                middle.push(hidden(next, number - 1), contextRows([line]));
+                next = number + 1;
+            }
+
+            middle.push(hidden(next, to));
+
+            return html`${contextRows(top)}${middle}${contextRows(bottom)}`;
         };
 
         /** Hidden lines still hidden before hunk `index`: none once a gap is shown whole, so its header goes too. */
@@ -645,6 +899,7 @@ function DiffFile({
                         marks=${marks}
                         onLine=${onLine}
                         onComment=${onComment}
+                        afterLine=${afterLine}
                     />
                 </tbody>`,
             )}
@@ -664,6 +919,7 @@ function DiffFile({
         path,
         lang,
         onComment,
+        discussion,
     ]);
 
     let body;
@@ -706,8 +962,10 @@ function DiffFile({
     return html`<section
         class=${`dv ${diffPrefs.wrap ? "wrap" : ""} ${open ? "" : "folded"} ${viewed ? "viewed" : ""}`}
         ref=${ref}
+        data-review-ready=${!loading && !waitingForContext ? "true" : "false"}
     >
         ${head && html`<${FileHead} file=${file} tools=${tools} viewed=${viewed} onViewed=${onViewed} open=${open} onToggle=${onToggle} note=${note} />`}
+        ${open && headerThreads}
         ${open ? body : error && html`<p class="dv-empty err">${error}</p>`}
     </section>`;
 }
@@ -738,7 +996,7 @@ function FileHead({ file, tools, viewed, onViewed, open, onToggle, note }) {
             ? html`<span class="dv-dir dv-was">${file.oldPath} →</span><${PathLabel} path=${file.path} />`
             : html`<${PathLabel} path=${file.path} />`;
 
-    return html`<header class="dv-head">
+    return html`<header class="dv-head" style="top:var(--review-index-height,0px)">
         ${
             onToggle &&
             html`<button
@@ -789,7 +1047,7 @@ export function DiffBlock({ text, path = "", bare = false }) {
         ${files.map(
             (file) => html`<${DiffFile}
                 file=${file}
-                path=${bare ? path : ""}
+                path=${bare && canSteer() ? path : ""}
                 head=${!bare}
             />`,
         )}
@@ -860,9 +1118,19 @@ const BUSY_MAX = 8000;
 /** What changed, per conversation: the last answer, and the request on its way, shared by everything that shows it. */
 const changesCache = new Map();
 
-/** Ask again for what changed in a conversation's folder, at most once at a time. */
+const commentsEnabled = () => store.state.server?.localReviews >= 2;
+const reviewCwd = () => store.state.view.agent?.cwd ?? store.state.view.conversation?.cwd ?? "";
+const changesKey = (id) =>
+    `${id}\u0000${commentsEnabled() ? "review" : "working"}\u0000${reviewCwd()}`;
+
+/** Ask again for scoped Changes, using review-only reads for everyone on new servers. */
 export function reloadChanges(id = store.state.conversationId) {
-    const known = changesCache.get(id) ?? { data: null, error: null, pending: null };
+    if (id === null || (!commentsEnabled() && !canSteer())) {
+        return Promise.resolve();
+    }
+
+    const key = changesKey(id);
+    const known = changesCache.get(key) ?? { data: null, error: null, pending: null };
 
     if (known.pending) {
         return known.pending;
@@ -870,12 +1138,13 @@ export function reloadChanges(id = store.state.conversationId) {
 
     // The conversation's newest entry when it asked: nothing newer, and Pi quiet, what it said still holds.
     const entry = id === store.state.conversationId ? store.state.view.order?.at(-1) : undefined;
+    const read = commentsEnabled() ? actions.reviewChanges(id) : actions.changes(id);
 
-    known.pending = actions.changes(id).then(
+    known.pending = read.then(
         (data) => Object.assign(known, { data, error: null, pending: null, at: Date.now(), entry }),
         (failure) => Object.assign(known, { error: failure.message, pending: null }),
     );
-    changesCache.set(id, known);
+    changesCache.set(key, known);
     known.pending.finally(() => store.set({}));
 
     return known.pending;
@@ -883,34 +1152,36 @@ export function reloadChanges(id = store.state.conversationId) {
 
 /**
  * What changed in this conversation's folder, `{ changes, error }`, fetched and kept current only while `live`.
- * Saved-only reviewers never read the working checkout; Pi's edits show up on their own for people who can steer.
+ * Review readers use the cwd-scoped endpoint; older servers still require steering.
  * A tab out of sight waits until it shows again; with nothing new since the last answer and Pi quiet, the answer
  * holds (Refresh asks again).
  */
 export function useChanges(live = true) {
     const id = store.state.conversationId;
-    const known = changesCache.get(id);
+    const key = changesKey(id);
+    const allowed = commentsEnabled() || canSteer();
+    const known = allowed ? changesCache.get(key) : null;
     const lastEntry = store.state.view.order?.at(-1);
     const busy = store.state.view.live?.busy;
 
     useEffect(() => {
-        if (live && !changesCache.get(id)?.data) {
+        if (live && allowed && !changesCache.get(key)?.data) {
             reloadChanges(id);
         }
-    }, [id, live]);
+    }, [key, live, allowed]);
     // The first look after it shows (or turns live) always asks: the folder can have changed outside the conversation
     // (an editor, a terminal, another session), and so can it while the tab was out of sight.
     const first = useRef(true);
 
     useEffect(() => {
-        if (!live) {
+        if (!live || !allowed) {
             first.current = true;
 
             return;
         }
 
         const look = (always) => {
-            const known = changesCache.get(id);
+            const known = changesCache.get(key);
 
             if (document.hidden || (!always && !busy && known?.data && known.entry === lastEntry)) {
                 return;
@@ -921,7 +1192,7 @@ export function useChanges(live = true) {
 
         const shown = () => !document.hidden && look(true);
         // While Pi works, entries come quickly: look less often then, but at least every few seconds.
-        const since = Date.now() - (changesCache.get(id)?.at ?? 0);
+        const since = Date.now() - (changesCache.get(key)?.at ?? 0);
         const wait = busy ? Math.max(0, Math.min(BUSY_WAIT, BUSY_MAX - since)) : QUIET_WAIT;
         const timer = setTimeout(() => {
             look(first.current);
@@ -934,7 +1205,7 @@ export function useChanges(live = true) {
             clearTimeout(timer);
             document.removeEventListener("visibilitychange", shown);
         };
-    }, [lastEntry, busy, live, id]);
+    }, [lastEntry, busy, live, key, allowed]);
 
     return { changes: known?.data ?? null, error: known?.error ?? null };
 }
@@ -953,8 +1224,11 @@ const refreshes = new Map();
 const diffKey = (id, file, base) =>
     [
         id,
+        commentsEnabled() ? "review" : "working",
+        reviewCwd(),
         file.path,
         file.kind,
+        file.discussionOnly ? "comments" : "diff",
         file.version ?? "",
         `${file.added}:${file.removed}`,
         base ?? "",
@@ -987,18 +1261,22 @@ const DIFF_FETCHES = 4;
 let fetching = 0;
 const waiting = [];
 
-function fetchDiff(id, path, reviewId = null) {
+function fetchDiff(id, path, review = commentsEnabled()) {
     return new Promise((resolve, reject) => {
         const run = async () => {
             fetching++;
 
             try {
-                if (reviewId !== null) {
-                    const result = await actions.reviewDiff(id, reviewId, path);
+                if (review) {
+                    const result = await actions.reviewDiff(id, path);
 
                     resolve(result.diff);
 
                     return;
+                }
+
+                if (!canSteer()) {
+                    throw new Error("This server does not support review reads yet.");
                 }
 
                 const response = await fetch(
@@ -1166,13 +1444,15 @@ function ReviewFile({
     onViewed,
     onLoaded,
     onChanged,
-    review = null,
+    onOpen,
+    threads = [],
+    target = null,
+    commenting = false,
 }) {
     const ref = useRef(null);
-    const key = review
-        ? `${id}\u0000snapshot\u0000${review.id}\u0000${file.path}`
-        : diffKey(id, file, base);
-    const [entry, setEntry] = useState(() => diffCache.get(key) ?? null);
+    const key = diffKey(id, file, base);
+    const [loaded, setEntry] = useState(() => diffCache.get(key) ?? null);
+    const entry = loaded?.key === key ? loaded : null;
     const [error, setError] = useState(null);
     const [near, setNear] = useState(false);
     const [undoing, setUndoing] = useState(false);
@@ -1205,7 +1485,13 @@ function ReviewFile({
             return;
         }
 
-        if (!near) {
+        if (file.discussionOnly) {
+            setEntry({ key, parsed: null, print: "" });
+
+            return;
+        }
+
+        if (!near && !target) {
             return;
         }
 
@@ -1213,10 +1499,10 @@ function ReviewFile({
 
         setEntry(null);
         setError(null);
-        fetchDiff(id, file.path, review?.id ?? null).then(
+        fetchDiff(id, file.path).then(
             (text) => {
                 const parsed = parseDiff(text, file.path).files[0] ?? null;
-                const made = { parsed, print: fingerprint(text) };
+                const made = { key, parsed, print: fingerprint(text) };
 
                 keepDiff(key, made);
 
@@ -1231,7 +1517,7 @@ function ReviewFile({
         return () => {
             live = false;
         };
-    }, [key, near]);
+    }, [key, near, Boolean(target)]);
 
     // The same object while nothing changed: the diff's colors and rows are worked out once per version.
     const shown = useMemo(
@@ -1272,8 +1558,25 @@ function ReviewFile({
               })
             : setUndoing(true);
 
+    const comment = (next) => {
+        onOpen();
+        setAnchor(next);
+    };
+
     const tools = html`${
-        !review &&
+        commenting &&
+        !file.discussionOnly &&
+        html`<button
+        class="icon-button dv-tool"
+        type="button"
+        title="Comment on file"
+        aria-label=${`Comment on ${file.path}`}
+        onClick=${() => comment({})}
+    >
+        <${Icon} name="chat" size=${15} />
+    </button>`
+    }${
+        !file.discussionOnly &&
         canSteer() &&
         file.kind !== "deleted" &&
         html`<button
@@ -1287,7 +1590,7 @@ function ReviewFile({
         </button>`
     }
     ${
-        !review &&
+        !file.discussionOnly &&
         canSteer() &&
         file.kind !== "renamed" &&
         html`<button
@@ -1301,32 +1604,39 @@ function ReviewFile({
         </button>`
     }`;
 
-    return html`<div class="dr-file" ref=${ref} data-path=${file.path}>
+    return html`<div
+        class="dr-file"
+        ref=${ref}
+        data-path=${file.path}
+        style="scroll-margin-top:calc(var(--review-index-height,0px) + .3rem)"
+    >
         <${DiffFile}
             file=${shown}
-            path=${review || !canSteer() ? "" : `${root}/${file.path}`}
-            version=${file.version ?? ""}
-            loading=${!entry}
+            path=${file.discussionOnly || !canSteer() ? "" : `${root}/${file.path}`}
+            reviewPath=${commenting && !file.discussionOnly ? file.path : null}
+            version=${key}
+            loading=${!entry && !error}
             error=${error}
-            expand=${!review && canSteer()}
-            onComment=${review?.status === "open" ? setAnchor : null}
+            expand=${!file.discussionOnly && (commenting || canSteer())}
+            onComment=${commenting && !file.discussionOnly ? comment : null}
+            discussion=${
+                commenting
+                    ? {
+                          threads,
+                          cwd: file.discussionOnly ? null : reviewCwd(),
+                          anchor,
+                          target,
+                          onCancel: () => setAnchor(null),
+                      }
+                    : null
+            }
             tools=${tools}
             viewed=${viewed}
             onViewed=${(on) => onViewed(file.path, on ? (entry?.print ?? "?") : undefined)}
             open=${open && !viewed}
             onToggle=${onToggle}
-            note=${html`${file.byPi && html`<span class="chip dv-chip">Pi</span>`}${stale && html`<span class="chip dv-chip warn" title="It changed after you marked it viewed">changed</span>`}`}
+            note=${html`${file.byPi && html`<span class="chip dv-chip">Pi</span>`}${file.discussionOnly && html`<span class="chip dv-chip">outdated</span>`}${stale && html`<span class="chip dv-chip warn" title="It changed after you marked it viewed">changed</span>`}`}
         />
-        ${
-            review &&
-            html`<${ReviewThreads}
-                key=${review.id}
-                review=${review}
-                path=${file.path}
-                anchor=${anchor}
-                onAnchorChange=${setAnchor}
-            />`
-        }
     </div>`;
 }
 
@@ -1338,17 +1648,18 @@ function ReviewFile({
  */
 export function DiffReview({ active = true, autoFocus = false, covering = false }) {
     const id = store.state.conversationId;
-    const { server, view } = store.state;
-    const cwd = view.agent?.cwd ?? view.conversation?.cwd ?? "";
-    const { changes: workingChanges, error } = useChanges(active && canSteer());
-    const liveChanges = canSteer() ? workingChanges : null;
-    const [selected, setSelected] = useState({ id, reviewId: null });
-    const selectedId = selected.id === id ? selected.reviewId : null;
-    const review = store.state.view.reviews.find((round) => round.id === selectedId) ?? null;
-    const changes = selectedId === null ? liveChanges : review?.snapshot;
-    const viewId = review ? `${id}@${review.id}` : id;
-    const selectReview = (reviewId) => setSelected({ id, reviewId });
-    const load = () => (canSteer() ? reloadChanges(id) : undefined);
+    const { server } = store.state;
+    const commenting = commentsEnabled();
+    const allowed = commenting || canSteer();
+    const { changes: workingChanges, error } = useChanges(active && allowed);
+    const changes = allowed ? workingChanges : null;
+    const threads = commenting ? (store.state.view.reviews?.threads ?? []) : [];
+    const cwd = reviewCwd();
+    const viewId = commenting ? `${id}@${cwd}` : id;
+    const target =
+        store.state.reviewTarget?.conversationId === id ? store.state.reviewTarget : null;
+    const targetThread = threads.find((thread) => thread.id === target?.threadId);
+    const load = () => reloadChanges(id);
 
     const refresh = () => {
         forgetDiffs(id);
@@ -1361,10 +1672,33 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
     const [onlyPi, setOnlyPi] = useState(false);
     const [current, setCurrent] = useState(null);
     const [treeOpen, setTreeOpen] = useState(false);
+    const [composingGeneral, setComposingGeneral] = useState(false);
     const prints = useRef({});
     const ref = useRef(null);
+    const indexRef = useRef(null);
     const width = useWidth(ref);
     const wide = width >= 720;
+
+    useLayoutEffect(() => {
+        const index = indexRef.current;
+        const host = ref.current;
+
+        if (!index || !host) {
+            return;
+        }
+
+        const measure = () =>
+            host.style.setProperty(
+                "--review-index-height",
+                `${index.getBoundingClientRect().height}px`,
+            );
+        const observer = new ResizeObserver(measure);
+
+        measure();
+        observer.observe(index);
+
+        return () => observer.disconnect();
+    }, [id, commenting]);
 
     // The tree of changed files over the diffs, where they do not fit side by side, in a tile that covers the screen:
     // back folds it away.
@@ -1379,6 +1713,7 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
         setFilter("");
         setOnlyPi(false);
         setTreeOpen(false);
+        setComposingGeneral(false);
         prints.current = {};
     }, [viewId]);
     // Keys reach the review when someone asks for it (its tab picked, the tile opened on it, the sheet), away from touch
@@ -1439,7 +1774,24 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
         });
     }, [changes]);
 
-    const files = (changes?.files ?? [])
+    // Committed, reverted, renamed or out-of-scope paths keep their conversations visible.
+    const all = [...(changes?.files ?? [])];
+    const paths = new Set(all.map((file) => file.path));
+
+    for (const thread of threads) {
+        if (thread.path && !paths.has(thread.path)) {
+            paths.add(thread.path);
+            all.push({
+                path: thread.path,
+                kind: "modified",
+                added: 0,
+                removed: 0,
+                discussionOnly: true,
+            });
+        }
+    }
+
+    const files = all
         .filter(
             (file) =>
                 (!onlyPi || file.byPi) &&
@@ -1456,12 +1808,122 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
     const seen = files.filter(isViewed).length;
     const added = files.reduce((sum, file) => sum + (file.added ?? 0), 0);
     const removed = files.reduce((sum, file) => sum + (file.removed ?? 0), 0);
-    const tree = useMemo(() => treeOf(files), [changes, filter, onlyPi]);
+    const tree = useMemo(() => treeOf(files), [changes, threads, filter, onlyPi]);
+    const jumped = useRef(null);
+    const jumpRequest = useRef(null);
+
+    const jumpToThread = (thread, { reply = false } = {}) => {
+        setFilter("");
+        setOnlyPi(false);
+        setTreeOpen(false);
+
+        if (thread.path) {
+            setViewed(thread.path, undefined);
+            setFolded((before) => ({ ...before, [thread.path]: false }));
+            setCurrent(thread.path);
+        }
+
+        const request = {
+            conversationId: id,
+            threadId: thread.id,
+            reply,
+            n: (store.state.reviewTarget?.n ?? 0) + 1,
+        };
+
+        jumpRequest.current = request;
+        store.set({ reviewTarget: request });
+    };
+
+    // Wait for actual renders, not a guessed delay: lazy diffs, hidden context and thread disclosure
+    // all settle before the one scroll. The deadline only bounds a failed load and never triggers a scroll.
+    useEffect(() => {
+        if (
+            !active ||
+            !targetThread ||
+            jumpRequest.current !== target ||
+            !ref.current ||
+            (!changes && !error)
+        ) {
+            return;
+        }
+
+        const token = `${id}:${target.threadId}:${target.n}`;
+
+        if (jumped.current === token) {
+            return;
+        }
+
+        let frame = 0;
+        let done = false;
+        const host = ref.current;
+        const observer = new MutationObserver(() => schedule());
+
+        const stop = () => {
+            done = true;
+            observer.disconnect();
+            cancelAnimationFrame(frame);
+            clearTimeout(deadline);
+        };
+
+        const check = () => {
+            frame = 0;
+
+            if (done) {
+                return;
+            }
+
+            const element = host.querySelector(`#review-thread-${CSS.escape(target.threadId)}`);
+            const file = element?.closest(".dv");
+            const replyInput = target.reply ? element?.querySelector(".rv-form textarea") : null;
+
+            if (
+                !element ||
+                (target.reply && !replyInput) ||
+                (file && (file.dataset.reviewReady !== "true" || file.classList.contains("folded")))
+            ) {
+                return;
+            }
+
+            const index = host.querySelector(".dr-review-index");
+            const margin =
+                (index?.getBoundingClientRect().height ?? 0) +
+                (file?.querySelector(".dv-head")?.getBoundingClientRect().height ?? 0) +
+                16;
+
+            element.style.scrollMarginTop = `${margin}px`;
+            element.scrollIntoView({ block: "start", behavior: "instant" });
+            (replyInput ?? element).focus({ preventScroll: true });
+            jumped.current = token;
+            stop();
+        };
+
+        const schedule = () => {
+            if (!frame && !done) {
+                frame = requestAnimationFrame(check);
+            }
+        };
+
+        const deadline = setTimeout(() => {
+            stop();
+            notify("info", "The comment could not be located. Refresh Changes and try again.");
+        }, 30000);
+
+        observer.observe(host, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["data-review-ready", "aria-expanded"],
+        });
+        schedule();
+
+        return stop;
+    }, [active, id, target?.n, Boolean(changes), error]);
 
     const scrollTo = (path) => {
         const element = ref.current?.querySelector(`.dr-file[data-path="${CSS.escape(path)}"]`);
 
         setCurrent(path);
+        setViewed(path, undefined);
         setFolded((all) => ({ ...all, [path]: false }));
 
         if (!wide) {
@@ -1518,18 +1980,29 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
             // The first row of each run of changes, in either layout, and where a row lands when gone to: below the
             // file's header, by the rows' scroll margin.
             const changed = ".dv-row.add, .dv-row.del, .dv-row.change";
-            const starts = [...ref.current.querySelectorAll(changed)].filter(
-                (row) => !row.previousElementSibling?.matches(changed),
-            );
+            const starts = [...ref.current.querySelectorAll(changed)].filter((row) => {
+                let previous = row.previousElementSibling;
+
+                while (previous?.matches(".dv-review-row")) {
+                    previous = previous.previousElementSibling;
+                }
+
+                return !previous?.matches(changed);
+            });
             const scroller = ref.current.closest(".files-body, .sheet-body");
             const margin = starts[0] ? parseFloat(getComputedStyle(starts[0]).scrollMarginTop) : 0;
-            const top = (scroller?.getBoundingClientRect().top ?? 0) + (margin || 0);
+            const reviewHeight = indexRef.current?.getBoundingClientRect().height ?? 0;
+            const top = (scroller?.getBoundingClientRect().top ?? 0) + (margin || 0) + reviewHeight;
             const target =
                 key === "n"
                     ? starts.find((row) => row.getBoundingClientRect().top > top + 2)
                     : starts.findLast((row) => row.getBoundingClientRect().top < top - 2);
 
-            target?.scrollIntoView({ block: "start", behavior: "smooth" });
+            if (target) {
+                target.style.scrollMarginTop = `${(margin || 0) + reviewHeight}px`;
+                target.scrollIntoView({ block: "start", behavior: "smooth" });
+                target.style.removeProperty("scroll-margin-top");
+            }
         } else if (key === "v" && here) {
             const path = here.dataset.path;
 
@@ -1549,42 +2022,63 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
     };
 
     const reviewsPanel =
-        store.state.server?.localReviews >= 1 &&
-        html`<${ReviewsPanel}
-        key=${id}
-        active=${active}
-        liveChanges=${liveChanges}
-        selectedId=${selectedId}
-        onSelect=${selectReview}
-    />`;
+        commenting &&
+        html`<div
+        class="dr-review-index"
+        ref=${indexRef}
+        style="position:sticky;top:0;z-index:4;background:var(--bg)"
+    >
+        <${ReviewsPanel} key=${id} active=${active} onJump=${jumpToThread} />
+    </div>`;
+    const general =
+        commenting &&
+        html`<div class="dr-general">
+        ${
+            !composingGeneral &&
+            html`<button
+            type="button"
+            class="button ghost small rv-button"
+            aria-label="Comment on all changes"
+            onClick=${() => setComposingGeneral(true)}
+        >
+            <${Icon} name="chat" size=${15} />
+            Comment on all changes
+        </button>`
+        }
+        <${ReviewThreads}
+            key=${`${id}:general`}
+            threads=${threads.filter((thread) => !thread.path)}
+            composing=${composingGeneral}
+            onCancel=${() => setComposingGeneral(false)}
+        />
+    </div>`;
 
-    if (!changes) {
+    if (!changes && !error) {
         return html`<div class="dr" ref=${ref}>
             ${reviewsPanel}
+            ${general}
             ${
-                selectedId !== null || !canSteer()
-                    ? html`<p class="dv-empty muted">Select a review round to read its saved diff.</p>`
-                    : error
-                      ? html`<p class="dv-empty err">${error}</p>`
-                      : html`<${Loader} label="Asking git" />`
+                allowed
+                    ? html`<${Loader} label="Asking git" />`
+                    : html`<p class="dv-empty muted">This server does not support live review comments yet.</p>`
             }
         </div>`;
     }
 
-    const all = changes.files;
-
     return html`<div class=${`dr ${wide ? "wide" : ""}`} ref=${ref} tabindex="-1" onKeyDown=${onKey}>
         ${reviewsPanel}
+        ${general}
+        ${error && html`<p class="dv-empty err" role="alert">${error}</p>`}
         <div class="dr-summary">
             ${
-                changes.repo
+                changes?.repo
                     ? html`<span class="dr-where mono">
                           ${
                               changes.repo.root !== cwd &&
                               html`<span class="dr-path">${shortPath(changes.repo.root, server?.home)}</span>`
                           }${
                               changes.repo.branch &&
-                              (!review && branchAvailable()
+                              (canSteer() && branchAvailable()
                                   ? html`<button
                                         class="dr-branch"
                                         type="button"
@@ -1613,7 +2107,7 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
             <span class="dr-actions">
                 ${all.length > 0 && html`<${LayoutSwitch} />`}
                 ${
-                    canSteer() &&
+                    allowed &&
                     html`<button
                         class="icon-button dv-tool"
                         type="button"
@@ -1665,8 +2159,8 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
             </div>`
         }
         ${
-            changes.repo &&
-            all.length === 0 &&
+            changes?.repo &&
+            changes.files.length === 0 &&
             html`<div class="dr-clean">
                 <${Icon} name="check" size=${22} />
                 <p>No uncommitted changes${changes.repo.branch ? ` on ${changes.repo.branch}` : ""}.</p>
@@ -1677,7 +2171,11 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
             html`<div class="dr-main">
                 ${
                     (wide || treeOpen) &&
-                    html`<nav class="dr-tree" aria-label="Changed files">
+                    html`<nav
+                        class="dr-tree"
+                        aria-label="Changed files"
+                        style="top:var(--review-index-height,0px)"
+                    >
                         <${TreeNode}
                             node=${tree}
                             depth=${0}
@@ -1693,10 +2191,16 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
                         (file) => html`<${ReviewFile}
                             key=${`${viewId}:${file.path}`}
                             id=${id}
-                            review=${review}
                             file=${file}
-                            root=${changes.repo.root}
-                            base=${changes.repo.head}
+                            root=${changes?.repo?.root ?? cwd}
+                            base=${changes?.repo?.head}
+                            commenting=${commenting}
+                            threads=${threads.filter((thread) => thread.path === file.path)}
+                            target=${targetThread?.path === file.path ? target : null}
+                            onOpen=${() => {
+                                setViewed(file.path, undefined);
+                                setFolded((each) => ({ ...each, [file.path]: false }));
+                            }}
                             open=${!folded[file.path]}
                             viewedAs=${viewed[file.path]}
                             onToggle=${() => {
@@ -1730,7 +2234,7 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
                         />`,
                     )}
                     ${
-                        changes.more > 0 &&
+                        changes?.more > 0 &&
                         html`<p class="muted small">
                             And ${changes.more} more changed ${changes.more === 1 ? "file" : "files"}, not listed here.
                         </p>`
@@ -1739,7 +2243,7 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
             </div>`
         }
         ${
-            changes.piOnly.length > 0 &&
+            changes?.piOnly?.length > 0 &&
             html`<div class="dr-pionly">
                 <div class="group-title">${changes.repo ? "Pi also edited (no uncommitted change)" : "Pi wrote or edited"}</div>
                 ${changes.piOnly.map(

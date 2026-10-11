@@ -1761,8 +1761,8 @@ export class PocketApp {
                 now: Date.now(),
                 // Collaboration features: 2 adds roles, take turns, reactions, pins, notes, mentions, and push.
                 collab: 2,
-                // Saved local review rounds and multiplayer verdicts, distinct from live Changes.
-                localReviews: 1,
+                // Comment-first reviews and session-folder-scoped live diffs, including viewers.
+                localReviews: 2,
                 reactions: REACTIONS,
                 approvalRule: this.config.approvalRule,
                 // The model and thinking level new sessions start with, or null for the last one picked.

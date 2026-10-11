@@ -99,7 +99,7 @@ test(
                 "sidebar tabs",
             );
             await page.evaluate(
-                `[...document.querySelectorAll('.private-tabs button')].find(button => button.textContent === 'Private' && button.getClientRects().length).click()`,
+                `[...document.querySelectorAll('.private-tabs button')].find(button => button.textContent.trim() === 'Herdr' && button.getClientRects().length).click()`,
             );
             await until(
                 () => value(page, `!!document.querySelector('.private-pane-row')`),

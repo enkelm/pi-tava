@@ -1,74 +1,164 @@
-// Local, immutable review rounds and discussion. Diff rendering stays in diff.js.
-import { useEffect, useId, useRef, useState } from "preact/hooks";
-import { actions, store, uid } from "./store.js";
+// Comment-first review. Navigation and diff placement belong to diff.js.
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { Avatar } from "./avatar.js";
+import { actions, canSteer, collab, notify, store, uid } from "./store.js";
 import { html, Icon } from "./ui.js";
 
-const VERDICTS = {
-    pending: "Pending",
-    commented: "Commented",
-    approved: "Approved",
-    changes_requested: "Changes requested",
-    dismissed: "Dismissed",
-};
+const reviewThreads = () => store.state.view.reviews?.threads ?? [];
+const enabled = () => (store.state.server?.localReviews ?? 0) >= 2;
 
-/** Keep failed drafts; ignore responses after navigating away from their conversation. */
-function useRequest(conversationId) {
-    const [pending, setPending] = useState(false);
-    const [error, setError] = useState("");
-    const busy = useRef(false);
-    const receipt = useRef(null);
-    const mounted = useRef(true);
+function ReviewAuthor({ userId, name, showYou = false }) {
+    const me = store.state.me;
+    const user = me?.id === userId ? me : store.state.users.find((person) => person.id === userId);
+
+    return html`<span class="rv-author">
+        <${Avatar} person=${{ id: userId, name }} size=${22} />
+        <span class="rv-name">${name}${showYou && userId === me?.id ? " (you)" : ""}</span>
+        ${user?.role === "owner" && html`<span class="rv-owner">Owner</span>`}
+    </span>`;
+}
+
+// Sending feedback is a normal follow-up, with the composer's steering and driver restrictions.
+function canSendReviews() {
+    const { me, view } = store.state;
+
+    return !!me && canSteer() && !(collab() && view.turns?.on && view.turns.driver !== me.id);
+}
+
+/** Only comment authors are reviewers; replies do not create an assigned-reviewer role. */
+export function reviewPeople(threads = reviewThreads()) {
+    const people = new Map();
+
+    for (const thread of threads) {
+        if (!people.has(thread.userId)) {
+            people.set(thread.userId, {
+                userId: thread.userId,
+                name: thread.name,
+                threads: [],
+                unresolved: 0,
+                status: "resolved",
+            });
+        }
+
+        const person = people.get(thread.userId);
+
+        person.threads.push(thread);
+
+        if (!thread.resolved) {
+            person.unresolved++;
+            person.status = "unresolved";
+        }
+    }
+
+    return [...people.values()];
+}
+
+// Tab-local drafts and durable request receipts survive folding, navigation and web reloads.
+// No saved request is replayed automatically. In-flight responses only update their original record.
+const drafts = new Map();
+
+function draftRecord(key) {
+    if (!drafts.has(key)) {
+        let saved;
+
+        try {
+            saved = JSON.parse(sessionStorage.getItem(key));
+        } catch {
+            // Storage can be unavailable. Keep the draft in this page's memory instead.
+        }
+
+        drafts.set(key, {
+            text: typeof saved?.text === "string" ? saved.text : "",
+            receipt: saved?.receipt ?? null,
+            error: typeof saved?.error === "string" ? saved.error : "",
+            pending: false,
+            listeners: new Set(),
+        });
+    }
+
+    return drafts.get(key);
+}
+
+function updateDraft(key, record, patch) {
+    Object.assign(record, patch);
+
+    try {
+        if (record.text || record.receipt || record.error) {
+            sessionStorage.setItem(
+                key,
+                JSON.stringify({
+                    text: record.text,
+                    receipt: record.receipt,
+                    error: record.error,
+                }),
+            );
+        } else {
+            sessionStorage.removeItem(key);
+        }
+    } catch {
+        // A full or disabled session store must not prevent commenting or retries.
+    }
+
+    for (const listener of record.listeners) {
+        listener();
+    }
+}
+
+function useReviewRequest(conversationId, scope) {
+    const key = `pocket.review-draft.${JSON.stringify([store.state.me?.id, conversationId, ...scope])}`;
+    const record = draftRecord(key);
+    const [, redraw] = useState(0);
+    const mounted = useRef(false);
 
     useEffect(() => {
+        const changed = () => redraw((n) => n + 1);
+
         mounted.current = true;
+        record.listeners.add(changed);
+        changed();
 
         return () => {
             mounted.current = false;
+            record.listeners.delete(changed);
         };
-    }, []);
+    }, [record]);
 
-    const run = async (work, success) => {
-        if (busy.current) {
+    const run = async (action, payload, success, clearText = false) => {
+        if (record.pending || store.state.conversationId !== conversationId) {
             return;
         }
 
-        busy.current = true;
-        setPending(true);
-        setError("");
+        const signature = JSON.stringify(payload);
+        const receipt =
+            record.receipt?.signature === signature ? record.receipt : { signature, id: uid() };
+
+        updateDraft(key, record, { receipt, pending: true, error: "" });
 
         try {
-            const result = await work();
+            const result = await action({ ...payload, requestId: receipt.id }, conversationId);
 
-            receipt.current = null;
+            updateDraft(key, record, {
+                receipt: null,
+                ...(clearText ? { text: "" } : {}),
+            });
 
             if (mounted.current && store.state.conversationId === conversationId) {
                 success?.(result);
             }
         } catch (cause) {
-            if (mounted.current && store.state.conversationId === conversationId) {
-                setError(cause?.message || "Could not save. Check your connection and try again.");
-            }
+            updateDraft(key, record, {
+                error: cause?.message || "Could not save. Check your connection and try again.",
+            });
         } finally {
-            busy.current = false;
-
-            if (mounted.current) {
-                setPending(false);
-            }
+            updateDraft(key, record, { pending: false });
         }
     };
 
-    // An explicit retry of the same failed draft reuses its receipt, including a lost response.
-    const requestId = (payload) => {
-        const key = JSON.stringify(payload);
-
-        if (receipt.current?.key !== key) {
-            receipt.current = { key, id: uid() };
-        }
-
-        return receipt.current.id;
+    return {
+        ...record,
+        run,
+        setText: (text) => updateDraft(key, record, { text, error: "" }),
     };
-
-    return { pending, error, run, requestId, clearError: () => setError("") };
 }
 
 function RequestError({ error }) {
@@ -87,882 +177,712 @@ function ReviewTime({ at }) {
     </time>`;
 }
 
-/** Compare substance, not Pi attribution or the order returned by git. */
-function fileSignature(changes) {
-    return JSON.stringify(
-        (changes.files ?? [])
-            .map((file) => [
-                file.path,
-                file.kind,
-                file.version ?? null,
-                file.added ?? null,
-                file.removed ?? null,
-            ])
-            .sort((a, b) => a[0].localeCompare(b[0])),
-    );
-}
-
-function snapshotStatus(review, liveChanges) {
-    if (!liveChanges) {
-        return "unknown";
+function locationLabel({ path, side, line }) {
+    if (!path) {
+        return "All changes";
     }
 
-    const saved = review.snapshot;
-    const repo = saved?.repo;
-    const live = liveChanges.repo;
-    const cwd = store.state.view.agent?.cwd ?? store.state.view.conversation?.cwd;
-    const savedCwd = review.cwd ?? saved?.cwd;
-
-    const root = repo?.root?.replace(/\/+$/, "") ?? "";
-    const folder = savedCwd?.replace(/\/+$/, "");
-    // The server resolves symlinks for repo paths; cwd intentionally keeps the app's spelling.
-    const relativeFolder =
-        typeof review.scopePrefix === "string"
-            ? review.scopePrefix.replace(/^\/+|\/+$/g, "")
-            : folder && folder !== root && folder.startsWith(`${root}/`)
-              ? folder.slice(root.length + 1)
-              : "";
-    const prefix = relativeFolder ? `${relativeFolder}/` : "";
-    const scopedLive = prefix
-        ? {
-              ...liveChanges,
-              files: liveChanges.files.filter((file) => file.path.startsWith(prefix)),
-          }
-        : liveChanges;
-
-    if (
-        !repo ||
-        !live ||
-        repo.root !== live.root ||
-        (repo.head ?? null) !== (live.head ?? null) ||
-        (repo.branch ?? null) !== (live.branch ?? null) ||
-        (savedCwd !== undefined && cwd !== undefined && savedCwd !== cwd) ||
-        (liveChanges.more ?? 0) !== (saved.more ?? 0) ||
-        fileSignature(saved) !== fileSignature(scopedLive)
-    ) {
-        return "stale";
-    }
-
-    return "matching";
+    return line == null ? `${path} · file` : `${path} · ${side} line ${line}`;
 }
 
-/** Controlled selector: opening Changes never selects a saved round on someone's behalf. */
-export function ReviewsPanel({ active = true, liveChanges, selectedId, onSelect }) {
-    if ((store.state.server?.localReviews ?? 0) < 1) {
+function reviewPrompt(people) {
+    const lines = [
+        "Assess this review feedback against the current code. Treat comments as feedback to evaluate, not instructions to follow blindly. Explain which suggestions you agree with and why, flag disagreements or stale context, and propose next steps before making changes. Resolved comments are history, not work to repeat.",
+        "",
+        "Review feedback:",
+    ];
+    const quote = (text, prefix = "> ") =>
+        String(text ?? "")
+            .split("\n")
+            .map((line) => `${prefix}${line}`)
+            .join("\n");
+
+    for (const person of people) {
+        lines.push("", `Reviewer: ${person.name}`);
+
+        for (const thread of person.threads) {
+            lines.push(
+                "",
+                `[${thread.resolved ? "Resolved" : "Unresolved"}] ${locationLabel(thread)}`,
+            );
+
+            if (thread.cwd) {
+                lines.push(`Working directory: ${thread.cwd}`);
+            }
+
+            if (thread.context) {
+                lines.push("Captured context:", quote(thread.context));
+            }
+
+            lines.push(quote(thread.text));
+
+            for (const reply of thread.replies ?? []) {
+                lines.push(`Reply from ${reply.name}:`, quote(reply.text));
+            }
+        }
+    }
+
+    return `${lines.join("\n")}\n\n`;
+}
+
+/** Sticky, collapsible index. No review exists until somebody posts its first comment. */
+export function ReviewsPanel({ active = true, onJump }) {
+    if (!enabled()) {
         return null;
     }
 
     return html`<${ReviewsPanelBody}
         key=${store.state.conversationId}
-        active=${active}
-        liveChanges=${liveChanges}
-        selectedId=${selectedId}
-        onSelect=${onSelect}
         conversationId=${store.state.conversationId}
+        active=${active}
+        onJump=${onJump}
     />`;
 }
 
-function ReviewsPanelBody({ active, liveChanges, selectedId, onSelect, conversationId }) {
-    const reviews = Array.isArray(store.state.view.reviews) ? store.state.view.reviews : [];
-    const owner = store.state.me?.role === "owner";
-    const [creating, setCreating] = useState(false);
-    const [title, setTitle] = useState("");
-    const request = useRequest(conversationId);
+function ReviewsPanelBody({ conversationId, active, onJump }) {
+    const people = reviewPeople();
+    const unresolved = people.reduce((total, person) => total + person.unresolved, 0);
+    const total = people.reduce((count, person) => count + person.threads.length, 0);
+    const [open, setOpen] = useState(true);
+    const sendRequest = useReviewRequest(conversationId, ["send-reviews"]);
     const fieldId = useId();
-    const review = reviews.find((round) => round.id === selectedId);
-    const busy = store.state.view.live?.busy === true;
-    const unavailable = !liveChanges
-        ? "Loading working changes…"
-        : !liveChanges.repo
-          ? "A git repository is required to save a review."
-          : liveChanges.files.length === 0
-            ? "No uncommitted changes to review."
-            : busy
-              ? "Wait until Pi finishes before saving a review."
-              : "";
+    const list = useRef(null);
+    const focus = store.state.reviewFocus;
+    const focused = focus?.conversationId === conversationId ? focus : null;
+    const showSend = !!store.state.me && canSteer() && total > 0;
+    const sendDisabled = !active || !canSendReviews() || sendRequest.pending;
 
-    const create = (event) => {
-        event.preventDefault();
+    useLayoutEffect(() => {
+        if (active && focused) {
+            setOpen(true);
+        }
+    }, [active, focused?.n, focused?.userId]);
 
-        if (!active || unavailable || !title.trim()) {
+    const sendReviews = (reviewers) => {
+        if (!active || !canSendReviews() || !reviewers.some((person) => person.threads.length)) {
             return;
         }
 
-        request.run(
-            () =>
-                actions.createReview(
-                    { requestId: request.requestId(title.trim()), title: title.trim() },
-                    conversationId,
-                ),
-            (result) => {
-                setTitle("");
-                setCreating(false);
-                onSelect?.(result.id);
-            },
+        sendRequest.run(
+            (request, id) =>
+                actions.submit(request.text, [], "followUp", false, id, request.requestId),
+            { text: reviewPrompt(reviewers) },
+            () => notify("info", "Reviews sent to Pi."),
         );
     };
 
-    return html`<section class="rv-panel" aria-label="Local reviews">
-        <div class="rv-selector-row">
-            <label class="rv-selector" for=${`${fieldId}-round`}>
-                <span>Review</span>
-                <select
-                    id=${`${fieldId}-round`}
-                    value=${selectedId ?? ""}
-                    onChange=${(event) => onSelect?.(event.currentTarget.value || null)}
-                >
-                    <option value="">${store.state.me?.role === "viewer" ? "Select a saved review" : "Working changes"}</option>
-                    ${reviews.map(
-                        (round) => html`<option key=${round.id} value=${round.id}>
-                            ${round.title} · ${round.status === "closed" ? "Closed" : "Open"}
-                        </option>`,
-                    )}
-                    ${selectedId && !review && html`<option value=${selectedId}>Loading review…</option>`}
-                </select>
-            </label>
-            ${
-                owner &&
-                html`<button
+    return html`<section class="rv-panel" aria-label="Reviews">
+        <div class="rv-panel-head">
+            <button
                 type="button"
-                class="button small rv-button"
-                disabled=${!active || request.pending}
-                aria-expanded=${creating}
-                aria-controls=${`${fieldId}-create`}
-                onClick=${() => {
-                    setCreating(!creating);
-                    request.clearError();
-                }}
+                class="rv-disclosure rv-panel-toggle"
+                aria-expanded=${open}
+                aria-controls=${`${fieldId}-reviewers`}
+                onClick=${() => setOpen(!open)}
             >
-                <${Icon} name="plus" size=${14} /> New review
-            </button>`
+                <span class=${`rv-chevron ${open ? "rv-expanded" : ""}`}>
+                    <${Icon} name="chevron" size=${14} />
+                </span>
+                <strong>Reviews</strong>
+                <span class="rv-count">${total ? `${unresolved} open · ${total - unresolved} resolved` : "No comments yet"}</span>
+            </button>
+            ${
+                showSend &&
+                html`<button
+                    type="button"
+                    class="icon-button rv-icon"
+                    aria-label="Send all reviews to Pi"
+                    title="Send all reviews to Pi"
+                    aria-busy=${sendRequest.pending}
+                    disabled=${sendDisabled}
+                    onClick=${() => sendReviews(people)}
+                >
+                    <${Icon} name="bot" size=${17} />
+                </button>`
             }
         </div>
-        ${
-            creating &&
-            owner &&
-            html`<form id=${`${fieldId}-create`} class="rv-form" onSubmit=${create}>
-            <label for=${`${fieldId}-title`}>Review title</label>
-            <input
-                id=${`${fieldId}-title`}
-                type="text"
-                value=${title}
-                maxlength="200"
-                required
-                disabled=${request.pending}
-                onInput=${(event) => setTitle(event.currentTarget.value)}
-                aria-describedby=${`${fieldId}-help`}
-            />
-            <p id=${`${fieldId}-help`} class="rv-hint">Saved uncommitted changes · local only</p>
-            ${unavailable && html`<p class="rv-hint" role="status">${unavailable}</p>`}
-            <${RequestError} error=${request.error} />
-            <div class="rv-actions">
-                <button
-                    class="button primary small rv-button"
-                    type="submit"
-                    disabled=${!active || !!unavailable || !title.trim() || request.pending}
-                >${request.pending ? "Saving snapshot…" : "Save review"}</button>
-                <button
-                    class="button ghost small rv-button"
-                    type="button"
-                    disabled=${request.pending}
-                    onClick=${() => setCreating(false)}
-                >Cancel</button>
-            </div>
-        </form>`
-        }
-        ${
-            selectedId &&
-            (review
-                ? html`<${ReviewDetails}
-                key=${review.id}
-                review=${review}
-                liveChanges=${liveChanges}
-                active=${active}
-                conversationId=${conversationId}
-            />`
-                : html`<p class="rv-hint" role="status">Loading saved review…</p>`)
-        }
+        <${RequestError} error=${sendRequest.error} />
+        <div id=${`${fieldId}-reviewers`} class="rv-index" hidden=${!open} ref=${list}>
+            ${
+                people.length
+                    ? html`<ul class="rv-reviewer-list">
+                        ${people.map(
+                            (person) => html`<${ReviewerRow}
+                                key=${person.userId}
+                                person=${person}
+                                active=${active}
+                                conversationId=${conversationId}
+                                onJump=${onJump}
+                                focused=${focused?.userId === person.userId ? focused : null}
+                                indexOpen=${open}
+                                list=${list}
+                                showSend=${showSend}
+                                sendDisabled=${sendDisabled}
+                                sending=${sendRequest.pending}
+                                onSend=${() => sendReviews([person])}
+                            />`,
+                        )}
+                    </ul>`
+                    : html`<p class="rv-hint rv-empty">Comment on a line, a file, or all changes. Everyone here can contribute.</p>`
+            }
+        </div>
     </section>`;
 }
 
-function ReviewDetails({ review, liveChanges, active, conversationId }) {
-    const { me, users } = store.state;
-    const owner = me?.role === "owner";
-    const writable = active && review.status === "open";
-    const reviewers = Object.values(review.reviewers ?? {});
-    const self = review.reviewers?.[me?.id];
-    const unresolved = (review.threads ?? []).filter((thread) => !thread.resolved).length;
-    const stale = snapshotStatus(review, liveChanges);
-    const assignment = useRequest(conversationId);
-    const [assignee, setAssignee] = useState("");
+function ReviewerRow({
+    person,
+    active,
+    conversationId,
+    onJump,
+    focused,
+    indexOpen,
+    list,
+    showSend,
+    sendDisabled,
+    sending,
+    onSend,
+}) {
+    const me = store.state.me;
+    const canResolve = !!me && (me.role === "owner" || me.id === person.userId);
+    const [open, setOpen] = useState(false);
+    const [history, setHistory] = useState(false);
+    const [selected, setSelected] = useState([]);
+    const request = useReviewRequest(conversationId, ["resolve", "reviewer", person.userId]);
     const fieldId = useId();
-    const available = users.filter(
-        (user) =>
-            !review.reviewers?.[user.id]?.active &&
-            (!Array.isArray(user.sessions) || user.sessions.includes(conversationId)),
-    );
-    const canAssign = available.some((user) => user.id === assignee);
-    const events = [...(review.events ?? [])].sort((a, b) => a.at - b.at);
+    const row = useRef(null);
+    const allCheckbox = useRef(null);
+    const unresolved = person.threads.filter((thread) => !thread.resolved);
+    const resolved = person.threads.filter((thread) => thread.resolved);
+    const selectedIds = unresolved
+        .filter((thread) => selected.includes(thread.id))
+        .map((thread) => thread.id);
+    const allSelected = unresolved.length > 0 && selectedIds.length === unresolved.length;
+    const sendLabel = `Send ${person.name}'s reviews to Pi`;
 
-    const assign = (event) => {
-        event.preventDefault();
+    useLayoutEffect(() => {
+        if (focused && active) {
+            setOpen(true);
 
-        if (!writable || !canAssign) {
+            if (!person.unresolved) {
+                setHistory(true);
+            }
+        }
+    }, [active, focused?.n, focused?.userId]);
+
+    useLayoutEffect(() => {
+        if (!focused || !active || !indexOpen || !open || !list.current || !row.current) {
             return;
         }
 
-        assignment.run(
-            () =>
-                actions.manageReview(
-                    review.id,
-                    { action: "assign", userId: assignee, expectedRevision: review.rev },
-                    conversationId,
-                ),
-            () => setAssignee(""),
-        );
-    };
+        // Scroll only the bounded index, never the diff or the whole conversation.
+        const parentBox = list.current.getBoundingClientRect();
+        const rowBox = row.current.getBoundingClientRect();
 
-    return html`<div class="rv-details">
-        <div class="rv-heading">
-            <h3>${review.title}</h3>
-            <span class=${`rv-status ${review.status}`}>${review.status === "closed" ? "Closed" : "Open"}</span>
-        </div>
-        <p class="rv-hint">Immutable snapshot · local only · saved by ${review.name} <${ReviewTime} at=${review.createdAt} /></p>
-        ${
-            stale === "stale" &&
-            html`<p class="rv-notice" role="status">
-            Working changes or the working directory have changed. Saved approvals do not cover the current files.
-        </p>`
+        list.current.scrollTop += rowBox.top - parentBox.top;
+    }, [active, indexOpen, open, focused?.n, focused?.userId]);
+
+    useLayoutEffect(() => {
+        if (allCheckbox.current) {
+            allCheckbox.current.indeterminate = selectedIds.length > 0 && !allSelected;
         }
-        ${
-            stale === "unknown" &&
-            html`<p class="rv-hint" role="status">
-            ${me?.role === "viewer" ? "Saved snapshot only; current working changes are not shared in this view." : "Working changes are unavailable; verdicts cover only this saved snapshot."}
-        </p>`
-        }
-        ${review.status === "closed" && html`<p class="rv-hint">This round is closed. Verdicts and discussion are read-only.</p>`}
-        <section class="rv-reviewers" aria-label="Reviewers">
-            <h4>Reviewers</h4>
-            ${reviewers.length === 0 && html`<p class="rv-hint">No reviewers assigned yet.</p>`}
-            <ul class="rv-reviewer-list">
-                ${reviewers.map(
-                    (reviewer) => html`<${ReviewerRow}
-                    key=${reviewer.userId}
-                    reviewer=${reviewer}
-                    review=${review}
-                    stale=${stale !== "matching"}
-                    owner=${owner}
-                    writable=${writable}
-                    conversationId=${conversationId}
-                />`,
-                )}
-            </ul>
-            ${
-                owner &&
-                html`<details class="rv-manage">
-                    <summary>Manage reviewers</summary>
-                    <form class="rv-assignment" onSubmit=${assign}>
-                        <label for=${`${fieldId}-assign`}>Assign reviewer</label>
-                        <div class="rv-input-row">
-                            <select
-                                id=${`${fieldId}-assign`}
-                                value=${assignee}
-                                disabled=${!writable || assignment.pending || available.length === 0}
-                                onChange=${(event) => setAssignee(event.currentTarget.value)}
-                            >
-                                <option value="">${available.length ? "Choose a person" : "Everyone is assigned"}</option>
-                                ${available.map((user) => html`<option key=${user.id} value=${user.id}>${user.name}</option>`)}
-                            </select>
-                            <button
-                                class="button small rv-button"
-                                type="submit"
-                                disabled=${!writable || !canAssign || assignment.pending}
-                            >${assignment.pending ? "Assigning…" : "Assign"}</button>
-                        </div>
-                        <${RequestError} error=${assignment.error} />
-                    </form>
-                </details>`
-            }
-        </section>
-        ${
-            self?.active &&
-            html`<${VerdictForm}
-            review=${review}
-            reviewer=${self}
-            writable=${writable}
-            conversationId=${conversationId}
-        />`
-        }
-        <div class="rv-discussion">
-            ${unresolved > 0 && html`<p class="rv-hint">${unresolved} unresolved ${unresolved === 1 ? "thread" : "threads"} across this review.</p>`}
-            <${ReviewThreads} review=${review} />
-        </div>
-        <div class="rv-footer">
-            ${
-                owner &&
-                html`<${ReviewLifecycle}
-                review=${review}
-                active=${active}
-                unfinished=${unresolved > 0 || reviewers.some((reviewer) => reviewer.active && reviewer.state === "changes_requested")}
-                conversationId=${conversationId}
-            />`
-            }
-            <details class="rv-audit">
-                <summary>Activity${events.length ? ` (${events.length})` : ""}</summary>
-                ${events.length === 0 && html`<p class="rv-hint">No activity recorded.</p>`}
-                <ol>
-                    ${events.map(
-                        (event, index) => html`<li key=${index}>
-                        <span class="rv-name">${event.name}</span> ${event.text}
-                        <${ReviewTime} at=${event.at} />
-                    </li>`,
-                    )}
-                </ol>
-            </details>
-        </div>
-    </div>`;
-}
+    }, [open, allSelected, selectedIds.length]);
 
-function ReviewerRow({ reviewer, review, stale, owner, writable, conversationId }) {
-    const request = useRequest(conversationId);
-    const [dismissing, setDismissing] = useState(false);
-    const [reason, setReason] = useState("");
-    const fieldId = useId();
-    const manage = (action) =>
-        request.run(() =>
-            actions.manageReview(
-                review.id,
-                { action, userId: reviewer.userId, expectedRevision: review.rev },
-                conversationId,
-            ),
-        );
-
-    const dismiss = (event) => {
-        event.preventDefault();
-
-        if (!writable || !reason.trim()) {
+    const resolve = (threadIds, resolved = true) => {
+        if (!active || !canResolve || !threadIds.length) {
             return;
         }
 
         request.run(
-            () =>
-                actions.manageReview(
-                    review.id,
-                    {
-                        action: "dismiss",
-                        userId: reviewer.userId,
-                        reason: reason.trim(),
-                        expectedRevision: review.rev,
-                    },
-                    conversationId,
-                ),
-            () => {
-                setReason("");
-                setDismissing(false);
-            },
+            actions.resolveReviewThreads,
+            { threadIds: [...threadIds].sort(), resolved },
+            () => setSelected([]),
         );
     };
 
-    return html`<li class=${`rv-reviewer ${!reviewer.active ? "removed" : ""}`}>
-        <div class="rv-reviewer-head">
-            <span class="rv-name">${reviewer.name}</span>
-            <span class=${`rv-verdict ${reviewer.state} ${stale || !reviewer.active ? "historical" : ""}`}>
-                ${VERDICTS[reviewer.state] ?? reviewer.state}
-            </span>
-            ${!reviewer.active && html`<span class="rv-status">Removed</span>`}
-            ${stale && reviewer.state === "approved" && html`<span class="rv-hint">Snapshot only</span>`}
-            <${ReviewTime} at=${reviewer.at} />
-        </div>
-        ${reviewer.text && html`<p class="rv-text">${reviewer.text}</p>`}
-        ${
-            owner &&
-            html`<div class="rv-actions">
-            <button
-                class="button ghost small rv-button"
-                type="button"
-                disabled=${!writable || request.pending}
-                aria-label=${`${reviewer.active ? "Remove" : "Re-add"} ${reviewer.name} as reviewer`}
-                onClick=${() => manage(reviewer.active ? "remove" : "assign")}
-            >${request.pending && !dismissing ? "Saving…" : reviewer.active ? "Remove" : "Re-add"}</button>
+    const jump = (thread, options) => {
+        if (active) {
+            onJump?.(thread, options);
+        }
+    };
+
+    const threadRow = (thread) => {
+        const resolveLabel = `${thread.resolved ? "Reopen" : "Resolve"} comment by ${person.name}: ${thread.text}`;
+        const replyLabel = `Reply to comment by ${person.name}: ${thread.text}`;
+
+        return html`<li key=${thread.id} class="rv-index-comment">
             ${
-                reviewer.active &&
-                !["pending", "dismissed"].includes(reviewer.state) &&
-                html`<button
-                class="button ghost small rv-button"
-                type="button"
-                disabled=${!writable || request.pending}
-                aria-expanded=${dismissing}
-                aria-label=${`Dismiss ${reviewer.name}'s verdict`}
-                onClick=${() => {
-                    setDismissing(!dismissing);
-                    request.clearError();
-                }}
-            >Dismiss…</button>`
+                !thread.resolved &&
+                canResolve &&
+                html`<label class="rv-check rv-comment-check">
+                    <input
+                        type="checkbox"
+                        checked=${selected.includes(thread.id)}
+                        disabled=${!active || request.pending}
+                        aria-label=${`Select comment by ${person.name}: ${thread.text}`}
+                        onChange=${(event) =>
+                            setSelected(
+                                event.currentTarget.checked
+                                    ? [...selected, thread.id]
+                                    : selected.filter((id) => id !== thread.id),
+                            )}
+                    />
+                </label>`
             }
-        </div>`
-        }
-        ${
-            dismissing &&
-            owner &&
-            html`<form class="rv-form" onSubmit=${dismiss}>
-            <label for=${`${fieldId}-reason`}>Reason for dismissing ${reviewer.name}'s verdict</label>
-            <textarea
-                id=${`${fieldId}-reason`}
-                rows="2"
-                required
-                value=${reason}
-                disabled=${!writable || request.pending}
-                onInput=${(event) => setReason(event.currentTarget.value)}
-            ></textarea>
-            <p class="rv-hint">Dismissal is recorded; it does not approve on their behalf.</p>
-            <div class="rv-actions">
+            <button
+                type="button"
+                class="rv-jump"
+                disabled=${!active || !onJump}
+                aria-label=${`Go to ${thread.resolved ? "resolved " : ""}comment by ${person.name} on ${locationLabel(thread)}: ${thread.text}`}
+                onClick=${() => jump(thread)}
+            >
+                <span class="rv-location">${locationLabel(thread)}</span>
+                <span class="rv-excerpt">${thread.text}</span>
+                ${thread.replies?.length > 0 && html`<span class="rv-hint">${thread.replies.length} ${thread.replies.length === 1 ? "reply" : "replies"}</span>`}
+            </button>
+            <div class="rv-index-tools">
                 <button
-                    class="button small rv-button"
-                    type="submit"
-                    disabled=${!writable || !reason.trim() || request.pending}
-                >${request.pending ? "Dismissing…" : "Dismiss verdict"}</button>
-                <button
-                    class="button ghost small rv-button"
                     type="button"
-                    disabled=${request.pending}
-                    onClick=${() => setDismissing(false)}
-                >Cancel</button>
+                    class="icon-button rv-icon"
+                    aria-label=${replyLabel}
+                    title=${replyLabel}
+                    disabled=${!active || !me || !onJump}
+                    onClick=${() => jump(thread, { reply: true })}
+                >
+                    <${Icon} name="reply" size=${16} />
+                </button>
+                ${
+                    canResolve &&
+                    html`<button
+                        type="button"
+                        class="icon-button rv-icon"
+                        aria-label=${resolveLabel}
+                        title=${resolveLabel}
+                        aria-busy=${request.pending}
+                        disabled=${!active || request.pending}
+                        onClick=${() => resolve([thread.id], !thread.resolved)}
+                    >
+                        <${Icon} name=${thread.resolved ? "reload" : "check"} size=${16} />
+                    </button>`
+                }
             </div>
-        </form>`
-        }
+        </li>`;
+    };
+
+    return html`<li
+        class=${`rv-reviewer ${focused ? "rv-focused" : ""}`}
+        data-reviewer=${person.userId}
+        ref=${row}
+    >
+        <div class="rv-reviewer-head">
+            <button
+                type="button"
+                class="rv-disclosure rv-reviewer-toggle"
+                aria-expanded=${open}
+                aria-controls=${`${fieldId}-comments`}
+                onClick=${() => setOpen(!open)}
+            >
+                <span class=${`rv-chevron ${open ? "rv-expanded" : ""}`}>
+                    <${Icon} name="chevron" size=${14} />
+                </span>
+                <${ReviewAuthor} userId=${person.userId} name=${person.name} showYou=${true} />
+                <span class=${`rv-status ${person.status}`}>
+                    ${person.unresolved ? `${person.unresolved} open` : "Resolved"}
+                </span>
+            </button>
+            ${
+                showSend &&
+                html`<button
+                    type="button"
+                    class="icon-button rv-icon"
+                    aria-label=${sendLabel}
+                    title=${sendLabel}
+                    aria-busy=${sending}
+                    disabled=${sendDisabled}
+                    onClick=${onSend}
+                >
+                    <${Icon} name="bot" size=${17} />
+                </button>`
+            }
+        </div>
         <${RequestError} error=${request.error} />
+        <div id=${`${fieldId}-comments`} class="rv-reviewer-comments" hidden=${!open}>
+            ${
+                canResolve &&
+                unresolved.length > 0 &&
+                html`<div class="rv-bulk">
+                    <label class="rv-check rv-select-all">
+                        <input
+                            ref=${allCheckbox}
+                            type="checkbox"
+                            checked=${allSelected}
+                            disabled=${!active || request.pending}
+                            aria-label=${`Select all open comments by ${person.name}`}
+                            onChange=${(event) => setSelected(event.currentTarget.checked ? unresolved.map((thread) => thread.id) : [])}
+                        />
+                        <span>Select all open</span>
+                    </label>
+                    ${
+                        selectedIds.length > 0 &&
+                        html`<button
+                            type="button"
+                            class="icon-button rv-icon"
+                            disabled=${!active || request.pending}
+                            aria-label=${`Resolve selected comments by ${person.name} (${selectedIds.length})`}
+                            title=${`Resolve selected comments by ${person.name} (${selectedIds.length})`}
+                            aria-busy=${request.pending}
+                            onClick=${() => resolve(selectedIds)}
+                        >
+                            <${Icon} name="check" size=${17} />
+                        </button>`
+                    }
+                </div>`
+            }
+            <ul class="rv-comment-index">${unresolved.map(threadRow)}</ul>
+            ${
+                resolved.length > 0 &&
+                html`<div class="rv-history">
+                    <button
+                        type="button"
+                        class="rv-disclosure rv-history-toggle"
+                        aria-expanded=${history}
+                        aria-controls=${`${fieldId}-history`}
+                        onClick=${() => setHistory(!history)}
+                    >
+                        <span class=${`rv-chevron ${history ? "rv-expanded" : ""}`}>
+                            <${Icon} name="chevron" size=${12} />
+                        </span>
+                        Resolved (${resolved.length})
+                    </button>
+                    <ul id=${`${fieldId}-history`} class="rv-comment-index" hidden=${!history}>
+                        ${resolved.map(threadRow)}
+                    </ul>
+                </div>`
+            }
+        </div>
     </li>`;
 }
 
-function VerdictForm({ review, reviewer, writable, conversationId }) {
-    const [state, setState] = useState(
-        ["approved", "changes_requested", "commented"].includes(reviewer.state)
-            ? reviewer.state
-            : "commented",
-    );
-    const [text, setText] = useState("");
-    const request = useRequest(conversationId);
-    const fieldId = useId();
-
-    const submit = (event) => {
-        event.preventDefault();
-
-        if (!writable || !reviewer.active) {
-            return;
-        }
-
-        request.run(
-            () =>
-                actions.submitReview(
-                    review.id,
-                    { state, text: text.trim(), expectedRevision: review.rev },
-                    conversationId,
-                ),
-            () => setText(""),
-        );
-    };
-
-    return html`<details class="rv-own-verdict">
-        <summary>${reviewer.state === "pending" ? "Submit your review" : "Update your review"}</summary>
-        <form class="rv-form" onSubmit=${submit}>
-        <label for=${`${fieldId}-state`}>Verdict</label>
-        <select
-            id=${`${fieldId}-state`}
-            value=${state}
-            disabled=${!writable || request.pending}
-            onChange=${(event) => setState(event.currentTarget.value)}
-        >
-            <option value="commented">Commented</option>
-            <option value="approved">Approved</option>
-            <option value="changes_requested">Changes requested</option>
-        </select>
-        <label for=${`${fieldId}-text`}>Review note</label>
-        <textarea
-            id=${`${fieldId}-text`}
-            value=${text}
-            rows="2"
-            disabled=${!writable || request.pending}
-            onInput=${(event) => setText(event.currentTarget.value)}
-        ></textarea>
-        <${RequestError} error=${request.error} />
-        <div class="rv-actions">
-            <button
-                class="button primary small rv-button"
-                type="submit"
-                disabled=${!writable || request.pending}
-            >${request.pending ? "Submitting…" : "Submit review"}</button>
-        </div>
-        </form>
-    </details>`;
-}
-
-function ReviewLifecycle({ review, active, unfinished, conversationId }) {
-    const [closing, setClosing] = useState(false);
-    const [reason, setReason] = useState("");
-    const request = useRequest(conversationId);
-    const fieldId = useId();
-
-    const close = (event) => {
-        event.preventDefault();
-
-        if (!active || (unfinished && !reason.trim())) {
-            return;
-        }
-
-        request.run(
-            () =>
-                actions.manageReview(
-                    review.id,
-                    { action: "close", reason: reason.trim(), expectedRevision: review.rev },
-                    conversationId,
-                ),
-            () => {
-                setClosing(false);
-                setReason("");
-            },
-        );
-    };
-
-    return html`<div class="rv-lifecycle">
-        ${
-            review.status === "closed"
-                ? html`<button
-                class="button small rv-button"
-                type="button"
-                disabled=${!active || request.pending}
-                onClick=${() => request.run(() => actions.manageReview(review.id, { action: "reopen", expectedRevision: review.rev }, conversationId))}
-            >${request.pending ? "Reopening…" : "Reopen review"}</button>`
-                : html`<button
-                class="button ghost small rv-button"
-                type="button"
-                disabled=${!active || request.pending}
-                aria-expanded=${closing}
-                onClick=${() => {
-                    setClosing(!closing);
-                    request.clearError();
-                }}
-            >Close review…</button>`
-        }
-        ${
-            closing &&
-            review.status === "open" &&
-            html`<form class="rv-form" onSubmit=${close}>
-            <label for=${`${fieldId}-close`}>Close reason${unfinished ? " (required)" : " (optional)"}</label>
-            <textarea
-                id=${`${fieldId}-close`}
-                rows="2"
-                value=${reason}
-                required=${unfinished}
-                disabled=${!active || request.pending}
-                onInput=${(event) => setReason(event.currentTarget.value)}
-            ></textarea>
-            ${unfinished && html`<p class="rv-hint">There are requested changes or unresolved threads. Explain why this round is being closed.</p>`}
-            <div class="rv-actions">
-                <button
-                    class="button small rv-button"
-                    type="submit"
-                    disabled=${!active || request.pending || (unfinished && !reason.trim())}
-                >${request.pending ? "Closing…" : "Close review"}</button>
-                <button
-                    class="button ghost small rv-button"
-                    type="button"
-                    disabled=${request.pending}
-                    onClick=${() => setClosing(false)}
-                >Cancel</button>
-            </div>
-        </form>`
-        }
-        <${RequestError} error=${request.error} />
-    </div>`;
-}
-
-/** General-only when path is null; file threads and optional line composer otherwise. */
-export function ReviewThreads({ review, path = null, anchor = null, onAnchorChange }) {
-    if (!review || (store.state.server?.localReviews ?? 0) < 1) {
+/** Exact anchor only. An explicit threads override renders that list as-is for stale fallback. */
+export function ReviewThreads({
+    path = null,
+    side = null,
+    line = null,
+    context = "",
+    composing = false,
+    active = true,
+    onCancel,
+    threads,
+    outdated = false,
+}) {
+    if (!enabled()) {
         return null;
     }
 
     const conversationId = store.state.conversationId;
-
-    return html`<${ReviewThreadsBody}
-        key=${`${conversationId}:${review.id}:${path ?? ""}`}
-        review=${review}
-        path=${path}
-        anchor=${anchor}
-        onAnchorChange=${onAnchorChange}
-        conversationId=${conversationId}
-    />`;
-}
-
-function ReviewThreadsBody({ review, path, anchor, onAnchorChange, conversationId }) {
-    const threads = (review.threads ?? []).filter((thread) => (thread.path ?? null) === path);
-    const writable = review.status === "open" && !!store.state.me;
-    const [composing, setComposing] = useState(false);
-    const [text, setText] = useState("");
-    const request = useRequest(conversationId);
-    const input = useRef(null);
-    const fieldId = useId();
-    const lineAnchor =
-        path !== null &&
-        ["old", "new"].includes(anchor?.side) &&
-        Number.isInteger(anchor?.line) &&
-        anchor.line > 0;
-    const shown = composing || lineAnchor;
-    const location =
-        path === null
-            ? "General discussion"
-            : lineAnchor
-              ? `${path} · ${anchor.side} line ${anchor.line}`
-              : path;
-
-    useEffect(() => {
-        if (lineAnchor && writable) {
-            setComposing(true);
-            input.current?.focus();
-        }
-    }, [anchor?.side, anchor?.line, writable]);
-
-    const submit = (event) => {
-        event.preventDefault();
-
-        if (!writable || !text.trim()) {
-            return;
-        }
-
-        const payload = {
-            text: text.trim(),
-            ...(path === null ? {} : { path }),
-            ...(lineAnchor ? { side: anchor.side, line: anchor.line } : {}),
-        };
-
-        request.run(
-            () =>
-                actions.reviewComment(
-                    review.id,
-                    { ...payload, requestId: request.requestId(payload) },
-                    conversationId,
-                ),
-            () => {
-                setText("");
-                setComposing(false);
-                onAnchorChange?.(null);
-            },
+    const scoped =
+        threads ??
+        reviewThreads().filter(
+            (thread) =>
+                (thread.path ?? null) === path &&
+                (thread.side ?? null) === side &&
+                (thread.line ?? null) === line,
         );
-    };
 
-    return html`<section
-        class=${`rv-threads ${path === null && threads.length === 0 ? "rv-empty" : ""}`}
-        aria-label=${path === null ? "General discussion" : `Discussion on ${path}`}
-    >
-        <h4>${path === null ? "General discussion" : "File discussion"}</h4>
-        ${path !== null && threads.length === 0 && html`<p class="rv-hint">No comments on this file yet.</p>`}
-        <div class="rv-thread-list">
-            ${threads.map(
-                (thread) => html`<${ReviewThread}
-                key=${thread.id}
-                review=${review}
-                thread=${thread}
-                writable=${writable}
-                conversationId=${conversationId}
-            />`,
-            )}
-        </div>
+    if (!scoped.length && !composing) {
+        return null;
+    }
+
+    return html`<section class="rv-threads" aria-label=${`Review comments: ${locationLabel({ path, side, line })}`}>
+        ${outdated && scoped.length > 0 && html`<p class="rv-notice">${typeof outdated === "string" ? outdated : "Earlier context · these comments may no longer match the current changes."}</p>`}
+        ${scoped.map(
+            (thread) => html`<${ReviewThread}
+            key=${`${conversationId}:${thread.id}`}
+            thread=${thread}
+            conversationId=${conversationId}
+            outdated=${!!outdated}
+            active=${active}
+        />`,
+        )}
         ${
-            writable &&
-            !shown &&
-            html`<button
-            class="button small rv-button"
-            type="button"
-            onClick=${() => setComposing(true)}
-        ><${Icon} name="chat" size=${14} /> ${path === null ? "Start discussion" : "Comment on file"}</button>`
-        }
-        ${
-            shown &&
-            (writable || text.length > 0) &&
-            html`<form class="rv-form rv-comment-form" onSubmit=${submit}>
-            <label for=${`${fieldId}-comment`}>${path === null ? "New discussion" : `Comment on ${location}`}</label>
-            ${
-                lineAnchor &&
-                html`<button
-                class="link rv-cancel-line"
-                type="button"
-                disabled=${request.pending}
-                onClick=${() => onAnchorChange?.(null)}
-            >Cancel line selection</button>`
-            }
-            <textarea
-                id=${`${fieldId}-comment`}
-                ref=${input}
-                rows="3"
-                required
-                value=${text}
-                disabled=${!writable || request.pending}
-                onInput=${(event) => setText(event.currentTarget.value)}
-            ></textarea>
-            <${RequestError} error=${request.error} />
-            <div class="rv-actions">
-                <button
-                    class="button primary small rv-button"
-                    type="submit"
-                    disabled=${!writable || !text.trim() || request.pending}
-                >${request.pending ? "Posting…" : "Post comment"}</button>
-                <button
-                    class="button ghost small rv-button"
-                    type="button"
-                    disabled=${request.pending}
-                    onClick=${() => {
-                        setComposing(false);
-                        onAnchorChange?.(null);
-                    }}
-                >Cancel</button>
-            </div>
-        </form>`
+            composing &&
+            html`<${CommentComposer}
+            key=${JSON.stringify([conversationId, path, side, line])}
+            conversationId=${conversationId}
+            active=${active}
+            path=${path}
+            side=${side}
+            line=${line}
+            context=${context}
+            onCancel=${onCancel}
+        />`
         }
     </section>`;
 }
 
-function ThreadLocation({ thread }) {
-    if (!thread.path) {
-        return null;
-    }
+function BusyWarning() {
+    const view = store.state.view;
+    const busy = view.live?.busy || (view.subagents ?? []).some((agent) => agent.busy);
 
-    return html`<span class="rv-location">
-        ${thread.path}${thread.line ? ` · ${thread.side} line ${thread.line}` : " · file"}
-    </span>`;
+    return busy
+        ? html`<p class="rv-notice" role="status">Pi or a subagent is working; these lines may change. You can still comment.</p>`
+        : null;
 }
 
-function CommentText({ comment }) {
-    return html`<div class="rv-comment">
-        <div class="rv-comment-meta">
-            <span class="rv-name">${comment.name}</span>
-            <${ReviewTime} at=${comment.at} />
-        </div>
-        <p class="rv-text">${comment.text}</p>
-    </div>`;
-}
-
-function ReviewThread({ review, thread, writable, conversationId }) {
-    const { me } = store.state;
-    const request = useRequest(conversationId);
-    const canResolve =
-        !!me &&
-        (me.role === "owner" ||
-            thread.userId === me.id ||
-            review.reviewers?.[me.id]?.active === true);
-    const body = html`<div class="rv-thread-body">
-        <${ThreadLocation} thread=${thread} />
-        <${CommentText} comment=${thread} />
-        <div class="rv-replies">
-            ${(thread.replies ?? []).map((reply) => html`<${CommentText} key=${reply.id} comment=${reply} />`)}
-        </div>
-        <div class="rv-thread-controls">
-            <${ReplyForm}
-                review=${review}
-                thread=${thread}
-                writable=${writable}
-                conversationId=${conversationId}
-            />
-            ${
-                canResolve &&
-                html`<button
-                class="button ghost small rv-button"
-                type="button"
-                disabled=${!writable || request.pending}
-                onClick=${() =>
-                    request.run(() =>
-                        actions.resolveReviewThread(
-                            review.id,
-                            {
-                                threadId: thread.id,
-                                resolved: !thread.resolved,
-                                expectedRevision: review.rev,
-                            },
-                            conversationId,
-                        ),
-                    )}
-            >${request.pending ? "Saving…" : thread.resolved ? "Reopen thread" : "Resolve thread"}</button>`
-            }
-        </div>
-        <${RequestError} error=${request.error} />
-    </div>`;
-
-    return thread.resolved
-        ? html`<details class="rv-thread resolved">
-            <summary>
-                <${Icon} name="check" size=${14} />
-                <span>Resolved · ${thread.name}${thread.line ? ` · ${thread.side} line ${thread.line}` : ""}</span>
-                <span class="rv-hint">${1 + (thread.replies?.length ?? 0)} ${thread.replies?.length ? "comments" : "comment"}</span>
-            </summary>
-            ${body}
-        </details>`
-        : html`<article class="rv-thread">${body}</article>`;
-}
-
-function ReplyForm({ review, thread, writable, conversationId }) {
-    const [open, setOpen] = useState(false);
-    const [text, setText] = useState("");
-    const request = useRequest(conversationId);
+function CommentComposer({
+    conversationId,
+    active = true,
+    path,
+    side,
+    line,
+    context,
+    thread,
+    onCancel,
+}) {
+    const scope = thread ? ["reply", thread.id] : ["comment", path, side, line];
+    const request = useReviewRequest(conversationId, scope);
+    const input = useRef(null);
     const fieldId = useId();
+    const writable = active && !!store.state.me && store.state.conversationId === conversationId;
+    const label = thread
+        ? `Reply to ${thread.name}`
+        : `Comment on ${locationLabel({ path, side, line })}`;
+    const postLabel = thread ? "Post reply" : "Post comment";
+
+    useLayoutEffect(() => {
+        if (writable) {
+            input.current?.focus({ preventScroll: true });
+        }
+    }, []);
 
     const submit = (event) => {
         event.preventDefault();
 
-        if (!writable || !text.trim()) {
+        if (!writable || !request.text.trim()) {
+            return;
+        }
+
+        const payload = thread
+            ? { threadId: thread.id, text: request.text.trim() }
+            : {
+                  text: request.text.trim(),
+                  ...(path == null ? {} : { path }),
+                  ...(line == null ? {} : { side, line }),
+                  ...(path != null && side != null && line != null
+                      ? { context: context.slice(0, 1000) }
+                      : {}),
+              };
+
+        // A changing diff must not turn a retry after a lost response into a second comment.
+        // Preserve the originally submitted context when the text and anchor are unchanged.
+        let previous;
+
+        try {
+            previous = JSON.parse(request.receipt?.signature ?? "null");
+        } catch {
+            // Ignore an invalid old tab-local receipt and make a fresh request.
+        }
+
+        const sameComment =
+            previous &&
+            ["text", "threadId", "path", "side", "line"].every(
+                (field) => previous[field] === payload[field],
+            );
+
+        request.run(actions.reviewComment, sameComment ? previous : payload, onCancel, true);
+    };
+
+    return html`<form class="rv-form" onSubmit=${submit} aria-busy=${request.pending}>
+        <label class="rv-form-label" for=${`${fieldId}-comment`}>${label}</label>
+        <${BusyWarning} />
+        <div class="rv-input">
+            <textarea
+                id=${`${fieldId}-comment`}
+                ref=${input}
+                rows=${thread ? 2 : 3}
+                maxlength="4000"
+                required
+                value=${request.text}
+                disabled=${!writable || request.pending}
+                onInput=${(event) => request.setText(event.currentTarget.value)}
+            ></textarea>
+            <div class="rv-input-actions">
+                <button
+                    type="button"
+                    class="icon-button rv-icon"
+                    aria-label="Cancel"
+                    title="Cancel"
+                    disabled=${!writable || request.pending}
+                    onClick=${() => onCancel?.()}
+                >
+                    <${Icon} name="close" size=${17} />
+                </button>
+                <button
+                    type="submit"
+                    class="icon-button rv-icon rv-post"
+                    aria-label=${postLabel}
+                    title=${postLabel}
+                    disabled=${!writable || !request.text.trim() || request.pending}
+                >
+                    <${Icon} name="send" size=${17} />
+                </button>
+            </div>
+        </div>
+        <${RequestError} error=${request.error} />
+    </form>`;
+}
+
+function ReviewThread({ thread, conversationId, outdated, active = true }) {
+    const me = store.state.me;
+    const [open, setOpen] = useState(!thread.resolved);
+    const [replying, setReplying] = useState(false);
+    const request = useReviewRequest(conversationId, ["resolve", "thread", thread.id]);
+    const fieldId = useId();
+    const target = store.state.reviewTarget;
+    const targeted =
+        target?.threadId === thread.id &&
+        (target.conversationId == null || target.conversationId === conversationId);
+    const canResolve = !!me && (me.role === "owner" || me.id === thread.userId);
+    const writable = active && !!me && store.state.conversationId === conversationId;
+    const replies = thread.replies ?? [];
+    const resolveLabel = thread.resolved ? "Reopen comment" : "Resolve comment";
+    const replyLabel = `Reply to ${thread.name}`;
+
+    useLayoutEffect(() => {
+        if (targeted && active) {
+            setOpen(true);
+
+            if (target.reply && writable) {
+                setReplying(true);
+            }
+        }
+    }, [active, targeted, target?.n]);
+
+    const resolve = () => {
+        if (!writable || !canResolve) {
             return;
         }
 
         request.run(
-            () =>
-                actions.reviewComment(
-                    review.id,
-                    {
-                        requestId: request.requestId(text.trim()),
-                        threadId: thread.id,
-                        text: text.trim(),
-                    },
-                    conversationId,
-                ),
+            actions.resolveReviewThreads,
+            { threadIds: [thread.id], resolved: !thread.resolved },
             () => {
-                setText("");
-                setOpen(false);
+                if (!thread.resolved) {
+                    setOpen(false);
+                }
             },
         );
     };
 
-    if (!open) {
-        return writable
-            ? html`<button
-            class="button ghost small rv-button"
-            type="button"
-            aria-label=${`Reply to ${thread.name}`}
-            onClick=${() => setOpen(true)}
-        >Reply</button>`
-            : null;
-    }
-
-    return html`<form class="rv-form rv-reply-form" onSubmit=${submit}>
-        <label for=${`${fieldId}-reply`}>Reply to ${thread.name}</label>
-        <textarea
-            id=${`${fieldId}-reply`}
-            rows="2"
-            required
-            value=${text}
-            disabled=${!writable || request.pending}
-            onInput=${(event) => setText(event.currentTarget.value)}
-        ></textarea>
-        <${RequestError} error=${request.error} />
-        <div class="rv-actions">
+    return html`<article
+        id=${`review-thread-${thread.id}`}
+        class=${`rv-thread ${thread.resolved ? "rv-resolved" : ""} ${targeted ? "rv-targeted" : ""}`}
+        tabindex="-1"
+        aria-label=${`Comment by ${thread.name}${thread.resolved ? ", resolved" : ""}`}
+    >
+        <div class="rv-thread-head">
             <button
-                class="button primary small rv-button"
-                type="submit"
-                disabled=${!writable || !text.trim() || request.pending}
-            >${request.pending ? "Posting…" : "Post reply"}</button>
-            <button
-                class="button ghost small rv-button"
                 type="button"
-                disabled=${request.pending}
-                onClick=${() => setOpen(false)}
-            >Cancel</button>
+                class="rv-disclosure rv-thread-toggle"
+                aria-expanded=${open}
+                aria-controls=${`${fieldId}-body`}
+                onClick=${() => setOpen(!open)}
+            >
+                <span class=${`rv-chevron ${open ? "rv-expanded" : ""}`}>
+                    <${Icon} name="chevron" size=${14} />
+                </span>
+                <${ReviewAuthor} userId=${thread.userId} name=${thread.name} />
+                <span class=${`rv-status ${thread.resolved ? "resolved" : "unresolved"}`}>
+                    ${thread.resolved ? "Resolved" : "Open"}
+                </span>
+                ${replies.length > 0 && html`<span class="rv-hint">${replies.length} ${replies.length === 1 ? "reply" : "replies"}</span>`}
+                ${!open && html`<span class="rv-preview">${thread.text}</span>`}
+            </button>
+            <div class="rv-thread-tools">
+                ${
+                    me &&
+                    !replying &&
+                    html`<button
+                        type="button"
+                        class="icon-button rv-icon"
+                        aria-label=${replyLabel}
+                        title=${replyLabel}
+                        disabled=${!writable || request.pending}
+                        onClick=${() => {
+                            if (writable) {
+                                setOpen(true);
+                                setReplying(true);
+                            }
+                        }}
+                    >
+                        <${Icon} name="reply" size=${16} />
+                    </button>`
+                }
+                ${
+                    canResolve &&
+                    html`<button
+                        type="button"
+                        class="icon-button rv-icon"
+                        aria-label=${resolveLabel}
+                        title=${resolveLabel}
+                        aria-busy=${request.pending}
+                        disabled=${!writable || request.pending}
+                        onClick=${resolve}
+                    >
+                        <${Icon} name=${thread.resolved ? "reload" : "check"} size=${16} />
+                    </button>`
+                }
+            </div>
         </div>
-    </form>`;
+        <${RequestError} error=${request.error} />
+        <div id=${`${fieldId}-body`} class="rv-thread-body" hidden=${!open}>
+            <div class="rv-comment-meta">
+                <span class="rv-location">${locationLabel(thread)}</span>
+                <${ReviewTime} at=${thread.at} />
+            </div>
+            ${
+                outdated &&
+                thread.context &&
+                html`<details class="rv-context">
+                    <summary>Original context</summary>
+                    <pre>${thread.context}</pre>
+                </details>`
+            }
+            <p class="rv-text">${thread.text}</p>
+            ${
+                replies.length > 0 &&
+                html`<ol class="rv-replies" aria-label="Replies">
+                    ${replies.map(
+                        (reply) => html`<li key=${reply.id} class="rv-reply">
+                            <div class="rv-comment-meta">
+                                <${ReviewAuthor} userId=${reply.userId} name=${reply.name} />
+                                <${ReviewTime} at=${reply.at} />
+                            </div>
+                            <p class="rv-text">${reply.text}</p>
+                        </li>`,
+                    )}
+                </ol>`
+            }
+            ${
+                replying &&
+                html`<${CommentComposer}
+                    conversationId=${conversationId}
+                    active=${active}
+                    thread=${thread}
+                    onCancel=${() => {
+                        const current = store.state.reviewTarget;
+
+                        setReplying(false);
+
+                        if (
+                            current?.reply &&
+                            current.threadId === thread.id &&
+                            current.conversationId === conversationId
+                        ) {
+                            store.set({ reviewTarget: { ...current, reply: false } });
+                        }
+                    }}
+                />`
+            }
+        </div>
+    </article>`;
 }

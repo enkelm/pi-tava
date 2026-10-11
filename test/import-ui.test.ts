@@ -142,6 +142,37 @@ async function wideNewButton(page: BrowserPage, scope: string) {
     );
 }
 
+/** The secondary source choice is a compact, bordered control, not another full-width tab row. */
+async function sourceToggle(page: BrowserPage) {
+    await page.evaluate(`
+        await Promise.all(document.getAnimations()
+            .filter((animation) => Number.isFinite(animation.effect.getComputedTiming().endTime))
+            .map((animation) => animation.finished.catch(() => {})));
+    `);
+    const layout = await value<{
+        compact: boolean;
+        bordered: boolean;
+        touchable: boolean;
+        fits: boolean;
+    }>(
+        page,
+        `(() => {
+            const tabs = document.querySelector('[role="tablist"][aria-label="Import source"]');
+            const bounds = tabs.getBoundingClientRect();
+            const style = getComputedStyle(tabs);
+
+            return {
+                compact: bounds.width > 0 && bounds.width <= 220,
+                bordered: ['Top', 'Right', 'Bottom', 'Left'].every(side => parseFloat(style['border' + side + 'Width']) >= 1),
+                touchable: [...tabs.querySelectorAll('button')].every(button => button.getBoundingClientRect().height >= 40),
+                fits: bounds.left >= 0 && bounds.right <= innerWidth,
+            };
+        })()`,
+    );
+
+    assert.deepEqual(layout, { compact: true, bordered: true, touchable: true, fits: true });
+}
+
 async function shot(page: BrowserPage, name: string) {
     const directory = process.env.IMPORT_SCREENSHOT_DIR;
 
@@ -803,6 +834,7 @@ test(
             await page.evaluate(`document.querySelector('.home-list .new-button').click()`);
             await sessionTab(page, "import");
             await present(page, "#import-tab-history");
+            await sourceToggle(page);
             assert.equal(
                 await value(
                     page,
@@ -892,6 +924,7 @@ test(
                 await value(page, `document.documentElement.scrollWidth <= innerWidth`),
                 true,
             );
+            await sourceToggle(page);
             await shot(page, "desktop-history-expanded");
             await sessionTab(page, "new");
             await sessionTab(page, "import");

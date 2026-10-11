@@ -423,7 +423,22 @@ test(
             await page.setViewport(VIEWPORTS.mobile);
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
             await present(page, ".home-list .private-tabs");
-            assert.equal(requests.length, 0, "Private is not fetched on Sessions");
+            assert.equal(requests.length, 0, "Herdr is not fetched on Collab");
+            assert.deepEqual(
+                await value(
+                    page,
+                    `[...document.querySelectorAll('.home-list .private-tabs button')].map(tab => ({
+                        label: tab.textContent.trim(),
+                        selected: tab.getAttribute('aria-selected'),
+                        icon: !!tab.querySelector('[aria-hidden="true"]'),
+                    }))`,
+                ),
+                [
+                    { label: "Collab", selected: "true", icon: true },
+                    { label: "Herdr", selected: "false", icon: true },
+                ],
+                "source tabs identify collaboration and private Herdr with decorative icons",
+            );
             await page.evaluate(`(await import('/store.js')).navigate(${durableId})`);
             await present(page, ".user-row .bubble");
             await present(page, ".round.send svg");

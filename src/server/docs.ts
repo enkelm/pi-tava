@@ -266,6 +266,24 @@ export const ReviewSnapshotDoc = defineDocFamily<
     initial: () => ({ diffs: {} }),
 });
 
+/** A comment's anchor is advisory; its client excerpt remains useful after files change. */
+export type ChangeReviewThread = ReviewThread & {
+    cwd: string;
+    context?: string;
+};
+
+export type ChangeReviews = { threads: ChangeReviewThread[]; rev: number };
+
+/** Comment-first collaboration. Legacy ReviewDoc/ReviewSnapshotDoc remain registered but unused. */
+export const CommentReviewDoc = defineDoc<ChangeReviews & { requests: Record<string, string> }>({
+    kind: "pocket.comment-reviews",
+    version: 1,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ threads: [], rev: 0, requests: {} }),
+});
+
 export type ArtifactType = "html" | "markdown" | "svg";
 
 export type ArtifactVersion = {

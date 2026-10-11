@@ -62,7 +62,7 @@ const emptyView = () => ({
     watch: null,
     branch: null,
     subagentsHeld: null,
-    reviews: [],
+    reviews: { threads: [], rev: 0 },
 });
 
 export const store = {
@@ -121,18 +121,8 @@ export const store = {
         pendingShells: [],
         /** The session's browser page as the server last told: address, title, loading, size (`browser.js`). */
         browser: null,
-        /** The Browser panel shows; kept per tab, so the reload after a live edit keeps it. */
-        browserOpen: sessionStorage.getItem("pocket.browser") === "1",
-        /** The Files tile shows (`files-panel.js`); kept per tab, like the browser's. */
-        filesOpen: sessionStorage.getItem("pocket.files") === "1",
-        /** The Files tile's tab: `files` or `changes`. */
-        filesTab: sessionStorage.getItem("pocket.filesTab") === "changes" ? "changes" : "files",
-        /** The last file asked to open in the Files tile: `{ path, line, n }`, `n` telling requests apart. */
-        filesTarget: null,
-        /** When someone last asked for the Files tile, and for which tab: `{ tab, at }`. */
-        filesAsk: null,
-        /** The People panel shows beside the conversation on wide screens; kept per tab, like the browser's. */
-        peopleOpen: sessionStorage.getItem("pocket.people") === "1",
+        // Panel selection and Files tab belong to this conversation, kept locally in this browser tab.
+        ...panelsFor(routeConversation(), { migrate: true }),
         /** The last request to show the People panel: which tab and chat message, and a count that tells requests apart. */
         peopleAsk: { tab: null, highlight: null, n: 0 },
         /** This person's PiP, as the server last told (`{ id, busy, endedAt }`); null when they have none yet. */
@@ -148,9 +138,19 @@ export const store = {
      * it makes on the way (a notice, say) is kept, not overwritten by the state as it was before.
      */
     set(patch) {
-        const change = typeof patch === "function" ? patch(this.state) : patch;
+        const before = this.state;
+        const change = typeof patch === "function" ? patch(before) : patch;
 
         this.state = { ...this.state, ...change };
+
+        if (
+            this.state.conversationId !== null &&
+            ["browserOpen", "filesOpen", "peopleOpen", "filesTab"].some(
+                (key) => before[key] !== this.state[key],
+            )
+        ) {
+            savePanels(this.state.conversationId, this.state);
+        }
 
         for (const listener of this.listeners) {
             listener(this.state);
@@ -185,6 +185,67 @@ function opened(id) {
 }
 
 opened(store.state.conversationId);
+
+/** One selected panel per conversation. Pages and open files already have their own conversation owners. */
+function savePanels(id, state) {
+    sessionStorage.setItem(
+        `pocket.panels.${id}`,
+        JSON.stringify({
+            panel: state.browserOpen
+                ? "browser"
+                : state.filesOpen
+                  ? "files"
+                  : state.peopleOpen
+                    ? "people"
+                    : null,
+            filesTab: state.filesTab,
+        }),
+    );
+}
+
+function panelsFor(id, { migrate = false } = {}) {
+    let saved = null;
+
+    try {
+        saved = id === null ? null : JSON.parse(sessionStorage.getItem(`pocket.panels.${id}`));
+    } catch {
+        // A malformed local preference must not prevent the app from opening.
+    }
+
+    if (migrate) {
+        // Bind the old global preference only to the thread open at upgrade, never to an unseen thread.
+        if (saved === null && id !== null) {
+            saved = {
+                panel:
+                    sessionStorage.getItem("pocket.browser") === "1"
+                        ? "browser"
+                        : sessionStorage.getItem("pocket.files") === "1"
+                          ? "files"
+                          : sessionStorage.getItem("pocket.people") === "1"
+                            ? "people"
+                            : null,
+                filesTab: sessionStorage.getItem("pocket.filesTab"),
+            };
+            sessionStorage.setItem(`pocket.panels.${id}`, JSON.stringify(saved));
+        }
+
+        for (const key of ["pocket.browser", "pocket.files", "pocket.people", "pocket.filesTab"]) {
+            sessionStorage.removeItem(key);
+        }
+    }
+
+    return {
+        browserOpen: saved?.panel === "browser",
+        filesOpen: saved?.panel === "files",
+        peopleOpen: saved?.panel === "people",
+        filesTab: saved?.filesTab === "changes" ? "changes" : "files",
+        // Requests are transient, not a file selection to replay in another thread.
+        filesTarget: null,
+        filesAsk: null,
+        reviewFocus: null,
+        reviewTarget: null,
+    };
+}
 
 function routeConversation() {
     const match = /^\/s\/(\d+)\/?$/.exec(location.pathname);
@@ -538,7 +599,10 @@ function mergeView(current, data) {
         decisions: data.decisions ?? base.decisions,
         plan: data.plan ?? base.plan,
         schedules: data.schedules ?? base.schedules,
-        reviews: data.reviews ?? base.reviews,
+        // Version-one saved rounds are deliberately not part of comment-first reviews.
+        reviews: Array.isArray(data.reviews)
+            ? { threads: [], rev: 0 }
+            : (data.reviews ?? base.reviews),
         // No goal is null, which the server sends too: only a missing field keeps the last value.
         goal: data.goal === undefined ? base.goal : data.goal,
         // The session's PR watch, or null: the same.
@@ -984,6 +1048,8 @@ export function navigate(conversationId, { replace = false, sheet = null, privat
               : {}),
         view: emptyView(),
         ...peopleFor(conversationId),
+        ...panelsFor(conversationId),
+        peopleAsk: { tab: null, highlight: null, n: state.peopleAsk.n },
         browser: null,
         history: null,
         transcriptFrom: null,
@@ -1011,6 +1077,8 @@ onRoute(() => {
                   : {}),
             view: emptyView(),
             ...peopleFor(id),
+            ...panelsFor(id),
+            peopleAsk: { tab: null, highlight: null, n: store.state.peopleAsk.n },
             browser: null,
             history: null,
             transcriptFrom: null,
@@ -1050,13 +1118,13 @@ export async function start() {
 const current = () => store.state.conversationId;
 
 export const actions = {
-    /** `inlineFiles`: the files the message mentions with @ go along with it. */
-    submit: (text, attachments, mode, inlineFiles = false) =>
-        api(`c/${current()}/submit`, {
+    /** `inlineFiles` attaches @ files; captured ids and receipts keep review sends on their thread. */
+    submit: (text, attachments, mode, inlineFiles = false, id = current(), requestId = uid()) =>
+        api(`c/${id}/submit`, {
             text,
             attachments,
             mode,
-            requestId: uid(),
+            requestId,
             ...(inlineFiles ? { inlineFiles } : {}),
         }),
     /** Run a command in the session's folder (`!`); `context: false` keeps it from Pi (`!!`). */
@@ -1070,20 +1138,13 @@ export const actions = {
     view: (path) => api(`c/${current()}/view?path=${encodeURIComponent(path)}`),
     /** What changed in the session's folder: git's uncommitted changes, and Pi's edits. */
     changes: (id = current()) => api(`c/${id}/changes`),
-    /** Saved local review rounds; requests capture their session so navigation cannot retarget a send. */
-    createReview: (request, id = current()) => api(`c/${id}/reviews`, request),
-    manageReview: (reviewId, request, id = current()) =>
-        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/manage`, request),
-    submitReview: (reviewId, request, id = current()) =>
-        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/submit`, request),
-    reviewComment: (reviewId, request, id = current()) =>
-        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/comment`, request),
-    resolveReviewThread: (reviewId, request, id = current()) =>
-        api(`c/${id}/reviews/${encodeURIComponent(reviewId)}/resolve`, request),
-    reviewDiff: (id, reviewId, path) =>
-        api(
-            `c/${id}/reviews/${encodeURIComponent(reviewId)}/diff?path=${encodeURIComponent(path)}`,
-        ),
+    /** Comment-first reviews capture their session so navigation cannot retarget a send. */
+    reviewComment: (request, id = current()) => api(`c/${id}/reviews/comment`, request),
+    resolveReviewThreads: (request, id = current()) => api(`c/${id}/reviews/resolve`, request),
+    /** Scoped, read-only Changes access for everyone in the conversation, including viewers. */
+    reviewChanges: (id = current()) => api(`c/${id}/reviews/changes`),
+    reviewDiff: (id, path) => api(`c/${id}/reviews/diff?path=${encodeURIComponent(path)}`),
+    reviewContext: (id, path) => api(`c/${id}/reviews/context?path=${encodeURIComponent(path)}`),
     branches: () => api(`c/${current()}/branches`),
     switchBranch: (target) => api(`c/${current()}/branch`, target),
     /** Undo the uncommitted changes to one file. */
@@ -1180,7 +1241,6 @@ export function revealEntry(entryId) {
 
 // ─── The People panel ──────────────────────────────────────────────────────────────
 
-const PEOPLE_KEY = "pocket.people";
 /** Wide enough for the session list, the conversation, and a panel beside it: where the Browser panel docks too. */
 const PEOPLE_DOCK = matchMedia("(min-width: 1100px)");
 
@@ -1210,10 +1270,6 @@ function sheetChange(sheet, state) {
         return { sheet };
     }
 
-    sessionStorage.setItem(PEOPLE_KEY, "1");
-    sessionStorage.removeItem("pocket.browser");
-    sessionStorage.removeItem("pocket.files");
-
     return {
         sheet: null,
         peopleOpen: true,
@@ -1229,7 +1285,7 @@ function sheetChange(sheet, state) {
 
 /**
  * The Files tile shows now: asked for, in a conversation, and not in the Browser panel's place (one panel at a time).
- * Viewers get saved Changes reviews only; the tile keeps its file tree and editor restricted to people who can steer.
+ * Viewers get scoped Changes reviews; the tile keeps its file tree and editor restricted to people who can steer.
  */
 export function filesShown(state = store.state) {
     // `browserAvailable()` (browser.js), which imports this module.
@@ -1240,15 +1296,33 @@ export function filesShown(state = store.state) {
         state.filesOpen &&
         state.conversationId !== null &&
         !state.missing &&
-        (state.me?.role !== "viewer" || state.server?.localReviews >= 1) &&
+        (state.me?.role !== "viewer" || state.server?.localReviews >= 2) &&
         !browsing
     );
 }
 
+/** Open a person's review from People, using the same per-thread Files panel and Back stack. */
+export function revealReviewReviewer(userId) {
+    const { conversationId, server, reviewFocus } = store.state;
+
+    if (conversationId === null || !(server?.localReviews >= 2)) {
+        return;
+    }
+
+    closePeople();
+    store.set({
+        filesOpen: true,
+        filesTab: "changes",
+        filesAsk: { tab: "changes", at: Date.now() },
+        browserOpen: false,
+        drawer: false,
+        sheet: null,
+        reviewFocus: { conversationId, userId, n: (reviewFocus?.n ?? 0) + 1 },
+    });
+}
+
 /** Hide the People panel. Showing it is `openSheet({ type: "chat" })`, which docks it on wide screens. */
 export function closePeople() {
-    sessionStorage.removeItem(PEOPLE_KEY);
-
     // Its active border goes to the conversation, not nowhere.
     if (document.documentElement.dataset.focus === "people-panel") {
         document.documentElement.dataset.focus = "pane";

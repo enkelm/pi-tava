@@ -6355,18 +6355,51 @@ button.chip:active:not(:disabled):not(.on) {
     white-space: normal;
 }
 
+.import-source-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.65rem 1rem;
+    margin-block: 0.75rem;
+}
+
+.import-source-heading {
+    flex: 1 1 18rem;
+    min-width: 0;
+    margin: 0;
+}
+
 .import-source-tabs {
-    margin-bottom: 0.75rem;
+    display: flex;
+    flex: none;
+    gap: 2px;
+    padding: 2px;
+    margin-left: auto;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--card);
 }
 
 .import-source-tabs button {
-    flex: 1;
+    min-width: 4.5rem;
     min-height: 40px;
-    border-bottom: 2px solid transparent;
+    padding: 0.35rem 0.65rem;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--body);
+    font-size: 0.8rem;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .import-source-tabs button:hover:not(:disabled):not(.on) {
+        background: var(--hover);
+        color: var(--text);
+    }
 }
 
 .import-source-tabs button.on {
-    border-bottom-color: var(--accent);
+    border-color: var(--accent-line);
+    background: var(--accent-soft);
     color: var(--accent);
 }
 
@@ -16152,11 +16185,24 @@ pre.gallery-code {
 }
 
 .private-tabs button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
     min-height: 40px;
 }
 
 .private-tabs button.on {
     box-shadow: inset 0 -2px var(--accent);
+}
+
+.herdr-icon {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    background: currentColor;
+    -webkit-mask: url("./herdr-mark.svg") center / contain no-repeat;
+    mask: url("./herdr-mark.svg") center / contain no-repeat;
 }
 
 .private-hint {

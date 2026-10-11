@@ -102,7 +102,7 @@ function SavedSessions({ visible, busy, onBusyChange, onPreview, onManual }) {
     };
 
     return html`<div class="import-history" hidden=${!visible}>
-        <p class="small muted">Choose a saved session. Expand it to review the last saved conversation before importing.</p>
+        <p class="small muted">Expand it to review the last saved conversation before importing.</p>
         <div class="field">
             <label class="label" for="import-history-search">Search saved sessions</label>
             <input
@@ -486,31 +486,44 @@ export function ImportPanel({
     return html`
         ${
             !fromPrivate &&
-            html`<div
-                class="session-tabs import-source-tabs"
-                role="tablist"
-                aria-label="Import source"
-                onKeyDown=${sourceKeys}
-            >
-            ${["live", "history"].map((source) => {
-                const current = sourceTab === source;
-
-                return html`<button
-                    key=${source}
-                    id=${`import-tab-${source}`}
-                    type="button"
-                    role="tab"
-                    class=${current ? "on" : ""}
-                    aria-selected=${current}
-                    aria-controls=${`import-panel-${source}`}
-                    tabindex=${current ? 0 : -1}
-                    disabled=${busy}
-                    onClick=${() => selectSource(source)}
+            html`<div class="import-source-header">
+                ${
+                    !preview &&
+                    mode !== "file" &&
+                    html`<p class="import-source-heading">
+                    ${
+                        sourceTab === "live"
+                            ? "Choose a Pi session to move into Durable."
+                            : "Choose a saved session."
+                    }
+                </p>`
+                }
+                <div
+                    class="import-source-tabs"
+                    role="tablist"
+                    aria-label="Import source"
+                    onKeyDown=${sourceKeys}
                 >
-                    ${source === "live" ? "Live" : "History"}
-                </button>`;
-            })}
-        </div>`
+                    ${["live", "history"].map((source) => {
+                        const current = sourceTab === source;
+
+                        return html`<button
+                            key=${source}
+                            id=${`import-tab-${source}`}
+                            type="button"
+                            role="tab"
+                            class=${current ? "on" : ""}
+                            aria-selected=${current}
+                            aria-controls=${`import-panel-${source}`}
+                            tabindex=${current ? 0 : -1}
+                            disabled=${busy}
+                            onClick=${() => selectSource(source)}
+                        >
+                            ${source === "live" ? "Live" : "History"}
+                        </button>`;
+                    })}
+                </div>
+            </div>`
         }
         <section
             id=${fromPrivate ? undefined : `import-panel-${sourceTab}`}
@@ -521,7 +534,7 @@ export function ImportPanel({
             mode === "running" &&
             !preview &&
             html`
-            <p>Choose a Pi session to move into Durable.</p>
+            ${fromPrivate && html`<p>Choose a Pi session to move into Durable.</p>`}
             <p class="small muted">Idle sessions are ready to import. Running operations need confirmation before they are aborted. Pi stops; its pane and shell stay open.</p>
             <div class="import-list" aria-label="Pi sessions" aria-busy=${loading || busy}>
                 ${listing === null && loading && html`<${Loader} label="Finding Pi sessions" />`}

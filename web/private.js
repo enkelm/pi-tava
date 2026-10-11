@@ -221,15 +221,24 @@ export function PrivateTabs() {
 
     return html`<div class="session-tabs private-tabs" role="tablist" aria-label="Session source">
         ${[
-            ["sessions", "Sessions"],
-            ["private", "Private"],
+            ["sessions", "Collab", "users"],
+            ["private", "Herdr", "herdr"],
         ].map(
-            ([key, label]) => html`<button
-            role="tab"
-            aria-selected=${store.state.sidebarTab === key}
-            class=${store.state.sidebarTab === key ? "on" : ""}
-            onClick=${() => store.set({ sidebarTab: key })}
-        >${label}</button>`,
+            ([key, label, icon]) => html`<button
+                key=${key}
+                type="button"
+                role="tab"
+                aria-selected=${store.state.sidebarTab === key}
+                class=${store.state.sidebarTab === key ? "on" : ""}
+                onClick=${() => store.set({ sidebarTab: key })}
+            >
+                ${
+                    icon === "herdr"
+                        ? html`<span class="icon herdr-icon" aria-hidden="true"></span>`
+                        : html`<${Icon} name=${icon} size=${18} />`
+                }
+                <span>${label}</span>
+            </button>`,
         )}
     </div>`;
 }

@@ -110,7 +110,7 @@ async function fresh(): Promise<void> {
     await page.setViewport(VIEWPORTS.mobile);
     await page.evaluate(`
         for (const key of Object.keys(sessionStorage)) {
-            if (/^pocket\.(files|browser)/.test(key)) {
+            if (/^pocket\.(files|browser|panels)/.test(key)) {
                 sessionStorage.removeItem(key);
             }
         }

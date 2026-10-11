@@ -11,15 +11,13 @@ import { FileView } from "./sheets/file.js";
 import { actions, canSteer, closePeople, panelsBeside, store } from "./store.js";
 import { html, Icon, Loader, Marked, shortPath, usePresence } from "./ui.js";
 
-const OPEN_KEY = "pocket.files";
-const TAB_KEY = "pocket.filesTab";
 const WIDTH_KEY = "pocket.filesWidth";
 /** Tree and viewer side by side from this width of the tile; one at a time below it. */
 const SIDE_BY_SIDE = 600;
 
 /** Viewers can review scoped changes; the file tree and editor still require steering rights. */
 export const filesAvailable = () =>
-    store.state.conversationId !== null && (canSteer() || store.state.server?.localReviews >= 1);
+    store.state.conversationId !== null && (canSteer() || store.state.server?.localReviews >= 2);
 
 /** Show or hide the tile. It takes the Browser and People panels' place. */
 export function setFilesOpen(open, tab) {
@@ -28,19 +26,9 @@ export function setFilesOpen(open, tab) {
     }
 
     if (open) {
-        sessionStorage.setItem(OPEN_KEY, "1");
-        sessionStorage.removeItem("pocket.browser");
         closePeople();
-    } else {
-        sessionStorage.removeItem(OPEN_KEY);
-
-        if (document.documentElement.dataset.focus === "files-panel") {
-            document.documentElement.dataset.focus = "pane";
-        }
-    }
-
-    if (tab) {
-        sessionStorage.setItem(TAB_KEY, tab);
+    } else if (document.documentElement.dataset.focus === "files-panel") {
+        document.documentElement.dataset.focus = "pane";
     }
 
     store.set({
@@ -70,7 +58,6 @@ export function toggleFiles(tab) {
 }
 
 function setTab(tab) {
-    sessionStorage.setItem(TAB_KEY, tab);
     store.set({ filesTab: tab });
 }
 
@@ -368,6 +355,11 @@ function FilesTab({ changes, covering }) {
 
     /** Close the file, as back does: where it covers the tree, back to the tab it came from. */
     const closeFile = () => {
+        // History may skip this thread's layers on the way to a different route. Keep its saved selection.
+        if (store.state.conversationId !== id) {
+            return;
+        }
+
         const from = selected?.from;
 
         setSelected(null);
@@ -654,14 +646,19 @@ export function FilesPanel({ leaving = false }) {
     const { view, server } = store.state;
     const root = view.agent?.cwd ?? view.conversation?.cwd ?? "";
     const filesTab = canSteer() ? store.state.filesTab : "changes";
-    const { changes } = useChanges(canSteer());
+    const { changes } = useChanges(canSteer() || store.state.server?.localReviews >= 2);
     // Pi's edits git does not list count too: outside a repository, they are all there is.
-    const count = canSteer() && changes ? changes.files.length + changes.piOnly.length : 0;
+    const count = changes ? changes.files.length + changes.piOnly.length : 0;
 
     const beside = panelsBeside();
+    const id = store.state.conversationId;
 
-    // Over the conversation, back closes the tile.
-    useBack(!beside && !leaving, () => setFilesOpen(false));
+    // Over the conversation, back closes the tile, not a different thread's restored panel.
+    useBack(!beside && !leaving, () => {
+        if (store.state.conversationId === id) {
+            setFilesOpen(false);
+        }
+    });
 
     return html`<section
         class=${`files-tile window ${leaving ? "leaving" : ""}`}

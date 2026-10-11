@@ -733,8 +733,12 @@ export function BrowserPanel({ leaving = false }) {
     const fittedHere = useRef(null);
     const beside = panelsBeside();
 
-    // Over the conversation, back closes the panel.
-    useBack(!beside && !leaving, () => setBrowserOpen(false));
+    // Over the conversation, back closes this thread's panel, not the one restored by a route traversal.
+    useBack(!beside && !leaving, () => {
+        if (store.state.conversationId === conversationId) {
+            setBrowserOpen(false);
+        }
+    });
 
     if (open) {
         wasOpen.current = true;

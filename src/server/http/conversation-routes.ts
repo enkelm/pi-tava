@@ -7,13 +7,7 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
-import type {
-    CommentReview,
-    CreateReview,
-    ManageReview,
-    ResolveReview,
-    SubmitReview,
-} from "../reviews.ts";
+import type { CommentReview, ResolveReview } from "../reviews.ts";
 import { serveImage, TYPES } from "./assets.ts";
 import { type ApiRequest, json, readJson, send } from "./io.ts";
 
@@ -45,54 +39,42 @@ export async function conversationRoutes(
     const [, , third, fourth] = parts;
 
     if (third === "reviews") {
-        const reviewId = fourth;
-        const action = parts[4];
+        if (parts.length > 4) {
+            throw new HttpError(404, "No such review route");
+        }
 
-        if (reviewId === undefined && method === "GET") {
+        if (fourth === undefined && method === "GET") {
             return json(response, 200, await app.reviews.list(id, user));
         }
 
-        if (reviewId === undefined && method === "POST") {
-            return json(
-                response,
-                200,
-                await app.reviews.create(id, user, await readJson<CreateReview>(request)),
-            );
+        if (fourth === "changes" && method === "GET") {
+            return json(response, 200, await app.reviews.changes(id, user));
         }
 
-        if (reviewId !== undefined && action === "diff" && method === "GET") {
+        if (fourth === "diff" && method === "GET") {
             return json(response, 200, {
-                diff: await app.reviews.diff(
-                    id,
-                    user,
-                    reviewId,
-                    url.searchParams.get("path") ?? "",
-                ),
+                diff: await app.reviews.diff(id, user, url.searchParams.get("path") ?? ""),
             });
         }
 
-        if (reviewId !== undefined && method === "POST") {
-            if (action === "manage") {
-                await app.reviews.manage(id, user, reviewId, await readJson<ManageReview>(request));
-            } else if (action === "submit") {
-                await app.reviews.submit(id, user, reviewId, await readJson<SubmitReview>(request));
-            } else if (action === "comment") {
-                await app.reviews.comment(
-                    id,
-                    user,
-                    reviewId,
-                    await readJson<CommentReview>(request),
-                );
-            } else if (action === "resolve") {
-                await app.reviews.resolve(
-                    id,
-                    user,
-                    reviewId,
-                    await readJson<ResolveReview>(request),
-                );
-            } else {
-                throw new HttpError(404, "No such review action");
-            }
+        if (fourth === "context" && method === "GET") {
+            return json(
+                response,
+                200,
+                await app.reviews.context(id, user, url.searchParams.get("path") ?? ""),
+            );
+        }
+
+        if (fourth === "comment" && method === "POST") {
+            return json(
+                response,
+                200,
+                await app.reviews.comment(id, user, await readJson<CommentReview>(request)),
+            );
+        }
+
+        if (fourth === "resolve" && method === "POST") {
+            await app.reviews.resolve(id, user, await readJson<ResolveReview>(request));
 
             return json(response, 200, { ok: true });
         }
