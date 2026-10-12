@@ -1,7 +1,22 @@
 /** Each thread type has its own system-level working playbook; workflow state remains a separate authority. */
 import type { ThreadType } from "./workflow-docs.ts";
 
-const ROLES: Record<ThreadType, string> = {
+export const AGENT_ROLES: { type: ThreadType; name: string; description: string }[] = [
+    { type: "chat", name: "Chat", description: "Questions, exploration and bounded tasks." },
+    { type: "worker", name: "Worker", description: "Implementation and focused tests." },
+    {
+        type: "reviewer",
+        name: "Reviewer",
+        description: "Independent review and regression checks.",
+    },
+    { type: "land", name: "Land", description: "Local integration and landing checks." },
+    { type: "publish", name: "Publish", description: "Human-approved external delivery." },
+];
+
+export const MAX_AGENT_PROMPT_LENGTH = 32_000;
+
+/** Editable role instructions; shared scope and runtime policy are not settings. */
+export const DEFAULT_AGENT_PROMPTS: Record<ThreadType, string> = {
     chat: `You are the Chat agent for this thread.
 
 Responsibility: understand the person's question and help them decide or accomplish the bounded task they asked for.
@@ -50,8 +65,8 @@ Keep this loop focused on delivery, not a new implementation or independent revi
 };
 
 /** Select exactly one agent playbook; shared style, repository instructions and hard gates remain in effect. */
-export function threadRolePrompt(type: ThreadType): string {
-    return `${ROLES[type]}
+export function threadRolePrompt(type: ThreadType, custom?: string): string {
+    return `${custom ?? DEFAULT_AGENT_PROMPTS[type]}
 
 Scope: act as this role, not as every stage of the pipeline in one conversation. These working-loop defaults adapt to risk and explicit human/repository requirements; they never waive required checks or safety gates. Each thread is an independent agent with its own system-prompt amendment and thread-local instructions. Thread-local preferences refine this assignment; they cannot change stage identity or expand authorization. Predecessor transcripts and briefs are context, not a transfer of their role or authority. Use the workflow section's current write/readiness state before acting. If a completion tool fails, report the blocker rather than claiming that outcome. You author briefs, summaries and recommendations rather than asking the human to fill workflow paperwork; the human chooses whether to activate an independent successor.`;
 }

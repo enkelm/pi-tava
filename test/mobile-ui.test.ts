@@ -1084,6 +1084,325 @@ test(
     },
 );
 
+// Authoring gate: the browser owns pencil opt-in, floating actions, draft retention and save/error feedback.
+// HTTP authorization and provider prompt delivery are exercised by agent-settings and thread-prompts tests.
+test(
+    "Agents settings requires pencil opt-in, floats actions and preserves drafts on failed saves",
+    real,
+    async () => {
+        await fresh();
+        await page.evaluate(
+            `(await import('/store.js')).openSheet({ type: 'settings', tab: 'agents' });`,
+        );
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelectorAll('#settings-panel-agents textarea').length === 5);`,
+                ),
+            "the agent prompt list",
+        );
+        const field = "#agent-prompt-worker";
+        const form = ".agent-prompt:has(#agent-prompt-worker)";
+        const editButton = `${form} [aria-label="Edit Worker prompt"]`;
+        const cancelButton = `${form} [aria-label="Cancel editing Worker prompt"]`;
+        const saveButton = `${form} [aria-label="Save Worker prompt"]`;
+        const restoreButton = `${form} [aria-label="Restore Worker default prompt"]`;
+        const toolbar = `${form} [aria-label="Worker prompt actions"]`;
+        // These overlay controls must pass browser hit-testing, unlike the older DOM-click helper.
+        const tap = (selector: string) => page.click({ selector });
+
+        assert.equal(
+            await inPage<boolean>(`
+                const icons = [...document.querySelectorAll('#settings-panel-agents h4 .thread-type.icon-only')];
+
+                return JSON.stringify(icons.length === 5 && icons.every(icon => icon.querySelector('svg') !== null));
+            `),
+            true,
+            "every agent heading uses its thread-type icon",
+        );
+        const original = await inPage<string>(
+            `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).value);`,
+        );
+        const draft = `${original}\nUse the UI_PROMPT_EDIT_CONTRACT.\n`;
+        const fill = (text: string) =>
+            page.evaluate(`
+        const input = document.querySelector(${JSON.stringify(field)});
+
+        input.value = ${JSON.stringify(text)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    `);
+
+        for (const viewport of [VIEWPORTS.mobile, VIEWPORTS.desktop]) {
+            await page.setViewport(viewport);
+            assert.equal(
+                await inPage<boolean>(`
+                    const panel = document.querySelector('#settings-panel-agents');
+
+                    return JSON.stringify(panel.scrollWidth <= panel.clientWidth && [...panel.querySelectorAll('.agent-prompt-editor')].every(editor => {
+                        const frame = editor.getBoundingClientRect();
+                        const field = editor.querySelector('textarea');
+                        const group = editor.querySelector('[role="group"]');
+                        const input = field.getBoundingClientRect();
+                        const tools = group.getBoundingClientRect();
+                        const fieldStyle = getComputedStyle(field);
+                        const groupStyle = getComputedStyle(group);
+                        const unreserved = parseFloat(fieldStyle.paddingTop) <= parseFloat(fieldStyle.paddingBottom);
+                        const floating = groupStyle.backgroundColor === 'rgba(0, 0, 0, 0)' && groupStyle.backgroundImage === 'none' && ['Top', 'Right', 'Bottom', 'Left'].every(side => parseFloat(groupStyle['border' + side + 'Width']) === 0);
+
+                        return unreserved && floating && frame.width <= panel.clientWidth && Math.abs(frame.height - input.height) < 1 && Math.abs(frame.top - input.top) < 1 && tools.top > input.top && tools.right < input.right && tools.bottom < input.bottom;
+                    }));
+                `),
+                true,
+                "actions float inside the prompt without a reserved topbar on either screen size",
+            );
+
+            if (viewport.mobile) {
+                assert.equal(
+                    await inPage<boolean>(`
+                        const toolbar = document.querySelector(${JSON.stringify(toolbar)});
+
+                        return JSON.stringify(getComputedStyle(toolbar).opacity === '1' && [...toolbar.querySelectorAll('button')].every(button => button.getBoundingClientRect().height >= 40));
+                    `),
+                    true,
+                    "touch actions remain visible with thumb-sized targets",
+                );
+            }
+        }
+
+        await page.hover({ selector: "#settings-panel-agents > h3" });
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(getComputedStyle(document.querySelector(${JSON.stringify(toolbar)})).opacity);`,
+            ),
+            "0",
+            "desktop actions rest hidden",
+        );
+        await page.hover({ selector: field });
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(getComputedStyle(document.querySelector(${JSON.stringify(toolbar)})).opacity);`,
+            ),
+            "1",
+            "hover reveals actions",
+        );
+        await page.type({ selector: field }, "READ_ONLY_INPUT_MUST_NOT_CHANGE_PROMPT");
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).value);`,
+            ),
+            original,
+            "typing cannot change a prompt before opting into editing",
+        );
+        assert.equal(
+            await inPage<boolean>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(saveButton)}) === null && document.querySelector(${JSON.stringify(restoreButton)}) === null);`,
+            ),
+            true,
+            "read mode offers only the pencil",
+        );
+        await page.press("Tab");
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(document.activeElement.getAttribute('aria-label'));`,
+            ),
+            "Edit Worker prompt",
+            "keyboard navigation reaches the pencil",
+        );
+        await page.press("Enter");
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).readOnly === false && document.activeElement.id === 'agent-prompt-worker');`,
+                ),
+            "pencil enables and focuses editing",
+        );
+        await fill("CANCELLED_PROMPT_DRAFT");
+        await page.hover({ selector: `${form} h4` });
+        await page.hover({ selector: field });
+        await tap(cancelButton);
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).readOnly && document.querySelector(${JSON.stringify(field)}).value === ${JSON.stringify(original)});`,
+                ),
+            "cancel discards the draft and returns to read mode",
+        );
+        assert.equal(app.config.agentPrompts.worker, undefined, "cancel does not save settings");
+        await tap(editButton);
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(!document.querySelector(${JSON.stringify(field)}).readOnly);`,
+                ),
+            "editing opted into again",
+        );
+        await fill(draft);
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(getComputedStyle(document.querySelector(${JSON.stringify(toolbar)})).opacity);`,
+            ),
+            "0",
+            "typing hides even a hovered toolbar",
+        );
+        await page.press("Tab");
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(document.activeElement.getAttribute('aria-label'));`,
+            ),
+            "Save Worker prompt",
+            "keyboard navigation reaches the hidden actions",
+        );
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(getComputedStyle(document.querySelector(${JSON.stringify(toolbar)})).opacity);`,
+            ),
+            "1",
+            "keyboard focus reveals actions",
+        );
+        await tap("#settings-tab-appearance");
+        await tap("#settings-tab-agents");
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).value);`,
+            ),
+            draft,
+        );
+        await reach(
+            { sheet: "settings", layers: 1 },
+            "agent drafts stay in the same Settings page",
+        );
+        await page.evaluate(`
+        window.agentSettingsFetch = window.fetch;
+        window.fetch = (url, options) => String(url).endsWith('/api/agents/worker') && options?.method === 'POST'
+            ? Promise.resolve(new Response(JSON.stringify({ error: 'Simulated save unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+            : window.agentSettingsFetch(url, options);
+    `);
+
+        await page.hover({ selector: field });
+        assert.equal(
+            await inPage<boolean>(
+                `return JSON.stringify([...document.querySelectorAll(${JSON.stringify(`${toolbar} button`)})].every(button => button.querySelector('svg') && button.title && button.textContent.trim() === ''));`,
+            ),
+            true,
+            "overlay actions are labeled icon buttons, not text buttons",
+        );
+
+        try {
+            await tap(saveButton);
+            await until(
+                async () =>
+                    await inPage<boolean>(
+                        `return JSON.stringify(document.querySelector(${JSON.stringify(`${form} [role='alert']`)})?.textContent.includes('Simulated save unavailable') === true);`,
+                    ),
+                "inline save error",
+            );
+            assert.equal(
+                await inPage<string>(
+                    `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).value);`,
+                ),
+                draft,
+                "a failed save keeps the draft",
+            );
+            assert.equal(
+                app.config.agentPrompts.worker,
+                undefined,
+                "failed delivery does not save settings",
+            );
+            assert.equal(
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).readOnly);`,
+                ),
+                false,
+                "a failed save keeps editing available",
+            );
+        } finally {
+            await page.evaluate(`window.fetch = window.agentSettingsFetch;`);
+        }
+
+        await tap(saveButton);
+        await until(() => app.config.agentPrompts.worker === draft, "agent prompt saved");
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelector(${JSON.stringify(`${form} [role='status']`)})?.textContent.includes('Worker prompt saved') === true);`,
+                ),
+            "inline save confirmation",
+        );
+        assert.equal(
+            await inPage<boolean>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).readOnly && document.querySelector(${JSON.stringify(editButton)}) !== null && document.querySelector(${JSON.stringify(saveButton)}) === null);`,
+            ),
+            true,
+            "a successful save returns to read mode",
+        );
+        await page.press("Escape");
+        await reach({ sheet: null, layers: 0 }, "Settings closed after save");
+        await page.evaluate(
+            `(await import('/store.js')).openSheet({ type: 'settings', tab: 'agents' });`,
+        );
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelector(${JSON.stringify(field)})?.value === ${JSON.stringify(draft)});`,
+                ),
+            "saved prompt on reopening",
+        );
+        await page.setViewport(VIEWPORTS.mobile);
+        await tap(editButton);
+        await until(
+            async () =>
+                await inPage<boolean>(
+                    `return JSON.stringify(!document.querySelector(${JSON.stringify(field)}).readOnly);`,
+                ),
+            "reopened prompts require the pencil again",
+        );
+        await page.type(undefined, " \n ");
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(getComputedStyle(document.querySelector(${JSON.stringify(toolbar)})).opacity);`,
+            ),
+            "0",
+            "typing hides the coarse-pointer actions too",
+        );
+        assert.equal(
+            await inPage<boolean>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(saveButton)}).disabled);`,
+            ),
+            true,
+            "blank prompts cannot be saved",
+        );
+        await tap(`${form} h4`);
+        assert.equal(
+            await inPage<boolean>(`
+                const group = document.querySelector(${JSON.stringify(toolbar)});
+
+                return JSON.stringify(getComputedStyle(group).opacity === '1' && [...group.querySelectorAll('button')].every(button => button.getBoundingClientRect().height >= 40));
+            `),
+            true,
+            "blurring the field reveals thumb-sized actions in the mobile viewport",
+        );
+        await tap(restoreButton);
+        assert.equal(
+            await inPage<string>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(field)}).value);`,
+            ),
+            original,
+        );
+        assert.equal(
+            app.config.agentPrompts.worker,
+            draft,
+            "restoring the editor still needs an explicit save",
+        );
+        await tap(saveButton);
+        await until(
+            () => app.config.agentPrompts.worker === undefined,
+            "default restored by a hit-tested mobile Save click",
+        );
+        await page.press("Escape");
+        await reach({ sheet: null, layers: 0 }, "Settings closed");
+    },
+);
+
 test(
     "Settings phone tabs fit owner extension paths and keep owner controls read-only for guests",
     real,
@@ -1160,6 +1479,16 @@ test(
                 return JSON.stringify(switches.length > 0 && switches.every((each) => each.disabled));
             `),
                 "guests can inspect extensions but not change them",
+            );
+            await tap("#settings-tab-agents");
+            await until(
+                async () =>
+                    await inPage<boolean>(`
+                    const panel = document.querySelector('#settings-panel-agents');
+
+                    return JSON.stringify(panel.textContent.includes('Only the owner') && panel.querySelector('textarea') === null);
+                `),
+                "guests do not load global prompt editors",
             );
             await tap("#settings-tab-account");
             assert.equal(

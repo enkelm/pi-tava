@@ -219,6 +219,11 @@ test("handoff successors, delegated helpers and retired threads retain the right
     const reviewer = await handoff(worker, "reviewer");
 
     role(await probe(reviewer), roles[2]!);
+    app.config.agentPrompts = {
+        reviewer:
+            "You are the Reviewer agent for this thread. Independently inspect test quality. CUSTOM_REVIEWER_PLAYBOOK.",
+    };
+    assert.match((await probe(reviewer)).thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
     await app.commands.setInstructions(
         reviewer,
         owner(app),
@@ -228,6 +233,7 @@ test("handoff successors, delegated helpers and retired threads retain the right
 
     role(retired, roles[1]!);
     assert.match(retired.workflow!, /permanently read-only/);
+    assert.doesNotMatch(retired.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
     await say(app, reviewer, "SPAWN_ROLE_HELPER");
     const child = (await app.harness.snapshot(SubagentsDoc, reviewer, context))?.agents[
         "role-helper"
@@ -240,14 +246,51 @@ test("handoff successors, delegated helpers and retired threads retain the right
     assert.ok(helper);
     role(helper.sections, roles[2]!);
     assert.match(helper.sections.thread_role!, /delegated helper/i);
+    assert.match(helper.sections.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
     await app.close();
     app = await openApp(model, data);
     const resumedReviewer = await probe(reviewer);
 
     role(resumedReviewer, roles[2]!);
     assert.match(resumedReviewer.instructions!, /REVIEWER_LOCAL_PERSISTENCE/);
+    assert.match(resumedReviewer.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
     const recovered = await probe(worker);
 
     role(recovered, roles[1]!);
     assert.match(recovered.workflow!, /permanently read-only/);
+    assert.doesNotMatch(recovered.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
+});
+
+test("changing app-wide instructions affects the next request without replacing shared scope or session rules", async () => {
+    const chat = await thread("chat");
+    const worker = await thread("worker");
+    const original = (await probe(chat)).thread_role;
+
+    await app.commands.setInstructions(chat, owner(app), "SESSION_RULE_STAYS_SEPARATE");
+    app.config.agentPrompts = {
+        ...app.config.agentPrompts,
+        chat: "Custom Chat instructions: clarify the request. FIRST_GLOBAL_PROMPT.",
+    };
+    const first = await probe(chat);
+
+    assert.match(first.thread_role!, /Custom Chat instructions/);
+    assert.match(first.thread_role!, /FIRST_GLOBAL_PROMPT/);
+    assert.match(first.thread_role!, /Scope: act as this role/);
+    assert.match(first.guidelines!, /Do not commit, push, publish, or deploy unless asked/);
+    assert.match(first.project_context!, /REPO_ROLE_CONTRACT/);
+    assert.match(first.instructions!, /SESSION_RULE_STAYS_SEPARATE/);
+    assert.doesNotMatch((await probe(worker)).thread_role!, /FIRST_GLOBAL_PROMPT/);
+    app.config.agentPrompts = {
+        ...app.config.agentPrompts,
+        chat: "SECOND_GLOBAL_PROMPT: help with this bounded task.",
+    };
+    const second = await probe(chat);
+
+    assert.match(second.thread_role!, /SECOND_GLOBAL_PROMPT/);
+    assert.doesNotMatch(second.thread_role!, /FIRST_GLOBAL_PROMPT/);
+    const prompts = app.config.agentPrompts;
+
+    delete prompts.chat;
+    app.config.agentPrompts = prompts;
+    assert.equal((await probe(chat)).thread_role, original);
 });

@@ -1866,6 +1866,8 @@ export class PocketApp {
                 // Durable project/goal organization and independently typed threads.
                 projects: 1,
                 handoffs: 1,
+                // Owner-editable system instructions for the built-in thread agents.
+                agentSettings: 1,
                 // Owner-managed, restart-only Pi provider package compatibility.
                 providerPackages: 1,
                 providerRecovery: this.providerExtensions.recoveryRequired,

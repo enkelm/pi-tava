@@ -25,6 +25,7 @@ import { HttpError } from "../errors.ts";
 import type { ImportRequest } from "../imports.ts";
 import type { PrivateRequest } from "../private-sessions.ts";
 import { runningNow } from "../running.ts";
+import { AGENT_ROLES, DEFAULT_AGENT_PROMPTS, MAX_AGENT_PROMPT_LENGTH } from "../thread-prompts.ts";
 import { browserProfileRoutes } from "./browser-profile-routes.ts";
 import { browserRoutes } from "./browser-routes.ts";
 import { conversationRoutes } from "./conversation-routes.ts";
@@ -747,6 +748,73 @@ export function createApi(options: HttpOptions, auth: Auth) {
             }
 
             return json(response, 200, { path: app.workspace.makeFolder(user, body.path) });
+        }
+
+        if (first === "agents" && third === undefined) {
+            requireOwner(user);
+            const prompts = app.config.agentPrompts;
+            const agent = AGENT_ROLES.find((each) => each.type === second);
+            const settings = (role: (typeof AGENT_ROLES)[number]) => ({
+                ...role,
+                prompt: prompts[role.type] ?? DEFAULT_AGENT_PROMPTS[role.type],
+                defaultPrompt: DEFAULT_AGENT_PROMPTS[role.type],
+            });
+
+            response.setHeader("Cache-Control", "no-store");
+
+            if (second === undefined && method === "GET") {
+                return json(response, 200, {
+                    agents: AGENT_ROLES.map(settings),
+                    maxPromptLength: MAX_AGENT_PROMPT_LENGTH,
+                });
+            }
+
+            if (agent !== undefined && method === "POST") {
+                const body = await readJson<{ prompt?: unknown; expectedPrompt?: unknown } | null>(
+                    request,
+                );
+
+                if (
+                    body === null ||
+                    typeof body.prompt !== "string" ||
+                    body.prompt.trim() === "" ||
+                    body.prompt.length > MAX_AGENT_PROMPT_LENGTH
+                ) {
+                    throw new HttpError(
+                        400,
+                        `Use a non-empty system prompt of at most ${MAX_AGENT_PROMPT_LENGTH} characters.`,
+                    );
+                }
+
+                // Re-read after the body arrives: another owner's tab may have saved meanwhile.
+                const current = app.config.agentPrompts;
+
+                if (
+                    body.expectedPrompt !==
+                    (current[agent.type] ?? DEFAULT_AGENT_PROMPTS[agent.type])
+                ) {
+                    throw new HttpError(
+                        409,
+                        "This agent's prompt changed elsewhere. Reopen Settings to load it; keep a copy of your draft first.",
+                    );
+                }
+
+                if (body.prompt === DEFAULT_AGENT_PROMPTS[agent.type]) {
+                    delete current[agent.type];
+                } else {
+                    current[agent.type] = body.prompt;
+                }
+
+                app.config.agentPrompts = current;
+
+                return json(response, 200, {
+                    ...agent,
+                    prompt: body.prompt,
+                    defaultPrompt: DEFAULT_AGENT_PROMPTS[agent.type],
+                });
+            }
+
+            throw new HttpError(404, "No such agent settings route");
         }
 
         if (first === "settings" && method === "POST") {

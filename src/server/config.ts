@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ThreadType } from "./workflow-docs.ts";
 
 /** The repository root: `web/`, `src/`, and `node_modules/` live here. */
 export const APP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -110,6 +111,8 @@ interface PocketConfig {
      */
     subagentModels?: string[];
     providerPackages?: ProviderPackageState;
+    /** Owner-edited, app-wide role instructions. Missing roles use their bundled defaults. */
+    agentPrompts?: Partial<Record<ThreadType, string>>;
 }
 
 /** Who may allow a risky tool call: anyone who can steer, or (for guests) only someone other than who asked. */
@@ -269,6 +272,24 @@ export class ConfigStore {
             this.save();
         } catch (error) {
             this.#config.providerPackages = previous;
+
+            throw error;
+        }
+    }
+
+    get agentPrompts(): Partial<Record<ThreadType, string>> {
+        return { ...this.#config.agentPrompts };
+    }
+
+    set agentPrompts(prompts: Partial<Record<ThreadType, string>>) {
+        const previous = this.#config.agentPrompts;
+
+        this.#config.agentPrompts = { ...prompts };
+
+        try {
+            this.save();
+        } catch (error) {
+            this.#config.agentPrompts = previous;
 
             throw error;
         }

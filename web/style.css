@@ -10084,6 +10084,99 @@ textarea.notes {
     align-self: stretch;
 }
 
+.agent-prompts {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.agent-prompt {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 0.65rem;
+    min-width: 0;
+    padding-top: 1rem;
+    border-top: 1px solid var(--line);
+}
+
+.agent-prompt-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.agent-prompt-heading h4 {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    font-size: 0.95rem;
+    color: var(--text);
+}
+
+.agent-prompt p {
+    margin: 0;
+}
+
+.agent-prompt-editor {
+    position: relative;
+    min-width: 0;
+}
+
+.agent-prompt textarea {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    min-height: 12rem;
+    resize: vertical;
+    line-height: 1.5;
+}
+
+.agent-prompt-actions {
+    position: absolute;
+    top: 6px;
+    right: 18px;
+    display: flex;
+    gap: 4px;
+}
+
+.agent-prompt-actions :where(button) {
+    border: 1px solid var(--line);
+    background: var(--card);
+}
+
+.agent-prompt-save {
+    color: var(--accent);
+}
+
+.agent-prompt-editor.typing .agent-prompt-actions:not(:focus-within) {
+    opacity: 0;
+    pointer-events: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .agent-prompt-actions {
+        opacity: 0;
+        pointer-events: none;
+    }
+    .agent-prompt-actions .icon-button {
+        width: 32px;
+        height: 32px;
+    }
+    .agent-prompt-editor:not(.typing):hover .agent-prompt-actions {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
+
+.agent-prompt-actions:focus-within {
+    opacity: 1;
+    pointer-events: auto;
+}
+
 .browser-profile-settings {
     display: flex;
     flex-direction: column;

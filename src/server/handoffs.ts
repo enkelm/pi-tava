@@ -304,7 +304,7 @@ export class Handoffs {
         section("thread_role", (input) => {
             const id = this.#app.rootOf(input.conversationId);
             const kind = this.#app.sessionMeta(id)?.threadType ?? "worker";
-            const instructions = threadRolePrompt(kind);
+            const instructions = threadRolePrompt(kind, this.#app.config.agentPrompts[kind]);
 
             return id === input.conversationId
                 ? instructions

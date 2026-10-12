@@ -4,6 +4,7 @@ import { NotificationsSettings } from "../notify.js";
 import { closeSheet, openSheet, store } from "../store.js";
 import { html, Icon, Sheet } from "../ui.js";
 import { AccountSettings } from "./account.js";
+import { AgentsSettings } from "./agents.js";
 import { AppearanceSettings } from "./appearance.js";
 import { BrowserSettings } from "./browser-profiles.js";
 import { ExtensionsSettings } from "./extensions.js";
@@ -13,6 +14,7 @@ import { SpendSettings } from "./spend.js";
 const TABS = [
     { id: "appearance", label: "Appearance", icon: "palette", body: AppearanceSettings },
     { id: "providers", label: "Providers", icon: "key", body: ProvidersSettings },
+    { id: "agents", label: "Agents", icon: "bot", body: AgentsSettings },
     { id: "notifications", label: "Notifications", icon: "bell", body: NotificationsSettings },
     { id: "browser", label: "Browser", icon: "globe", body: BrowserSettings },
     { id: "extensions", label: "Extensions & safety", icon: "shield", body: ExtensionsSettings },

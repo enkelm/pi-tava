@@ -285,6 +285,12 @@ function actionItems() {
             run: () => openSheet({ type: "settings", tab: "providers" }),
         },
         {
+            label: "Agents",
+            detail: "edit system prompts for Chat, Worker, Reviewer, Land and Publish",
+            icon: "bot",
+            run: () => openSheet({ type: "settings", tab: "agents" }),
+        },
+        {
             label: "Notifications",
             detail: "this device, Pi finished, approvals, mentions, chat",
             icon: "bell",
