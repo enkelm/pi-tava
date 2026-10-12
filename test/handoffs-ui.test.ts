@@ -1,5 +1,11 @@
 // Authoring gate: browser activation, retry identity, native slash routing and group organization are public UI contracts.
-// A lost create response must not create two successors; member search must not orphan or duplicate its Work Item.
+// Chooser regressions: hidden disabled paths, auto-start on a sole option, lost recommendation reasons,
+// target-locked prepared briefs, stale readiness and new roles falling back to Worker are not exercised by backend tests.
+// Role defaults must not restart review after Follow-up, pick Chat merely by server ordering,
+// or pretend to be agent recommendations; explicit role activation alone does not catch those regressions.
+// A lost create response freezes the admitted role/request for recovery; a definite initial rejection leaves refresh available.
+// An uncertain retry's later rejection cannot prove that the original admission failed.
+// Member search must not orphan or duplicate its Work Item.
 // Backend tests own ownership, transition validation and access; this owns rendered forms, navigation and group actions.
 // All sessions, git commits and browser profiles are disposable fixtures; no production test seams or live user data.
 import {
@@ -79,6 +85,31 @@ async function select(page: BrowserPage, selector: string, option: string) {
         field.dispatchEvent(new Event('change', { bubbles: true }));`);
 }
 
+async function defaultChoice(page: BrowserPage, type: string) {
+    await click(page, ".topbar .handoff-button");
+    await present(page, `${dialog} input[value="${type}:same-work"]:checked`);
+    assert.equal(
+        await value(page, `document.querySelectorAll('${dialog} .handoff-recommendation').length`),
+        0,
+        "a role-aware default is not an agent recommendation",
+    );
+    await button(page, dialog, "Cancel");
+    await present(page, dialog, false);
+}
+
+async function shot(page: BrowserPage, name: string) {
+    const directory = process.env.HANDOFFS_SCREENSHOT_DIR;
+
+    if (directory === undefined) {
+        return;
+    }
+
+    mkdirSync(directory, { recursive: true });
+    const captured = await page.screenshot();
+
+    writeFileSync(join(directory, `${name}.jpg`), Buffer.from(captured.data, "base64"));
+}
+
 const previewHtml =
     '<!doctype html><html><body><h1>Static fixture preview</h1><script>document.body.dataset.executed = "yes"; parent.postMessage({ type: "preview-ui-fixture" }, "*");</script></body></html>';
 const dialog = '[role="dialog"][aria-label="Handoff"]';
@@ -100,7 +131,7 @@ async function choose(page: BrowserPage, type: string, relationship = "same-work
 }
 
 test(
-    "Handoffs UI: agent-owned readiness, direct activation, durable retry and indivisible Work Items",
+    "Handoffs UI: full role chooser, advisory recommendations, durable retry and indivisible Work Items",
     {
         skip: findBrowser() === undefined ? "no Chromium installed" : false,
         timeout: 180_000,
@@ -136,6 +167,12 @@ test(
 
                 const held = new Promise<void>((resolve) => {
                     release = resolve;
+                });
+
+                let releaseBusy = () => {};
+
+                const busyCheck = new Promise<void>((resolve) => {
+                    releaseBusy = resolve;
                 });
                 const model = scriptedModel(async (request) => {
                     const last = lastText(request as never);
@@ -176,14 +213,30 @@ test(
                         );
                     }
 
+                    if (last.role === "user" && text.endsWith("UI_BUSY_CHECK")) {
+                        await busyCheck;
+                    }
+
                     if (last.role === "user" && text.endsWith("UI_WORKER_READY")) {
                         return fauxAssistantMessage(
                             [
                                 fauxToolCall("handoff", {
                                     action: "prepare",
-                                    targetType: "reviewer",
+                                    targetType: "follow-up",
                                     relationship: "same-work",
                                     brief: "Independently review this checkout. Fixture tests passed; no known risks.",
+                                    recommendations: [
+                                        {
+                                            targetType: "follow-up",
+                                            relationship: "same-work",
+                                            reason: "Only a bounded fix and self-review remain.",
+                                        },
+                                        {
+                                            targetType: "pull",
+                                            relationship: "same-work",
+                                            reason: "Upstream changes may need integration first.",
+                                        },
+                                    ],
                                 }),
                             ],
                             { stopReason: "toolUse" },
@@ -219,6 +272,10 @@ test(
                                     reason: "The reviewed checkout is ready for local landing.",
                                 },
                             ],
+                        },
+                        UI_FOLLOW_UP_READY: {
+                            status: "review-complete",
+                            summary: "Bounded fixes and self-review passed.",
                         },
                         UI_LAND_READY: {
                             status: "landed",
@@ -304,7 +361,115 @@ test(
                         `${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`,
                     );
                     await click(page, `${scope} .session-row[data-id="${origin.id}"] .session`);
-                    await present(page, '.topbar .handoff-button[aria-label="Start review"]');
+                    await present(page, '.topbar .handoff-button[aria-label="Choose next thread"]');
+                    const beforeEmptyPicker = app.sessions().length;
+
+                    await click(page, ".topbar .handoff-button");
+                    await present(page, `${dialog} input[name="handoff-option"]`);
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `[...document.querySelectorAll(${JSON.stringify(`${dialog} input[name="handoff-option"]`)})].map(input => input.value).sort()`,
+                        ),
+                        [
+                            "chat:same-work",
+                            "follow-up:same-work",
+                            "land:same-work",
+                            "publish:same-work",
+                            "pull:same-work",
+                            "reviewer:same-work",
+                            "worker:new-work",
+                            "worker:same-work",
+                        ],
+                        "empty threads still show every server path, including unavailable stages",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} input[value="reviewer:same-work"]').disabled`,
+                        ),
+                        true,
+                        "an empty thread cannot start an independent review",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} input[value="reviewer:same-work"]').closest('label').textContent.includes('completed')`,
+                        ),
+                        true,
+                        "the unavailable reviewer explains its missing completed work",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} input[value="land:same-work"]').disabled && document.querySelector('${dialog} input[value="publish:same-work"]').disabled`,
+                        ),
+                        true,
+                        "checkpoint-gated stages remain visible but disabled",
+                    );
+                    await shot(page, `${viewport}-empty-role-chooser`);
+                    await button(page, dialog, "Cancel");
+                    assert.equal(
+                        app.sessions().length,
+                        beforeEmptyPicker,
+                        "choosing a role never auto-starts work",
+                    );
+
+                    const busyRun = say(app, originId, "UI_BUSY_CHECK");
+
+                    await until(() => app.isBusy(originId), "worker held in an active model run");
+                    await click(page, ".topbar .handoff-button");
+                    await present(page, `${dialog} input[name="handoff-option"]`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `[...document.querySelectorAll('${dialog} input[name="handoff-option"]')].every(input => input.disabled && input.closest('label').querySelector('.handoff-disabled-reason')?.textContent.trim())`,
+                        ),
+                        true,
+                        "busy work disables every role with the server's reason, without hiding the picker",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} button[type="submit"]').disabled`,
+                        ),
+                        true,
+                        "no disabled fallback can be activated",
+                    );
+                    releaseBusy();
+                    await busyRun;
+                    await button(page, dialog, "Refresh options");
+                    await present(
+                        page,
+                        `${dialog} input[value="reviewer:same-work"]:not(:disabled):checked`,
+                    );
+                    await choose(page, "pull");
+                    await page.evaluate(`const fetchBeforeRefresh = window.fetch.bind(window);
+                        window.handoffRefreshLoads = 0;
+                        window.fetch = async (url, options) => {
+                            const response = await fetchBeforeRefresh(url, options);
+
+                            if (String(url).endsWith('/handoffs') && options?.method !== 'POST') {
+                                window.handoffRefreshLoads++;
+                            }
+
+                            return response;
+                        };`);
+                    await button(page, dialog, "Refresh options");
+                    await until(
+                        () => value<boolean>(page, "window.handoffRefreshLoads >= 1"),
+                        "refresh reloads server eligibility",
+                    );
+                    await present(page, `${dialog} .loader`, false);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} input[value="pull:same-work"]').checked`,
+                        ),
+                        true,
+                        "refreshing readiness preserves a human's still-enabled selection",
+                    );
+                    await button(page, dialog, "Cancel");
                     const chat = await app.commands.createSession(owner(app), {
                         cwd,
                         threadType: "chat",
@@ -318,6 +483,7 @@ test(
                     });
                     await page.evaluate(`(await import('/store.js')).navigate(${chat.id})`);
                     await say(app, chatId, "PREVIEW_HTML_FIXTURE");
+                    await defaultChoice(page, "worker");
                     const richPreview = ".transcript .rich.html";
 
                     await present(page, `${richPreview} .html-preview`);
@@ -408,10 +574,7 @@ test(
                     await say(app, originId, "UI_WORKER_READY");
                     const countBeforeHandoff = app.sessions().length;
 
-                    await present(
-                        page,
-                        '.topbar .handoff-button[aria-label="Start review"]:not([disabled])',
-                    );
+                    await present(page, '.topbar .handoff-button[aria-label="Choose next thread"]');
                     assert.equal(
                         await value(
                             page,
@@ -424,34 +587,151 @@ test(
                     // Drop the successful response at the real fetch boundary, after the server admitted the handoff.
                     await page.evaluate(`const fetchOriginal = window.fetch.bind(window);
                     window.handoffRequests = [];
+                    window.handoffOptionReads = 0;
+                    window.handoffLoseNext = true;
                     window.fetch = async (url, options) => {
                         const match = /\\/api\\/c\\/\\d+\\/handoffs$/.test(String(url)) && options?.method === 'POST';
 
                         if (match) {
                             window.handoffRequests.push(JSON.parse(options.body));
+
+                            if (window.handoffRejectNext) {
+                                window.handoffRejectNext = false;
+
+                                return new Response(JSON.stringify({ error: 'Fixture handoff rejected: helper still busy' }), { status: 409 });
+                            }
+                        } else if (String(url).endsWith('/handoffs')) {
+                            window.handoffOptionReads++;
                         }
 
                         const result = await fetchOriginal(url, options);
 
-                        if (match && result.ok && window.handoffRequests.length === 1) {
+                        if (window.legacyHandoffOptions && String(url).endsWith('/handoffs') && options?.method !== 'POST' && result.ok) {
+                            const data = await result.json();
+
+                            data.options = data.options.filter(option => option.targetType === 'reviewer');
+
+                            return new Response(JSON.stringify(data), { status: result.status, headers: result.headers });
+                        }
+
+                        if (match && result.ok && window.handoffLoseNext) {
+                            window.handoffLoseNext = false;
+
                             throw new Error('Fixture lost create response');
                         }
 
                         return result;
                     };`);
+                    await page.evaluate("window.legacyHandoffOptions = true");
                     await click(page, ".topbar .handoff-button");
-                    await until(
-                        () => value<boolean>(page, "window.handoffRequests.length === 1"),
-                        "one Worker click activates review without a dialog",
+                    await present(page, `${dialog} input[value="reviewer:same-work"]:checked`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelectorAll('${dialog} input[name="handoff-option"]').length`,
+                        ),
+                        1,
+                        "an older server's sole enabled path still opens the chooser",
                     );
-                    await present(page, dialog, false);
-                    await present(page, '.topbar .handoff-button[aria-label="Retry start review"]');
+                    assert.equal(await value(page, "window.handoffRequests.length"), 0);
+                    await button(page, dialog, "Cancel");
+                    await page.evaluate("window.legacyHandoffOptions = false");
+                    await click(page, ".topbar .handoff-button");
+                    await present(page, `${dialog} input[value="follow-up:same-work"]:checked`);
+                    assert.equal(
+                        await value(page, "window.handoffRequests.length"),
+                        0,
+                        "the header always opens a chooser, never creates a successor",
+                    );
+                    await choose(page, "reviewer");
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `[...document.querySelectorAll('${dialog} .handoff-recommendation')].map(element => element.textContent.trim())`,
+                        ),
+                        [
+                            "Recommended · Only a bounded fix and self-review remain.",
+                            "Recommended · Upstream changes may need integration first.",
+                        ],
+                        "both recommendations and their reasons remain visible after picking a different enabled role",
+                    );
+                    await shot(page, `${viewport}-advisory-recommendations`);
+                    await page.evaluate("window.handoffRejectNext = true");
+                    await button(page, dialog, "Start review");
+                    await present(page, `${dialog} .error`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `[...document.querySelectorAll('${dialog} button')].find(button => button.textContent.trim() === 'Refresh options').disabled`,
+                        ),
+                        false,
+                        "a definite rejection leaves eligibility refresh available",
+                    );
+                    assert.equal(app.sessions().length, countBeforeHandoff);
+                    const readsBeforeRefresh = await value<number>(
+                        page,
+                        "window.handoffOptionReads",
+                    );
+
+                    await button(page, dialog, "Refresh options");
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                `window.handoffOptionReads > ${readsBeforeRefresh} && !document.querySelector('${dialog} .loader')`,
+                            ),
+                        "eligibility reloads after the rejected admission",
+                    );
+                    await present(page, `${dialog} input[value="reviewer:same-work"]:checked`);
+                    await choose(page, "follow-up");
+                    await choose(page, "reviewer");
+                    await button(page, dialog, "Start review");
+                    await until(
+                        () => value<boolean>(page, "window.handoffRequests.length === 2"),
+                        "explicit selection activates review",
+                    );
+                    await present(page, `${dialog} .error`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `[...document.querySelectorAll('${dialog} button')].find(button => button.textContent.trim() === 'Refresh options').disabled`,
+                        ),
+                        true,
+                        "refresh cannot invalidate the admitted request after a lost response",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} input[value="follow-up:same-work"]').matches(':disabled')`,
+                        ),
+                        true,
+                        "another role cannot discard an uncertain admission's recovery request",
+                    );
+                    await page.evaluate(
+                        `document.querySelector('${dialog} input[value="follow-up:same-work"]').click()`,
+                    );
+                    await present(page, `${dialog} input[value="reviewer:same-work"]:checked`);
                     assert.equal(
                         app.sessions().length,
                         countBeforeHandoff + 1,
-                        "the first request really created its destination",
+                        "the admitted request really created its destination",
                     );
-                    await click(page, '.topbar .handoff-button[aria-label="Retry start review"]');
+                    await page.evaluate("window.handoffRejectNext = true");
+                    await button(page, dialog, "Start review");
+                    await until(
+                        () => value<boolean>(page, "window.handoffRequests.length === 3"),
+                        "an uncertain retry receives a later rejection",
+                    );
+                    await present(page, `${dialog} .error`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} input[value="follow-up:same-work"]').matches(':disabled')`,
+                        ),
+                        true,
+                        "a later rejection cannot disprove the original uncertain admission",
+                    );
+                    await button(page, dialog, "Start review");
                     await until(
                         () =>
                             value<boolean>(
@@ -465,8 +745,17 @@ test(
                         "window.handoffRequests.map(request => request.requestId)",
                     );
 
-                    assert.equal(requestIds.length, 2);
-                    assert.equal(requestIds[0], requestIds[1], "retries preserve request identity");
+                    assert.equal(requestIds.length, 4);
+                    assert.notEqual(
+                        requestIds[0],
+                        requestIds[1],
+                        "a definite rejection permits a fresh selection and admission",
+                    );
+                    assert.deepEqual(
+                        requestIds.slice(1),
+                        [requestIds[1], requestIds[1], requestIds[1]],
+                        "uncertain retries preserve request identity even after a later rejection",
+                    );
                     assert.equal(
                         await value(
                             page,
@@ -753,8 +1042,9 @@ test(
                         false,
                         "review outcome is not a human form",
                     );
+                    await defaultChoice(page, "follow-up");
                     await say(app, reviewer.id as ConversationId, "UI_REVIEW_READY");
-                    await present(page, '.topbar .handoff-button[aria-label="Start land"]');
+                    await present(page, '.topbar .handoff-button[aria-label="Choose next thread"]');
                     const countBeforePicker = app.sessions().length;
 
                     await click(page, ".topbar .handoff-button");
@@ -764,8 +1054,17 @@ test(
                             page,
                             `[...document.querySelectorAll(${JSON.stringify(`${dialog} input[name="handoff-option"]`)})].map(input => input.value).sort()`,
                         ),
-                        ["land:same-work", "worker:same-work"],
-                        "completed review exposes only valid Land/fresh Worker paths, not new-work/Publish/re-review choices",
+                        [
+                            "chat:same-work",
+                            "follow-up:same-work",
+                            "land:same-work",
+                            "publish:same-work",
+                            "pull:same-work",
+                            "reviewer:same-work",
+                            "worker:new-work",
+                            "worker:same-work",
+                        ],
+                        "completed review keeps all roles visible rather than filtering the human's choices",
                     );
                     assert.equal(
                         await value(
@@ -795,7 +1094,7 @@ test(
                         .find((session) => session.threadType === "land")!;
 
                     await say(app, localLand.id as ConversationId, "UI_LAND_READY");
-                    await present(page, '.topbar .handoff-button[aria-label="Start publish"]');
+                    await present(page, '.topbar .handoff-button[aria-label="Choose next thread"]');
                     const land = app.sessions().find((session) => session.threadType === "land")!;
 
                     assert.equal(
@@ -866,7 +1165,7 @@ test(
                     );
                     await button(page, `${scope} .session-tabs`, "Recent");
                     await click(page, `${workItem} > .work-item-head .session`);
-                    await present(page, '.topbar .handoff-button[aria-label="Start publish"]');
+                    await present(page, '.topbar .handoff-button[aria-label="Choose next thread"]');
                     await click(page, ".topbar .handoff-button");
                     await choose(page, "publish");
                     await button(page, dialog, "Start publish");
@@ -896,6 +1195,7 @@ test(
                         "the agent records publication completion without a human form",
                     );
                     await present(page, '[role="dialog"]', false);
+                    await defaultChoice(page, "worker");
                     await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff worker --new");
                     await click(page, ".composer .send");
                     await present(page, ".topbar .title-sub .thread-type.worker");
@@ -956,6 +1256,56 @@ test(
                         2,
                         "same-work followup does not duplicate the group",
                     );
+                    await click(page, `${nextItem} > .work-item-head .session`);
+                    await until(
+                        () => app.sessions().every((session) => !session.busy),
+                        "fresh worker delivery idle",
+                    );
+                    await click(page, ".topbar .handoff-button");
+                    await choose(page, "follow-up");
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} .handoff-explanation').textContent.includes('self-review')`,
+                        ),
+                        true,
+                        "Follow-up explains its bounded fixes and self-review",
+                    );
+                    await button(page, dialog, "Start follow-up");
+                    await present(page, ".topbar .title-sub .thread-type.follow-up");
+                    await until(
+                        () => app.sessions().every((session) => !session.busy),
+                        "follow-up delivery idle",
+                    );
+                    await defaultChoice(page, "worker");
+                    const followUpId = await value<number>(
+                        page,
+                        "Number(location.pathname.split('/').at(-1))",
+                    );
+
+                    await say(app, followUpId as ConversationId, "UI_FOLLOW_UP_READY");
+                    await defaultChoice(page, "land");
+                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff pull");
+                    await click(page, ".composer .send");
+                    await present(page, ".topbar .title-sub .thread-type.pull");
+                    assert.equal(
+                        await value(
+                            page,
+                            "document.querySelector('.topbar .title-sub .thread-type').textContent.trim()",
+                        ),
+                        "Pull",
+                        "Pull has its own labeled header instead of falling back to Worker",
+                    );
+                    await home(page);
+                    await present(page, nextItem);
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `[...document.querySelectorAll(${JSON.stringify(`${nextItem} .work-item-member .session-state [role="img"]`)})].map(icon => icon.getAttribute('aria-label'))`,
+                        ),
+                        ["Worker", "Worker", "Follow-up", "Pull"],
+                        "new roles keep their accessible sidebar indicators in the same Work Item",
+                    );
                     assert.equal(
                         await value(page, "document.documentElement.scrollWidth <= innerWidth"),
                         true,
@@ -963,6 +1313,7 @@ test(
                     );
                 } finally {
                     release();
+                    releaseBusy();
                     await browsers.closeAll({ final: true });
                     await app.close();
                     await new Promise<void>((resolve) => server.close(() => resolve()));

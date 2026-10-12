@@ -18,10 +18,16 @@ _Avoid_: Session when describing project organization; session remains the exist
 A thread for conversation, initially created without a project or goal. Its type does not prevent it from being organized within a project or goal later.
 
 **Worker**:
-A thread for project work. New threads created within a project start as Workers.
+A thread for implementation and focused tests. New project threads default to Worker.
 
 **Reviewer**:
-A thread that takes responsibility for reviewing and fixing the current work. Substantial remaining implementation belongs in a fresh Worker.
+A thread that independently reviews the current work in a bounded pass. Small remaining repairs belong in Follow-up; substantial implementation belongs in a fresh Worker.
+
+**Follow-up**:
+A thread for closing specific review gaps with a short self-review limited to its repairs.
+
+**Pull**:
+A thread for reading external sources and integrating upstream changes locally, independent of the work's current stage.
 
 **Land**:
 A thread for local integration, commits, hook fixes, worktree cleanup and checking the impact of integration changes.

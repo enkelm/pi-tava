@@ -7,6 +7,8 @@
 // coarse-pointer hover-only traps and status text/icon regressions are not reached by app tests.
 // Header geometry owns invisible shortcuts reserving width and capped labels stranding the count.
 // Session-moves UI owns thread menus; this covers project/goal menus through DOM and trusted input.
+// Direct Pull creation owns rendered selection, new-goal atomicity and type indicators; backend tests
+// do not reach that UI boundary. Legacy hello delivery must keep unsupported Pull controls hidden.
 // Uses public app/model/browser APIs; no test-only production seams or state flags.
 import {
     type App,
@@ -527,7 +529,7 @@ async function destination(page: BrowserPage, cwd: string) {
     );
 }
 
-async function start(page: BrowserPage, app: App, type: "Worker" | "Chat") {
+async function start(page: BrowserPage, app: App, type: "Worker" | "Chat" | "Pull") {
     const before = new Set(app.sessions().map((session) => session.id));
 
     await button(page, panel, `Start ${type}`);
@@ -570,7 +572,12 @@ async function start(page: BrowserPage, app: App, type: "Worker" | "Chat") {
     return created[0]!;
 }
 
-async function rowTag(page: BrowserPage, scope: string, id: number, type: "Chat" | "Worker") {
+async function rowTag(
+    page: BrowserPage,
+    scope: string,
+    id: number,
+    type: "Chat" | "Worker" | "Pull",
+) {
     const row = `${scope} .session-row[data-id="${id}"]`;
 
     await present(page, row);
@@ -593,7 +600,7 @@ async function rowTag(page: BrowserPage, scope: string, id: number, type: "Chat"
             const style = getComputedStyle(tag);
             const swatch = document.createElement('span');
 
-            swatch.style.color = 'var(${type === "Chat" ? "--o-green" : "--o-blue"})';
+            swatch.style.color = 'var(${type === "Chat" ? "--o-green" : type === "Pull" ? "--o-cyan" : "--o-blue"})';
             row.append(swatch);
             const color = getComputedStyle(tag).color === getComputedStyle(swatch).color;
 
@@ -625,7 +632,7 @@ async function rowTag(page: BrowserPage, scope: string, id: number, type: "Chat"
     assert.equal(
         result.color,
         true,
-        `${type} uses its ${type === "Chat" ? "green" : "blue"} theme color`,
+        `${type} uses its ${type === "Chat" ? "green" : type === "Pull" ? "cyan" : "blue"} theme color`,
     );
 
     return result.ordinary;
@@ -1390,6 +1397,82 @@ test(
                     await home(page, scope);
                     assert.equal(await rowTag(page, scope, chat.id, "Chat"), true);
                     await present(peer, `${scope} .session-row[data-id="${chat.id}"]`);
+                    await click(page, `${scope} .new-button[aria-label="New session"]`);
+                    await button(page, panel, "Start a one-time chat");
+                    await page.evaluate(`const field = document.querySelector('${panel} select[aria-label="Thread type"]');
+                        field.value = 'pull';
+                        field.dispatchEvent(new Event('change', { bubbles: true }));`);
+                    const standalonePull = await start(page, app, "Pull");
+
+                    assert.equal(standalonePull.threadType, "pull");
+                    assert.equal(standalonePull.projectId, undefined);
+                    assert.equal(standalonePull.goalId, undefined);
+                    await home(page, scope);
+                    assert.equal(await rowTag(page, scope, standalonePull.id, "Pull"), true);
+                    await present(peer, `${scope} .session-row[data-id="${standalonePull.id}"]`);
+                    await click(page, `${scope} .new-button[aria-label="New session"]`);
+                    await chooseProject(page, name);
+                    await button(page, `${panel} .project-goal-choices`, "New Goal");
+                    await page.evaluate(`const field = document.querySelector('${panel} select[aria-label="Thread type"]');
+                        field.value = 'pull';
+                        field.dispatchEvent(new Event('change', { bubbles: true }));`);
+                    await shot(page, `${viewport}-new-goal-pull`);
+                    const pull = await start(page, app, "Pull");
+                    const pullGoal = app.projects
+                        .list(user)
+                        .goals.find((item) => item.id === pull.goalId);
+
+                    assert.equal(pull.threadType, "pull");
+                    assert.equal(pull.projectId, project.id);
+                    assert.equal(pull.cwd, cwd);
+                    assert.ok(
+                        pullGoal,
+                        "starting a Pull with New Goal creates its goal, not an orphan or Worker",
+                    );
+                    assert.equal(pullGoal.status, "active");
+                    assert.equal(app.projects.list(user).goals.length, 2);
+                    await home(page, scope);
+                    assert.equal(await rowTag(page, scope, pull.id, "Pull"), false);
+                    await present(peer, `${scope} .session-row[data-id="${pull.id}"]`);
+
+                    // Advertise the real older hello over the event stream; do not inject UI state.
+                    const hello = app.hello.bind(app);
+
+                    app.hello = async (supplied) => {
+                        const result = await hello(supplied);
+
+                        return { ...result, server: { ...result.server, handoffs: 1 } };
+                    };
+
+                    try {
+                        await page.reload();
+                        await click(page, `${scope} .new-button[aria-label="New session"]`);
+                        await chooseProject(page, name);
+                        await present(page, `${panel} .session-destination`);
+                        await present(page, `${panel} select[aria-label="Thread type"]`, false);
+                        assert.equal(
+                            await value(
+                                page,
+                                `[...document.querySelectorAll('${panel} button')].some(button => button.textContent.trim() === 'Start Worker' && !button.disabled)`,
+                            ),
+                            true,
+                            "legacy servers retain their supported Worker creation flow",
+                        );
+                        await button(page, panel, "Start a one-time chat");
+                        await present(page, `${panel} select[aria-label="Thread type"]`, false);
+                        assert.equal(
+                            await value(
+                                page,
+                                `[...document.querySelectorAll('${panel} button')].some(button => button.textContent.trim() === 'Start Chat' && !button.disabled)`,
+                            ),
+                            true,
+                            "legacy servers retain one-time Chat without offering unsupported Pull creation",
+                        );
+                        await closeDialog(page);
+                    } finally {
+                        app.hello = hello;
+                    }
+
                     assert.equal(
                         await value(page, "document.documentElement.scrollWidth <= innerWidth"),
                         true,

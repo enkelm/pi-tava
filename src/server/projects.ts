@@ -116,17 +116,23 @@ function selection(doc: ProjectsData, request: SelectProject): ProjectSelection 
                 : "worker"
             : request.threadType;
 
-    if (!["chat", "worker", "reviewer", "land", "publish"].includes(String(threadType))) {
+    if (
+        !["chat", "worker", "reviewer", "follow-up", "pull", "land", "publish"].includes(
+            String(threadType),
+        )
+    ) {
         throw new HttpError(400, "Unknown thread type");
     }
 
     if (
         request.newGoal === true &&
-        (projectId === undefined || goalId !== undefined || threadType !== "worker")
+        (projectId === undefined ||
+            goalId !== undefined ||
+            !["worker", "pull"].includes(String(threadType)))
     ) {
         throw new HttpError(
             400,
-            "A new goal needs a project and a new worker without an existing goal",
+            "A new goal needs a project and a new Worker or Pull thread without an existing goal",
         );
     }
 
@@ -421,11 +427,12 @@ export class Projects {
         if (
             request.threadType !== undefined &&
             request.threadType !== "chat" &&
-            request.threadType !== "worker"
+            request.threadType !== "worker" &&
+            request.threadType !== "pull"
         ) {
             throw new HttpError(
                 400,
-                "Start reviewer, land and publish threads through a human handoff",
+                "Start reviewer, follow-up, land and publish threads through a human handoff",
             );
         }
 

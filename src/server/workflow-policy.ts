@@ -142,6 +142,7 @@ export async function safeWorkflowGit(
 }
 
 const publicationLocks = new WeakMap<PocketApp, Set<string>>();
+const localWriters = new WeakMap<PocketApp, Map<string, number>>();
 
 function publicationKey(app: PocketApp, id: ConversationId): string {
     const root = app.rootOf(id);
@@ -160,6 +161,31 @@ export function requireWorkflowLocalWrite(app: PocketApp, id: ConversationId): v
     }
 }
 
+/** Reserve before the first await and release only once the filesystem operation or child has settled. */
+function reserveWorkflowLocalWrite(app: PocketApp, id: ConversationId): () => void {
+    requireWorkflowLocalWrite(app, id);
+    let writers = localWriters.get(app);
+
+    if (writers === undefined) {
+        writers = new Map();
+        localWriters.set(app, writers);
+    }
+
+    const key = publicationKey(app, id);
+
+    writers.set(key, (writers.get(key) ?? 0) + 1);
+
+    return () => {
+        const remaining = writers.get(key)! - 1;
+
+        if (remaining === 0) {
+            writers.delete(key);
+        } else {
+            writers.set(key, remaining);
+        }
+    };
+}
+
 export async function withWorkflowPublicationLock<T>(
     app: PocketApp,
     id: ConversationId,
@@ -176,6 +202,12 @@ export async function withWorkflowPublicationLock<T>(
 
     if (locks.has(root)) {
         throw new Error("Another publication is executing for this workflow.");
+    }
+
+    if ((localWriters.get(app)?.get(root) ?? 0) > 0) {
+        throw new Error(
+            "Local workflow writes are still executing. Wait before fetching or publishing.",
+        );
     }
 
     locks.add(root);
@@ -249,6 +281,14 @@ export function createWorkflowHooks(app: PocketApp) {
                         };
                     }
 
+                    if (call.name === "pull") {
+                        return app.sessionMeta(app.rootOf(id))?.threadType === "pull"
+                            ? undefined
+                            : {
+                                  block: "Only the current active Pull workflow may perform external reads.",
+                              };
+                    }
+
                     if (
                         [
                             "write",
@@ -276,7 +316,8 @@ export function createWorkflowHooks(app: PocketApp) {
 /**
  * Cached instances must consult live policy on every operation. There is deliberately no unrestricted fallback:
  * managed commands are offline, so HTTP/server tests and dependency downloads cannot run here. Publication is
- * the sole separately approved external execution path. Known Git publication/GH commands are refused lexically,
+ * the separately approved mutation path; Pull has a constrained inbound-read adapter, not online shell access.
+ * Known Git publication/GH commands are refused lexically,
  * even for file remotes. Darwin seatbelt applies to child hooks and interpreters, not just command spelling, but
  * active local writes and arbitrary trusted programs are not a complete hostile-code filesystem sandbox.
  * Other platforms need an equivalent OS sandbox before shell execution is enabled.
@@ -291,17 +332,26 @@ class WorkflowExecutionEnv extends NodeExecutionEnv {
         this.#conversationId = id;
     }
 
-    #writeError(path?: string): Result<never, FileError> | undefined {
-        try {
-            requireWorkflowLocalWrite(this.#app, this.#conversationId);
+    async #write<T>(
+        path: string | undefined,
+        run: () => Promise<Result<T, FileError>>,
+    ): Promise<Result<T, FileError>> {
+        let release: () => void;
 
+        try {
             if (this.#app.handoffs.isManaged(this.#conversationId)) {
                 requireWorkflowRequester(this.#app, this.#conversationId);
             }
 
-            return undefined;
+            release = reserveWorkflowLocalWrite(this.#app, this.#conversationId);
         } catch (error) {
             return err(new FileError("permission_denied", describe(error), path));
+        }
+
+        try {
+            return await run();
+        } finally {
+            release();
         }
     }
 
@@ -331,7 +381,7 @@ class WorkflowExecutionEnv extends NodeExecutionEnv {
             return err(
                 new ExecutionError(
                     "shell_unavailable",
-                    "Direct Git push/send-pack/receive-pack and GitHub CLI commands are blocked in managed shell, including file remotes. Use publication for supported, individually human-approved operations.",
+                    "Direct Git push/send-pack/receive-pack and GitHub CLI commands are blocked in managed shell, including file remotes. Use pull for supported active-Pull reads, or publication for supported, individually human-approved mutations.",
                 ),
             );
         }
@@ -374,38 +424,46 @@ class WorkflowExecutionEnv extends NodeExecutionEnv {
             argv[0] = git;
         }
 
-        return super.exec(
-            ["/usr/bin/sandbox-exec", "-p", profile, ...argv],
-            {
-                ...options,
-                env: {
-                    ...options?.env,
-                    PATH: git === undefined ? path : `${dirname(git)}:${path}`,
-                    GIT_OPTIONAL_LOCKS: "0",
+        // The graph gate covers owned tasks; this reservation also covers direct env callers and
+        // remains held through the child's entire lifetime, not just its initial policy check.
+        const release = readOnly ? () => {} : reserveWorkflowLocalWrite(app, id);
+
+        try {
+            return await super.exec(
+                ["/usr/bin/sandbox-exec", "-p", profile, ...argv],
+                {
+                    ...options,
+                    env: {
+                        ...options?.env,
+                        PATH: git === undefined ? path : `${dirname(git)}:${path}`,
+                        GIT_OPTIONAL_LOCKS: "0",
+                    },
                 },
-            },
-            context,
-        );
+                context,
+            );
+        } finally {
+            release();
+        }
     }
 
     override async writeFile(path: string, content: string | Uint8Array, context: Context) {
-        return this.#writeError(path) ?? super.writeFile(path, content, context);
+        return this.#write(path, () => super.writeFile(path, content, context));
     }
 
     override async appendFile(path: string, content: string | Uint8Array, context: Context) {
-        return this.#writeError(path) ?? super.appendFile(path, content, context);
+        return this.#write(path, () => super.appendFile(path, content, context));
     }
 
     override async truncateFile(path: string, size: number, context: Context) {
-        return this.#writeError(path) ?? super.truncateFile(path, size, context);
+        return this.#write(path, () => super.truncateFile(path, size, context));
     }
 
     override async flushFile(path: string, context: Context) {
-        return this.#writeError(path) ?? super.flushFile(path, context);
+        return this.#write(path, () => super.flushFile(path, context));
     }
 
     override async renameFile(source: string, destination: string, context: Context) {
-        return this.#writeError(destination) ?? super.renameFile(source, destination, context);
+        return this.#write(destination, () => super.renameFile(source, destination, context));
     }
 
     override async createDir(
@@ -413,7 +471,7 @@ class WorkflowExecutionEnv extends NodeExecutionEnv {
         options: { recursive?: boolean } | undefined,
         context: Context,
     ) {
-        return this.#writeError(path) ?? super.createDir(path, options, context);
+        return this.#write(path, () => super.createDir(path, options, context));
     }
 
     override async remove(
@@ -421,18 +479,18 @@ class WorkflowExecutionEnv extends NodeExecutionEnv {
         options: { recursive?: boolean; force?: boolean } | undefined,
         context: Context,
     ) {
-        return this.#writeError(path) ?? super.remove(path, options, context);
+        return this.#write(path, () => super.remove(path, options, context));
     }
 
     override async createTempDir(prefix: string | undefined, context: Context) {
-        return this.#writeError() ?? super.createTempDir(prefix, context);
+        return this.#write(undefined, () => super.createTempDir(prefix, context));
     }
 
     override async createTempFile(
         options: { prefix?: string; suffix?: string } | undefined,
         context: Context,
     ) {
-        return this.#writeError() ?? super.createTempFile(options, context);
+        return this.#write(undefined, () => super.createTempFile(options, context));
     }
 }
 

@@ -39,6 +39,33 @@ let childGate: Promise<void> | undefined;
 const model = scriptedModel(async (input) => {
     const last = lastText(input as never);
 
+    if (last.role === "user" && /SPAWN_AND_(?:PREPARE|COMPLETE)$/.test(last.text)) {
+        const handoff: Record<string, string> = last.text.endsWith("SPAWN_AND_COMPLETE")
+            ? {
+                  action: "complete",
+                  status: "needs-review",
+                  summary: "Premature completion while a helper still works.",
+              }
+            : {
+                  action: "prepare",
+                  targetType: "reviewer",
+                  relationship: "same-work",
+                  brief: "Premature brief while a helper still works.",
+              };
+
+        return fauxAssistantMessage(
+            [
+                fauxToolCall("subagent", {
+                    action: "spawn",
+                    name: "writer",
+                    message: "HOLD_CHILD",
+                }),
+                fauxToolCall("handoff", handoff),
+            ],
+            { stopReason: "toolUse" },
+        );
+    }
+
     if (last.role === "user" && last.text.endsWith("SPAWN_CHILD")) {
         return fauxAssistantMessage(
             [fauxToolCall("subagent", { action: "spawn", name: "writer", message: "HOLD_CHILD" })],
@@ -50,14 +77,18 @@ const model = scriptedModel(async (input) => {
         await childGate;
     }
 
-    if (last.role === "user" && last.text.endsWith("PREPARE_ONLY")) {
+    if (last.role === "user" && /PREPARE_(?:ONLY|LONG)$/.test(last.text)) {
         return fauxAssistantMessage(
             [
                 fauxToolCall("handoff", {
                     action: "prepare",
                     targetType: "reviewer",
                     relationship: "same-work",
-                    brief: "COMPLETE_FROM_TOOL. Original ask: repair the retry path. Spec: docs/retries.md. Tests: run the lifecycle tests. Risks: duplicate delivery. Git checkpoint: inspect the current HEAD.",
+                    brief:
+                        "COMPLETE_FROM_TOOL. Original ask: repair the retry path. Spec: docs/retries.md. Tests: run the lifecycle tests. Risks: duplicate delivery. Git checkpoint: inspect the current HEAD." +
+                        (last.text.endsWith("PREPARE_LONG")
+                            ? `\n${"Relevant implementation context. ".repeat(140)}\nDeferred checks: browser unavailable; manual UI verification still required.`
+                            : ""),
                 }),
             ],
             { stopReason: "toolUse" },
@@ -423,6 +454,110 @@ test("handoff quiescence rejects stranded reports but allows delivered and expli
     }
 });
 
+// Empty history is not reviewable work; both discovery and actual activation must agree.
+test("an untouched thread cannot start review, but completed work can", async () => {
+    const { id: source } = await app.commands.createSession(owner(app), {
+        cwd: repo("empty-handoff"),
+        threadType: "worker",
+    });
+
+    await app.commands.configure(source, owner(app), {
+        model: { provider: "faux", modelId: "faux-1" },
+        thinkingLevel: "off",
+    });
+    const count = app.sessions().length;
+    const option = (await app.handoffs.list(source, owner(app))).options.find(
+        (each) => each.targetType === "reviewer",
+    );
+
+    assert.equal(option?.enabled, false);
+    assert.match(option?.reason ?? "", /completed work/i);
+    await assert.rejects(start(source, "reviewer", "empty-review"), status(409));
+    assert.equal(app.sessions().length, count);
+    await say(app, source, "Implement and report the work to review.");
+    assert.equal(
+        (await app.handoffs.list(source, owner(app))).options.find(
+            (each) => each.targetType === "reviewer",
+        )?.enabled,
+        true,
+    );
+    await delivered(cid((await start(source, "reviewer", "empty-review")).id));
+});
+
+// Recommendations are advisory: an alternate successor still needs the author's detailed brief.
+test("choosing a different role retains the prepared handoff brief", async () => {
+    const source = await newSession(app, repo("alternate-handoff"));
+
+    await say(app, source, "PREPARE_LONG");
+    const created = await start(source, "worker", "choose-alternate");
+    const id = cid(created.id);
+
+    await delivered(id);
+    const record = (await app.handoffs.list(id, owner(app))).handoffs.find(
+        (each) => each.targetThreadId === created.id,
+    );
+
+    assert.equal(app.sessionMeta(id)?.threadType, "worker");
+    assert.match(record?.brief ?? "", /COMPLETE_FROM_TOOL\. Original ask/);
+    assert.match(record?.brief ?? "", /Risks: duplicate delivery/);
+    assert.match(
+        record?.brief ?? "",
+        /Deferred checks: browser unavailable; manual UI verification still required/,
+        "a long prepared brief must not lose its final verification gaps",
+    );
+});
+
+// Helper work belongs to its parent even when the parent has returned from spawning it.
+test("preparing or completing a handoff waits for delegated helpers instead of recording unfinished work", async () => {
+    for (const action of ["PREPARE", "COMPLETE"]) {
+        const source = await newSession(app, repo(`${action.toLowerCase()}-helper-handoff`));
+        let child: ConversationId | undefined;
+
+        childGate = new Promise<void>((resolve) => {
+            releaseChild = resolve;
+        });
+
+        try {
+            await say(app, source, `SPAWN_AND_${action}`);
+            child = (await app.harness.snapshot(SubagentsDoc, source, context))?.agents.writer
+                ?.conversationId;
+
+            assert.ok(child);
+            await until(() => app.isBusy(child!), "delegated helper remains running");
+            const list = await app.handoffs.list(source, owner(app));
+            const output = JSON.stringify(await modelTexts(app, source));
+
+            assert.equal(list.workflow.proposal, undefined);
+            assert.equal(list.workflow.status, "active");
+            assert.equal(list.workflow.summary, undefined);
+            assert.match(output, /delegated helpers/);
+            assert.doesNotMatch(output, /Cannot fingerprint/);
+            assert.equal(
+                list.options.every((each) => !each.enabled),
+                true,
+            );
+            assert.equal(app.isBusy(child), true, "handoff tools must not abort helpers");
+            await assert.rejects(
+                app.handoffs.complete(source, owner(app), {
+                    status: "needs-review",
+                    summary: "Cannot complete while the delegated helper still works.",
+                }),
+                (error: unknown) =>
+                    error instanceof HttpError &&
+                    error.status === 409 &&
+                    /delegated helpers/.test(error.message),
+                "human completion also explains helper work before inspecting the checkpoint",
+            );
+        } finally {
+            releaseChild?.();
+            await until(
+                () => !app.isBusy(source) && (child === undefined || !app.isBusy(child)),
+                "helper and parent reporter idle",
+            );
+        }
+    }
+});
+
 // Gate: transport/native semantics, scoped visibility and no model activation are new public contracts.
 test("HTTP/native handoffs inherit scope without broadening access; viewers cannot activate and hidden members stay private", async () => {
     const cwd = repo("http-handoff");
@@ -569,7 +704,18 @@ test("review/land/publish/new-work transitions bind exact code and group archive
         status: "review-complete",
         summary: "Reviewed the changed untracked contents.",
     });
-    const land = await start(reviewer, "land", "land-transition");
+    const followUp = await start(reviewer, "follow-up", "follow-up-transition");
+    const followUpId = cid(followUp.id);
+
+    await delivered(followUpId);
+    await assert.rejects(start(followUpId, "land", "premature-follow-up-land"), status(409));
+    writeFileSync(join(cwd, "new-code.txt"), "small review repair\n");
+    await app.handoffs.complete(followUpId, owner(app), {
+        status: "review-complete",
+        summary:
+            "Reused the independent review and self-reviewed the small repair with focused checks.",
+    });
+    const land = await start(followUpId, "land", "land-transition");
     const landId = cid(land.id);
 
     assert.equal(land.workItemId, review.workItemId);
@@ -670,7 +816,7 @@ test("review/land/publish/new-work transitions bind exact code and group archive
 
     assert.ok(goalId);
     await app.projects.assign(owner(app), reviewer, { projectId: project.id, goalId });
-    const oldMembers = [source, reviewer, landId, publishId];
+    const oldMembers = [source, reviewer, followUpId, landId, publishId];
 
     assert.deepEqual(
         oldMembers.map((id) => app.sessionMeta(id)?.projectId),
@@ -726,6 +872,7 @@ test("review/land/publish/new-work transitions bind exact code and group archive
     await app.harness.commit(async (tx) => {
         (await tx.doc(SessionsDoc)).items[String(hiddenSource)]!.ownerOnly = true;
     }, context);
+    await say(app, hiddenSource, "Report the owner-only implementation for review.");
     const hiddenReview = await start(hiddenSource, "reviewer", "owner-only-review");
     const guest = app.config.addUser("Unrestricted guest", "guest").user;
 
@@ -767,6 +914,7 @@ test(
             const source = await newSession(app, cwd);
 
             writeFileSync(join(cwd, "code.txt"), "changedA\n");
+            await say(app, source, "Report the physical tracked-byte change for review.");
             const reviewer = cid((await start(source, "reviewer", "filter-review")).id);
 
             await delivered(reviewer);
@@ -883,6 +1031,11 @@ test("tools prepare/complete but never activate; descendant and background write
         command: "sleep 1; printf done > background-finished.txt",
         requestId: "background-writer",
     });
+    assert.equal(
+        (await app.handoffs.list(shellSource, owner(app))).options.every((each) => !each.enabled),
+        true,
+        "discovery must include background work even without a main-thread run",
+    );
     await assert.rejects(start(shellSource, "reviewer", "shell-busy"), status(409));
     await until(
         () => existsSync(join(cwd, "background-finished.txt")),
@@ -939,6 +1092,8 @@ test("human worktree cleanup moves the whole item and invalidates readiness when
     const cwd = repo("cleanup-handoff");
     const source = (await app.commands.createSession(owner(app), { cwd, worktree: true })).id;
     const checkout = app.cwdOf(source);
+
+    await say(app, source, "Report the worktree implementation for review.");
     const review = await start(source, "reviewer", "cleanup-review");
     const reviewer = cid(review.id);
 

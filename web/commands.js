@@ -370,7 +370,7 @@ const COMMANDS = [
     },
     {
         name: "handoff",
-        args: "[reviewer|land|publish|worker] [--same|--new]",
+        args: "[chat|worker|reviewer|follow-up|pull|land|publish] [--same|--new]",
         description: "Start the next workflow thread; without arguments, choose a handoff",
         available: () => handoffsAvailable() && isSession(),
         native: true,

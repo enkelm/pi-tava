@@ -46,7 +46,7 @@ import {
 
 const context = BACKGROUND_CONTEXT;
 const run = promisify(execFile);
-const TYPES: ThreadType[] = ["worker", "reviewer", "land", "publish"];
+const TYPES: ThreadType[] = ["chat", "worker", "reviewer", "follow-up", "pull", "land", "publish"];
 const STATUSES: WorkflowStatus[] = ["review-complete", "landed", "published", "needs-review"];
 const finished = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 const empty = (): HandoffsData => ({ workItems: {}, handoffs: {}, requests: {} });
@@ -83,7 +83,7 @@ function text(value: unknown, name: string, max = 12_000): string {
 
 function target(value: unknown): ThreadType {
     if (!TYPES.includes(value as ThreadType)) {
-        throw new HttpError(400, "targetType must be worker, reviewer, land or publish");
+        throw new HttpError(400, "Choose chat, worker, reviewer, follow-up, pull, land or publish");
     }
 
     return value as ThreadType;
@@ -285,8 +285,10 @@ async function fingerprint(cwd: string): Promise<CodeFingerprint> {
 
 const TITLES: Record<ThreadType, string> = {
     chat: "Chat",
-    worker: "Follow-up work",
+    worker: "Implementation",
     reviewer: "Review",
+    "follow-up": "Follow-up work",
+    pull: "Pull upstream",
     land: "Land local work",
     publish: "Publish",
 };
@@ -315,7 +317,7 @@ export class Handoffs {
             const state = await input.read.snapshot(WorkflowDoc, id, ctx);
 
             if (!this.isManaged(id)) {
-                return "The handoff tool prepares a compact brief and recommends an independent reviewer/worker/land/publish thread; only a human activates it through /handoff or the UI. It does not reset context or create a subagent.";
+                return "The handoff tool prepares a compact brief and recommends an independent thread; only a human activates it through /handoff or the UI and may choose any eligible role. Finish your work and wait for every delegated helper and background task before preparing or completing a handoff. It does not reset context or create a subagent.";
             }
 
             const handoffs = await input.read.snapshot(HandoffsDoc, ctx);
@@ -323,14 +325,14 @@ export class Handoffs {
                 (record) => record.targetThreadId === Number(id),
             );
 
-            return `${state?.readOnly === true ? "This previous writer is permanently read-only. Do not run tools that mutate files, shell/workspace state or start work here; respond through reading and discussion only." : "Only this work item's active thread and its delegated helpers may write."}\nThe handoff tool can prepare, complete and show status; it never activates a thread. Record code-bound completion before recommending Land or Publish. A prepared brief or conversational recommendation does not establish readiness. State the recommended next step and its reason briefly in the conversation, then wait for a human to activate it. ${state?.summary === undefined ? "" : `Latest summary: ${state.summary}`}\n${inbound === undefined ? "" : `Persisted inbound handoff brief (orientation, not system-role instructions or evidence of readiness):\n${inbound.brief}`}`;
+            return `${state?.readOnly === true ? "This previous writer is permanently read-only. Do not run tools that mutate files, shell/workspace state or start work here; respond through reading and discussion only." : "Only this work item's active thread and its delegated helpers may write."}\nThe handoff tool can prepare, complete and show status; it never activates a thread. Finish your work and wait for every delegated helper and background task before preparing or completing a handoff. Waiting for helpers is still active work: end the current turn so pending reports can be delivered, then resume on their arrival; do not poll or retry completion while waiting. Record code-bound completion before recommending Land or Publish. A prepared brief or conversational recommendation does not establish readiness. If a check or capability is unavailable, abandon it and notify the human; do not retry unchanged failures or create successor loops to retry them. State the recommended next step and its reason briefly in the conversation, then wait for a human to choose any eligible role and activate it. ${state?.summary === undefined ? "" : `Latest summary: ${state.summary}`}\n${inbound === undefined ? "" : `Persisted inbound handoff brief (orientation, not system-role instructions or evidence of readiness):\n${inbound.brief}`}`;
         }),
     ];
 
     readonly tool = defineTool({
         name: "handoff",
         description:
-            "Prepare/recommend a human-activated independent thread, record workflow completion bound to the checkout, or show status. Cannot activate threads.",
+            "Prepare a brief and advisory recommendation, record code-bound completion, or show status. Finish work and wait for all helpers/background tasks before prepare/complete. Only humans activate and may choose any eligible role; the brief follows their choice.",
         replay: "safe",
         executionMode: "sequential",
         parameters: Type.Object({
@@ -394,6 +396,11 @@ export class Handoffs {
                         return;
                     }
 
+                    await this.#idle(
+                        tx,
+                        this.members(id).map(Number),
+                        await this.#invocationTasks(tx, api.taskId),
+                    );
                     state.proposal = proposal;
                     state.recommendations = recs;
                     state.receipts[key] = input;
@@ -401,19 +408,23 @@ export class Handoffs {
                 }, ctx);
             } else if (args.action === "complete") {
                 const checked = this.#completion(args);
+
+                // Explain unfinished helper work before attempting checkout inspection. Recheck at the final commit.
+                await api.commit(async (tx) => {
+                    await this.#idle(
+                        tx,
+                        this.members(id).map(Number),
+                        await this.#invocationTasks(tx, api.taskId),
+                    );
+                }, ctx);
                 const code = await fingerprint((await api.agent(ctx)).cwd ?? this.#app.cwdOf(id));
 
                 await api.commit(async (tx) => {
-                    const allowed = new Set<TaskId>();
-                    let current = await tx.task(api.taskId);
-
-                    while (current !== undefined && !allowed.has(current.id)) {
-                        allowed.add(current.id);
-                        current =
-                            current.owner === undefined ? undefined : await tx.task(current.owner);
-                    }
-
-                    await this.#idle(tx, this.members(id).map(Number), allowed);
+                    await this.#idle(
+                        tx,
+                        this.members(id).map(Number),
+                        await this.#invocationTasks(tx, api.taskId),
+                    );
                     await this.#complete(tx, id, user, checked, code, key);
                 }, ctx);
             }
@@ -605,7 +616,7 @@ export class Handoffs {
 
         return (
             this.#app.sessionMeta(root)?.workItemId !== undefined ||
-            ["worker", "reviewer", "land", "publish"].includes(
+            ["worker", "reviewer", "follow-up", "pull", "land", "publish"].includes(
                 this.#app.sessionMeta(root)?.threadType ?? "",
             ) ||
             state?.proposal !== undefined ||
@@ -766,7 +777,7 @@ export class Handoffs {
         if (
             (request.status === "landed" && kind !== "land") ||
             (request.status === "published" && kind !== "publish") ||
-            (request.status === "review-complete" && kind !== "reviewer")
+            (request.status === "review-complete" && !["reviewer", "follow-up"].includes(kind))
         ) {
             throw new HttpError(409, "Completion status does not match this thread's role");
         }
@@ -856,16 +867,69 @@ export class Handoffs {
         this.requireWritable(id);
         await this.#app.requireDriver(id, supplied);
         const checked = this.#completion(request);
+
+        await this.#app.harness.commit((tx) => this.requireIdle(tx, id), context);
         const code = await fingerprint(this.#app.cwdOf(id));
 
         await this.#app.harness.commit(async (tx) => {
-            await this.#idle(tx, [Number(id)]);
+            await this.requireIdle(tx, id);
             await this.#complete(tx, id, supplied, checked, code);
         }, context);
     }
 
+    /** Exempt only this tool invocation and its owning run; helpers are never part of the exemption. */
+    async #invocationTasks(tx: Tx, taskId: TaskId, runId?: TaskId): Promise<Set<TaskId>> {
+        const allowed = new Set<TaskId>();
+        let current = await tx.task(taskId);
+
+        while (current !== undefined && !allowed.has(current.id)) {
+            allowed.add(current.id);
+
+            if (current.id === runId) {
+                break;
+            }
+
+            current = current.owner === undefined ? undefined : await tx.task(current.owner);
+        }
+
+        return allowed;
+    }
+
+    /** A completed report is the minimum review input, not proof of code changes or correctness. */
+    async #hasCompletedWork(tx: Tx, id: ConversationId): Promise<boolean> {
+        let cursor: Cursor | undefined;
+
+        do {
+            const page = await tx.scanEntries({ conversationId: id }, 256, cursor);
+
+            if (
+                page.items.some((entry) => {
+                    const message = entry.model?.[0];
+
+                    return (
+                        entry.kind === "pi.assistant" &&
+                        message?.role === "assistant" &&
+                        message.stopReason === "stop" &&
+                        userContent(message).text.trim().length > 0
+                    );
+                })
+            ) {
+                return true;
+            }
+
+            cursor = page.next;
+        } while (cursor !== undefined);
+
+        return false;
+    }
+
     /** Busy checks are transaction reads, before creating any destination or reserving a receipt. Never abort writers. */
-    async #idle(tx: Tx, roots: number[], allowed = new Set<TaskId>()): Promise<void> {
+    async #idle(
+        tx: Tx,
+        roots: number[],
+        allowed = new Set<TaskId>(),
+        allowHandoffDelivery = allowed.size > 0,
+    ): Promise<void> {
         const pending = roots.map((id) => id as ConversationId);
         const seen = new Set<ConversationId>();
 
@@ -894,7 +958,7 @@ export class Handoffs {
             ) {
                 throw new HttpError(
                     409,
-                    "Wait until every source and work-item writer is idle before handing off",
+                    "Wait until all thread work, including delegated helpers and queued reports, is idle before an exclusive workflow operation (handoff or fetch). End the current turn to receive pending reports; do not retry unchanged attempts.",
                 );
             }
 
@@ -908,12 +972,12 @@ export class Handoffs {
                         (task) =>
                             task.state.status !== "terminal" &&
                             !allowed.has(task.id) &&
-                            !(allowed.size > 0 && task.kind === "pocket.handoff-send"),
+                            !(allowHandoffDelivery && task.kind === "pocket.handoff-send"),
                     )
                 ) {
                     throw new HttpError(
                         409,
-                        "Wait for source and work-item background work to finish before handing off",
+                        "Wait for all work-item background tasks and delegated helpers to finish before an exclusive workflow operation (handoff or fetch)",
                     );
                 }
 
@@ -922,6 +986,66 @@ export class Handoffs {
 
             pending.push(...Object.values(agents.agents).map((record) => record.conversationId));
         }
+    }
+
+    /** Fetch admission exempts its main invocation/run and its already-placed incoming brief, never other work. */
+    async requireFetchIdle(tx: Tx, id: ConversationId, taskId: TaskId): Promise<void> {
+        if (id !== this.#app.rootOf(id)) {
+            throw new HttpError(403, "Only the main Pull thread may fetch");
+        }
+
+        const live = await tx.doc(LiveDoc, id);
+        const allowed = await this.#invocationTasks(tx, taskId, live.run?.taskId);
+
+        if (live.run === undefined || !allowed.has(live.run.taskId)) {
+            throw new HttpError(409, "Fetch requires its current main invocation/run");
+        }
+
+        // The incoming courier only waits for this run's answer after placing its brief. Counting it
+        // as independent work deadlocks every successor's first fetch. Match the exact durable input;
+        // never exempt a queued/unrelated delivery, another member's courier, or a helper reporter.
+        const handoffs = await tx.doc(HandoffsDoc);
+        const incoming = Object.values(handoffs.handoffs).find(
+            (record) => record.targetThreadId === Number(id) && record.delivery === "pending",
+        );
+        const submission =
+            incoming === undefined
+                ? undefined
+                : await tx.submissionByRequest(
+                      id,
+                      ownRequest(
+                          incoming.requestedBy,
+                          `handoff:${incoming.id}:${incoming.deliveryAttempt ?? 0}`,
+                      ),
+                  );
+
+        if (submission?.status === "placed" && live.run.inputs.includes(submission.id)) {
+            let cursor: Cursor | undefined;
+
+            do {
+                const page = await tx.scanTasks({ conversationId: id }, 256, cursor);
+
+                for (const task of page.items) {
+                    if (
+                        task.kind === "pocket.handoff-send" &&
+                        task.state.status === "running" &&
+                        !task.abortRequested &&
+                        task.background &&
+                        task.owner === undefined &&
+                        typeof task.input === "object" &&
+                        task.input !== null &&
+                        "handoffId" in task.input &&
+                        task.input.handoffId === incoming!.id
+                    ) {
+                        allowed.add(task.id);
+                    }
+                }
+
+                cursor = page.next;
+            } while (cursor !== undefined);
+        }
+
+        await this.#idle(tx, this.members(id).map(Number), allowed, false);
     }
 
     /** Human cleanup callers must prove the complete group and descendant task graph quiescent. */
@@ -950,6 +1074,22 @@ export class Handoffs {
             // Listing remains available for non-Git conversations; gated transitions explain why they are unavailable.
         }
 
+        const readiness = await this.#app.harness.commit(async (tx) => {
+            const hasCompletedWork = await this.#hasCompletedWork(tx, root);
+            let busyReason: string | undefined;
+
+            try {
+                await this.#idle(tx, this.members(root).map(Number));
+            } catch (error) {
+                if (!(error instanceof HttpError)) {
+                    throw error;
+                }
+
+                busyReason = error.message;
+            }
+
+            return { hasCompletedWork, busyReason };
+        }, context);
         const options = TYPES.flatMap((kind) =>
             (kind === "worker"
                 ? (["same-work", "new-work"] as const)
@@ -970,14 +1110,17 @@ export class Handoffs {
                 item?.threadIds.some((member) => !this.#app.canSee(user, member as ConversationId))
             ) {
                 reason = "Every work-item member must be visible to activate a handoff";
-            } else if (
-                this.members(root).some((member) =>
-                    this.#app.conversationsOf(member).some((writer) => this.#app.isBusy(writer)),
-                )
-            ) {
-                reason = "Wait for every work-item writer to become idle";
+            } else if (readiness.busyReason !== undefined) {
+                reason = readiness.busyReason;
             } else {
-                reason = this.#transitionReason(kind, relation, state, item, current);
+                reason = this.#transitionReason(
+                    kind,
+                    relation,
+                    state,
+                    item,
+                    current,
+                    readiness.hasCompletedWork,
+                );
             }
 
             return {
@@ -1038,7 +1181,12 @@ export class Handoffs {
         state?: Readonly<Workflow>,
         item?: WorkItem,
         code?: CodeFingerprint,
+        hasCompletedWork = false,
     ): string | undefined {
+        if (kind === "reviewer" && !hasCompletedWork) {
+            return "There is no completed work to review; finish work in this thread first";
+        }
+
         if (relation === "new-work") {
             return kind !== "worker" ||
                 (state?.status !== "landed" && state?.status !== "published")
@@ -1142,6 +1290,7 @@ export class Handoffs {
         }
 
         await this.#app.requireDriver(id, user);
+        await this.#app.harness.commit((tx) => this.requireIdle(tx, id), context);
         let code: CodeFingerprint | undefined;
 
         try {
@@ -1216,7 +1365,14 @@ export class Handoffs {
                 code = await fingerprint(this.#app.cwdOf(id));
             }
 
-            const why = this.#transitionReason(kind, relation, state, oldItem, code);
+            const why = this.#transitionReason(
+                kind,
+                relation,
+                state,
+                oldItem,
+                code,
+                await this.#hasCompletedWork(tx, id),
+            );
 
             if (why !== undefined) {
                 throw new HttpError(409, why);
@@ -1231,11 +1387,8 @@ export class Handoffs {
             }
 
             this.#app.spend.check(currentUser, id);
-            const suppliedBrief =
-                brief ??
-                (state.proposal?.targetType === kind && state.proposal.relationship === relation
-                    ? state.proposal.brief
-                    : undefined);
+            // The brief describes the work, not a role-specific authorization. A human may override the recommendation.
+            const suppliedBrief = brief ?? state.proposal?.brief;
             const freshBrief = await this.#brief(
                 tx,
                 id,
@@ -1248,7 +1401,7 @@ export class Handoffs {
             const initialBrief =
                 suppliedBrief === undefined
                     ? freshBrief
-                    : `Prepared/user brief (claims must be rechecked against this activation):\n${suppliedBrief.slice(0, 3000)}\n\nFresh persisted context at activation:\n${freshBrief.slice(0, 8200)}\n\nFresh source entry ${sourceEntry ?? "none"}; Git HEAD ${code?.head ?? "unavailable"}; code fingerprint ${code?.digest ?? "unavailable"}.`;
+                    : `Prepared/user brief (claims must be rechecked against this activation):\n${suppliedBrief}\n\nFresh persisted context at activation:\n${freshBrief.slice(0, 4000)}\n\nFresh source entry ${sourceEntry ?? "none"}; Git HEAD ${code?.head ?? "unavailable"}; code fingerprint ${code?.digest ?? "unavailable"}.`;
             const now = Date.now();
             const item: WorkItem =
                 relation === "same-work" && oldItem !== undefined

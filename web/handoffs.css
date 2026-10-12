@@ -4,6 +4,16 @@
     background: color-mix(in srgb, var(--o-magenta) 8%, transparent);
 }
 
+.thread-type.follow-up {
+    color: var(--o-blue);
+    background: color-mix(in srgb, var(--o-blue) 8%, transparent);
+}
+
+.thread-type.pull {
+    color: var(--o-cyan);
+    background: color-mix(in srgb, var(--o-cyan) 8%, transparent);
+}
+
 .thread-type.land {
     color: var(--o-yellow);
     background: color-mix(in srgb, var(--o-yellow) 8%, transparent);
@@ -16,6 +26,14 @@
 
 :root[data-mode="light"] .thread-type.reviewer {
     color: color-mix(in srgb, var(--o-magenta) 50%, var(--o-fg));
+}
+
+:root[data-mode="light"] .thread-type.follow-up {
+    color: color-mix(in srgb, var(--o-blue) 50%, var(--o-fg));
+}
+
+:root[data-mode="light"] .thread-type.pull {
+    color: color-mix(in srgb, var(--o-cyan) 50%, var(--o-fg));
 }
 
 :root[data-mode="light"] .thread-type.land {
@@ -109,12 +127,28 @@
     accent-color: var(--accent);
 }
 
-.handoff-option > span {
-    min-width: 0;
+.handoff-option > .thread-type {
+    flex-shrink: 0;
+}
+
+.handoff-option-copy {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     gap: 0.2rem;
     overflow-wrap: anywhere;
+}
+
+.handoff-option.disabled {
+    cursor: default;
+}
+
+.handoff-option.disabled strong {
+    color: var(--muted);
+}
+
+.handoff-recommendation {
+    color: var(--accent);
 }
 
 .handoff-explanation {

@@ -12,10 +12,11 @@ Thread type is separate from placement:
 
 - **Worker** has a blue agent tag. New project threads default to Worker.
 - **Chat** has a green speech-bubble tag. The one-time-chat flow starts an unassigned Chat.
-- **Reviewer**, **Land** and **Publish** are successor types created through handoffs. Reviewer owns review and fixes; Land performs local integration and impact checks; Publish handles individually approved external delivery.
+- **Reviewer**, **Follow-up**, **Land** and **Publish** are successor types created through handoffs. Reviewer owns bounded independent review; Follow-up handles small review repairs and a short self-review; Land performs local integration and impact checks; Publish handles individually approved external delivery.
+- **Pull** reads upstream/external sources and handles requested local rebases. It can start independently or be selected as a handoff at any stage.
 - Moving a thread does not change its type. Threads grouped in a Work Item move together.
 
-The first same-work review handoff groups its Worker and Reviewer in a **Work Item** named after the first thread. Later same-work successors join the same item; subsequent work can start a linked item. Items can stand alone or belong to a project and optional goal. Member threads cannot be archived independently. See [handoffs.md](handoffs.md) for the workflow and `/handoff`.
+The first same-work handoff groups its source and successor in a **Work Item** named after the first thread. Later same-work successors join the same item; subsequent work can start a linked item. Items can stand alone or belong to a project and optional goal. Member threads cannot be archived independently. See [handoffs.md](handoffs.md) for the workflow and `/handoff`.
 
 On upgrade, ordinary Collab catalogue entries without a type are durably marked Worker; untyped linked roots remain independent Chats. They stay unassigned and appear as ordinary rows, with no synthetic project or Unassigned section. Explicit types are not changed on later restarts. Private Herdr processes are not migrated.
 
@@ -29,9 +30,9 @@ Threads keep hover Archive/Pin; Move is available through Options → **Move to 
 
 **Start new** begins with projects. Selecting a project expands its goal choices, with **+ New Goal** first, followed by existing unarchived goals. A goal is optional. The project's directory is the default; it can be overridden without changing membership. A git worktree can still be requested. **Start a one-time chat** escapes project selection.
 
-New Goal is a creation intent, not a naming form. Confirming Start creates the worker and an Active goal named **New goal** together. Cancelling leaves neither behind. The first worker message reserves a durable background naming task. A small available model of that worker's provider writes the goal's name; the response does not replace or interrupt the worker's ordinary answer. Usage, the accepted name and task completion commit together. A short message-derived name is the fallback when no naming model is available or the request fails. A manual rename wins over a delayed AI result.
+New Goal is a creation intent, not a naming form. Confirming Start creates the selected Worker or Pull thread and an Active goal named **New goal** together. Cancelling leaves neither behind. The first message reserves a durable background naming task. A small available model of that thread's provider writes the goal's name; the response does not replace or interrupt the thread's ordinary answer. Usage, the accepted name and task completion commit together. A short message-derived name is the fallback when no naming model is available or the request fails. A manual rename wins over a delayed AI result.
 
-A restart resumes a reserved naming task. Scheduled first messages also reserve naming. Startup repairs an admission interrupted before naming was reserved; a later message also repairs it using the durable first input, not the later message. An untouched empty worker leaves its goal unnamed until the first message. Project goals are unrelated to the existing **Done when** `/until` completion-check documents and tools.
+A restart resumes a reserved naming task. Scheduled first messages also reserve naming. Startup repairs an admission interrupted before naming was reserved; a later message also repairs it using the durable first input, not the later message. An untouched empty thread leaves its goal unnamed until the first message. Project goals are unrelated to the existing **Done when** `/until` completion-check documents and tools.
 
 Project defaults affect new threads only. Moving an existing thread changes organization, never its directory. Ungrouped forks and resends retain source placement and thread type, actual directory/worktree and owner-only restrictions. Grouped handoff threads cannot fork or resend around Work Item ownership. A fork within an archived goal remains archived. Imports retain their source directory and initially remain unassigned Chats; import destination selection is not extended by this feature.
 
@@ -47,7 +48,7 @@ For an independent thread, a later explicit archive/unarchive removes its bulk-a
 
 Project membership never grants access or changes the Durable ownership tree. Existing owner-only imports, scoped invitations, steering rights, take-turns rules and spend limits still apply. Unrestricted steering participants can edit projects and goals. Viewers can read the filtered catalogue but cannot edit. Session-scoped participants see only the projects/goals associated with their visible threads, without project default directories or unrelated empty groups. Goals occupied exclusively by threads hidden from a participant are omitted, and a remembered goal ID cannot be used to join them. Bulk edits that would touch a hidden thread reject as a whole.
 
-The server sends the filtered catalogue in `projects` events on connection, membership changes and catalogue updates. `hello.server.projects >= 1` gates the new UI so saving web files before restarting the server does not break the running older server.
+The server sends the filtered catalogue in `projects` events on connection, membership changes and catalogue updates. `hello.server.projects >= 1` gates the project UI so saving web files before restarting the server does not break the running older server. `hello.server.handoffs >= 2` enables independent Pull creation on updated servers.
 
 ## Interface
 

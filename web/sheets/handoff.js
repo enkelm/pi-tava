@@ -1,4 +1,4 @@
-// A human chooses a valid path; the agent owns the brief, completion summary and recommendation.
+// A human chooses any enabled path; agent recommendations are advisory.
 import { useEffect, useRef, useState } from "preact/hooks";
 import { HANDOFF_LABELS, handoffOptions, preferredHandoff } from "../handoffs.js";
 import {
@@ -15,10 +15,13 @@ import { html, Loader, Sheet } from "../ui.js";
 
 const keyOf = (option) => `${option.targetType}:${option.relationship}`;
 const DESCRIPTIONS = {
-    reviewer: "Independent review and fixes in this checkout. This thread becomes read-only.",
-    land: "Review passed. Integrate and verify locally; no external delivery.",
+    chat: "Explore, discuss or clarify the next task in a fresh Chat.",
+    worker: "Continue implementation and focused tests in a fresh Worker.",
+    reviewer: "Independent code and test review, fixes and impact-driven regression checks.",
+    "follow-up": "Make tight, bounded fixes and self-review their impact.",
+    pull: "Fetch upstream or external changes, rebase and check the integration.",
+    land: "Integrate and verify locally; no external delivery.",
     publish: "Optional external delivery. Each action requires separate human approval.",
-    worker: "More implementation is needed. Continue in a fresh worker; this thread becomes read-only.",
 };
 
 export function HandoffSheet({ id, option: initialOption }) {
@@ -26,10 +29,11 @@ export function HandoffSheet({ id, option: initialOption }) {
     const [loading, setLoading] = useState(true);
     const [choice, setChoice] = useState(initialOption ? keyOf(initialOption) : "");
     const [busy, setBusy] = useState(false);
+    const [uncertain, setUncertain] = useState(false);
     const [error, setError] = useState("");
     const [retry, setRetry] = useState(0);
     const submitting = useRef(false);
-    const request = useRef({ id: uid(), signature: null });
+    const request = useRef({ id: uid(), payload: null });
     const type = store.state.sessions.find((each) => each.id === id)?.threadType ?? "worker";
 
     useEffect(() => {
@@ -43,14 +47,13 @@ export function HandoffSheet({ id, option: initialOption }) {
                     return;
                 }
 
-                const options = handoffOptions(value, type);
-
                 setData(value);
                 setLoading(false);
                 setChoice((old) =>
-                    options.some((each) => keyOf(each) === old)
+                    data &&
+                    handoffOptions(value).some((each) => each.enabled && keyOf(each) === old)
                         ? old
-                        : keyOf(preferredHandoff(value, type) ?? options[0] ?? {}),
+                        : keyOf(preferredHandoff(value, type) ?? {}),
                 );
             },
             (failure) => {
@@ -70,12 +73,13 @@ export function HandoffSheet({ id, option: initialOption }) {
         return null;
     }
 
-    const options = handoffOptions(data, type);
+    const options = handoffOptions(data);
     const selected = options.find((each) => keyOf(each) === choice);
-    const valid = selected && !data.workflow.readOnly;
-    const recommendation = [data?.workflow.proposal, ...(data?.workflow.recommendations ?? [])]
-        .filter(Boolean)
-        .find((each) => keyOf(each) === choice);
+    const valid = selected?.enabled && !data?.workflow?.readOnly;
+    const recommendations = [
+        data?.workflow?.proposal,
+        ...(data?.workflow?.recommendations ?? []),
+    ].filter(Boolean);
 
     const save = async (event) => {
         event.preventDefault();
@@ -85,17 +89,14 @@ export function HandoffSheet({ id, option: initialOption }) {
         }
 
         const opened = store.state.sheet;
-        const payload = {
+        // An uncertain response may hide a committed successor. Retry that exact admission,
+        // never replace its identity or payload until the server definitively rejects it.
+        const payload = request.current.payload ?? {
             targetType: selected.targetType,
             relationship: selected.relationship,
         };
-        const signature = JSON.stringify(payload);
 
-        if (request.current.signature !== null && request.current.signature !== signature) {
-            request.current.id = uid();
-        }
-
-        request.current.signature = signature;
+        request.current.payload = payload;
         submitting.current = true;
         setBusy(true);
         setError("");
@@ -110,7 +111,13 @@ export function HandoffSheet({ id, option: initialOption }) {
                 navigate(created.id);
             }
         } catch (failure) {
-            setError(`${failure.message} Retry to use the same handoff request.`);
+            if (!uncertain && failure.status >= 400 && failure.status < 500) {
+                request.current = { id: uid(), payload: null };
+                setError(`${failure.message} Refresh options or choose another role.`);
+            } else {
+                setUncertain(true);
+                setError(`${failure.message} Retry to recover the same handoff request.`);
+            }
         } finally {
             submitting.current = false;
             setBusy(false);
@@ -131,32 +138,50 @@ export function HandoffSheet({ id, option: initialOption }) {
             !loading &&
             data &&
             html`<form class="handoff-form" onSubmit=${save}>
-            <fieldset aria-label="Next thread" disabled=${busy}>
+            <p class="muted small">Choose the next role. Recommendations are advisory; starting a thread makes this one read-only.</p>
+            <fieldset aria-label="Next thread" disabled=${busy || uncertain}>
                 <div class="handoff-options">
-                    ${options.map(
-                        (each) => html`<label class="handoff-option">
-                        <input
-                            type="radio"
-                            name="handoff-option"
-                            value=${keyOf(each)}
-                            checked=${choice === keyOf(each)}
-                            disabled=${data.workflow.readOnly}
-                            onChange=${() => setChoice(keyOf(each))}
-                        />
-                        <${ThreadTypeTag} session=${{ threadType: each.targetType }} iconOnly=${true} />
-                        <span>
-                            <strong>${HANDOFF_LABELS[each.targetType] ?? each.targetType}</strong>
-                            ${each.targetType === "worker" && html`<span class="small muted">${each.relationship === "new-work" ? "New Work Item · linked to this one" : "More work · same Work Item"}</span>`}
-                        </span>
-                    </label>`,
-                    )}
+                    ${options.map((each) => {
+                        const recommendation =
+                            recommendations.find(
+                                (entry) => keyOf(entry) === keyOf(each) && entry.reason,
+                            ) ?? recommendations.find((entry) => keyOf(entry) === keyOf(each));
+                        const disabled = !each.enabled || data.workflow?.readOnly;
+
+                        return html`<label class=${`handoff-option ${disabled ? "disabled" : ""}`}>
+                            <input
+                                type="radio"
+                                name="handoff-option"
+                                value=${keyOf(each)}
+                                checked=${choice === keyOf(each)}
+                                disabled=${disabled}
+                                onChange=${() => setChoice(keyOf(each))}
+                            />
+                            <${ThreadTypeTag}
+                                session=${{ threadType: each.targetType }}
+                                iconOnly=${true}
+                            />
+                            <span class="handoff-option-copy">
+                                <strong>${HANDOFF_LABELS[each.targetType] ?? each.targetType}</strong>
+                                ${each.targetType === "worker" && html`<span class="small muted">${each.relationship === "new-work" ? "New Work Item · linked to this one" : "More work · same Work Item"}</span>`}
+                                ${recommendation && html`<span class="small handoff-recommendation">Recommended${recommendation.reason ? ` · ${recommendation.reason}` : ""}</span>`}
+                                ${each.reason && html`<span class="small muted handoff-disabled-reason">${each.reason}</span>`}
+                            </span>
+                        </label>`;
+                    })}
                 </div>
-                ${options.length === 0 && html`<p class="muted small">${data.workflow.readOnly ? "Open the active thread to continue this work." : "No handoff is ready. Ask the agent to finish its checks and prepare the next step."}</p>`}
-                ${selected && html`<p class="small handoff-explanation">${selected.relationship === "new-work" ? "Begin separate work linked to this completed Work Item." : DESCRIPTIONS[selected.targetType]}</p>`}
-                ${recommendation?.reason && html`<p class="small muted">${recommendation.reason}</p>`}
+                ${options.length === 0 && html`<p class="muted small">${data.workflow?.readOnly ? "Open the active thread to continue this work." : "No handoff options are available from this server."}</p>`}
+                ${selected && html`<p class="small handoff-explanation">${selected.relationship === "new-work" ? "Begin separate work linked to this Work Item." : DESCRIPTIONS[selected.targetType]}</p>`}
             </fieldset>
             ${error && html`<p class="error" role="alert">${error}</p>`}
             <div class="handoff-form-actions">
+                <button
+                    class="button"
+                    type="button"
+                    disabled=${busy || uncertain}
+                    title=${uncertain ? "Retry the existing handoff request before refreshing options" : "Reload roles and their current availability"}
+                    onClick=${() => setRetry((each) => each + 1)}
+                >Refresh options</button>
                 <button class="button" type="button" disabled=${busy} onClick=${closeSheet}>Cancel</button>
                 <button class="button primary" type="submit" disabled=${busy || !valid}>
                     ${busy ? "Starting…" : (HANDOFF_LABELS[selected?.targetType] ?? "Start thread")}

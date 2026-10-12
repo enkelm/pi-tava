@@ -119,6 +119,7 @@ export const BUILT_IN_TOOLS: ReadonlySet<string> = new Set([
     "session_watch_pr",
     "handoff",
     "publication",
+    "pull",
 ]);
 
 /** Pi Pocket's own modules, or the owner's from the drop-in folder. */

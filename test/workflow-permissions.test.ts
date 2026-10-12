@@ -8,6 +8,7 @@ import {
     openApp,
     owner,
     root,
+    say,
     scriptedModel,
     until,
 } from "./helpers.ts";
@@ -119,6 +120,8 @@ export default function(){return defineExtension({name:'workflow-test-extension'
         model: { provider: "faux", modelId: "faux-1" },
         thinkingLevel: "off",
     });
+
+    await say(app, worker, "Report the disposable fixture implementation for review.");
 
     const send = async (
         id: ConversationId,

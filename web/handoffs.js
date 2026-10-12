@@ -1,17 +1,8 @@
 // Agents author briefs and readiness; only an explicit human action starts the next independent thread.
-import { useEffect, useRef, useState } from "preact/hooks";
-import {
-    actions,
-    canSteer,
-    handoffsAvailable,
-    navigate,
-    notify,
-    openSheet,
-    store,
-    uid,
-} from "./store.js";
+import { useEffect } from "preact/hooks";
+import { actions, canSteer, handoffsAvailable, navigate, openSheet, store } from "./store.js";
 import { ThreadTypeTag } from "./thread-type.js";
-import { html, Icon, Spinner } from "./ui.js";
+import { html, Icon } from "./ui.js";
 
 export const HANDOFF_LABELS = {
     chat: "Start chat",
@@ -19,6 +10,8 @@ export const HANDOFF_LABELS = {
     land: "Start land",
     publish: "Start publish",
     worker: "Start worker",
+    "follow-up": "Start follow-up",
+    pull: "Start pull",
 };
 
 export const WORKFLOW_LABELS = {
@@ -29,24 +22,22 @@ export const WORKFLOW_LABELS = {
     "needs-review": "Needs review",
 };
 
-/** Keep the common workflow focused. Explicit native commands retain advanced transitions. */
-export function handoffOptions(data, type) {
-    const next = {
-        chat: ["worker", "reviewer"],
-        worker: ["reviewer"],
-        reviewer: ["land", "worker"],
-        land: ["publish", "reviewer", "worker"],
-        publish: ["worker", "reviewer"],
-    }[type ?? "worker"] ?? ["reviewer"];
-
-    return (data?.options ?? []).filter(
-        (option) => option.enabled && next.includes(option.targetType),
-    );
+/** The server owns eligibility, including disabled paths and their reasons. */
+export function handoffOptions(data) {
+    return data?.options ?? [];
 }
 
 export function preferredHandoff(data, type) {
-    const options = handoffOptions(data, type);
-    const expected = type === "reviewer" ? "land" : type === "land" ? "publish" : "reviewer";
+    const options = handoffOptions(data).filter((option) => option.enabled);
+    const defaults = {
+        chat: ["worker"],
+        worker: ["reviewer", "follow-up", "worker"],
+        reviewer: ["land", "follow-up", "worker"],
+        "follow-up": ["land", "worker"],
+        pull: ["reviewer", "follow-up", "worker"],
+        land: ["publish", "reviewer", "follow-up", "worker"],
+        publish: ["worker"],
+    }[type ?? "worker"] ?? ["worker"];
     const recommendations = [
         data?.workflow?.proposal,
         ...(data?.workflow?.recommendations ?? []),
@@ -64,10 +55,15 @@ export function preferredHandoff(data, type) {
         }
     }
 
-    return (
-        options.find((option) => option.targetType === expected) ??
-        (options.length === 1 ? options[0] : null)
-    );
+    for (const targetType of defaults) {
+        const option = options.find((each) => each.targetType === targetType);
+
+        if (option) {
+            return option;
+        }
+    }
+
+    return options[0] ?? null;
 }
 
 export async function refreshHandoffs(id) {
@@ -87,10 +83,6 @@ export function HandoffButton() {
     const status = session?.workflow?.status;
     const readOnly = session?.workflow?.readOnly;
     const busy = view.live?.busy;
-    const request = useRef(null);
-    const submitting = useRef(false);
-    const [starting, setStarting] = useState(false);
-    const [failed, setFailed] = useState(null);
 
     useEffect(() => {
         if (!available) {
@@ -125,67 +117,20 @@ export function HandoffButton() {
 
     const data = store.state.handoff?.id === id ? store.state.handoff.data : null;
     const type = view.conversation.threadType ?? session?.threadType ?? "worker";
-    const options = handoffOptions(data, type);
-    // A lost response may have retired the source already. Retry only the admitted, immutable request.
-    const pending = request.current?.id === id ? request.current : null;
-    const retry = failed === pending && pending !== null;
-    const frozen = data?.workflow?.readOnly || readOnly;
 
-    if (frozen && !pending) {
+    if (data?.workflow?.readOnly || readOnly) {
         return null;
     }
 
-    const preferred = pending?.option ?? preferredHandoff(data, type);
-    const label = preferred ? HANDOFF_LABELS[preferred.targetType] : "Handoff";
-
-    const activate = async (option) => {
-        if (submitting.current) {
-            return;
-        }
-
-        const admitted = pending ?? { id, option, requestId: uid() };
-
-        request.current = admitted;
-        submitting.current = true;
-        setStarting(true);
-        setFailed(null);
-
-        try {
-            const created = await actions.createHandoff(id, {
-                targetType: admitted.option.targetType,
-                relationship: admitted.option.relationship,
-                requestId: admitted.requestId,
-            });
-
-            request.current = null;
-
-            if (store.state.conversationId === id) {
-                navigate(created.id);
-            }
-        } catch (failure) {
-            setFailed(admitted);
-            notify("error", `${failure.message} Retry to open the same handoff.`);
-        } finally {
-            submitting.current = false;
-            setStarting(false);
-        }
-    };
+    const preferred = preferredHandoff(data, type);
 
     return html`<button
         class="icon-button handoff-button"
-        aria-label=${retry ? `Retry ${label.toLowerCase()}` : label}
-        title=${retry ? `Retry ${label.toLowerCase()} · same request, no duplicate thread` : `${label} · previous thread becomes read-only`}
-        aria-busy=${starting || undefined}
-        disabled=${starting || (!pending && (!data || options.length === 0))}
-        onClick=${() => {
-            if (pending || options.length === 1) {
-                activate(pending?.option ?? options[0]);
-            } else {
-                openSheet({ type: "handoff", id, option: preferred });
-            }
-        }}
+        aria-label="Choose next thread"
+        title="Choose the next thread · starting it makes this thread read-only"
+        onClick=${() => openSheet({ type: "handoff", id, option: preferred })}
     >
-        ${starting ? html`<${Spinner} />` : preferred ? html`<${ThreadTypeTag} session=${{ threadType: preferred.targetType }} iconOnly=${true} />` : html`<${Icon} name="fork" />`}
+        ${preferred ? html`<${ThreadTypeTag} session=${{ threadType: preferred.targetType }} iconOnly=${true} />` : html`<${Icon} name="fork" />`}
     </button>`;
 }
 

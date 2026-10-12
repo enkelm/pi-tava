@@ -1,7 +1,7 @@
 /** Durable handoff grouping and per-thread workflow state; no executable context reset or task ownership. */
 import { defineDoc } from "@earendil-works/pi-durable";
 
-export type ThreadType = "chat" | "worker" | "reviewer" | "land" | "publish";
+export type ThreadType = "chat" | "worker" | "reviewer" | "follow-up" | "pull" | "land" | "publish";
 export type Relationship = "same-work" | "new-work";
 export type WorkflowStatus = "active" | "review-complete" | "landed" | "published" | "needs-review";
 export type Recommendation = {

@@ -81,7 +81,7 @@ after(async () => {
     cleanUp();
 });
 
-async function thread(type: "chat" | "worker") {
+async function thread(type: "chat" | "worker" | "pull") {
     const { id } = await app.commands.createSession(owner(app), { cwd, threadType: type });
 
     await app.commands.configure(id, owner(app), {
@@ -107,6 +107,8 @@ const roles = [
     { type: "reviewer", label: "Reviewer", responsibility: /test quality/i },
     { type: "land", label: "Land", responsibility: /integration-impact/i },
     { type: "publish", label: "Publish", responsibility: /publication tool/i },
+    { type: "follow-up", label: "Follow-up", responsibility: /Self-review only your delta/i },
+    { type: "pull", label: "Pull", responsibility: /upstream or external information/i },
 ] satisfies { type: ThreadType; label: string; responsibility: RegExp }[];
 
 function role(sections: Record<string, string>, expected: (typeof roles)[number]) {
@@ -125,7 +127,10 @@ function role(sections: Record<string, string>, expected: (typeof roles)[number]
     assert.match(sections.project_context!, /REPO_ROLE_CONTRACT/);
 }
 
-async function handoff(source: ConversationId, type: "reviewer" | "land" | "publish") {
+async function handoff(
+    source: ConversationId,
+    type: "reviewer" | "land" | "publish" | "follow-up" | "pull",
+) {
     const created = await app.handoffs.start(source, owner(app), {
         targetType: type,
         relationship: "same-work",
@@ -173,7 +178,9 @@ test("each thread type receives its own system working playbook and retains shar
     );
     assert.match((await probe(id)).instructions!, /WORKER_LOCAL_ONLY/);
 
-    for (const expected of roles.slice(2)) {
+    for (const expected of roles.filter((expected) =>
+        ["reviewer", "land", "publish"].includes(expected.type),
+    )) {
         // These human fixture checkpoints admit the next stage; this test owns prompt delivery, not verification.
         if (expected.type === "land") {
             await app.handoffs.complete(id, owner(app), {
@@ -188,9 +195,7 @@ test("each thread type receives its own system working playbook and retains shar
             });
         }
 
-        assert.ok(
-            expected.type === "reviewer" || expected.type === "land" || expected.type === "publish",
-        );
+        assert.ok(expected.type !== "chat" && expected.type !== "worker");
         id = await handoff(id, expected.type);
         const fresh = await probe(id);
 
@@ -212,13 +217,38 @@ test("each thread type receives its own system working playbook and retains shar
     }
 });
 
+test("Pull can start independently and Follow-up receives focused self-review rather than a full reviewer role", async () => {
+    const pull = await thread("pull");
+    const pullRole = await probe(pull);
+
+    role(
+        pullRole,
+        roles.find((expected) => expected.type === "pull")!,
+    );
+    const followUp = await handoff(pull, "follow-up");
+    const followUpRole = await probe(followUp);
+
+    role(
+        followUpRole,
+        roles.find((expected) => expected.type === "follow-up")!,
+    );
+    assert.match(followUpRole.thread_role!, /Do not re-review the whole application/i);
+    assert.match(followUpRole.thread_role!, /abandon it and notify the human/i);
+    assert.match(followUpRole.thread_role!, /wait for every delegated helper/i);
+});
+
 test("handoff successors, delegated helpers and retired threads retain the right system role across restart", async () => {
     const worker = await thread("worker");
 
     await probe(worker);
     const reviewer = await handoff(worker, "reviewer");
 
-    role(await probe(reviewer), roles[2]!);
+    const reviewRole = await probe(reviewer);
+
+    role(reviewRole, roles[2]!);
+    assert.match(reviewRole.thread_role!, /bounded to two passes/i);
+    assert.match(reviewRole.thread_role!, /abandon that check and tell the human/i);
+    assert.match(reviewRole.thread_role!, /Never work around a denied capability/i);
     app.config.agentPrompts = {
         reviewer:
             "You are the Reviewer agent for this thread. Independently inspect test quality. CUSTOM_REVIEWER_PLAYBOOK.",

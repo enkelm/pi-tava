@@ -5,6 +5,8 @@ const TYPES = {
     worker: { label: "Worker", icon: "bot" },
     chat: { label: "Chat", icon: "chat" },
     reviewer: { label: "Reviewer", icon: "search" },
+    "follow-up": { label: "Follow-up", icon: "pencil" },
+    pull: { label: "Pull", icon: "reload" },
     land: { label: "Land", icon: "fork" },
     publish: { label: "Publish", icon: "external" },
 };

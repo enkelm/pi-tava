@@ -263,7 +263,7 @@ test("a drop-in cannot take a name Pi Pocket keeps, or one another module has: i
     );
 
     // An edit cannot replace coding tools or the always-on workflow core; the working version remains.
-    for (const tool of ["bash", "handoff", "publication"]) {
+    for (const tool of ["bash", "handoff", "publication", "pull"]) {
         writeFileSync(join(dropIns, "first.ts"), named("first", tool));
         await assert.rejects(
             app.loader.reload("first.ts"),

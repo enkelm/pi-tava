@@ -20,6 +20,7 @@ export function ProjectSessionPanel({
     const [goalId, setGoalId] = useState(initialGoalId ?? null);
     const [newGoal, setNewGoal] = useState(initialNewGoal);
     const [chat, setChat] = useState(false);
+    const [threadType, setThreadType] = useState("worker");
     const [creating, setCreating] = useState(false);
     const [override, setOverride] = useState(initialCwd ?? null);
     const [browse, setBrowse] = useState(false);
@@ -31,8 +32,16 @@ export function ProjectSessionPanel({
     const goal = projectGoals.find((each) => each.id === goalId && each.projectId === projectId);
     const cwd = override ?? (!chat ? project?.cwd : null) ?? server?.defaultCwd ?? "~";
     const noProjects = projectsLoaded && projects.length === 0;
+    const pullAvailable = (server?.handoffs ?? 0) >= 2;
+    const typeLabel = threadType === "pull" ? "Pull" : chat ? "Chat" : "Worker";
 
-    useBack(visible && chat, () => setChat(false));
+    const leaveChat = () => {
+        setChat(false);
+        setThreadType("worker");
+        requestId.current = uid();
+    };
+
+    useBack(visible && chat, leaveChat);
     useBack(visible && creating, () => setCreating(false));
     useBack(visible && browse, () => setBrowse(false));
 
@@ -64,6 +73,7 @@ export function ProjectSessionPanel({
 
     const chooseChat = () => {
         setChat(true);
+        setThreadType("chat");
         setCreating(false);
         setOverride(initialCwd ?? null);
         setBrowse(false);
@@ -81,7 +91,7 @@ export function ProjectSessionPanel({
 
         try {
             const created = await actions.createSession(override ?? undefined, {
-                threadType: chat ? "chat" : "worker",
+                threadType,
                 ...(chat
                     ? {}
                     : {
@@ -192,13 +202,13 @@ export function ProjectSessionPanel({
         ${
             chat
                 ? html`<div class="one-time-chat">
-                    <button class="button small" disabled=${busy} onClick=${() => setChat(false)}>
+                    <button class="button small" disabled=${busy} onClick=${leaveChat}>
                         <${Icon} name="back" size=${14} /> Projects
                     </button>
-                    <p>A one-time Chat stays outside projects and goals.</p>
+                    <p>A one-time ${typeLabel} stays outside projects and goals.</p>
                 </div>`
                 : html`
-                    <p class="muted small">Choose a project for this Worker, then a goal if you need one.</p>
+                    <p class="muted small">Choose a project for this ${typeLabel}, then a goal if you need one.</p>
                     ${!projectsLoaded && !error && html`<${Loader} label="Loading projects" />`}
                     ${
                         projectsLoaded &&
@@ -215,12 +225,32 @@ export function ProjectSessionPanel({
             (chat || project) &&
             html`<div class="session-destination">
                 ${
+                    pullAvailable &&
+                    html`<label>
+                        <span class="label">Thread type</span>
+                        <select
+                            aria-label="Thread type"
+                            value=${threadType}
+                            disabled=${busy}
+                            onChange=${(event) => {
+                                setThreadType(event.currentTarget.value);
+                                setError("");
+                                requestId.current = uid();
+                            }}
+                        >
+                            <option value=${chat ? "chat" : "worker"}>${chat ? "Chat" : "Worker"}</option>
+                            <option value="pull">Pull</option>
+                        </select>
+                    </label>`
+                }
+                ${threadType === "pull" && html`<p class="muted small">Fetch upstream or external changes, rebase and check the integration.</p>`}
+                ${
                     !chat &&
                     html`<p class="small">
                         <b>${project.name}</b>${newGoal ? " · New Goal" : goal ? ` · ${goal.name}` : " · No goal"}
                         ${
                             newGoal &&
-                            html`<span class="muted goal-naming-note">Pi names the goal from your first Worker prompt.</span>`
+                            html`<span class="muted goal-naming-note">Pi names the goal from your first thread prompt.</span>`
                         }
                     </p>`
                 }
@@ -267,7 +297,7 @@ export function ProjectSessionPanel({
                     /> In a git worktree of its own: a branch, apart from this folder
                 </label>
                 <button class="button primary wide" disabled=${busy} onClick=${start}>
-                    <${Icon} name=${chat ? "chat" : "bot"} size=${16} /> ${busy ? "Starting…" : chat ? "Start Chat" : "Start Worker"}
+                    <${Icon} name=${threadType === "pull" ? "reload" : chat ? "chat" : "bot"} size=${16} /> ${busy ? "Starting…" : `Start ${typeLabel}`}
                 </button>
             </div>`
         }

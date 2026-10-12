@@ -136,6 +136,17 @@ test("projects have opaque identity, multi-thread goals and independent type and
 
     assert.equal(app.sessionMeta(completed.id)?.projectId, projectId);
     assert.equal(app.sessionMeta(completed.id)?.goalId, first.goalId);
+    const pull = await app.commands.createSession(owner(app), {
+        projectId,
+        newGoal: true,
+        threadType: "pull",
+    });
+    const pullGoalId = app.sessionMeta(pull.id)?.goalId;
+
+    assert.ok(pullGoalId);
+    assert.equal(app.sessionMeta(pull.id)?.threadType, "pull");
+    assert.equal(findGoal(pullGoalId).namingThreadId, Number(pull.id));
+    assert.equal(app.cwdOf(pull.id), destination);
 });
 
 // HTTP owns shape, authentication/CSRF, role denial and filtered live catalogue delivery.

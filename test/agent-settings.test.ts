@@ -88,7 +88,7 @@ test("only the owner can read or change app-wide agent prompts", async () => {
     assert.ok((await app.hello(owner(app))).server.agentSettings >= 1);
     assert.deepEqual(
         agents.map((agent) => agent.type),
-        ["chat", "worker", "reviewer", "land", "publish"],
+        ["chat", "worker", "reviewer", "follow-up", "pull", "land", "publish"],
     );
     assert.ok(
         agents.every((agent) => agent.prompt.length > 0 && agent.prompt === agent.defaultPrompt),

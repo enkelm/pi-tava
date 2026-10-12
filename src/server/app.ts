@@ -121,6 +121,7 @@ import { Handoffs } from "./handoffs.ts";
 import { HandoffsDoc, WorkflowDoc } from "./workflow-docs.ts";
 import { createWorkflowEnv, createWorkflowHooks } from "./workflow-policy.ts";
 import { createPublicationTool } from "./workflow-publication.ts";
+import { createPullTool } from "./workflow-pull.ts";
 import { PI_PROVIDERS_FILE, ProviderPackages } from "./provider-packages.ts";
 import { ProviderExtensions } from "./provider-extensions.ts";
 
@@ -538,7 +539,7 @@ export class PocketApp {
         registry.install(
             defineExtension({
                 name: "pocket-core",
-                tools: [this.handoffs.tool, createPublicationTool(this)],
+                tools: [this.handoffs.tool, createPublicationTool(this), createPullTool(this)],
                 tasks: [
                     ResendTask,
                     this.shell.task,
@@ -1865,7 +1866,7 @@ export class PocketApp {
                 localReviews: 2,
                 // Durable project/goal organization and independently typed threads.
                 projects: 1,
-                handoffs: 1,
+                handoffs: 2,
                 // Owner-editable system instructions for the built-in thread agents.
                 agentSettings: 1,
                 // Owner-managed, restart-only Pi provider package compatibility.
