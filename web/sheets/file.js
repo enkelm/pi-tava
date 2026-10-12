@@ -1,12 +1,12 @@
 // The file viewer: a file's text, an image, or a folder's entries. `FileView` draws it in the Files tile and in the
 // file sheet alike.
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { browserAvailable, openInBrowser } from "../browser.js";
 import { FileEditor } from "../file-editor.js";
 import { mentionText } from "../files.js";
 import { highlightLines, langOf } from "../highlight.js";
 import { HtmlPreview } from "../rich.js";
-import { RunFrame } from "../run-frame.js";
+import { RunFrame, usePreviewRuntime } from "../run-frame.js";
 import { actions, canSteer, closeSheet, insertIntoComposer, notify, store } from "../store.js";
 import {
     copyText,
@@ -58,6 +58,7 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
     const page = isPage(path);
     const [preview, setPreview] = useState(markdown && line === undefined);
     const [running, setRunning] = useState(false);
+    const runtime = usePreviewRuntime();
     const [all, setAll] = useState(line !== undefined && line > FILE_LINES);
     const body = useRef(null);
     const { lines, colored } = useLines(file, file?.path ?? path);
@@ -92,6 +93,7 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
         setPreview(markdown && line === undefined);
         setRunning(false);
     }, [path, line]);
+    useLayoutEffect(() => setRunning(false), [runtime.id, runtime.allowed]);
     useEffect(() => {
         if (file?.kind === "text" && line !== undefined && !preview) {
             body.current
@@ -117,7 +119,7 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
                 previewable=${markdown || page}
                 preview=${preview}
                 onPreview=${setPreview}
-                running=${page && preview ? running : null}
+                running=${page && preview && runtime.allowed ? running : null}
                 onRun=${setRunning}
                 onEdit=${() => {
                     setRunning(false);
@@ -203,8 +205,12 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
             preview &&
             page &&
             html`${
-                running
-                    ? html`<${RunFrame} source=${file.text} title=${name} />`
+                running && runtime.allowed
+                    ? html`<${RunFrame}
+                        source=${file.text}
+                        title=${name}
+                        conversationId=${runtime.id}
+                    />`
                     : html`<${HtmlPreview} source=${file.text} title=${name} />`
             }
             <p class="muted small file-note">

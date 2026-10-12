@@ -26,6 +26,7 @@ import { describe, HttpError } from "./errors.ts";
 import { fileEditInput, saveFileEdit } from "./file-edits.ts";
 import { FileLists, type FileListing, type FileView, viewFile } from "./files.ts";
 import { displayPath, expandHome } from "./paths.ts";
+import { requireWorkflowLocalWrite } from "./workflow-policy.ts";
 
 export class Workspace {
     readonly #app: PocketApp;
@@ -115,6 +116,14 @@ export class Workspace {
         }
 
         await this.#app.requireDriver(id, user);
+        requireWorkflowLocalWrite(this.#app, id);
+
+        if (this.#app.handoffs.isManaged(id)) {
+            throw new HttpError(
+                409,
+                "Switch branches through managed offline bash, so Git child hooks cannot access the network.",
+            );
+        }
 
         const track = typeof request.track === "string" ? request.track : undefined;
         const name =
@@ -138,6 +147,7 @@ export class Workspace {
 
         const before = this.head(id);
 
+        requireWorkflowLocalWrite(this.#app, id);
         await switchBranch(cwd, {
             name,
             create: request.create === true,
@@ -430,7 +440,8 @@ export class Workspace {
                     const canonical = this.editableFile(user, id, path);
                     const info = lstatSync(canonical);
 
-                    editable = info.isFile() && info.nlink === 1;
+                    editable =
+                        info.isFile() && info.nlink === 1 && !this.#app.handoffs.isReadOnly(id);
                 } catch {
                     // Read access does not grant quick-edit access, including for the owner.
                 }
@@ -467,6 +478,7 @@ export class Workspace {
             await this.#app.requireDriver(id, user);
             // A queued save may have waited behind another conversation's save of this same path.
             this.#app.requireSee(user, id);
+            requireWorkflowLocalWrite(this.#app, id);
 
             if (this.#app.isBusy(id)) {
                 throw new HttpError(
@@ -504,6 +516,14 @@ export class Workspace {
     async revertChange(id: ConversationId, user: User, path: string): Promise<void> {
         this.#app.requireSee(user, id);
         await this.#app.requireDriver(id, user);
+        requireWorkflowLocalWrite(this.#app, id);
+
+        if (this.#app.handoffs.isManaged(id)) {
+            throw new HttpError(
+                409,
+                "Undo changes through managed offline bash, so Git child hooks cannot access the network.",
+            );
+        }
 
         if (this.#app.isBusy(id)) {
             throw new HttpError(
@@ -546,6 +566,7 @@ export class Workspace {
                 this.#app.cwdOf(id),
                 await this.#app.transcripts.allEntries(id, false),
                 onlyHere,
+                { offline: () => this.#app.handoffs.isManaged(id) },
             ))().finally(() => {
             if (this.#changesUnderWay.get(key) === pending) {
                 this.#changesUnderWay.delete(key);
@@ -569,13 +590,16 @@ export class Workspace {
         this.#app.requireSteer(user);
 
         try {
-            return await diffOf(this.#app.cwdOf(id), path, user.sessions !== undefined);
+            return await diffOf(this.#app.cwdOf(id), path, user.sessions !== undefined, {
+                offline: () => this.#app.handoffs.isManaged(id),
+            });
         } catch (error) {
             throw new HttpError(404, describe(error));
         }
     }
 
     uploadDirectory(id: ConversationId): string {
+        requireWorkflowLocalWrite(this.#app, id);
         const directory = join(this.#app.dataDir, "uploads", String(id));
 
         mkdirSync(directory, { recursive: true });

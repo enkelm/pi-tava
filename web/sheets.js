@@ -15,6 +15,8 @@ import {
     GalleryUpdateSheet,
 } from "./sheets/gallery.js";
 import { ImportSheet } from "./sheets/import.js";
+import { HandoffSheet } from "./sheets/handoff.js";
+import { WorkItemOptionsSheet } from "./sheets/work-item-options.js";
 import { CwdSheet } from "./sheets/folder.js";
 import { MemorySheet } from "./sheets/memory.js";
 import { MenuSheet, PlacesSheet } from "./sheets/menu.js";
@@ -62,7 +64,10 @@ const sheetKey = (sheet) => {
         (sheet.type === "import" && !sheet.fromPrivate);
     const type = session ? "new-session" : SETTINGS_TABS[sheet.type] ? "settings" : sheet.type;
 
-    return `${type}:${sheet.entryId ?? sheet.id ?? sheet.pipId ?? ""}`;
+    const id = sheet.entryId ?? sheet.id ?? sheet.pipId ?? "";
+
+    // Member Options can open Work Item Options for the same thread without replacing its Back step.
+    return type === "sidebar-options" ? `${type}:${sheet.kind}:${id}` : `${type}:${id}`;
 };
 
 /**
@@ -218,6 +223,12 @@ function sheetBody(sheet) {
                 cwd=${sheet.cwd}
                 continuation=${sheet.continuation}
             />`;
+            break;
+        case "handoff":
+            body = html`<${HandoffSheet} key=${sheet.id} id=${sheet.id} option=${sheet.option} />`;
+            break;
+        case "work-item-options":
+            body = html`<${WorkItemOptionsSheet} id=${sheet.id} />`;
             break;
         case "project":
             body = html`<${ProjectSheet} projectId=${sheet.projectId} />`;

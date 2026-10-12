@@ -1,12 +1,13 @@
 // The non-drag alternative uses exactly the same placement action as the sidebar drop targets.
 import { useRef, useState } from "preact/hooks";
 import { canMoveSessions, moveSessions, samePlacement } from "../session-moves.js";
-import { closeSheet, store } from "../store.js";
+import { closeSheet, handoffsAvailable, store } from "../store.js";
 import { html, Sheet } from "../ui.js";
 
 export function SessionMoveSheet({ ids }) {
     const sessions = ids.map((id) => store.state.sessions.find((session) => session.id === id));
     const first = sessions[0];
+    const workItem = ids.length === 1 && handoffsAvailable() && first?.workItemId;
     const common = sessions.every(
         (session) =>
             session &&
@@ -69,11 +70,11 @@ export function SessionMoveSheet({ ids }) {
     };
 
     return html`<${Sheet}
-        title=${ids.length === 1 ? "Move session" : `Move ${ids.length} sessions`}
+        title=${workItem ? "Move Work Item" : ids.length === 1 ? "Move session" : `Move ${ids.length} items`}
         onClose=${busy ? () => {} : closeSheet}
     >
         <form class="session-move-form" onSubmit=${save}>
-            <p class="muted small">Only the project and goal change. History, thread type and working directory stay the same.</p>
+            <p class="muted small">${workItem ? "All threads in this Work Item move together. " : "Work Item members move together. "}Only project and goal change; history, thread type and working directory stay the same.</p>
             <label>
                 <span class="label">Project</span>
                 <select

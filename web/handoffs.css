@@ -1,0 +1,265 @@
+/* Workflow additions inherit the managed-session palette, typography and disclosure behavior. */
+.thread-type.reviewer {
+    color: var(--o-magenta);
+    background: color-mix(in srgb, var(--o-magenta) 8%, transparent);
+}
+
+.thread-type.land {
+    color: var(--o-yellow);
+    background: color-mix(in srgb, var(--o-yellow) 8%, transparent);
+}
+
+.thread-type.publish {
+    color: var(--o-cyan);
+    background: color-mix(in srgb, var(--o-cyan) 8%, transparent);
+}
+
+:root[data-mode="light"] .thread-type.reviewer {
+    color: color-mix(in srgb, var(--o-magenta) 50%, var(--o-fg));
+}
+
+:root[data-mode="light"] .thread-type.land {
+    color: color-mix(in srgb, var(--o-yellow) 50%, var(--o-fg));
+}
+
+:root[data-mode="light"] .thread-type.publish {
+    color: color-mix(in srgb, var(--o-cyan) 50%, var(--o-fg));
+}
+
+.thread-type.icon-only {
+    background: none;
+}
+
+.handoff-button {
+    color: var(--accent);
+    flex-shrink: 0;
+}
+
+.handoff-button .thread-type {
+    color: inherit;
+    padding: 0;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .handoff-button:hover:not(:disabled) {
+        background: var(--hover);
+    }
+}
+
+.handoff-button:active:not(:disabled) {
+    background: var(--pressed);
+}
+
+.workflow-tools {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.workflow-state {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 36px;
+    color: var(--muted);
+}
+
+.workflow-state.read-only {
+    color: var(--warn);
+}
+
+.workflow-state:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
+}
+
+.handoff-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.handoff-form fieldset {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+}
+
+.handoff-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+}
+
+.handoff-option {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-height: 44px;
+    padding: 0.35rem 0;
+    cursor: pointer;
+}
+
+.handoff-option input {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+}
+
+.handoff-option > span {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    overflow-wrap: anywhere;
+}
+
+.handoff-explanation {
+    margin: 0.75rem 0 1rem;
+    line-height: 1.5;
+}
+
+.handoff-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.handoff-form-actions .button {
+    min-height: 44px;
+}
+
+.work-item .session {
+    min-height: 44px;
+    padding-block: 0.4rem;
+}
+
+.work-item-head > .session {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding-left: 36px;
+}
+
+.work-item-head .session-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.work-item-head .session-main > .session-title {
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.work-item-head .session-people {
+    grid-column: 1 / span 2;
+}
+
+.work-item-disclosure {
+    position: absolute;
+    z-index: 1;
+    left: calc(var(--linked-depth, 0) * 14px);
+    top: 0;
+    width: 32px;
+    height: 100%;
+    min-height: 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 2px;
+    padding: calc(0.7rem + 1px) 0 0;
+}
+
+.work-item-member .session {
+    padding-left: 1.35rem;
+}
+
+.work-item-member {
+    animation: none;
+}
+
+.work-item.closed .work-item-body {
+    grid-template-rows: 0fr;
+    opacity: 0;
+}
+
+.work-item .session-meta {
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 0.6rem;
+}
+
+.work-item .session-meta > span {
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.work-item-head .session-meta > .mono {
+    flex: 1 1 0;
+}
+
+.work-item-head .work-item-status {
+    flex: 0 1 auto;
+    max-width: 60%;
+}
+
+.work-item-head .session-meta span + span::before {
+    content: none;
+}
+
+.work-item-head .session-actions {
+    max-width: calc(100% - 42px);
+}
+
+@media (hover: none), (pointer: coarse) {
+    .workflow-state {
+        width: 40px;
+        height: 40px;
+    }
+
+    .work-item-disclosure {
+        width: 40px;
+    }
+
+    .work-item-head > .session {
+        padding-left: 44px;
+    }
+
+    .work-item-head .session-actions {
+        display: flex;
+        right: 0;
+        margin-top: -20px;
+    }
+
+    .work-item-head .session-actions .session-act {
+        display: none;
+    }
+
+    .work-item-head .session-actions .work-item-options {
+        display: grid;
+        width: 40px;
+        height: 40px;
+        opacity: 1;
+        transform: none;
+        border: 0;
+        background: transparent;
+    }
+
+    .work-item-head .session {
+        padding-right: 44px;
+    }
+}
+
+@media (max-width: 699px) {
+    .handoff-button {
+        min-width: 44px;
+        height: 44px;
+        padding: 0;
+    }
+}

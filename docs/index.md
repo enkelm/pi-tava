@@ -43,6 +43,7 @@ A drop-in extension stays when Pi Pocket updates, and the owner can turn it off 
 - [architecture.md](architecture.md): how the parts depend on each other, and the orders that they need.
 - [features.md](features.md): what each feature does, as people use it.
 - [projects.md](projects.md): Projects, goals, typed threads and their durable storage/access contract.
+- [handoffs.md](handoffs.md): Reviewer, Land and Publish handoffs, grouped Work Items and execution rules.
 - [provider-extensions.md](provider-extensions.md): owner-managed Pi provider packages, restart-only activation and recovery.
 - [../SECURITY.md](../SECURITY.md): what Pi Pocket protects, and what it does not.
 

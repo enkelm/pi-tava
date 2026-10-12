@@ -14,12 +14,15 @@ import { useSessionHold } from "./session-hold.js";
 import { canMoveSessions, useSessionDrag } from "./session-moves.js";
 import { sessionResultUnread } from "./session-seen.js";
 import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
-import { ThreadTypeTag } from "./thread-type.js";
+import { ThreadTypeTag, threadTypeLabel } from "./thread-type.js";
+import { WORKFLOW_LABELS } from "./handoffs.js";
+import { organizationTargets, workItemRows } from "./work-items.js";
 import {
     actions,
     attempt,
     canSteer,
     collab,
+    handoffsAvailable,
     navigate,
     notify,
     isUnread,
@@ -80,19 +83,29 @@ export async function setArchived(ids, archived, { undo = true } = {}) {
         return;
     }
 
+    const targets = organizationTargets(ids, store.state.sessions, handoffsAvailable());
+    const affected = targets.flatMap((target) => target.ids);
     const titles = new Map(
-        store.state.sessions.map((session) => [session.id, session.title ?? "New session"]),
+        store.state.sessions.map((session) => [
+            session.id,
+            session.workItemTitle ?? session.title ?? "New session",
+        ]),
     );
 
-    markMoving(ids, archived);
+    markMoving(affected, archived);
     const results = await Promise.allSettled(
-        ids.map((id) => actions.updateSession(id, { archived })),
+        targets.map(({ id, workItemId }) =>
+            workItemId
+                ? actions.updateWorkItem(id, { archived })
+                : actions.updateSession(id, { archived }),
+        ),
     );
-    const done = ids.filter((_, index) => results[index].status === "fulfilled");
+    const completed = targets.filter((_, index) => results[index].status === "fulfilled");
+    const done = completed.flatMap((target) => target.ids);
 
     // Rows that failed come back at once; the rest stay dimmed until the server's list shows them moved.
     unmarkMoving(
-        ids.filter((id) => !done.includes(id)),
+        affected.filter((id) => !done.includes(id)),
         archived,
     );
     const failed = results.find((result) => result.status === "rejected");
@@ -112,11 +125,11 @@ export async function setArchived(ids, archived, { undo = true } = {}) {
         return;
     }
 
-    const title = titles.get(done[0]) ?? "";
+    const title = titles.get(completed[0].id) ?? "";
     const what =
-        done.length === 1
-            ? `“${title.length > 48 ? `${title.slice(0, 47)}…` : title}”`
-            : `${done.length} sessions`;
+        completed.length === 1
+            ? `${completed[0].workItemId ? "Work Item " : ""}“${title.length > 48 ? `${title.slice(0, 47)}…` : title}”`
+            : `${completed.length} items`;
 
     notify(
         "info",
@@ -486,7 +499,7 @@ export function sessionMark(session) {
  */
 function SessionRow({
     session,
-    branches,
+    branches = [],
     index,
     number,
     needle,
@@ -497,18 +510,39 @@ function SessionRow({
     onOptions,
     dnd,
     chosen,
+    member = false,
+    closed,
+    onToggle,
 }) {
     const { conversationId, server, me } = store.state;
     const ref = useRef(null);
-    const options = (at) => onOptions(session.id, at);
+    const options = (at) => onOptions(session.id, at, session.members ? "work-item" : "thread");
 
     useSidebarContext(ref, options);
-    const pinned = isPinned(session.id);
-    const open = session.id === conversationId && !session.archived;
+    const pinned = session.members
+        ? session.members.some((member) => isPinned(member.id))
+        : isPinned(session.id);
+
+    const toggleRowPin = () => {
+        if (session.members && pinned) {
+            for (const member of session.members) {
+                if (isPinned(member.id)) {
+                    togglePin(member.id);
+                }
+            }
+        } else {
+            togglePin(session.id);
+        }
+    };
+
+    const open =
+        !session.archived &&
+        (session.id === conversationId ||
+            session.members?.some((member) => member.id === conversationId));
     const marked = isUnread(session.id);
     const unread = collab() && sessionUnread(session);
     const moving = store.state.moving[session.id] !== undefined;
-    const canDrag = canMoveSessions() && !moving && !dnd.busy;
+    const canDrag = !member && canMoveSessions() && !moving && !dnd.busy;
     const { hold, consumeClick } = useSessionHold({
         ref,
         enabled: !moving && !dnd.busy,
@@ -553,7 +587,7 @@ function SessionRow({
     // Finished since this browser last looked: its result is unread, so its title reads bold.
     const unseen = sessionResultUnread(session);
     // Options joins the existing archive, pin and mark-unread hover actions.
-    const acts = (canSteer() ? 1 : 0) + (session.archived ? 0 : 2) + 1;
+    const acts = (!member && canSteer() ? 1 : 0) + (session.archived ? 0 : 2) + 1;
     const state = html`<span class="session-mark">
         ${
             selected
@@ -577,9 +611,20 @@ function SessionRow({
                     ></span>`
         }
     </span>`;
+    const name = html`<span class=${`session-title ${hit ? "with-hit" : ""}`}>
+        ${
+            hit
+                ? html`<span class="session-name">${title}</span>
+                      <span class="session-hit">
+                          <${Highlight} text=${hit} needle=${needle} />
+                      </span>`
+                : html`<${Highlight} text=${title} needle=${needle} />`
+        }
+    </span>`;
+    const disclosureLabel = `${closed ? "Expand" : "Collapse"} Work Item ${session.title} · ${threadTypeLabel(session)}`;
 
     return html`<div
-        class=${`session-row ${open ? "active" : ""} ${selected ? "selected" : ""} ${hold ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
+        class=${`session-row ${session.members ? "work-item-head" : ""} ${member ? "work-item-member" : ""} ${open ? "active" : ""} ${selected ? "selected" : ""} ${hold ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
         ref=${ref}
         data-part="session-row"
         data-state=${ROW_STATES[mark.shape.split(" ")[0]]}
@@ -597,6 +642,20 @@ function SessionRow({
                 )}
             </span>`
         }
+        ${
+            session.members &&
+            html`<button
+                class="work-item-disclosure icon-button"
+                data-session-hold-action="true"
+                aria-label=${disclosureLabel}
+                title=${disclosureLabel}
+                aria-expanded=${!closed}
+                onClick=${onToggle}
+            >
+                <${ThreadTypeTag} session=${session} iconOnly=${true} />
+                <${Icon} class="work-item-chevron" name=${closed ? "chevron" : "down"} size=${12} />
+            </button>`
+        }
         <button
             class=${`session ${unread ? "unread" : ""}`}
             data-part="session-button"
@@ -608,19 +667,33 @@ function SessionRow({
             aria-haspopup="menu"
             title=${tip}
         >
-            ${projectsAvailable() ? html`<span class="session-state"><${ThreadTypeTag} session=${session} iconOnly=${true} /></span>` : state}
-            <span class=${`session-title ${hit ? "with-hit" : ""}`}>
-                ${
-                    hit
-                        ? html`<span class="session-name">${title}</span>
-                              <span class="session-hit">
-                                  <${Highlight} text=${hit} needle=${needle} />
-                              </span>`
-                        : html`<${Highlight} text=${title} needle=${needle} />`
-                }
-            </span>
+            ${
+                !session.members &&
+                (member || projectsAvailable()
+                    ? html`<span class="session-state"><${ThreadTypeTag} session=${session} iconOnly=${true} /></span>`
+                    : state)
+            }
+            ${
+                session.members
+                    ? html`<span class="session-main">
+                        ${name}
+                        <span class="session-meta">
+                            <span class="work-item-status">
+                                ${WORKFLOW_LABELS[session.workflow?.status] ?? "Active"} · ${session.members.length} threads
+                            </span>
+                            <span class="mono"><${Highlight} text=${path} needle=${needle} /></span>
+                            ${
+                                session.worktree
+                                    ? html`<span class="mono">⎇ ${session.worktree.branch}</span>`
+                                    : session.model &&
+                                      html`<span class="mono">${session.model}</span>`
+                            }
+                        </span>
+                    </span>`
+                    : name
+            }
             <span class="session-side">
-                ${projectsAvailable() && state}
+                ${(session.members || member || projectsAvailable()) && state}
                 ${
                     fork &&
                     html`<span
@@ -647,10 +720,10 @@ function SessionRow({
         </button>
         <span class="session-actions">
             <button
-                class="session-act session-options"
+                class=${`session-act session-options ${session.members ? "work-item-options" : ""}`}
                 data-session-hold-action="true"
-                title="Options"
-                aria-label=${`Options for ${session.title ?? "New session"}`}
+                title=${session.members ? "Work Item options" : "Options"}
+                aria-label=${session.members ? "Work Item options" : `Options for ${session.title ?? "New session"}`}
                 aria-haspopup="menu"
                 disabled=${moving}
                 onClick=${() => options()}
@@ -658,12 +731,13 @@ function SessionRow({
                 <${Icon} name="settings" size=${16} />
             </button>
             ${
+                !member &&
                 canSteer() &&
                 html`<button
                     class="session-act"
                     data-session-hold-action="true"
                     title=${session.archived ? "Unarchive" : "Archive"}
-                    aria-label=${session.archived ? "Unarchive" : "Archive"}
+                    aria-label=${session.members ? (session.archived ? "Restore Work Item" : "Archive Work Item") : session.archived ? "Unarchive" : "Archive"}
                     onClick=${() => setArchived([session.id], !session.archived)}
                 >
                     <${Icon} name=${session.archived ? "unarchive" : "archive"} size=${14} />
@@ -676,7 +750,7 @@ function SessionRow({
                     data-session-hold-action="true"
                     title=${pinned ? "Unpin" : "Pin to the top"}
                     aria-label=${pinned ? "Unpin" : "Pin"}
-                    onClick=${() => togglePin(session.id)}
+                    onClick=${toggleRowPin}
                 >
                     <${Icon} name="pin" size=${14} />
                 </button>`
@@ -730,6 +804,44 @@ function SessionRow({
     </div>`;
 }
 
+function WorkItemRow({ session, closed, onToggle, ...rowProps }) {
+    const linked = sessionForest(session.members);
+    // Keep admission order between independent threads, while retaining each linked family exactly once.
+    const members = session.members.flatMap((member) => linked.rows.get(member.id) ?? []);
+
+    return html`<section
+        class=${`work-item ${closed ? "closed" : ""}`}
+        data-work-item-id=${session.workItemId}
+        aria-label=${`Work Item ${session.title}`}
+    >
+        <${SessionRow} session=${session} closed=${closed} onToggle=${onToggle} ...${rowProps} />
+        <div class="group-body work-item-body" inert=${closed}>
+            <div>
+                ${members.map(
+                    ({ session: member, branches }) => html`<${SessionRow}
+                    ...${rowProps}
+                    key=${member.id}
+                    session=${member}
+                    branches=${branches}
+                    member=${true}
+                    number=${undefined}
+                    selected=${false}
+                    onSelect=${() => {}}
+                    onPick=${(event, id) => {
+                        if (rowProps.dnd.consumeClick(event)) {
+                            return;
+                        }
+
+                        event.preventDefault();
+                        navigate(id);
+                    }}
+                />`,
+                )}
+            </div>
+        </div>
+    </section>`;
+}
+
 /** Sessions in groups: pinned, then by day or by folder. While searching, one flat list of matches. */
 function groupsOf(shown, { tab, needle, home, pinned }) {
     if (needle !== "" || tab === "archived") {
@@ -737,13 +849,16 @@ function groupsOf(shown, { tab, needle, home, pinned }) {
     }
 
     const groups = [];
-    const pins = shown.filter((session) => pinned.includes(session.id));
+    const rowPinned = (session) =>
+        pinned.includes(session.id) ||
+        session.members?.some((member) => pinned.includes(member.id));
+    const pins = shown.filter(rowPinned);
 
     if (pins.length > 0) {
         groups.push({ key: "pinned", label: "Pinned", rows: pins });
     }
 
-    const rest = shown.filter((session) => !pinned.includes(session.id));
+    const rest = shown.filter((session) => !rowPinned(session));
     const byKey = new Map();
 
     for (const session of rest) {
@@ -854,8 +969,17 @@ export function SessionList({ compact = false, home = false }) {
     const startSelect = useRef(null);
 
     startSelect.current = (id) => {
-        anchor.current = id;
-        setSelected(new Set([...picked.current, id]));
+        // Member Options selects the visible Work Item, never a hidden duplicate child row.
+        const row = shown.find(
+            (each) => each.id === id || each.members?.some((member) => member.id === id),
+        );
+
+        if (!row) {
+            return;
+        }
+
+        anchor.current = row.id;
+        setSelected(new Set([...picked.current, row.id]));
         setTapSelects(true);
     };
 
@@ -868,9 +992,9 @@ export function SessionList({ compact = false, home = false }) {
         [],
     );
 
-    const openThreadOptions = (id, at) => {
+    const openThreadOptions = (id, at, kind = "thread") => {
         pressedIn = startSelect;
-        openSidebarOptions("thread", id, at, { keepDrawer: true });
+        openSidebarOptions(kind, id, at, { keepDrawer: true });
     };
 
     const clearSelection = () => {
@@ -892,7 +1016,8 @@ export function SessionList({ compact = false, home = false }) {
     };
 
     const hierarchical = organized && (tab === "projects" || archived);
-    const matching = sessions.filter(
+    const sidebarRows = workItemRows(sessions, handoffsAvailable());
+    const matching = sidebarRows.filter(
         (session) =>
             Boolean(session.archived) === archived &&
             sessionMatches(session, needle, {
@@ -901,9 +1026,22 @@ export function SessionList({ compact = false, home = false }) {
                 goal: organized ? projectGoals.find((each) => each.id === session.goalId) : null,
             }),
     );
-    const forest = sessionForest(matching, { pinned, folders: tab === "folders" });
+    const rowPins = [
+        ...new Set(
+            pinned
+                .map(
+                    (id) =>
+                        sidebarRows.find(
+                            (row) =>
+                                row.id === id || row.members?.some((member) => member.id === id),
+                        )?.id,
+                )
+                .filter((id) => id !== undefined),
+        ),
+    ];
+    const forest = sessionForest(matching, { pinned: rowPins, folders: tab === "folders" });
     const rawGroups = hierarchical
-        ? projectGroups(sessions, projects, projectGoals, {
+        ? projectGroups(sidebarRows, projects, projectGoals, {
               archived,
               needle,
               pinned,
@@ -914,11 +1052,11 @@ export function SessionList({ compact = false, home = false }) {
     // Linked sessions remain independent placements: only nest families inside the same project/goal section.
     // Keep raw session rows for project counts/moves, alongside their branch guides for rendering.
     const linkGroup = (group) => {
-        const linked = hierarchical ? sessionForest(group.rows, { pinned }) : forest;
+        const linked = hierarchical ? sessionForest(group.rows, { pinned: rowPins }) : forest;
         let roots = hierarchical ? linked.roots : group.rows;
 
         if (hierarchical && group.key === "flat") {
-            const pins = pinned
+            const pins = rowPins
                 .map((id) => roots.find((session) => session.id === id))
                 .filter(Boolean);
 
@@ -1154,12 +1292,23 @@ export function SessionList({ compact = false, home = false }) {
     };
 
     const busy = sessions.filter((session) => session.busy).length;
-    const allPinned = chosen.length > 0 && chosen.every((id) => pinned.includes(id));
+    const pinRows = shown.filter((row) => chosen.includes(row.id));
+    const allPinned =
+        pinRows.length > 0 &&
+        pinRows.every(
+            (row) =>
+                pinned.includes(row.id) ||
+                row.members?.some((member) => pinned.includes(member.id)),
+        );
 
     const pinChosen = () => {
-        for (const id of chosen) {
-            if (isPinned(id) === allPinned) {
-                togglePin(id);
+        for (const row of pinRows) {
+            const ids = allPinned ? (row.members ?? [row]).map((member) => member.id) : [row.id];
+
+            for (const id of ids) {
+                if (isPinned(id) === allPinned) {
+                    togglePin(id);
+                }
             }
         }
 
@@ -1303,9 +1452,14 @@ export function SessionList({ compact = false, home = false }) {
             <div class="group-body" inert=${isClosed}>
                 <div>
                     ${group.linkedRows.map(
-                        ({ session, branches }) => html`<${SessionRow}
-                        key=${session.id}
+                        ({
+                            session,
+                            branches,
+                        }) => html`<${session.members ? WorkItemRow : SessionRow}
+                        key=${session.workItemId ?? session.id}
                         session=${session}
+                        closed=${groupClosed({ key: `work:${session.workItemId}` })}
+                        onToggle=${() => toggleGroup(`work:${session.workItemId}`)}
                         branches=${branches}
                         folders=${tab === "folders" && needle === ""}
                         index=${index++}
@@ -1652,7 +1806,7 @@ export function Rail() {
                 (session, index) =>
                     html`<button
                         key=${session.id}
-                        class=${`ws ${session.id === conversationId ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
+                        class=${`ws ${session.id === conversationId || session.members?.some((member) => member.id === conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
                         style=${`--i:${index}`}
                         title=${`${session.title ?? "New session"}${index < 9 ? `  (Alt ${index + 1})` : ""}`}
                         onClick=${() => navigate(session.id)}
@@ -1714,18 +1868,20 @@ function RailTiles() {
             (session, index) =>
                 html`<button
                     key=${session.id}
-                    class=${`ws ${session.id === conversationId ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
+                    class=${`ws ${session.id === conversationId || session.members?.some((member) => member.id === conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
                     style=${`--i:${index}`}
                     title=${`${session.title ?? "New session"}${index < 9 ? ` (Alt+${index + 1})` : ""}`}
                     aria-label=${`${session.title ?? "New session"}${session.waiting ? ", needs you" : session.busy ? ", working" : ""}`}
-                    aria-current=${session.id === conversationId ? "page" : undefined}
+                    aria-current=${session.id === conversationId || session.members?.some((member) => member.id === conversationId) ? "page" : undefined}
                     onClick=${() => navigate(session.id)}
                 >
                     ${index < 9 ? index + 1 : initials(session.title ?? "New session")}
                     ${
-                        ((collab() && sessionUnread(session)) || isUnread(session.id)) &&
-                        session.id !== conversationId &&
-                        html`<span class="unread-dot"></span>`
+                        (session.members ?? [session]).some(
+                            (member) =>
+                                member.id !== conversationId &&
+                                ((collab() && sessionUnread(member)) || isUnread(member.id)),
+                        ) && html`<span class="unread-dot"></span>`
                     }
                 </button>`,
         )}

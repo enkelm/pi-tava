@@ -38,7 +38,7 @@ import {
     UsageDoc,
     type UsageState,
 } from "@earendil-works/pi-durable";
-import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import type { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Alerts } from "./alerts.ts";
@@ -117,6 +117,10 @@ import { LanguageServices } from "./language-services.ts";
 import { Reviews } from "./reviews.ts";
 import { Projects } from "./projects.ts";
 import { GoalNames } from "./goal-names.ts";
+import { Handoffs } from "./handoffs.ts";
+import { HandoffsDoc, WorkflowDoc } from "./workflow-docs.ts";
+import { createWorkflowEnv, createWorkflowHooks } from "./workflow-policy.ts";
+import { createPublicationTool } from "./workflow-publication.ts";
 import { PI_PROVIDERS_FILE, ProviderPackages } from "./provider-packages.ts";
 import { ProviderExtensions } from "./provider-extensions.ts";
 
@@ -280,6 +284,7 @@ export class PocketApp {
     readonly reviews = new Reviews(this);
     readonly projects = new Projects(this);
     readonly goalNames = new GoalNames(this);
+    readonly handoffs = new Handoffs(this);
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
     readonly schedules = new Schedules(this);
@@ -326,6 +331,7 @@ export class PocketApp {
     readonly #rooms = new Map<ConversationId, Promise<Room>>();
     readonly #envs = new Map<string, NodeExecutionEnv>();
     readonly #busy = new Set<ConversationId>();
+    readonly #answeringApprovals = new Set<string>();
     /** When each conversation's last run ended, since this server started: peek tiles show sessions done since a look. */
     readonly #endedAt = new Map<ConversationId, number>();
     /**
@@ -532,13 +538,17 @@ export class PocketApp {
         registry.install(
             defineExtension({
                 name: "pocket-core",
+                tools: [this.handoffs.tool, createPublicationTool(this)],
                 tasks: [
                     ResendTask,
                     this.shell.task,
                     this.goalNames.task,
                     this.commands.followTask,
                     this.extensionCommands.task,
+                    this.handoffs.task,
                 ],
+                sections: this.handoffs.sections,
+                hooks: createWorkflowHooks(this),
             }),
         );
         const host: PocketHost = {
@@ -618,12 +628,13 @@ export class PocketApp {
                 registry,
                 settings: this.#harnessSettings(),
                 now: this.now,
-                env: ({ cwd }) => this.#env(cwd ?? this.defaultCwd),
+                env: ({ conversationId, cwd }) => this.#env(conversationId, cwd ?? this.defaultCwd),
                 conversationCreated: async (tx, conversation) => {
                     // Every conversation gets the app's documents up front, so views can read them from the start.
                     await tx.doc(AuthorsDoc, conversation.id);
                     await tx.doc(ArtifactsDoc, conversation.id);
                     await tx.doc(SubagentsDoc, conversation.id);
+                    await tx.doc(WorkflowDoc, conversation.id);
                 },
                 onReport: (error) => this.notice("warning", describe(error)),
             },
@@ -691,14 +702,15 @@ export class PocketApp {
     async #recover(storage: Storage): Promise<ConversationId[]> {
         const savedSessions = (await this.harness.snapshot(SessionsDoc, context))?.items ?? {};
 
-        // Untyped legacy links stay independent Chats; other legacy threads become Workers.
+        // Untyped legacy PiP and linked roots stay Chats; ordinary legacy threads become Workers.
         // Explicit types are never rewritten.
         if (Object.values(savedSessions).some((meta) => meta.threadType === undefined)) {
             await this.harness.commit(async (tx) => {
                 const sessions = await tx.doc(SessionsDoc);
 
                 for (const meta of Object.values(sessions.items)) {
-                    meta.threadType ??= meta.linkedFrom === undefined ? "worker" : "chat";
+                    meta.threadType ??=
+                        meta.pip !== undefined || meta.linkedFrom !== undefined ? "chat" : "worker";
                 }
             }, context);
         }
@@ -747,6 +759,7 @@ export class PocketApp {
         } while (cursor !== undefined);
 
         await this.attribution.repair(unrecorded);
+        await this.handoffs.recover();
 
         return conversations;
     }
@@ -909,6 +922,12 @@ export class PocketApp {
             );
         } else if (kind === MemoryDoc.definition.kind) {
             this.memory.committed();
+        } else if (kind === HandoffsDoc.definition.kind) {
+            this.handoffs.committed(change.value);
+            sessionsChanged = true;
+        } else if (kind === WorkflowDoc.definition.kind && id !== undefined) {
+            this.handoffs.workflowCommitted(id, change.value);
+            sessionsChanged = true;
         } else if (kind === ProjectsDoc.definition.kind) {
             this.projects.committed(change.value);
             sessionsChanged = true;
@@ -1015,15 +1034,16 @@ export class PocketApp {
 
     /** Where a conversation's commands run: its folder on this machine. */
     envFor(id: ConversationId): NodeExecutionEnv {
-        return this.#env(this.cwdOf(id));
+        return this.#env(id, this.cwdOf(id));
     }
 
-    #env(cwd: string): NodeExecutionEnv {
-        let env = this.#envs.get(cwd);
+    #env(id: ConversationId, cwd: string): NodeExecutionEnv {
+        const key = JSON.stringify([id, cwd]);
+        let env = this.#envs.get(key);
 
         if (env === undefined) {
-            env = new NodeExecutionEnv({ cwd });
-            this.#envs.set(cwd, env);
+            env = createWorkflowEnv(this, id, cwd);
+            this.#envs.set(key, env);
         }
 
         return env;
@@ -1529,19 +1549,39 @@ export class PocketApp {
         return current;
     }
 
-    /** Scoped invites, private PiP assistants and owner-only imports each retain their access restriction. */
+    /** Scoped grants flow forward through handoff ancestry; every PiP/owner-only hop still restricts it. */
     canSee(user: User, id: ConversationId): boolean {
         const root = this.rootOf(id);
-        const meta = this.#sessions[String(root)];
+        const seen = new Set<ConversationId>();
+        let current = root;
+        let granted = user.sessions === undefined;
 
-        if (
-            (meta?.pip !== undefined && meta.pip !== user.id) ||
-            (meta?.ownerOnly === true && user.role !== "owner")
-        ) {
-            return false;
+        while (!seen.has(current)) {
+            seen.add(current);
+            const meta = this.sessionMeta(current);
+
+            if (
+                (current !== root && meta === undefined) ||
+                (meta?.pip !== undefined && meta.pip !== user.id) ||
+                (meta?.ownerOnly === true && user.role !== "owner")
+            ) {
+                return false;
+            }
+
+            granted ||= user.sessions?.includes(String(current)) === true;
+
+            if (meta?.accessFrom === undefined) {
+                return granted;
+            }
+
+            if (!Number.isSafeInteger(meta.accessFrom) || meta.accessFrom <= 0) {
+                return false;
+            }
+
+            current = meta.accessFrom as ConversationId;
         }
 
-        return user.sessions === undefined || user.sessions.includes(String(root));
+        return false;
     }
 
     requireSee(user: User, id: ConversationId): void {
@@ -1825,6 +1865,7 @@ export class PocketApp {
                 localReviews: 2,
                 // Durable project/goal organization and independently typed threads.
                 projects: 1,
+                handoffs: 1,
                 // Owner-managed, restart-only Pi provider package compatibility.
                 providerPackages: 1,
                 providerRecovery: this.providerExtensions.recoveryRequired,
@@ -1938,7 +1979,12 @@ export class PocketApp {
                 const endedAt = this.#endedAt.get(Number(id) as unknown as ConversationId);
                 const counts = countSubagents(subagents.get(id) ?? []);
                 // Which of Pi's sessions it continues is the owner's to know (the Pi sessions sheet), not the list's.
-                const { fromPi: _fromPi, linkedFrom, ...shown } = meta;
+                const {
+                    fromPi: _fromPi,
+                    accessFrom: _privateAccessOrigin,
+                    linkedFrom,
+                    ...shown
+                } = meta;
                 // Linking does not share the origin: do not leak its id to someone who only sees the new chat.
                 const origin =
                     linkedFrom === undefined ? undefined : this.#sessions[String(linkedFrom.id)];
@@ -1960,6 +2006,7 @@ export class PocketApp {
                     ...shown,
                     ...linkage,
                     threadType: meta.threadType ?? "worker",
+                    ...this.handoffs.projection(Number(id) as ConversationId, user),
                     busy,
                     waiting: waiting.has(id),
                     ...(endedAt === undefined ? {} : { endedAt }),
@@ -2032,6 +2079,7 @@ export class PocketApp {
             archived: meta?.archived === true,
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
+            workflow: this.handoffs.projection(room.id).workflow,
             ...(meta === undefined
                 ? {}
                 : {
@@ -2119,25 +2167,53 @@ export class PocketApp {
             throw new HttpError(403, refused);
         }
 
-        if (!this.approvals.answer(id, { allow, by: user.name })) {
+        if (this.#answeringApprovals.has(id)) {
             return false;
         }
 
+        this.#answeringApprovals.add(id);
         const conversationId = request.conversationId;
 
-        if (request.callId !== undefined) {
-            const callId = request.callId;
+        try {
+            if (request.callId !== undefined) {
+                const callId = request.callId;
 
-            await this.harness
-                .commit(async (tx) => {
+                await this.harness.commit(async (tx) => {
+                    if (this.approvals.all().find((each) => each.id === id) !== request) {
+                        throw new HttpError(409, "This approval was superseded");
+                    }
+
+                    const current = this.config.userById(user.id);
+
+                    if (current === undefined) {
+                        throw new HttpError(401, "Your access was removed");
+                    }
+
+                    this.requireSteer(current);
+                    this.requireSee(current, conversationId);
+                    const denied = allow ? this.cannotAllow(current, request) : undefined;
+
+                    if (denied !== undefined) {
+                        throw new HttpError(403, denied);
+                    }
+
                     (await tx.doc(DecisionsDoc, conversationId)).calls[callId] = {
                         allow,
-                        by: user.name,
-                        userId: user.id,
+                        by: current.name,
+                        userId: current.id,
                         at: Date.now(),
                     };
-                }, context)
-                .catch((error: unknown) => this.#log(`decision not recorded: ${describe(error)}`));
+                }, context);
+            }
+
+            if (
+                this.approvals.all().find((each) => each.id === id) !== request ||
+                !this.approvals.answer(id, { allow, by: user.name })
+            ) {
+                return false;
+            }
+        } finally {
+            this.#answeringApprovals.delete(id);
         }
 
         await this.collab.activity(

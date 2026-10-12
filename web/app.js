@@ -18,6 +18,7 @@ import {
 import { ExtensionPage } from "./extension-ui.js";
 import { startEdgeBack, startSwipes, useDragToClose } from "./gestures.js";
 import { Splash } from "./home.js";
+import { HandoffButton } from "./handoffs.js";
 import { Launcher } from "./launcher.js";
 import { registerWorker, updateBadge } from "./notify.js";
 import {
@@ -205,6 +206,7 @@ function Topbar() {
             </button>`
         }
         ${filesAvailable() && html`<${ChangesButton} key=${conversationId} />`}
+        <${HandoffButton} />
         <${PeeksButton} />
         <${FilesButton} />
         <${BrowserButton} />
@@ -565,7 +567,11 @@ function step(by) {
         return;
     }
 
-    const at = order.findIndex((session) => session.id === store.state.conversationId);
+    const at = order.findIndex(
+        (session) =>
+            session.id === store.state.conversationId ||
+            session.members?.some((member) => member.id === store.state.conversationId),
+    );
 
     const next = order[(at + by + order.length) % order.length].id;
 

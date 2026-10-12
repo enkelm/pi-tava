@@ -1,6 +1,6 @@
 /**
- * `/a/:conversation/:artifact/:version`: an artifact as its own page, in a sandbox with no way into the app. `/a/frame`:
- * the page that runs HTML from a reply, once someone taps Run, in the same sandbox.
+ * `/a/:conversation/:artifact/:version`: an artifact as its own page, in a sandbox with no way into the app.
+ * `/a/frame/:conversation`: runs a reply's HTML after Run, except in managed offline workflows.
  */
 import type { ServerResponse } from "node:http";
 import { marked } from "marked";
@@ -106,7 +106,25 @@ export async function artifact(
         throw new HttpError(401, "Sign in first");
     }
 
-    if (parts.length === 1 && parts[0] === "frame") {
+    if (parts[0] === "frame") {
+        if (parts.length !== 2) {
+            throw new HttpError(400, "A runnable preview must identify its conversation");
+        }
+
+        if (parts[1] === "private") {
+            if (user.role !== "owner") {
+                throw new HttpError(403, "Private previews are only available to the owner");
+            }
+        } else {
+            const id = conversationId(parts[1]);
+
+            app.requireSee(user, id);
+
+            if (app.handoffs.isManaged(id)) {
+                throw new HttpError(403, "Runnable previews are disabled in managed workflows");
+            }
+        }
+
         return send(response, 200, RUN_FRAME, "text/html; charset=utf-8", {
             "content-security-policy": ARTIFACT_CSP,
             "x-content-type-options": "nosniff",
@@ -122,6 +140,11 @@ export async function artifact(
     }
 
     app.requireSee(user, conversationId(conv));
+
+    if (app.handoffs.isManaged(conversationId(conv))) {
+        throw new HttpError(403, "Executable artifacts are disabled in managed workflows");
+    }
+
     const found = await app.artifactBody(
         conversationId(conv),
         id,

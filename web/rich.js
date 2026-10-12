@@ -2,10 +2,10 @@
 // in the diff viewer. ui.js draws every code block as code; this module gives `Markdown` the component for these when
 // it loads (`setRichBlock`), so ui.js does not import it.
 
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { DiffBlock } from "./diff.js";
 import { highlight, langOf } from "./highlight.js";
-import { RunFrame, useFitHeight } from "./run-frame.js";
+import { RunFrame, useFitHeight, usePreviewRuntime } from "./run-frame.js";
 import { notify } from "./store.js";
 import { COLOR_LIMIT, copyText, html, setRichBlock } from "./ui.js";
 
@@ -167,6 +167,7 @@ function SvgImage({ source }) {
 function RichBlock({ kind, lang, source, streaming }) {
     const [view, setView] = useState("shown");
     const [running, setRunning] = useState(false);
+    const runtime = usePreviewRuntime();
     const code = streaming || view === "code";
     const colored = useMemo(
         () =>
@@ -175,7 +176,7 @@ function RichBlock({ kind, lang, source, streaming }) {
     );
 
     // A new version of the page stops the old one running.
-    useEffect(() => setRunning(false), [source]);
+    useLayoutEffect(() => setRunning(false), [source, runtime.id, runtime.allowed]);
 
     const copy = () =>
         copyText(source).then(
@@ -191,9 +192,10 @@ function RichBlock({ kind, lang, source, streaming }) {
                 ? html`<pre><code>${source}</code></pre>`
                 : html`<pre><code dangerouslySetInnerHTML=${{ __html: colored }}></code></pre>`;
     } else if (kind === "html") {
-        body = running
-            ? html`<${RunFrame} source=${source} />`
-            : html`<${HtmlPreview} source=${source} />`;
+        body =
+            running && runtime.allowed
+                ? html`<${RunFrame} source=${source} conversationId=${runtime.id} />`
+                : html`<${HtmlPreview} source=${source} />`;
     } else if (kind === "svg") {
         body = html`<${SvgImage} source=${source} />`;
     } else {
@@ -230,6 +232,7 @@ function RichBlock({ kind, lang, source, streaming }) {
             ${
                 kind === "html" &&
                 !code &&
+                runtime.allowed &&
                 html`<button
                     type="button"
                     class=${`rich-run ${running ? "on" : ""}`}
@@ -242,6 +245,14 @@ function RichBlock({ kind, lang, source, streaming }) {
             <button type="button" class="copy" onClick=${copy}>Copy</button>
         </div>
         ${body}
+        ${
+            kind === "html" &&
+            !code &&
+            !runtime.allowed &&
+            html`<p class="muted small rich-note">
+            Static preview only. Scripts are disabled in this conversation.
+        </p>`
+        }
     </div>`;
 }
 

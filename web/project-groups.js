@@ -4,6 +4,12 @@ export function sessionMatches(session, needle, { project, goal, home } = {}) {
         return true;
     }
 
+    if (
+        session.members?.some((member) => sessionMatches(member, needle, { project, goal, home }))
+    ) {
+        return true;
+    }
+
     const cwd = session.cwd ?? "";
     const short = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
 
@@ -26,7 +32,19 @@ export function projectGroups(sessions, projects, goals, { archived, needle, pin
     const ordinary = available.filter(
         (session) => !projectById.has(session.projectId) && matches(session),
     );
-    const pins = pinned.map((id) => ordinary.find((session) => session.id === id)).filter(Boolean);
+    const pins = [
+        ...new Set(
+            pinned
+                .map((id) =>
+                    ordinary.find(
+                        (session) =>
+                            session.id === id ||
+                            session.members?.some((member) => member.id === id),
+                    ),
+                )
+                .filter(Boolean),
+        ),
+    ];
     const groups = [];
 
     for (const project of projects) {

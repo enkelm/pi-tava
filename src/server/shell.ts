@@ -22,6 +22,7 @@ import { ShellRequestsDoc } from "./docs.ts";
 import { SHELL_ENTRY, type ShellData } from "./entry-format.ts";
 import { HttpError } from "./errors.ts";
 import { ownRequest } from "./requests.ts";
+import { createWorkflowEnv, requireWorkflowLocalWrite } from "./workflow-policy.ts";
 
 const TASK = "pocket.shell";
 /** How long a command may run. */
@@ -91,12 +92,33 @@ export class Shell {
                         data = { ...task.input, output: "", status: "interrupted", taskId };
                     } else {
                         await runtime.memo("started", Date.now(), context);
-                        data = await this.#run(
-                            task.input,
-                            taskId,
-                            await runtime.env(context),
-                            context,
-                        );
+                        const id = runtime.conversationId;
+                        const user = this.#app.config.userById(task.input.by);
+
+                        try {
+                            if (user === undefined) {
+                                throw new Error("The command requester's access was removed.");
+                            }
+
+                            this.#app.requireSee(user, id);
+                            this.#app.requireSteer(user);
+                            requireWorkflowLocalWrite(this.#app, id);
+                            const env = this.#app.handoffs.isManaged(id)
+                                ? createWorkflowEnv(this.#app, id, this.#app.cwdOf(id))
+                                : await runtime.env(context);
+
+                            data = await this.#run(task.input, taskId, env, context);
+                        } catch (error) {
+                            data = {
+                                ...task.input,
+                                taskId,
+                                output:
+                                    error instanceof Error
+                                        ? error.message
+                                        : "Workflow execution was blocked.",
+                                status: "failed",
+                            };
+                        }
                     }
 
                     await this.#record(runtime.conversationId, data, context);
@@ -238,6 +260,7 @@ export class Shell {
         app.requireSee(user, id);
         await app.requireDriver(id, user);
         await app.conversation(id);
+        requireWorkflowLocalWrite(app, id);
         const command = typeof request.command === "string" ? request.command.trim() : "";
 
         if (command === "") {
@@ -271,6 +294,15 @@ export class Shell {
                 ? `${user.id}:${request.requestId.slice(0, 64)}`
                 : undefined;
         const taskId = await app.harness.commit(async (tx) => {
+            const currentUser = app.config.userById(user.id);
+
+            if (currentUser === undefined) {
+                throw new HttpError(403, "The command requester's access was removed.");
+            }
+
+            app.requireSee(currentUser, id);
+            app.requireSteer(currentUser);
+            requireWorkflowLocalWrite(app, id);
             const requests = await tx.doc(ShellRequestsDoc, id);
             const known = key === undefined ? undefined : requests.items[key];
 

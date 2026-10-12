@@ -1,7 +1,72 @@
-// HTML from a reply, run: in the server's sandboxed frame page (`/a/frame`), only once someone taps Run. The frame has
-// an opaque origin, as artifacts do: it can run scripts and reach the network, never the app or its cookies.
+// HTML runs only after a tap, through a server-validated conversation-scoped sandbox. Managed work keeps scripts off.
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
+import { store } from "./store.js";
 import { html } from "./ui.js";
+
+function previewRuntime(conversationId) {
+    const { view, sessions, server, privateId, me } = store.state;
+    const scoped = (server?.handoffs ?? 0) >= 1;
+    const privateContext = `private:${privateId}`;
+
+    if (privateId !== null && (conversationId === undefined || conversationId === privateContext)) {
+        return {
+            id: privateContext,
+            scoped,
+            allowed: me?.role === "owner",
+            src: scoped ? "/a/frame/private" : "/a/frame",
+        };
+    }
+
+    const id = conversationId ?? view.conversation?.id;
+    const session = sessions.find((each) => each.id === id);
+    const conversation = view.conversation?.id === id ? view.conversation : session;
+    // Either projection can arrive first. An older active view must never mask a newly locked catalogue row.
+    const managed = [conversation, session].some(
+        (each) =>
+            each?.isManaged ||
+            each?.workItemId ||
+            (scoped && ["worker", "reviewer", "land", "publish"].includes(each?.threadType)) ||
+            each?.workflow?.managed ||
+            each?.workflow?.readOnly ||
+            each?.workflow?.proposal ||
+            (each?.workflow?.status && each.workflow.status !== "active"),
+    );
+
+    return {
+        id,
+        scoped,
+        allowed: Number.isSafeInteger(id) && id > 0 && Boolean(conversation) && !managed,
+        src: scoped ? `/a/frame/${id}` : "/a/frame",
+    };
+}
+
+/** Subscribe independently of memoized transcript rows, so a new workflow lock removes an already-running frame. */
+export function usePreviewRuntime(conversationId) {
+    const [, setRuntime] = useState(() => previewRuntime(conversationId));
+
+    useLayoutEffect(() => {
+        const refresh = () => {
+            const next = previewRuntime(conversationId);
+
+            setRuntime((before) =>
+                before.id === next.id &&
+                before.allowed === next.allowed &&
+                before.scoped === next.scoped
+                    ? before
+                    : next,
+            );
+        };
+
+        const unsubscribe = store.subscribe(refresh);
+
+        refresh();
+
+        return unsubscribe;
+    }, [conversationId]);
+
+    // Props can change before the subscription effect runs: authorize this render, not the previous conversation.
+    return previewRuntime(conversationId);
+}
 
 /**
  * The sandbox's permissions: those of the artifact viewer's frame (`sheets/viewers.js`). A frame gets only what both this
@@ -48,17 +113,31 @@ export function useFitHeight(initial, min, max) {
  * A frame running `source`. The frame page says when it is ready; then it gets the HTML and reports its height, and the
  * frame fits it. Messages count only from this frame's own window, and a height only when it is a sane number.
  */
-export function RunFrame({ source, title = "Preview" }) {
+export function RunFrame({ source, title = "Preview", conversationId }) {
+    const runtime = usePreviewRuntime(conversationId);
     const ref = useRef(null);
     const [height, fitHeight, resetFit] = useFitHeight(240, MIN_HEIGHT, MAX_HEIGHT);
 
     // Listening from the moment the frame is in the page, before it can load: it says it is ready only once.
     useLayoutEffect(() => {
+        if (!runtime.allowed) {
+            return;
+        }
+
         const onMessage = (event) => {
             const frame = ref.current;
             const data = event.data;
+            const current = previewRuntime(conversationId);
 
-            if (!frame || event.source !== frame.contentWindow || typeof data !== "object") {
+            // Store notifications can precede the render that removes this frame. Do not send source after a lock.
+            if (
+                !current.allowed ||
+                current.id !== runtime.id ||
+                current.scoped !== runtime.scoped ||
+                !frame ||
+                event.source !== frame.contentWindow ||
+                typeof data !== "object"
+            ) {
                 return;
             }
 
@@ -78,13 +157,17 @@ export function RunFrame({ source, title = "Preview" }) {
         addEventListener("message", onMessage);
 
         return () => removeEventListener("message", onMessage);
-    }, [source]);
+    }, [source, conversationId, runtime.id, runtime.allowed, runtime.scoped]);
+
+    if (!runtime.allowed) {
+        return html`<p class="muted small rich-note">Interactive Run is unavailable for this conversation.</p>`;
+    }
 
     return html`<iframe
         class="run-frame"
         ref=${ref}
-        key=${source}
-        src="/a/frame"
+        key=${`${runtime.id}:${runtime.scoped}:${source}`}
+        src=${runtime.src}
         sandbox=${SANDBOX}
         allow="fullscreen; clipboard-write"
         referrerpolicy="no-referrer"

@@ -2,6 +2,7 @@
 import {
     type App,
     cleanUp,
+    context,
     fakeTab,
     lastText,
     modelTexts,
@@ -70,11 +71,15 @@ let app: App;
 before(async () => {
     mkdirSync(dropIns, { recursive: true });
     writeFileSync(join(dropIns, "shout.ts"), shout("!"));
-    // The name of a built-in module: never loaded in its place.
-    writeFileSync(
-        join(dropIns, "plan.ts"),
-        "export default () => { throw new Error('a drop-in must not replace a built-in'); };",
-    );
+    // Neither a real built-in nor the virtual provider-compatibility row can be replaced by a drop-in.
+
+    for (const file of ["plan.ts", "pi-providers.ts"]) {
+        writeFileSync(
+            join(dropIns, file),
+            "export default () => { throw new Error('a drop-in must not replace a built-in'); };",
+        );
+    }
+
     app = await openApp(model, dataDir);
 });
 
@@ -94,6 +99,20 @@ test("drop-ins are off until the owner turns them on, and cannot replace a built
         module("plan.ts").map((each) => each.source),
         ["built-in"],
     );
+    assert.deepEqual(
+        module("pi-providers.ts"),
+        [],
+        "the compatibility row is not a watched module",
+    );
+    const compatibility = (await app.extensions(owner(app))).modules.filter(
+        (each) => each.file === "pi-providers.ts",
+    );
+
+    assert.equal(compatibility.length, 1);
+    assert.equal(compatibility[0]?.source, "built-in");
+    assert.equal(compatibility[0]?.restartOnly, true);
+    assert.deepEqual(compatibility[0]?.extensions, []);
+    await assert.rejects(app.reloadExtension("pi-providers.ts"), /require a server restart/);
     // Where the server keeps files is the owner's to know.
     const scoped = app.config.addUser("Sid", "guest", ["1"]).user;
     const seen = await app.extensions(scoped);
@@ -120,7 +139,7 @@ test("_pocket.d.ts: a link the owner pointed elsewhere stays, and only Pi Pocket
     writeFileSync(elsewhere, "export {};\n");
     symlinkSync(elsewhere, link, "file");
     linkTypes(folder, types);
-    assert.equal(realpathSync(link), elsewhere);
+    assert.equal(realpathSync(link), realpathSync(elsewhere));
 
     // Where links cannot be made, Pi Pocket keeps a copy: a stale one is refreshed, a file of the owner's is not.
     rmSync(link);
@@ -204,7 +223,7 @@ export default () =>
 	});
 `;
 
-test("a drop-in cannot take a name Pi Pocket keeps: it is refused", async () => {
+test("a drop-in cannot take a name Pi Pocket keeps, or one another module has: it is refused", async () => {
     const refused = async (file: string, source: string, why: RegExp) => {
         writeFileSync(join(dropIns, file), source);
         await assert.rejects(app.setExtensionEnabled(owner(app), file, true), why);
@@ -215,5 +234,83 @@ test("a drop-in cannot take a name Pi Pocket keeps: it is refused", async () => 
     // turned off would remove the guard.
     await refused("guard-twin.ts", named("pocket-guard"), /pocket-guard is Pi Coop's own/);
     await refused("my-tools.ts", named("coding-tools"), /coding-tools is Pi Coop's own/);
+    await refused("core-twin.ts", named("pocket-core"), /pocket-core is Pi Coop's own/);
     await refused("my-bash.ts", named("my-bash", "bash"), /bash is a built-in tool's/);
+    await refused("my-browser.ts", named("my-browser", "browser"), /browser is a built-in tool's/);
+
+    // Another drop-in's: the first one in keeps it.
+    writeFileSync(join(dropIns, "first.ts"), named("first", "greet"));
+    await app.setExtensionEnabled(owner(app), "first.ts", true);
+    const first = {
+        name: "first",
+        tools: ["greet"],
+        readOnlyTools: [],
+        hooks: [],
+        sections: [],
+        wraps: [],
+    };
+
+    assert.deepEqual(module("first.ts")[0]?.extensions, [first]);
+    await refused(
+        "second.ts",
+        named("second", "greet"),
+        /first\.ts already has a tool named greet/,
+    );
+    await refused(
+        "third.ts",
+        named("first"),
+        /first\.ts already installs an extension named first/,
+    );
+
+    // An edit cannot replace coding tools or the always-on workflow core; the working version remains.
+    for (const tool of ["bash", "handoff", "publication"]) {
+        writeFileSync(join(dropIns, "first.ts"), named("first", tool));
+        await assert.rejects(
+            app.loader.reload("first.ts"),
+            new RegExp(`${tool} is a built-in tool's`),
+        );
+        assert.deepEqual(module("first.ts")[0]?.extensions, [first]);
+    }
+
+    // Reloading its own working version is not a clash with itself.
+    writeFileSync(join(dropIns, "first.ts"), named("first", "greet"));
+    await app.loader.reload("first.ts");
+    assert.equal(module("first.ts")[0]?.error, undefined);
+});
+
+test("the built-in tool names a drop-in may not take are every tool the built-ins install", async () => {
+    const { BUILT_IN_TOOLS } = await import("../src/server/reload.ts");
+    const disabled = app.loader
+        .list()
+        .filter((each) => each.source === "built-in" && !each.enabled);
+
+    try {
+        // Agent Teams is off by default, but its tool name is reserved even then.
+        for (const each of disabled) {
+            await app.setExtensionEnabled(owner(app), each.file, true);
+        }
+
+        const conversation = await app.conversation(await newSession(app));
+        const agent = await conversation.agent(context);
+        const pip = await app.conversation(await app.pip.ensure(owner(app)));
+        const pipAgent = await pip.agent(context);
+        // Ordinary sessions exclude PiP. Together their real selections cover the installed built-ins,
+        // including the always-on core; the virtual provider row is not a registered extension.
+        const extensions = new Map(
+            [...agent.extensions, ...pipAgent.extensions].map((extension) => [
+                extension.name,
+                extension,
+            ]),
+        );
+        const installed = [...extensions.values()]
+            .filter((extension) => /^(pocket-.*|coding-tools)$/.test(extension.name))
+            .flatMap((extension) => (extension.tools ?? []).map((tool) => tool.name));
+
+        assert.ok(installed.length >= 9, "the built-ins are on");
+        assert.deepEqual([...installed].sort(), [...BUILT_IN_TOOLS].sort());
+    } finally {
+        for (const each of disabled) {
+            await app.setExtensionEnabled(owner(app), each.file, false);
+        }
+    }
 });

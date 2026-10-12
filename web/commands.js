@@ -8,6 +8,7 @@ import { askPip, openPip, pipAvailable } from "./pip.js";
 import {
     actions,
     collab,
+    handoffsAvailable,
     navigate,
     notify,
     openSheet,
@@ -366,6 +367,13 @@ const COMMANDS = [
             "Watch this session's pull request: Pi fixes failed checks and answers reviews until it is merged",
         available: watchAvailable,
         run: (arg) => watchPr(arg),
+    },
+    {
+        name: "handoff",
+        args: "[reviewer|land|publish|worker] [--same|--new]",
+        description: "Start the next workflow thread; without arguments, choose a handoff",
+        available: () => handoffsAvailable() && isSession(),
+        native: true,
     },
     { name: "stop", description: "Stop the current run", run: () => actions.abort() },
     { name: "copy", description: "Copy Pi’s last reply", run: copyLast },

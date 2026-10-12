@@ -14,6 +14,7 @@ import {
     TurnsDoc,
 } from "./docs.ts";
 import { HttpError } from "./errors.ts";
+import { HandoffsDoc, type ThreadType } from "./workflow-docs.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_NAME = 160;
@@ -23,11 +24,11 @@ export type ProjectSelection = {
     projectId?: string;
     goalId?: string;
     newGoal?: boolean;
-    threadType: "chat" | "worker";
+    threadType: ThreadType;
     cwd?: string;
 };
 
-export type ProjectPlacement = Pick<ProjectSelection, "projectId" | "goalId" | "threadType">;
+export type ProjectPlacement = { projectId?: string; goalId?: string; threadType: ThreadType };
 export type SelectProject = {
     projectId?: unknown;
     goalId?: unknown;
@@ -115,8 +116,8 @@ function selection(doc: ProjectsData, request: SelectProject): ProjectSelection 
                 : "worker"
             : request.threadType;
 
-    if (threadType !== "chat" && threadType !== "worker") {
-        throw new HttpError(400, "threadType must be chat or worker");
+    if (!["chat", "worker", "reviewer", "land", "publish"].includes(String(threadType))) {
+        throw new HttpError(400, "Unknown thread type");
     }
 
     if (
@@ -133,7 +134,7 @@ function selection(doc: ProjectsData, request: SelectProject): ProjectSelection 
         ...(projectId === undefined ? {} : { projectId }),
         ...(goalId === undefined ? {} : { goalId }),
         ...(request.newGoal === true ? { newGoal: true } : {}),
-        threadType,
+        threadType: threadType as ProjectSelection["threadType"],
         ...(selectedProject === undefined ? {} : { cwd: selectedProject.cwd }),
     };
 }
@@ -398,6 +399,8 @@ export class Projects {
             if (name !== undefined || status !== undefined || archived !== undefined) {
                 item.updatedAt = now;
             }
+
+            await this.#app.handoffs.organization(tx);
         }, context);
     }
 
@@ -412,6 +415,17 @@ export class Projects {
                 user,
                 goalId,
                 this.#app.sessions().map((item) => [String(item.id), item] as const),
+            );
+        }
+
+        if (
+            request.threadType !== undefined &&
+            request.threadType !== "chat" &&
+            request.threadType !== "worker"
+        ) {
+            throw new HttpError(
+                400,
+                "Start reviewer, land and publish threads through a human handoff",
             );
         }
 
@@ -489,74 +503,105 @@ export class Projects {
         }
 
         await this.#app.requireDriver(id, user);
-        await this.#app.harness.commit(async (tx) => {
-            const doc = await tx.doc(ProjectsDoc);
-            const sessions = await tx.doc(SessionsDoc);
-            const turns = await tx.doc(TurnsDoc, this.#app.rootOf(id));
-            const current = this.#editor(supplied);
-            const meta = sessions.items[String(id)];
+        await this.#app.harness.commit((tx) => this.assignTx(tx, supplied, id, request), context);
+    }
 
-            if (meta === undefined) {
-                throw new HttpError(404, "No such session");
+    /** Group placement and combined group updates share one transaction. */
+    async assignTx(
+        tx: Tx,
+        supplied: User,
+        id: ConversationId,
+        request: AssignProject,
+    ): Promise<void> {
+        const doc = await tx.doc(ProjectsDoc);
+        const sessions = await tx.doc(SessionsDoc);
+        const turns = await tx.doc(TurnsDoc, this.#app.rootOf(id));
+        const current = this.#editor(supplied);
+        const meta = sessions.items[String(id)];
+        const groups = await tx.doc(HandoffsDoc);
+        const group =
+            meta?.workItemId === undefined ? undefined : groups.workItems[meta.workItemId];
+        const members = group?.threadIds ?? [Number(id)];
+
+        if (meta === undefined) {
+            throw new HttpError(404, "No such session");
+        }
+
+        for (const memberId of members) {
+            const member = sessions.items[String(memberId)];
+
+            if (member === undefined) {
+                throw new HttpError(409, "Work item membership is incomplete");
             }
 
-            this.#see(current, id, meta);
+            this.#see(current, memberId as ConversationId, member);
+            const memberTurns = await tx.doc(TurnsDoc, memberId as ConversationId);
 
-            if (turns.on && turns.driver !== current.id) {
+            if (memberTurns.on && memberTurns.driver !== current.id) {
                 throw new HttpError(
                     409,
-                    "Take turns is on: take the wheel before moving this thread",
+                    "Take the wheel in every work-item member before moving it",
                 );
             }
+        }
 
-            if (request.projectId === undefined && request.goalId === undefined) {
-                return;
-            }
+        if (turns.on && turns.driver !== current.id) {
+            throw new HttpError(409, "Take turns is on: take the wheel before moving this thread");
+        }
 
-            const projectId =
-                request.projectId === undefined
-                    ? meta.projectId
-                    : optionalId(request.projectId, "projectId");
-            const goalId =
-                request.goalId === undefined
-                    ? projectId === meta.projectId
-                        ? meta.goalId
-                        : undefined
-                    : optionalId(request.goalId, "goalId");
+        if (request.projectId === undefined && request.goalId === undefined) {
+            return;
+        }
 
-            if (goalId !== undefined) {
-                this.#requireGoalVisible(current, goalId, Object.entries(sessions.items));
-            }
+        const projectId =
+            request.projectId === undefined
+                ? meta.projectId
+                : optionalId(request.projectId, "projectId");
+        const goalId =
+            request.goalId === undefined
+                ? projectId === meta.projectId
+                    ? meta.goalId
+                    : undefined
+                : optionalId(request.goalId, "goalId");
 
-            const chosen = selection(doc, {
-                ...(goalId !== undefined &&
-                request.goalId !== undefined &&
-                request.projectId === undefined
-                    ? {}
-                    : { projectId: projectId ?? null }),
-                goalId,
-                threadType: meta.threadType ?? "worker",
-            });
+        if (goalId !== undefined) {
+            this.#requireGoalVisible(current, goalId, Object.entries(sessions.items));
+        }
+
+        const chosen = selection(doc, {
+            ...(goalId !== undefined &&
+            request.goalId !== undefined &&
+            request.projectId === undefined
+                ? {}
+                : { projectId: projectId ?? null }),
+            goalId,
+            threadType: meta.threadType ?? "worker",
+        });
+
+        for (const memberId of members) {
+            const member = sessions.items[String(memberId)]!;
 
             if (chosen.projectId === undefined) {
-                delete meta.projectId;
+                delete member.projectId;
             } else {
-                meta.projectId = chosen.projectId;
+                member.projectId = chosen.projectId;
             }
 
             if (chosen.goalId === undefined) {
-                delete meta.goalId;
+                delete member.goalId;
             } else {
-                meta.goalId = chosen.goalId;
+                member.goalId = chosen.goalId;
             }
 
-            if (meta.archivedByGoal !== undefined && meta.archivedByGoal !== chosen.goalId) {
-                delete meta.archivedByGoal;
+            if (member.archivedByGoal !== undefined && member.archivedByGoal !== chosen.goalId) {
+                delete member.archivedByGoal;
             }
 
-            meta.threadType = chosen.threadType;
-            meta.updatedAt = Date.now();
-        }, context);
+            member.threadType ??= "worker";
+            member.updatedAt = Date.now();
+        }
+
+        await this.#app.handoffs.organization(tx);
     }
 
     /** A delayed AI name may only claim its original unnamed goal and naming thread. */

@@ -7,6 +7,7 @@ import {
     context,
     fakeTab,
     lastText,
+    modelTexts,
     newSession,
     openApp,
     owner,
@@ -19,7 +20,7 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
@@ -30,6 +31,7 @@ import { AuthorsDoc, type PrWatch, ScheduleDoc, SessionsDoc } from "../src/serve
 import { prWatchLine, repoWatchLine } from "../src/server/extensions/pip.ts";
 import { quoted } from "../src/server/fence.ts";
 import { PIP_EXTENSION, SESSION_CLOSE, SESSION_OPEN } from "../src/server/pip.ts";
+import { HandoffsDoc, type ThreadType, WorkflowDoc } from "../src/server/workflow-docs.ts";
 
 const tool = (name: string, args: Parameters<typeof fauxToolCall>[1]) =>
     fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
@@ -151,6 +153,149 @@ test("PiP is made once, for the owner, and stays out of the session list", async
     assert.equal(app.pip.state(guest), null);
     assert.equal((await app.hello(owner(app))).server.pip, true);
     assert.equal((await app.hello(guest)).server.pip, false);
+});
+
+test("new and legacy PiP roots stay Chats across restart without losing tools or exempting managed state", async (t) => {
+    for (const legacy of [false, true]) {
+        await t.test(legacy ? "legacy untyped PiP" : "new PiP", async () => {
+            const data = join(root, `pip-chat-restart-${legacy ? "legacy" : "new"}`);
+            let isolated = await openApp(scriptedModel(route), data);
+
+            try {
+                const session = await newSession(isolated);
+                const id = await isolated.pip.ensure(owner(isolated));
+
+                await isolated.commands.configure(id, owner(isolated), {
+                    model: { provider: "faux", modelId: "faux-1" },
+                    thinkingLevel: "off",
+                });
+
+                const exerciseTools = async (phase: string) => {
+                    await say(isolated, id, "list");
+                    assert.ok(
+                        (await modelTexts(isolated, id)).at(-1)?.includes(`#${String(session)}`),
+                    );
+                    await say(isolated, id, `read ${String(session)}`);
+                    await say(isolated, id, `send ${String(session)} ${phase}-PiP-lifecycle`);
+                    await until(
+                        async () =>
+                            (await modelTexts(isolated, session)).some((text) =>
+                                text.includes(`[via PiP] ${phase}-PiP-lifecycle`),
+                            ) &&
+                            (await modelTexts(isolated, id)).some(
+                                (text) =>
+                                    text.includes("[report]") &&
+                                    text.includes(`${phase}-PiP-lifecycle`),
+                            ) &&
+                            !isolated.isBusy(id),
+                        "the delegated answer delivered back to PiP",
+                    );
+                };
+
+                assert.equal(isolated.handoffs.isManaged(id), false);
+                await exerciseTools("before");
+                const controls: { id: ConversationId; expected: ThreadType }[] = [];
+
+                if (legacy) {
+                    // Reproduce persisted pre-classification data through the public Durable authoring boundary.
+                    await isolated.harness.commit(async (tx) => {
+                        delete (await tx.doc(SessionsDoc)).items[String(id)]!.threadType;
+                    }, context);
+
+                    for (const kind of [
+                        undefined,
+                        "chat",
+                        "worker",
+                        "reviewer",
+                        "land",
+                        "publish",
+                    ] as const) {
+                        const conversation = await isolated.harness.createConversation(
+                            {
+                                ownership: { kind: "ownerless" },
+                                agent: { cwd: work },
+                                init: async (tx, controlId) => {
+                                    (await tx.doc(SessionsDoc)).items[String(controlId)] = {
+                                        cwd: work,
+                                        createdAt: 100,
+                                        updatedAt: 100,
+                                        ...(kind === undefined ? {} : { threadType: kind }),
+                                    };
+                                },
+                            },
+                            context,
+                        );
+
+                        controls.push({ id: conversation.id, expected: kind ?? "worker" });
+                    }
+                } else {
+                    assert.equal(
+                        isolated.sessionMeta(id)?.threadType,
+                        "chat",
+                        "new PiP metadata is explicit before restart",
+                    );
+                }
+
+                await isolated.close();
+                isolated = await openApp(scriptedModel(route), data);
+                assert.equal(await isolated.pip.ensure(owner(isolated)), id);
+                assert.equal(isolated.sessionMeta(id)?.threadType, "chat");
+                assert.equal(isolated.handoffs.isManaged(id), false);
+                const stored = await isolated.harness.snapshot(SessionsDoc, context);
+
+                assert.equal(
+                    stored?.items[String(id)]?.threadType,
+                    "chat",
+                    "classification is persisted",
+                );
+
+                for (const control of controls) {
+                    assert.equal(isolated.sessionMeta(control.id)?.threadType, control.expected);
+                    assert.equal(stored?.items[String(control.id)]?.threadType, control.expected);
+                }
+
+                await exerciseTools("after");
+
+                if (legacy) {
+                    // Even a PiP entry's explicit legacy type is authoritative, not silently reset to Chat.
+                    for (const kind of ["worker", "reviewer", "land", "publish", "chat"] as const) {
+                        await isolated.harness.commit(async (tx) => {
+                            (await tx.doc(SessionsDoc)).items[String(id)]!.threadType = kind;
+                        }, context);
+                        await isolated.close();
+                        isolated = await openApp(scriptedModel(route), data);
+                        assert.equal(await isolated.pip.ensure(owner(isolated)), id);
+                        assert.equal(isolated.sessionMeta(id)?.threadType, kind);
+                        assert.equal(isolated.handoffs.isManaged(id), kind !== "chat");
+                    }
+
+                    // Chat classification is not a blanket PiP exemption from real workflow authority.
+                    await isolated.harness.commit(async (tx) => {
+                        const key = "pip-work-item-control";
+
+                        (await tx.doc(SessionsDoc)).items[String(id)]!.workItemId = key;
+                        (await tx.doc(HandoffsDoc)).workItems[key] = {
+                            id: key,
+                            originThreadId: Number(id),
+                            activeThreadId: Number(id),
+                            threadIds: [Number(id)],
+                            title: "Managed PiP control",
+                            createdAt: 100,
+                        };
+                    }, context);
+                    assert.equal(isolated.handoffs.isManaged(id), true);
+                    await isolated.harness.commit(async (tx) => {
+                        delete (await tx.doc(SessionsDoc)).items[String(id)]!.workItemId;
+                        (await tx.doc(WorkflowDoc, id)).readOnly = true;
+                    }, context);
+                    assert.equal(isolated.handoffs.isManaged(id), true);
+                    assert.throws(() => isolated.handoffs.requireWritable(id), /read-only/);
+                }
+            } finally {
+                await isolated.close();
+            }
+        });
+    }
 });
 
 test("only PiP has PiP's tools, and PiP has none that change files or run commands", async () => {
@@ -509,7 +654,7 @@ test("PiP works in its person's own checkouts only, and takes a clone once it is
     checkout(theirs, "acme/guestclaim");
     await app.commands.createSession(me, { cwd: mine });
     await app.commands.createSession(guest, { cwd: theirs });
-    assert.equal(await app.pip.checkout(id, "acme/mine"), mine);
+    assert.equal(await app.pip.checkout(id, "acme/mine"), realpathSync(mine));
     assert.equal(clones("acme/mine"), 0);
     assert.equal(await app.pip.checkout(id, "acme/guestclaim"), join(repos, "guestclaim"));
     assert.equal(clones("acme/guestclaim"), 1, "cloned, not the guest's folder");

@@ -434,6 +434,21 @@ function settleBatch(
     delete state.sending;
 }
 
+/** Quiescence includes stranded batches, but not reports already placed or explicitly discarded. */
+export async function hasPendingSubagentReports(tx: Tx, id: ConversationId): Promise<boolean> {
+    const state = await tx.doc(SubagentsDoc, id);
+    // Settlement only replaces these fields: a shallow view applies the courier's rules without changing storage.
+    const pending = { outbox: state.outbox, sending: state.sending };
+    const record =
+        state.sending === undefined
+            ? undefined
+            : await tx.submissionByRequest(id, state.sending.request);
+
+    settleBatch(pending, record);
+
+    return (pending.outbox?.length ?? 0) > 0 || (pending.sending?.reports.length ?? 0) > 0;
+}
+
 /** How long a courier waits, for a parent that is idle, for more reports to go with the first. */
 const GATHER_MS = 2_000;
 

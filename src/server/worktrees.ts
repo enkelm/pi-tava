@@ -9,7 +9,10 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { copyFile, lstat, mkdir } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, HttpError } from "./errors.ts";
-import { git, GitError } from "./git.ts";
+import { git, GitError, type GitOptions } from "./git.ts";
+
+/** Re-evaluated for every child process, including failed-creation cleanup. */
+type WorktreePolicy = Pick<GitOptions, "offline">;
 
 export type Worktree = {
     /** The worktree's folder. */
@@ -23,20 +26,20 @@ export type Worktree = {
 const MAX_COPIED_BYTES = 50 * 1024 * 1024;
 
 /** The top folder of the repository `cwd` is in, or undefined when it is in none. */
-async function repositoryOf(cwd: string): Promise<string | undefined> {
-    return git(cwd, ["rev-parse", "--show-toplevel"]).then(
+async function repositoryOf(cwd: string, policy: WorktreePolicy): Promise<string | undefined> {
+    return git(cwd, ["rev-parse", "--show-toplevel"], policy).then(
         (root) => root.trim(),
         () => undefined,
     );
 }
 
 /** Copy the repository's new (untracked, not ignored) files into the worktree. Returns the ones left out for size. */
-async function copyNewFiles(root: string, into: string): Promise<string[]> {
+async function copyNewFiles(root: string, into: string, policy: WorktreePolicy): Promise<string[]> {
     const skipped: string[] = [];
     let copied = 0;
 
     for (const path of (
-        await git(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+        await git(root, ["ls-files", "--others", "--exclude-standard", "-z"], policy)
     ).split("\0")) {
         if (path === "") {
             continue;
@@ -70,8 +73,9 @@ export async function createWorktree(
     cwd: string,
     folder: string,
     label: string,
+    policy: WorktreePolicy = {},
 ): Promise<{ worktree: Worktree; cwd: string; skipped: string[] }> {
-    const root = await repositoryOf(cwd);
+    const root = await repositoryOf(cwd, policy);
 
     if (root === undefined) {
         throw new HttpError(
@@ -81,10 +85,10 @@ export async function createWorktree(
     }
 
     // Where `cwd` is within the repository, as git sees it: `cwd` may be reached through a symbolic link, `root` not.
-    const within = (await git(cwd, ["rev-parse", "--show-prefix"])).trim();
+    const within = (await git(cwd, ["rev-parse", "--show-prefix"], policy)).trim();
 
     if (
-        !(await git(root, ["rev-parse", "--verify", "--quiet", "HEAD"]).then(
+        !(await git(root, ["rev-parse", "--verify", "--quiet", "HEAD"], policy).then(
             () => true,
             () => false,
         ))
@@ -102,21 +106,26 @@ export async function createWorktree(
     const worktree: Worktree = { path: join(folder, name), branch: `pocket/${name}`, source: cwd };
 
     mkdirSync(folder, { recursive: true });
-    await git(root, ["worktree", "add", "-b", worktree.branch, worktree.path, "HEAD"]);
+    await git(root, ["worktree", "add", "-b", worktree.branch, worktree.path, "HEAD"], {
+        ...policy,
+        readOnly: false,
+    });
 
     try {
         // Uncommitted changes to tracked files, as a commit object that changes nothing here; empty when there are none.
-        const changes = (await git(root, ["stash", "create"])).trim();
+        const changes = (
+            await git(root, ["stash", "create"], { ...policy, readOnly: false })
+        ).trim();
 
         if (changes !== "") {
-            await git(worktree.path, ["stash", "apply", changes]);
+            await git(worktree.path, ["stash", "apply", changes], { ...policy, readOnly: false });
         }
 
-        const skipped = await copyNewFiles(root, worktree.path);
+        const skipped = await copyNewFiles(root, worktree.path, policy);
 
         return { worktree, cwd: resolve(worktree.path, within), skipped };
     } catch (error) {
-        await discardWorktree(worktree).catch(() => undefined);
+        await discardWorktree(worktree, policy).catch(() => undefined);
 
         throw new HttpError(500, `The worktree could not be set up: ${describe(error)}`);
     }
@@ -142,8 +151,11 @@ export function inWorktree(worktree: Worktree, cwd: string): boolean {
  * Where each folder of a worktree is in the folder it was made from: the same place in the repository, and the
  * session's folder as it was given. A folder that is only in the worktree maps to the session's folder.
  */
-export async function sourceFolders(worktree: Worktree): Promise<(cwd: string) => string> {
-    const root = await repositoryOf(worktree.source);
+export async function sourceFolders(
+    worktree: Worktree,
+    policy: WorktreePolicy = {},
+): Promise<(cwd: string) => string> {
+    const root = await repositoryOf(worktree.source, policy);
     let original: string | undefined;
 
     try {
@@ -167,19 +179,26 @@ export async function sourceFolders(worktree: Worktree): Promise<(cwd: string) =
  * Remove a worktree's folder; its branch stays, with whatever was committed on it. One with uncommitted changes is
  * kept, unless `force`.
  */
-export async function removeWorktree(worktree: Worktree, force: boolean): Promise<void> {
+export async function removeWorktree(
+    worktree: Worktree,
+    force: boolean,
+    policy: WorktreePolicy = {},
+): Promise<void> {
     if (!existsSync(worktree.path)) {
         return;
     }
 
-    const root = await repositoryOf(worktree.source);
+    const root = await repositoryOf(worktree.source, policy);
 
     if (root === undefined) {
         throw new HttpError(409, `${worktree.source} is not in a git repository anymore.`);
     }
 
     try {
-        await git(root, ["worktree", "remove", ...(force ? ["--force"] : []), worktree.path]);
+        await git(root, ["worktree", "remove", ...(force ? ["--force"] : []), worktree.path], {
+            ...policy,
+            readOnly: false,
+        });
     } catch (error) {
         const message = describe(error);
 
@@ -193,11 +212,14 @@ export async function removeWorktree(worktree: Worktree, force: boolean): Promis
 }
 
 /** Undo a worktree that a session never got: its folder and its branch. */
-export async function discardWorktree(worktree: Worktree): Promise<void> {
-    await removeWorktree(worktree, true);
-    const root = await repositoryOf(worktree.source);
+export async function discardWorktree(
+    worktree: Worktree,
+    policy: WorktreePolicy = {},
+): Promise<void> {
+    await removeWorktree(worktree, true, policy);
+    const root = await repositoryOf(worktree.source, policy);
 
     if (root !== undefined) {
-        await git(root, ["branch", "-D", worktree.branch]);
+        await git(root, ["branch", "-D", worktree.branch], { ...policy, readOnly: false });
     }
 }

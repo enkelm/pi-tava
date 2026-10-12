@@ -192,10 +192,9 @@ export class Reviews {
             throw new HttpError(404, "The session folder is not accessible");
         }
 
-        const root = await git(folder, ["rev-parse", "--show-toplevel"]).then(
-            record,
-            () => undefined,
-        );
+        const root = await git(folder, ["rev-parse", "--show-toplevel"], {
+            offline: () => this.#app.handoffs.isManaged(id),
+        }).then(record, () => undefined);
         const scope = { cwd, folder, root, prefix: "" };
 
         if (root !== undefined) {
@@ -233,7 +232,9 @@ export class Reviews {
 
     async #changes(id: ConversationId, user: User, scope: Scope): Promise<Changes> {
         const entries = await this.#app.transcripts.allEntries(id, false);
-        const changes = await changesIn(scope.cwd, entries, true);
+        const changes = await changesIn(scope.cwd, entries, true, {
+            offline: () => this.#app.handoffs.isManaged(id),
+        });
 
         this.#guard(id, user, scope);
 
@@ -271,7 +272,9 @@ export class Reviews {
             throw new HttpError(404, "That file has no uncommitted changes in this session folder");
         }
 
-        const diff = await diffOf(scope.cwd, path, true).catch((error: unknown) => {
+        const diff = await diffOf(scope.cwd, path, true, {
+            offline: () => this.#app.handoffs.isManaged(id),
+        }).catch((error: unknown) => {
             throw new HttpError(404, describe(error));
         });
 

@@ -409,6 +409,7 @@ test("an open board loses the subagents of a session no longer shared, at once",
         );
         assert.ok(unshared !== shared);
     } finally {
+        app.detach(tab.client);
         // One person again, as the tests after expect: with more, messages say who sent them.
         app.config.removeUser(guest.user.id);
     }

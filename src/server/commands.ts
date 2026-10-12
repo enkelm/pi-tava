@@ -56,6 +56,7 @@ import {
     NOTE_ENTRY,
     splitAttachments,
 } from "./entry-format.ts";
+import { WorkflowDoc } from "./workflow-docs.ts";
 import { describe, HttpError, optionalText } from "./errors.ts";
 import { homePath } from "./paths.ts";
 import { mentionedPaths, viewFile } from "./files.ts";
@@ -525,6 +526,7 @@ export class Commands {
 
                 return { id: conversation.id };
             },
+            selection.threadType !== "chat",
         );
     }
 
@@ -590,17 +592,19 @@ export class Commands {
         isolated: boolean,
         label: string,
         create: (place: Place) => Promise<T>,
+        offline: boolean | (() => boolean) = false,
     ): Promise<T> {
         if (!isolated) {
             return create({ cwd, skipped: [] });
         }
 
-        const made = await createWorktree(cwd, join(this.#app.dataDir, "worktrees"), label);
+        const policy = { offline };
+        const made = await createWorktree(cwd, join(this.#app.dataDir, "worktrees"), label, policy);
 
         try {
             return await create(made);
         } catch (error) {
-            await discardWorktree(made.worktree).catch((cleanup: unknown) =>
+            await discardWorktree(made.worktree, policy).catch((cleanup: unknown) =>
                 this.#app.log(`worktree ${made.worktree.path} left behind: ${describe(cleanup)}`),
             );
 
@@ -620,6 +624,22 @@ export class Commands {
             throw new HttpError(404, "This session has no worktree");
         }
 
+        app.handoffs.requireWritable(id);
+        const members = app.handoffs.members(id);
+        const memberIds = new Set(members.map(Number));
+
+        if (app.sessionMeta(id)?.workItemId !== undefined && force === true) {
+            throw new HttpError(409, "Workflow cleanup never force-removes dirty worktrees");
+        }
+
+        for (const member of members) {
+            app.requireSee(user, member);
+        }
+
+        if (members.length > 1) {
+            await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
+        }
+
         const inside = (cwd: string) => inWorktree(worktree, cwd);
 
         // Anything at work there would lose its folder: this session's runs, its subagents', or another session's.
@@ -632,7 +652,7 @@ export class Commands {
             .sessions()
             .find(
                 (session) =>
-                    session.id !== Number(id) &&
+                    !memberIds.has(session.id) &&
                     inside(app.cwdOf(session.id as unknown as ConversationId)),
             );
 
@@ -643,13 +663,14 @@ export class Commands {
             );
         }
 
-        const back = await sourceFolders(worktree);
-        const moves = app
-            .conversationsOf(id)
+        const policy = { offline: () => app.handoffs.isManaged(id) };
+        const back = await sourceFolders(worktree, policy);
+        const moves = members
+            .flatMap((member) => app.conversationsOf(member))
             .filter((each) => inside(app.cwdOf(each)))
             .map((each) => ({ id: each, cwd: back(app.cwdOf(each)) }));
 
-        await removeWorktree(worktree, force === true);
+        await removeWorktree(worktree, force === true, policy);
 
         // The session and its subagents go back to the folders the worktree came from.
         for (const move of moves) {
@@ -659,14 +680,28 @@ export class Commands {
         const cwd = app.cwdOf(id);
 
         await app.harness.commit(async (tx) => {
-            const meta = (await tx.doc(SessionsDoc)).items[String(id)];
+            const sessions = await tx.doc(SessionsDoc);
 
-            if (meta === undefined) {
-                return;
+            for (const member of members) {
+                const meta = sessions.items[String(member)];
+
+                if (meta === undefined) {
+                    continue;
+                }
+
+                delete meta.worktree;
+                meta.cwd = app.cwdOf(member);
+
+                if (meta.workItemId !== undefined) {
+                    const workflow = await tx.doc(WorkflowDoc, member);
+
+                    workflow.readyForPublish = false;
+
+                    if (workflow.status === "landed" || workflow.status === "review-complete") {
+                        workflow.status = "needs-review";
+                    }
+                }
             }
-
-            delete meta.worktree;
-            meta.cwd = cwd;
         }, context);
         await app.collab.activity(
             id,
@@ -792,8 +827,12 @@ export class Commands {
             }
 
             if (patch.archived !== undefined) {
-                meta.archived = patch.archived;
-                delete meta.archivedByGoal;
+                if (meta.workItemId !== undefined) {
+                    await app.handoffs.archive(tx, id, user, patch.archived);
+                } else {
+                    meta.archived = patch.archived;
+                    delete meta.archivedByGoal;
+                }
 
                 // Restoring one thread reveals its goal, without restoring the goal's other archived threads.
                 if (!patch.archived && meta.goalId !== undefined) {
@@ -806,6 +845,8 @@ export class Commands {
                     }
                 }
             }
+
+            await app.handoffs.organization(tx);
         }, context);
         const title = patch.title === undefined ? undefined : oneLine(patch.title);
 
@@ -833,7 +874,12 @@ export class Commands {
         user: User,
         request: SubmitRequest,
         via?: string,
-    ): Promise<{ submissionId: SubmissionId; requestId: string }> {
+    ): Promise<{
+        submissionId: SubmissionId;
+        requestId: string;
+        handoffThreadId?: number;
+        handoffPicker?: true;
+    }> {
         const app = this.#app;
 
         app.requireSee(user, id);
@@ -847,6 +893,72 @@ export class Commands {
 
         const conversation = await app.conversation(id);
         const typed = request.text.trim();
+
+        // Only a person's own command activates this native route, never an assistant's relayed text.
+        // It wins over templates; its passive receipt never enters model context or starts generation.
+        if (via === undefined && /^\/handoff(?:\s|$)/.test(typed)) {
+            if ((request.attachments?.length ?? 0) > 0) {
+                throw new HttpError(400, "Handoff commands do not accept attachments");
+            }
+
+            const words = typed.split(/\s+/).slice(1);
+            let destination: number | undefined;
+
+            if (words.length > 0) {
+                const [kind, flag] = words;
+
+                if (
+                    words.length > 2 ||
+                    (flag !== undefined && flag !== "--same" && flag !== "--new")
+                ) {
+                    throw new HttpError(400, "Use /handoff <kind> [--same|--new]");
+                }
+
+                if (kind === "worker" && flag === undefined) {
+                    throw new HttpError(
+                        400,
+                        "Choose /handoff worker --same or /handoff worker --new",
+                    );
+                }
+
+                const started = await app.handoffs.start(id, user, {
+                    targetType: kind === "review" ? "reviewer" : kind,
+                    relationship: flag === "--new" ? "new-work" : "same-work",
+                    requestId: request.requestId,
+                });
+
+                destination = started.id;
+            }
+
+            const requestId = ownRequest(
+                user.id,
+                `handoff-command:${clientKey(request.requestId)}`,
+            );
+            const receipt = await conversation.submit(
+                {
+                    type: "write",
+                    entry: {
+                        kind: "pocket.handoff-command",
+                        data: {
+                            by: user.id,
+                            text: typed,
+                            ...(destination === undefined ? {} : { handoffThreadId: destination }),
+                        },
+                    },
+                    requestId,
+                },
+                context,
+            );
+
+            return {
+                submissionId: receipt.id,
+                requestId,
+                ...(destination === undefined
+                    ? { handoffPicker: true as const }
+                    : { handoffThreadId: destination }),
+            };
+        }
+
         // `/skill:name request` sends the skill with the request; `/name arguments`, Pi's prompt template of that name.
         const text = typed.startsWith("/skill:")
             ? (expandSkillCommand(typed, app.skillCommands(id)) ?? typed)
@@ -1412,6 +1524,17 @@ export class Commands {
         }
 
         optionalText(request.cwd, "cwd");
+
+        if (request.cwd !== undefined) {
+            app.handoffs.requireWritable(id);
+
+            if (app.sessionMeta(app.rootOf(id))?.workItemId !== undefined) {
+                throw new HttpError(
+                    409,
+                    "A work item keeps one checkout; use safe grouped worktree cleanup instead of changing one member's folder",
+                );
+            }
+        }
 
         // Someone invited to one session sees files in its folder only: moving it would move what they see.
         if (request.cwd !== undefined && user.sessions !== undefined) {
@@ -2024,6 +2147,14 @@ export class Commands {
 
         app.requireSee(user, id);
         app.requireSteer(user);
+        app.handoffs.requireWritable(id);
+
+        if (app.sessionMeta(app.rootOf(id))?.workItemId !== undefined) {
+            throw new HttpError(
+                409,
+                "Grouped handoff threads cannot be forked or resent; use an explicit handoff",
+            );
+        }
 
         if (user.sessions !== undefined) {
             throw new HttpError(403, "You were invited to one session and cannot start new ones.");
@@ -2060,8 +2191,12 @@ export class Commands {
         const sourceTitle = meta.title ?? "New session";
         const title = `${sourceTitle} · ${branch.label}`.slice(0, MAX_TITLE);
 
-        return this.#inPlace(source?.cwd ?? meta.cwd, branch.worktree, title, (place) =>
-            this.#fork(id, user, { ...branch, title, sourceTitle, place }),
+        return this.#inPlace(
+            source?.cwd ?? meta.cwd,
+            branch.worktree,
+            title,
+            (place) => this.#fork(id, user, { ...branch, title, sourceTitle, place }),
+            () => app.handoffs.isManaged(id),
         );
     }
 

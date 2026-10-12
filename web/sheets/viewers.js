@@ -1,5 +1,6 @@
 // Artifacts and images, each in a viewer of its own.
 import { useEffect, useState } from "preact/hooks";
+import { usePreviewRuntime } from "../run-frame.js";
 import { closeSheet, openSheet, store } from "../store.js";
 import { modeOf, paletteOf, themeVars } from "../theme.js";
 import { formatBytes, html, Icon, Sheet, timeAgo } from "../ui.js";
@@ -63,12 +64,14 @@ export function ArtifactsSheet() {
 
 export function ArtifactViewer({ id, version }) {
     const { view } = store.state;
+    const runtime = usePreviewRuntime(view.conversation?.id ?? null);
+    const available = runtime.allowed && Number.isSafeInteger(view.conversation?.id);
     const artifact = view.artifacts.find((each) => each.id === id);
     const [shown, setShown] = useState(version ?? artifact?.versions.at(-1)?.version);
     const [nonce, setNonce] = useState(0);
     const latest = artifact?.versions.at(-1)?.version;
     const theme = artifact?.type === "markdown" ? themeQuery() : "";
-    const src = `/a/${view.conversation.id}/${encodeURIComponent(id)}/${shown ?? "latest"}${theme}`;
+    const src = `/a/${view.conversation?.id}/${encodeURIComponent(id)}/${shown ?? "latest"}${theme}`;
 
     return html`<div class="viewer">
         <header class="viewer-head">
@@ -94,21 +97,34 @@ export function ArtifactViewer({ id, version }) {
                         )}
                 </select>`
             }
-            <button class="icon-button" title="Reload" onClick=${() => setNonce(nonce + 1)}>
-                ↻
-            </button>
-            <a class="button small" href=${src} target="_blank" rel="noopener">Open tab</a>
+            ${
+                available &&
+                html`<button
+                    class="icon-button"
+                    title="Reload"
+                    onClick=${() => setNonce(nonce + 1)}
+                >
+                    ↻
+                </button>
+                <a class="button small" href=${src} target="_blank" rel="noopener">Open tab</a>`
+            }
             <button class="icon-button" onClick=${closeSheet} aria-label="Close">
                 <${Icon} name="close" />
             </button>
         </header>
-        <iframe
-            key=${`${src}#${nonce}`}
-            src=${src}
-            sandbox="allow-scripts allow-forms allow-modals allow-popups allow-pointer-lock allow-downloads"
-            allow="fullscreen; clipboard-write; accelerometer; gyroscope"
-            title=${artifact?.title ?? id}
-        ></iframe>
+        ${
+            available
+                ? html`<iframe
+                    key=${`${src}#${nonce}`}
+                    src=${src}
+                    sandbox="allow-scripts allow-forms allow-modals allow-popups allow-pointer-lock allow-downloads"
+                    allow="fullscreen; clipboard-write; accelerometer; gyroscope"
+                    title=${artifact?.title ?? id}
+                ></iframe>`
+                : html`<p class="muted" role="status">
+                    Artifact previews are disabled in managed conversations.
+                </p>`
+        }
     </div>`;
 }
 

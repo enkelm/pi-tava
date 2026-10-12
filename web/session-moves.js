@@ -1,6 +1,15 @@
 // Moving threads changes catalogue placement only; the server owns permissions and durable state.
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import { actions, canSteer, notify, projectsAvailable, scoped, store } from "./store.js";
+import {
+    actions,
+    canSteer,
+    handoffsAvailable,
+    notify,
+    projectsAvailable,
+    scoped,
+    store,
+} from "./store.js";
+import { organizationTargets } from "./work-items.js";
 
 const DRAG_TYPE = "application/x-pi-coop-sessions";
 const inFlight = new Set();
@@ -16,42 +25,56 @@ export function samePlacement(session, destination) {
     );
 }
 
-/** Multi-row moves report partial failures honestly; each thread is its own server transaction. */
+/** Each independent thread or whole Work Item is one transaction; mixed selections report partial failures. */
 export async function moveSessions(ids, destination) {
-    const targets = [...new Set(ids)].filter((id) => {
-        const session = store.state.sessions.find((each) => each.id === id);
+    const targets = organizationTargets(ids, store.state.sessions, handoffsAvailable()).filter(
+        ({ id }) => {
+            const session = store.state.sessions.find((each) => each.id === id);
 
-        return !session || !samePlacement(session, destination);
-    });
+            return !session || !samePlacement(session, destination);
+        },
+    );
     const results = await Promise.allSettled(
-        targets.map(async (id) => {
-            if (inFlight.has(id)) {
+        targets.map(async ({ id, workItemId }) => {
+            const key = workItemId ?? id;
+
+            if (inFlight.has(key)) {
                 throw new Error("This session is already being moved. Wait for it to finish.");
             }
 
-            inFlight.add(id);
+            inFlight.add(key);
 
             try {
-                await actions.updateSession(id, {
+                const patch = {
                     projectId: destination.projectId,
                     goalId: destination.goalId,
-                });
+                };
+
+                if (workItemId) {
+                    await actions.updateWorkItem(id, patch);
+                } else {
+                    await actions.updateSession(id, patch);
+                }
             } finally {
-                inFlight.delete(id);
+                inFlight.delete(key);
             }
         }),
     );
-    const moved = targets.filter((_, index) => results[index].status === "fulfilled");
-    const failed = targets.filter((_, index) => results[index].status === "rejected");
+    const completed = targets.filter((_, index) => results[index].status === "fulfilled");
+    const moved = completed.flatMap((target) => target.ids);
+    const failed = targets
+        .filter((_, index) => results[index].status === "rejected")
+        .map((target) => target.id);
     const failure = results.find((result) => result.status === "rejected");
+    const noun = targets.some((target) => target.workItemId) ? "items" : "sessions";
     const error = failure
-        ? `${moved.length ? `Moved ${moved.length} of ${targets.length} sessions. ` : ""}${failure.reason?.message ?? String(failure.reason)}`
+        ? `${completed.length ? `Moved ${completed.length} of ${targets.length} ${noun}. ` : ""}${failure.reason?.message ?? String(failure.reason)}`
         : "";
 
     if (moved.length && !error) {
         notify(
             "info",
-            `Moved ${moved.length === 1 ? "session" : `${moved.length} sessions`} to ${destination.label}.`,
+            `Moved ${completed.length === 1 ? (completed[0].workItemId ? "Work Item" : "session") : `${completed.length} ${noun}`} to ${destination.label}.`,
         );
     }
 

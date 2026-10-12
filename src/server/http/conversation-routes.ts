@@ -8,6 +8,7 @@ import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
 import type { CommentReview, ResolveReview } from "../reviews.ts";
+import type { StartHandoff, CompleteHandoff, UpdateWorkItem } from "../handoffs.ts";
 import { serveImage, TYPES } from "./assets.ts";
 import { type ApiRequest, json, readJson, send } from "./io.ts";
 
@@ -37,6 +38,38 @@ export async function conversationRoutes(
     const { app, request, response, url, user } = api;
     const method = request.method ?? "GET";
     const [, , third, fourth] = parts;
+
+    if (third === "handoffs") {
+        if (parts.length > 4) {
+            throw new HttpError(404, "No such handoff route");
+        }
+
+        if (fourth === undefined && method === "GET") {
+            return json(response, 200, await app.handoffs.list(id, user));
+        }
+
+        if (fourth === undefined && method === "POST") {
+            return json(
+                response,
+                200,
+                await app.handoffs.start(id, user, await readJson<StartHandoff>(request)),
+            );
+        }
+
+        if (fourth === "complete" && method === "POST") {
+            await app.handoffs.complete(id, user, await readJson<CompleteHandoff>(request));
+
+            return json(response, 200, { ok: true });
+        }
+
+        if (fourth === "work-item" && method === "POST") {
+            await app.handoffs.updateWorkItem(id, user, await readJson<UpdateWorkItem>(request));
+
+            return json(response, 200, { ok: true });
+        }
+
+        throw new HttpError(404, "No such handoff route");
+    }
 
     if (third === "reviews") {
         if (parts.length > 4) {

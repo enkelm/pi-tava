@@ -1,6 +1,7 @@
 // App state, the server connection, and API calls. Components read `store.state` and re-render on `store.subscribe`.
 import { onRoute, pushRoute } from "./back.js";
 import { sessionForest } from "./session-tree.js";
+import { workItemRows } from "./work-items.js";
 
 /** A random id. crypto.randomUUID only exists on https and localhost pages; plain-http network addresses lack it. */
 export function uid() {
@@ -302,13 +303,30 @@ export function sessionUnread(session, state = store.state) {
 /**
  * Sessions in "workspace" order, as Alt+1…9 and the rail number them: pinned ones first (in the order they were
  * pinned), then the rest, newest first, each followed by the linked sessions under it, as the list shows them
- * (`session-tree.js`). Archived sessions are left out.
+ * (`session-tree.js`). Work Items target their active visible thread; pinning any visible member pins its row.
+ * Archived sessions are left out.
  */
 export function workspaceOrder(state = store.state) {
-    const active = state.sessions.filter((session) => !session.archived);
-    const { roots, rows } = sessionForest(active, { pinned: state.pinned });
+    const active = workItemRows(state.sessions, (state.server?.handoffs ?? 0) >= 1).filter(
+        (session) => !session.archived,
+    );
+    const pins = [
+        ...new Set(
+            state.pinned
+                .map(
+                    (id) =>
+                        active.find(
+                            (session) =>
+                                session.id === id ||
+                                session.members?.some((member) => member.id === id),
+                        )?.id,
+                )
+                .filter((id) => id !== undefined),
+        ),
+    ];
+    const { roots, rows } = sessionForest(active, { pinned: pins });
     const family = (root) => rows.get(root.id).map((row) => row.session);
-    const pinned = state.pinned.map((id) => roots.find((root) => root.id === id)).filter(Boolean);
+    const pinned = pins.map((id) => roots.find((root) => root.id === id)).filter(Boolean);
 
     return [
         ...pinned.flatMap(family),
@@ -320,6 +338,7 @@ export function workspaceOrder(state = store.state) {
 export const collab = () => (store.state.server?.collab ?? 0) >= 2;
 /** Project organization is unavailable until the server has restarted with this capability. */
 export const projectsAvailable = () => (store.state.server?.projects ?? 0) >= 1;
+export const handoffsAvailable = () => (store.state.server?.handoffs ?? 0) >= 1;
 /** Viewers read and chat; they never steer Pi. */
 export const canSteer = () => store.state.me?.role !== "viewer";
 
@@ -1126,14 +1145,36 @@ const current = () => store.state.conversationId;
 
 export const actions = {
     /** `inlineFiles` attaches @ files; captured ids and receipts keep review sends on their thread. */
-    submit: (text, attachments, mode, inlineFiles = false, id = current(), requestId = uid()) =>
-        api(`c/${id}/submit`, {
+    submit: async (
+        text,
+        attachments,
+        mode,
+        inlineFiles = false,
+        id = current(),
+        requestId = uid(),
+    ) => {
+        const result = await api(`c/${id}/submit`, {
             text,
             attachments,
             mode,
             requestId,
             ...(inlineFiles ? { inlineFiles } : {}),
-        }),
+        });
+
+        // Native handoffs do not submit model input. Do not steal navigation if the sender left meanwhile.
+        if (handoffsAvailable() && store.state.conversationId === id) {
+            if (result.handoffThreadId !== undefined) {
+                navigate(result.handoffThreadId);
+            } else if (result.handoffPicker) {
+                openSheet({ type: "handoff", id });
+            }
+        }
+
+        return result;
+    },
+    handoffs: (id = current()) => api(`c/${id}/handoffs`),
+    createHandoff: (id, request) => api(`c/${id}/handoffs`, request),
+    updateWorkItem: (id, patch) => api(`c/${id}/handoffs/work-item`, patch),
     /** Run a command in the session's folder (`!`); `context: false` keeps it from Pi (`!!`). */
     shell: (command, context, requestId = uid()) =>
         api(`c/${current()}/shell`, { command, context, requestId }),

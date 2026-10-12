@@ -7,7 +7,7 @@ import { realpathSync } from "node:fs";
 import { lstat, rm } from "node:fs/promises";
 import { devNull } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { type GitOptions, git as runGit } from "./git.ts";
+import { GitError, type GitOptions, git as runGit } from "./git.ts";
 import type { ClientEntry } from "./projection.ts";
 
 /** How a file changed, as git sees it: `new` is a file git does not track yet. */
@@ -53,6 +53,10 @@ const GIT_TIMEOUT_MS = 15_000;
 /** Git for Changes: quick, with room for a long diff. */
 const git = (cwd: string, args: string[], options: GitOptions = {}) =>
     runGit(cwd, args, { timeoutMs: GIT_TIMEOUT_MS, maxBuffer: MAX_DIFF * 4, ...options });
+const inspector =
+    (options: GitOptions) =>
+    (cwd: string, args: string[], extra: GitOptions = {}) =>
+        git(cwd, args, { ...options, ...extra });
 /**
  * Diffs as the viewer reads them, whatever a person's git config says: no external diff program or text conversion, no
  * colors, and git's usual `a/` and `b/` before the paths (`diff.mnemonicPrefix` and `diff.noprefix` change them).
@@ -260,8 +264,8 @@ async function versionOf(file: string): Promise<string | undefined> {
 }
 
 /** Where a folder is in its repository, as git writes paths: `app/` for the folder app, empty at the top. */
-async function prefixOf(cwd: string): Promise<string> {
-    return (await git(cwd, ["rev-parse", "--show-prefix"])).replace(/\n$/, "");
+async function prefixOf(cwd: string, options: GitOptions = {}): Promise<string> {
+    return (await git(cwd, ["rev-parse", "--show-prefix"], options)).replace(/\n$/, "");
 }
 
 /**
@@ -272,12 +276,20 @@ export async function changesIn(
     cwd: string,
     entries: readonly ClientEntry[],
     onlyHere = false,
+    options: GitOptions = {},
 ): Promise<Changes> {
+    const git = inspector(options);
     let root: string;
 
     try {
         root = (await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
-    } catch {
+    } catch (error) {
+        const offline = typeof options.offline === "function" ? options.offline() : options.offline;
+
+        if (offline && (!(error instanceof GitError) || error.exitCode === undefined)) {
+            throw error;
+        }
+
         const edits = piEdits(entries, cwd);
 
         return {
@@ -296,7 +308,7 @@ export async function changesIn(
         (id) => id.trim() || undefined,
         () => undefined,
     );
-    const prefix = onlyHere ? await prefixOf(cwd) : "";
+    const prefix = onlyHere ? await prefixOf(cwd, options) : "";
     const changed = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
     ).filter(
@@ -381,14 +393,20 @@ export async function changesIn(
  * Only files that git lists as changed: the path cannot point anywhere else. With `onlyHere`, both rename paths
  * must be in `cwd`. Large diffs are truncated to the viewer's limit.
  */
-export async function diffOf(cwd: string, path: string, onlyHere = false): Promise<string> {
+export async function diffOf(
+    cwd: string,
+    path: string,
+    onlyHere = false,
+    options: GitOptions = {},
+): Promise<string> {
+    const git = inspector(options);
     const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
     const change = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
     ).find((each) => each.path === path);
 
     // A file outside the folder is as unknown as one without changes.
-    const prefix = onlyHere ? await prefixOf(cwd) : "";
+    const prefix = onlyHere ? await prefixOf(cwd, options) : "";
 
     if (
         change === undefined ||

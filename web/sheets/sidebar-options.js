@@ -1,11 +1,13 @@
 // Object-specific sidebar menus invoke existing actions without opening a different conversation first.
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { canMoveSessions } from "../session-moves.js";
+import { openSidebarOptions } from "../sidebar-context.js";
 import { selectFromList, setArchived, setGoalArchived } from "../sessions.js";
 import {
     actions,
     canSteer,
     closeSheet,
+    handoffsAvailable,
     isUnread,
     notify,
     openSheet,
@@ -152,11 +154,21 @@ function OptionsSurface({ title, at, children }) {
 
 export function SidebarOptions({ kind, id, at, archivedView = false }) {
     const { sessions, projects, projectGoals } = store.state;
-    const thread = kind === "thread" ? sessions.find((each) => each.id === id) : null;
+    const thread =
+        kind === "thread" || kind === "work-item" ? sessions.find((each) => each.id === id) : null;
+    const grouped = handoffsAvailable() && Boolean(thread?.workItemId);
+    const workItem = grouped && kind === "work-item";
+    const members = workItem
+        ? sessions.filter((each) => each.workItemId === thread.workItemId)
+        : [];
     const goal = kind === "goal" ? projectGoals.find((each) => each.id === id) : null;
     const project = kind === "project" ? projects.find((each) => each.id === id) : null;
     const object = thread ?? goal ?? project;
-    const title = thread ? (thread.title ?? "New session") : (object?.name ?? "Options");
+    const title = workItem
+        ? (thread.workItemTitle ?? "Work Item")
+        : thread
+          ? (thread.title ?? "New session")
+          : (object?.name ?? "Options");
     const organize = canMoveSessions();
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
@@ -165,7 +177,19 @@ export function SidebarOptions({ kind, id, at, archivedView = false }) {
     const add = (label, icon, run, danger = false) => items.push({ label, icon, run, danger });
 
     if (thread) {
-        add(isPinned(id) ? "Unpin" : "Pin to the top", "pin", () => togglePin(id));
+        const pinned = workItem ? members.some((member) => isPinned(member.id)) : isPinned(id);
+
+        add(pinned ? "Unpin" : "Pin to the top", "pin", () => {
+            if (workItem && pinned) {
+                for (const member of members) {
+                    if (isPinned(member.id)) {
+                        togglePin(member.id);
+                    }
+                }
+            } else {
+                togglePin(id);
+            }
+        });
 
         if (!thread.archived) {
             add(isUnread(id) ? "Mark read" : "Mark unread", "unread", () =>
@@ -179,13 +203,21 @@ export function SidebarOptions({ kind, id, at, archivedView = false }) {
             selectFromList(id);
         });
 
-        if (canSteer()) {
+        if (!workItem && canSteer()) {
             add("Rename…", "pencil", () => openSheet({ type: "rename", id }));
         }
 
-        if (canMoveSessions()) {
-            add("Move to project or goal…", "folder", () =>
-                openSheet({ type: "move-sessions", ids: [id] }),
+        if (grouped && !workItem) {
+            add("Work Item options…", "target", () =>
+                openSidebarOptions("work-item", id, at, { keepDrawer: true }),
+            );
+        }
+
+        if ((!grouped || workItem) && canMoveSessions()) {
+            add(
+                workItem ? "Move Work Item to project or goal…" : "Move to project or goal…",
+                "folder",
+                () => openSheet({ type: "move-sessions", ids: [id] }),
             );
         }
 
@@ -194,9 +226,15 @@ export function SidebarOptions({ kind, id, at, archivedView = false }) {
             notify("info", "Link copied. Other signed-in devices can open it.");
         });
 
-        if (canSteer()) {
+        if ((!grouped || workItem) && canSteer()) {
             add(
-                thread.archived ? "Restore thread" : "Archive thread",
+                workItem
+                    ? thread.archived
+                        ? "Restore Work Item"
+                        : "Archive Work Item"
+                    : thread.archived
+                      ? "Restore thread"
+                      : "Archive thread",
                 thread.archived ? "unarchive" : "archive",
                 () => setArchived([id], !thread.archived),
                 !thread.archived,

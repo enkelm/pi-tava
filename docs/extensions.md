@@ -40,7 +40,7 @@ This page is the map. Read all of it, then only the pages that your task needs.
 
 ## Drop-in or built-in
 
-**A drop-in** is a file in the drop-in folder, `~/.pi-pocket/extensions/` (the `extensions/` folder in the data folder). Use a drop-in for all that one person or one machine wants.
+**A drop-in** is a file in the drop-in folder, `~/.pi-durable-app/extensions/` (the `extensions/` folder in the data folder). Use a drop-in for all that one person or one machine wants.
 
 - It stays when Pi Pocket updates.
 - It starts off. The owner turns it on in Menu → Extensions.
@@ -95,6 +95,12 @@ These examples work. `npm test` runs them (`test/docs-examples.test.ts`):
 - [examples/clock.ts](examples/clock.ts): a tool, and a command (`/clock-zone`) that sets the time zone that it uses in a session.
 - [examples/no-force-push.ts](examples/no-force-push.ts): a hook that stops some bash calls, and a prompt section that tells Pi so.
 - [examples/server-status.ts](examples/server-status.ts) with [examples/server-status.js](examples/server-status.js): a page on the rail, with a route that reads the machine's load and memory, and events that keep it live.
+
+## The workflow core
+
+Workflow enforcement belongs to the non-toggleable `pocket-core`, not an optional extension module. Its `handoff` tool supports `prepare`, `complete` and `status`: agents can prepare briefs, record code-bound completion/readiness and recommend successors, but only humans activate handoffs through the UI or `/handoff`. The separate `publication` tool requires individual human approval for supported external mutations. See [handoffs.md](handoffs.md).
+
+The core's extension name and its `handoff` and `publication` tool names are reserved alongside the existing [extension and tool names](extensions/reference/names.md). Drop-ins cannot claim `coding-tools` or any `pocket-` name, even when an optional built-in is off. A rejected edit leaves the previous working version installed. Managed execution gates also apply to nested tool calls; wrapping a tool does not grant authority to bypass a block.
 
 ## Ordinary Pi provider packages
 

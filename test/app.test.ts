@@ -129,10 +129,21 @@ test("the page that runs a reply's HTML is for people signed in, sandboxed, and 
 
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
-    const url = `http://127.0.0.1:${port}/a/frame`;
+    // A Chat is unmanaged initially; a Worker would block the successful preview assertions below.
+    const { id } = await app.commands.createSession(owner(), { cwd: work, threadType: "chat" });
+
+    await app.commands.configure(id, owner(), {
+        model: { provider: "faux", modelId: "faux-1" },
+        thinkingLevel: "off",
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const url = `${base}/a/frame/${id}`;
+    const authorization = `Bearer ${app.config.ownerToken}`;
+    let previewUserId: string | undefined;
 
     try {
         assert.equal((await fetch(url)).status, 401);
+        assert.equal((await fetch(`${base}/a/frame`, { headers: { authorization } })).status, 400);
         const response = await fetch(url, {
             headers: { authorization: `Bearer ${app.config.ownerToken}` },
         });
@@ -158,7 +169,52 @@ test("the page that runs a reply's HTML is for people signed in, sandboxed, and 
             body.includes("event.origin !== location.origin"),
             "a parent at the app's address",
         );
+
+        const other = await newSession();
+        const scoped = app.config.addUser("Preview viewer", "viewer", [String(other)]);
+
+        previewUserId = scoped.user.id;
+        assert.equal(
+            (await fetch(`${base}/a/frame/private`, { headers: { authorization } })).status,
+            200,
+        );
+        assert.equal(
+            (
+                await fetch(`${base}/a/frame/private`, {
+                    headers: { authorization: `Bearer ${scoped.token}` },
+                })
+            ).status,
+            403,
+        );
+        assert.equal(
+            (await fetch(url, { headers: { authorization: `Bearer ${scoped.token}` } })).status,
+            404,
+        );
+        await say(id, "please make an artifact");
+        const artifact = `${base}/a/${id}/demo-page/latest`;
+
+        assert.equal((await fetch(artifact, { headers: { authorization } })).status, 200);
+        // A human's native command transfers write ownership; no agent preparation API is involved.
+        const transferred = await app.commands.submit(id, owner(), {
+            text: "/handoff reviewer",
+            requestId: crypto.randomUUID(),
+        });
+
+        assert.ok(transferred.handoffThreadId, "the human command created a successor");
+        assert.equal((await fetch(url, { headers: { authorization } })).status, 403);
+        const blocked = await fetch(artifact, { headers: { authorization } });
+
+        assert.equal(blocked.status, 403);
+        assert.doesNotMatch(await blocked.text(), /<h1>one<\/h1>/);
+        assert.equal(
+            (await fetch(`${base}/a/frame/${other}`, { headers: { authorization } })).status,
+            200,
+        );
     } finally {
+        if (previewUserId !== undefined) {
+            app.config.removeUser(previewUserId);
+        }
+
         server.closeAllConnections();
         server.close();
     }

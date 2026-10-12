@@ -30,6 +30,7 @@ import {
     TurnsDoc,
 } from "../src/server/docs.ts";
 import { importFixture } from "./import-fixtures.ts";
+import { WorkflowDoc } from "../src/server/workflow-docs.ts";
 
 let app: App;
 
@@ -323,6 +324,57 @@ test("an unavailable model creates no session", async (t) => {
         (await app.harness.snapshot(LinkedSessionCallsDoc, id, context))?.items[token],
         undefined,
     );
+});
+
+test("managed roots and managed linked peers cannot start or receive team work, even on receipt reuse", async () => {
+    const id = await source();
+    const key = "managed-peer-start";
+    const { session: child, address } = await start(id, key);
+
+    await send(id, address, "before-management");
+    await until(async () => (await sent(child)) === 2, "the unmanaged messages");
+    const count = app.sessions().length;
+    const manage = (target: ConversationId) =>
+        app.harness.commit(async (tx) => {
+            // A persisted proposal makes even an explicitly typed Chat managed, without changing its role or linkage.
+            (await tx.doc(WorkflowDoc, target)).proposal = {
+                targetType: "reviewer",
+                relationship: "same-work",
+                brief: "This Chat now belongs to managed workflow policy.",
+            };
+        }, context);
+
+    await manage(child);
+    assert.equal(app.sessionMeta(child)?.threadType, "chat");
+    assert.equal(app.handoffs.isManaged(id), false);
+    assert.equal(app.handoffs.isManaged(child), true);
+    await assert.rejects(send(id, address), /managed workflows/);
+    await assert.rejects(send(id, address, "before-management"), /managed workflows/);
+    await assert.rejects(start(id, key), /managed workflows/);
+    await manage(id);
+    await assert.rejects(start(id), /managed workflows/);
+    await assert.rejects(start(id, key), /managed workflows/);
+    await assert.rejects(send(id, address), /managed workflows/);
+    assert.equal(app.sessions().length, count);
+    assert.equal(await sent(child), 2, "denials admit no messages");
+});
+
+test("a team start rechecks management after asynchronous model admission without creating a child", async (t) => {
+    const id = await source();
+    const count = app.sessions().length;
+    const original = app.providers.problem.bind(app.providers);
+
+    t.mock.method(app.providers, "problem", async (...args: Parameters<typeof original>) => {
+        const result = await original(...args);
+
+        await app.harness.commit(async (tx) => {
+            (await tx.doc(WorkflowDoc, id)).readOnly = true;
+        }, context);
+
+        return result;
+    });
+    await assert.rejects(start(id), /managed workflows/);
+    assert.equal(app.sessions().length, count);
 });
 
 test("a session that started others shows what counts against its limit: theirs too", async () => {

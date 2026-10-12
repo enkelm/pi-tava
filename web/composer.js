@@ -12,6 +12,7 @@ import {
 } from "./commands.js";
 import { loadFiles, mentionAt, mentionText, suggestFiles } from "./files.js";
 import { remember, searchHistory, sentHistory } from "./history.js";
+import { WorkflowTools } from "./handoffs.js";
 import { MessageBox, SendButton } from "./message-box.js";
 import {
     actions,
@@ -971,7 +972,7 @@ export function Composer() {
 
         const full = expandPastes(text, pastes);
 
-        if (parsed) {
+        if (parsed && !parsed.command.native) {
             if (full.length <= REMEMBER_CHARS) {
                 remember(full, historyScope);
             }
@@ -1689,7 +1690,8 @@ export function Composer() {
                             >
                                 Plan
                             </button>`
-                        }`
+                        }
+                        <${WorkflowTools} />`
                     }
                     <span class="grow"></span>
                     ${

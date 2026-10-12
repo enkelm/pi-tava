@@ -19,6 +19,7 @@ import {
     canToggleTurns,
     closeSheet,
     collab,
+    handoffsAvailable,
     navigate,
     notify,
     openSheet,
@@ -347,6 +348,9 @@ export function MenuSheet({ places = true }) {
     const conversation = view.conversation;
     const steer = canSteer();
     const session = conversation?.kind === "session";
+    const workItem =
+        handoffsAvailable() &&
+        store.state.sessions.find((each) => each.id === conversation?.id)?.workItemId;
     const turns = view.turns;
     // While take turns is on, settings belong to the driver.
     const driving = !turns?.on || turns.driver === me?.id;
@@ -464,10 +468,19 @@ export function MenuSheet({ places = true }) {
             ${
                 session &&
                 steer &&
-                item(conversation.archived ? "Unarchive" : "Archive", () => {
-                    closeSheet();
-                    setArchived([conversation.id], !conversation.archived);
-                })
+                item(
+                    workItem
+                        ? conversation.archived
+                            ? "Restore Work Item"
+                            : "Archive Work Item"
+                        : conversation.archived
+                          ? "Unarchive"
+                          : "Archive",
+                    () => {
+                        closeSheet();
+                        setArchived([conversation.id], !conversation.archived);
+                    },
+                )
             }
         </div>
         ${

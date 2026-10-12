@@ -348,6 +348,7 @@ export class Pip {
                         createdAt: now,
                         updatedAt: now,
                         createdBy: user.id,
+                        threadType: "chat",
                         pip: user.id,
                     };
                 },

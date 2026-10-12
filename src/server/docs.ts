@@ -16,6 +16,7 @@ import type { Repeat } from "./when.ts";
 import type { ActivePi } from "./imports/herdr.ts";
 import type { Worktree } from "./worktrees.ts";
 import type { Changes } from "./changes.ts";
+import type { ThreadType } from "./workflow-docs.ts";
 
 export type SessionMeta = {
     title?: string;
@@ -28,8 +29,11 @@ export type SessionMeta = {
     archivedByGoal?: string;
     projectId?: string;
     goalId?: string;
-    /** Legacy catalogue entries are marked worker at startup; new unassigned threads default to chat. */
-    threadType?: "chat" | "worker";
+    /** Ordinary untyped legacy entries become Worker; linked roots and new unassigned threads are Chats. */
+    threadType?: ThreadType;
+    /** Handoff visibility flows from this immediate source; older flattened-origin references also remain valid. */
+    accessFrom?: number;
+    workItemId?: string;
     /** The initial import slice is restricted to the owner, including forks and subagents. */
     ownerOnly?: boolean;
     imported?: boolean;
