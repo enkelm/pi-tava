@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/ho
 import { api, store, uid } from "./store.js";
 import { prefs, setPrefs } from "./theme.js";
 import { html, Icon } from "./ui.js";
+import { terminalDiagnostics } from "./terminal-diagnostics.js";
 
 const owner = () => (store.state.me?.role === "owner" ? store.state.me.id : null);
 const awake = () => document.visibilityState !== "hidden" && navigator.onLine !== false;
@@ -103,6 +104,7 @@ export function syncTerminalTargets(data) {
 /** Transport only. Hidden pages retain the latest bounded frame but never paint or send input. */
 export function terminalConnection(id, changed, lifecycle = {}) {
     const who = owner();
+    const diagnostics = terminalDiagnostics();
     let target = id;
     let state = empty();
     let socket = null;
@@ -114,6 +116,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
 
     const emit = (next, force = false) => {
         state = next;
+        diagnostics.state({ ...next, paused: !awake() });
 
         if (awake() || force) {
             changed({
@@ -155,6 +158,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
     const unsubscribe = store.subscribe(() => {
         if (owner() !== who) {
             drop("Private access ended.");
+            diagnostics.clear();
         }
     });
 
@@ -164,6 +168,25 @@ export function terminalConnection(id, changed, lifecycle = {}) {
     window.addEventListener("pagehide", pagehide);
 
     return {
+        diagnosticsView(view) {
+            if (authorized()) {
+                diagnostics.view(view);
+            }
+        },
+        diagnosticsNote(kind) {
+            if (authorized()) {
+                diagnostics.note(kind);
+            }
+        },
+        diagnosticsReport() {
+            if (!authorized()) {
+                return null;
+            }
+
+            diagnostics.note("copy-diagnostics");
+
+            return diagnostics.report();
+        },
         setTarget(next) {
             target = next;
         },
@@ -177,6 +200,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
 
             request = controller;
             emit({ ...empty("connecting"), inputEpoch: ++inputSequence }, true);
+            diagnostics.sent({ ...size, type: "connect" });
             deadline = setTimeout(() => drop("Herdr did not connect in time.", true), 15000);
 
             try {
@@ -219,6 +243,8 @@ export function terminalConnection(id, changed, lifecycle = {}) {
 
                         return;
                     }
+
+                    diagnostics.received(frame);
 
                     if (frame.type === "connected") {
                         emit({ ...state, phase: "connected", reason: "", welcome: frame.welcome });
@@ -377,6 +403,11 @@ export function terminalConnection(id, changed, lifecycle = {}) {
                         bootId: state.bootId,
                     }),
                 );
+                diagnostics.sent({
+                    type: "request",
+                    method: "client_shell.surface.set",
+                    params: { active },
+                });
 
                 return true;
             } catch {
@@ -407,6 +438,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
                         ...(frame.type === "request" ? { requestId: "web-" + uid() } : {}),
                     }),
                 );
+                diagnostics.sent(frame);
 
                 return true;
             } catch {
@@ -426,6 +458,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
             window.removeEventListener("offline", offline);
             window.removeEventListener("online", online);
             window.removeEventListener("pagehide", pagehide);
+            diagnostics.clear();
         },
     };
 }
@@ -1268,6 +1301,8 @@ export function PrivateTerminal({
     const [loadError, setLoadError] = useState("");
     const [theme, setTheme] = useState(null);
     const [notice, setNotice] = useState("");
+    const [diagnosticReport, setDiagnosticReport] = useState("");
+    const [diagnosticStatus, setDiagnosticStatus] = useState("");
     const controller = useRef(null);
     const retained = useRef(null);
     const opened = useRef(false);
@@ -1406,6 +1441,45 @@ export function PrivateTerminal({
         state.snapshot?.focused_tab_id,
         id,
     ]);
+
+    const captureDiagnostics = () => {
+        const viewport = host.current?.querySelector(".terminal-grid-viewport");
+        const canvas = host.current?.querySelector("canvas");
+        const active = document.activeElement;
+        const focus = active?.matches?.(".terminal-grid-input")
+            ? "terminal-input"
+            : active?.closest?.(".private-terminal-help")
+              ? "help"
+              : active?.closest?.(".terminal-keyboard")
+                ? "touch-keyboard"
+                : active?.closest?.(".private-terminal-footer, .private-mobile-terminal-nav")
+                  ? "terminal-controls"
+                  : "outside";
+
+        controller.current?.diagnosticsView({
+            width: viewport?.clientWidth,
+            height: viewport?.clientHeight,
+            cols: displaySurface?.frame?.width,
+            rows: displaySurface?.frame?.height,
+            scrollTop: viewport?.scrollTop,
+            scrollLeft: viewport?.scrollLeft,
+            canvasWidth: canvas?.clientWidth,
+            canvasHeight: canvas?.clientHeight,
+            coarsePointer: matchMedia("(pointer: coarse)").matches,
+            documentFocused: document.hasFocus(),
+            surfaceActive: state.surfaceActive,
+            targetPending: state.targetPending,
+            inputEnabled: interactive,
+            focus,
+        });
+    };
+
+    useLayoutEffect(captureDiagnostics);
+    useEffect(() => {
+        setDiagnosticReport("");
+        setDiagnosticStatus("");
+    }, [id, instanceId]);
+
     const connecting =
         state.phase === "connecting" || (state.phase === "connected" && !state.snapshot);
 
@@ -1585,6 +1659,144 @@ export function PrivateTerminal({
         }
     }, [interactive]);
 
+    const issue = statusError || notice || state.reason || loadError;
+    const status =
+        issue ||
+        (state.paused
+            ? "Painting paused"
+            : connecting
+              ? "Connecting…"
+              : connected
+                ? state.surfacePending
+                    ? "Waiting for surface acknowledgement…"
+                    : "Live · Herdr"
+                : "Disconnected");
+
+    const copyDiagnostics = async () => {
+        captureDiagnostics();
+        const text = controller.current?.diagnosticsReport();
+
+        if (!text) {
+            setDiagnosticReport("");
+            setDiagnosticStatus("Diagnostics are unavailable. Reopen Terminal to try again.");
+
+            return;
+        }
+
+        setDiagnosticReport(text);
+
+        try {
+            if (!navigator.clipboard?.writeText) {
+                throw new Error("Clipboard unavailable");
+            }
+
+            await navigator.clipboard.writeText(text);
+            setDiagnosticStatus("Copied diagnostics. Paste the report into this chat.");
+        } catch {
+            setDiagnosticStatus(
+                "Copy was blocked. Tap the report below, then use your browser’s Copy command.",
+            );
+        }
+    };
+
+    const footer = (keyboardControls, pasteAction) => html`
+        ${
+            connected &&
+            html`
+            <nav class="private-mobile-terminal-nav" aria-label="Herdr mobile controls">
+                ${[
+                    ["tab-previous", "Prev tab"],
+                    ["tab-next", "Next tab"],
+                    ["tab-new", "New tab"],
+                    ["split-right", "Split"],
+                    ["zoom", "Zoom"],
+                ].map(
+                    ([name, label]) => html`
+                    <button
+                        disabled=${!interactive || !state.welcome?.methods?.includes(nativeCommand(name, state.snapshot)?.method)}
+                        onClick=${() => execute(name)}
+                    >${label}</button>`,
+                )}
+                ${pasteAction}
+            </nav>`
+        }
+        <div class="private-terminal-footer">
+            <span
+                class="small private-terminal-status"
+                role="status"
+                title=${issue || "Opening Terminal allows control of this Herdr instance, including resizing or resuming a pending agent."}
+            >${status}</span>
+            ${
+                connected || connecting
+                    ? html`
+                        <button
+                            class="private-disconnect"
+                            onClick=${() => retained.current?.disconnect()}
+                        >${connecting ? "Cancel" : "Disconnect"}</button>`
+                    : html`
+                        <button
+                            class="private-connect"
+                            disabled=${!available || !Grid || !instanceId}
+                            onClick=${connect}
+                        >Reconnect</button>`
+            }
+            ${keyboardControls}
+            <details class="private-terminal-help"
+                onToggle=${(event) =>
+                    controller.current?.diagnosticsNote(
+                        event.currentTarget.open ? "help-open" : "help-close",
+                    )}>
+                <summary
+                    class="icon-button"
+                    aria-label="Terminal help"
+                    title="Terminal help and browser limits"
+                >
+                    <${Icon} name="keyboard" size=${16} />
+                </summary>
+                <div class="private-help-tooltip" role="note">
+                    <section
+                        class="private-terminal-diagnostics"
+                        aria-label="Temporary terminal diagnostics"
+                    >
+                        <p>Temporary diagnostics stay in memory. No terminal text, key values, titles or paths are included.</p>
+                        <button
+                            type="button"
+                            class="button small private-diagnostics-copy"
+                            disabled=${!controller.current}
+                            onPointerDown=${(event) => event.preventDefault()}
+                            onClick=${copyDiagnostics}
+                        >
+                            Copy diagnostics
+                        </button>
+                        ${diagnosticStatus && html`<p role="status">${diagnosticStatus}</p>`}
+                        ${
+                            diagnosticReport &&
+                            html`
+                            <label>Diagnostic report
+                                <textarea
+                                    class="private-diagnostics-report"
+                                    rows="6"
+                                    readOnly
+                                    aria-label="Terminal diagnostics report"
+                                    value=${diagnosticReport}
+                                    onFocus=${(event) => event.currentTarget.select()}
+                                />
+                            </label>`
+                        }
+                    </section>
+                    ${issue && html`<p role="status">${issue}</p>`}
+                    ${state.welcome && !state.welcome.methods?.includes("client_shell.surface.set") && html`<p>This Herdr connection does not advertise surface pausing. Only local painting can pause.</p>`}
+                    <p>Opening Terminal gives this browser control of the full Herdr instance. Connecting can resize panes or resume a pending agent. Access stays private to you.</p>
+                    <p>Click the terminal to type. On touch screens, choose Touch or Native in the keyboard type group. The chevron hides or shows the selected keyboard. Tap Ctrl, Alt, Cmd or Shift once for the next key, twice to lock, and again to release. The Paste icon at the right of the quick-action bar appears in Touch mode and opens an editable field; Paste into pane sends the text without an extra Enter. Escape, arrows and control keys go to Herdr while the terminal has focus.</p>
+                    <p>While the terminal has keyboard focus: Cmd+D splits right, Cmd+Shift+D splits down, Cmd+Shift+Enter zooms, Cmd+Option+arrows focus a pane, and Cmd+Shift+[ or ] change tabs. Cmd means Command on macOS and Super on Linux. Ctrl+C and Ctrl+D remain terminal input.</p>
+                    <p>Herdr’s default prefix is Ctrl+B, then c for a new tab, v to split right, minus to split down, z to zoom, n/p to switch tabs, and x to close a pane with confirmation. Repeat the prefix to send it to the terminal; Escape cancels. Published Herdr [keys] bindings and advertised command bindings replace the corresponding daemon defaults where supported.</p>
+                    <p>Browsers may reserve Cmd+T, Cmd+W, Cmd+1–9 and Cmd+L. We handle them only when delivered, without inventing replacement shortcuts. GPUI-local keybinding files, native windows, worktree management and native search dialogs are not mirrored. Clipboard writes and links always need your action.</p>
+                    ${keymap.unsupported && html`<p>Some published bindings use unsupported TOML or key syntax. Supported bindings and defaults remain available; unsupported bindings are not forwarded as commands.</p>`}
+                    <p>Chat and hidden pages keep the connection. Surface streaming pauses after Herdr acknowledges the request; local painting and input pause immediately. Offline connections retry with fresh snapshots and bounded backoff. Input is never queued or replayed. Disconnect stops automatic reconnection until Reconnect or reopening Terminal.</p>
+                </div>
+            </details>
+        </div>`;
+
     return html`<div class="private-live-terminal" ref=${host} onKeyDownCapture=${shortcut}
         onCompositionEnd=${() =>
             queueMicrotask(() => {
@@ -1612,6 +1824,7 @@ export function PrivateTerminal({
                 enabled=${interactive}
                 inputEpoch=${state.inputEpoch}
                 focusRef=${gridFocus}
+                renderFooter=${footer}
                 theme=${theme || undefined}
                 reportAllKeys=${state.reportAllKeys}
                 onShortcut=${(event, context) => (context?.virtual ? shortcut(event, context) : undefined)}
@@ -1645,44 +1858,6 @@ export function PrivateTerminal({
             }
             ${(!interactive || !state.surface) && html`<pre class="private-terminal-preview" aria-label="Read-only terminal snapshot">${state.paused ? "Painting paused while hidden or offline." : fallback || "Waiting for terminal output…"}</pre>`}
         </div>
-        ${
-            connected &&
-            html`<nav class="private-mobile-terminal-nav" aria-label="Herdr mobile controls">
-            ${[
-                ["tab-previous", "Prev tab"],
-                ["tab-next", "Next tab"],
-                ["tab-new", "New tab"],
-                ["split-right", "Split"],
-                ["zoom", "Zoom"],
-            ].map(
-                ([name, label]) => html`<button
-                disabled=${!interactive || !state.welcome?.methods?.includes(nativeCommand(name, state.snapshot)?.method)}
-                onClick=${() => execute(name)}
-            >${label}</button>`,
-            )}
-        </nav>`
-        }
-        <div class="private-terminal-footer">
-            <span class="small private-terminal-status" role="status" title=${statusError || notice || state.reason || loadError || "Opening Terminal allows control of this Herdr instance, including resizing or resuming a pending agent."}>${statusError || notice || state.reason || loadError || (state.paused ? "Painting paused" : connecting ? "Connecting…" : connected ? (state.surfacePending ? "Waiting for surface acknowledgement…" : "Live · Herdr") : "Disconnected")}</span>
-            ${
-                connected || connecting
-                    ? html`<button class="private-disconnect" onClick=${() => retained.current?.disconnect()}>${connecting ? "Cancel" : "Disconnect"}</button>`
-                    : html`<button class="private-connect" disabled=${!available || !Grid || !instanceId} onClick=${connect}>Reconnect</button>`
-            }
-        <details class="private-terminal-help">
-            <summary class="icon-button" aria-label="Terminal help" title="Terminal help and browser limits"><${Icon} name="keyboard" size=${16} /></summary>
-            <div class="private-help-tooltip" role="note">
-            ${(statusError || notice || state.reason || loadError) && html`<p role="status">${statusError || notice || state.reason || loadError}</p>`}
-            ${state.welcome && !state.welcome.methods?.includes("client_shell.surface.set") && html`<p>This Herdr connection does not advertise surface pausing. Only local painting can pause.</p>`}
-            <p>Opening Terminal gives this browser control of the full Herdr instance. Connecting can resize panes or resume a pending agent. Access stays private to you.</p>
-            <p>Click the terminal to type. On touch screens, use the full keyboard below it: tap Ctrl, Alt, Cmd or Shift once for the next key, twice to lock, and again to release. Hide expands the terminal; Native opens your device keyboard only when requested. Paste uses the terminal’s paste event. Escape, arrows and control keys go to Herdr while the terminal has focus.</p>
-            <p>While the terminal has keyboard focus: Cmd+D splits right, Cmd+Shift+D splits down, Cmd+Shift+Enter zooms, Cmd+Option+arrows focus a pane, and Cmd+Shift+[ or ] change tabs. Cmd means Command on macOS and Super on Linux. Ctrl+C and Ctrl+D remain terminal input.</p>
-            <p>Herdr’s default prefix is Ctrl+B, then c for a new tab, v to split right, minus to split down, z to zoom, n/p to switch tabs, and x to close a pane with confirmation. Repeat the prefix to send it to the terminal; Escape cancels. Published Herdr [keys] bindings and advertised command bindings replace the corresponding daemon defaults where supported.</p>
-            <p>Browsers may reserve Cmd+T, Cmd+W, Cmd+1–9 and Cmd+L. We handle them only when delivered, without inventing replacement shortcuts. GPUI-local keybinding files, native windows, worktree management and native search dialogs are not mirrored. Clipboard writes and links always need your action.</p>
-            ${keymap.unsupported && html`<p>Some published bindings use unsupported TOML or key syntax. Supported bindings and defaults remain available; unsupported bindings are not forwarded as commands.</p>`}
-            <p>Chat and hidden pages keep the connection. Surface streaming pauses after Herdr acknowledges the request; local painting and input pause immediately. Offline connections retry with fresh snapshots and bounded backoff. Input is never queued or replayed. Disconnect stops automatic reconnection until Reconnect or reopening Terminal.</p>
-            </div>
-        </details>
-        </div>
+        ${!Grid && footer(null)}
     </div>`;
 }

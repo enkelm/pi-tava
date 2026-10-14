@@ -539,13 +539,14 @@ export class PrivateSessions {
         }
 
         try {
-            // Collie's plain-text read contract: recent_unwrapped is the WIRE spelling, not recent-unwrapped.
+            // Polling must be passive. Herdr recent/recent_unwrapped reads may send
+            // wheel events to harvest an idle alternate-screen agent's history.
             const { read } = await this.local.request<{ read: { pane_id: string; text: string } }>(
                 target.socket,
                 "pane.read",
                 {
                     pane_id: target.wire.pane_id,
-                    source: "recent_unwrapped",
+                    source: "visible",
                     lines: 200,
                     format: "text",
                 },

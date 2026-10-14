@@ -32,9 +32,49 @@ const utility = [
 const letters = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
 const symbols = ["!@#$%^&*()", "[]{}<>/\\|", "`~;:'\"-_=+"];
 
-export function TerminalKeyboard({ disabled, contextKey, onKey, native, onNative, resetRef }) {
+export function TerminalKeyboardControls({ disabled, native, open, onChange }) {
+    return html`
+        <div class="terminal-keyboard-controls">
+            <div class="terminal-keyboard-types" role="group" aria-label="Keyboard type">
+                ${[
+                    [false, "Touch"],
+                    [true, "Native"],
+                ].map(
+                    ([value, label]) => html`
+                    <button type="button" disabled=${disabled}
+                        aria-label=${`${label} keyboard`} aria-pressed=${native === value}
+                        onPointerDown=${(event) => event.preventDefault()}
+                        onClick=${() => onChange(value, true)}>${label}</button>`,
+                )}
+            </div>
+            <button type="button" class="terminal-keyboard-collapse" disabled=${disabled}
+                aria-label=${open ? "Hide keyboard" : "Show keyboard"} aria-expanded=${open}
+                title=${open ? "Hide keyboard" : "Show keyboard"}
+                onPointerDown=${(event) => event.preventDefault()}
+                onClick=${() => onChange(native, !open)}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" aria-hidden="true">
+                    <path d=${open ? "m6 9 6 6 6-6" : "m6 15 6-6 6 6"} />
+                </svg>
+            </button>
+        </div>`;
+}
+
+export function TerminalKeyboard({
+    disabled,
+    contextKey,
+    onKey,
+    onPaste,
+    native,
+    open,
+    onOpen,
+    controls,
+    pasteAction,
+    pasteButtonRef,
+    keyboardRef,
+}) {
     const [layout, setLayout] = useState("letters");
-    const [open, setOpen] = useState(true);
     const [mods, setMods] = useState(emptyModifiers);
     const modifiers = useRef(mods);
     const repeating = useRef(null);
@@ -42,7 +82,25 @@ export function TerminalKeyboard({ disabled, contextKey, onKey, native, onNative
     const lastReleased = useRef(null);
     const intentVersion = useRef(0);
     const current = useRef(null);
+    const pasteTarget = useRef(null);
+    const pasteField = useRef(null);
+    const [pasting, setPasting] = useState(false);
+    const [pasteText, setPasteText] = useState("");
     const shift = mods.shiftKey > 0;
+
+    const clearPaste = () => {
+        pasteTarget.current = null;
+        setPasting(false);
+        setPasteText("");
+    };
+
+    if (
+        current.current?.contextKey !== contextKey ||
+        current.current?.native !== native ||
+        disabled
+    ) {
+        pasteTarget.current = null;
+    }
 
     const stopRepeat = () => {
         clearTimeout(repeating.current?.timer);
@@ -68,7 +126,14 @@ export function TerminalKeyboard({ disabled, contextKey, onKey, native, onNative
         updateModifiers(emptyModifiers());
         pressed.current.clear();
         stopRepeat();
-    }, [contextKey, disabled, native]);
+        clearPaste();
+    }, [contextKey, disabled, native, open]);
+
+    useLayoutEffect(() => {
+        if (pasting) {
+            pasteField.current?.focus();
+        }
+    }, [pasting]);
 
     useLayoutEffect(() => {
         const reset = () => {
@@ -76,16 +141,36 @@ export function TerminalKeyboard({ disabled, contextKey, onKey, native, onNative
             stopRepeat();
             pressed.current.clear();
             updateModifiers(emptyModifiers());
+            clearPaste();
         };
 
-        resetRef.current = reset;
+        const controller = {
+            reset,
+            paste: () => {
+                if (current.current.disabled || current.current.native) {
+                    return;
+                }
+
+                if (pasteTarget.current === current.current.contextKey && pasteField.current) {
+                    pasteField.current.focus();
+
+                    return;
+                }
+
+                reset();
+                pasteTarget.current = current.current.contextKey;
+                setPasting(true);
+            },
+        };
+
+        keyboardRef.current = controller;
 
         return () => {
-            if (resetRef.current === reset) {
-                resetRef.current = null;
+            if (keyboardRef.current === controller) {
+                keyboardRef.current = null;
             }
         };
-    }, [resetRef]);
+    }, [keyboardRef]);
 
     useEffect(() => {
         const visibility = () => {
@@ -320,27 +405,32 @@ export function TerminalKeyboard({ disabled, contextKey, onKey, native, onNative
     const changeLayout = (next) => {
         stopRepeat();
         pressed.current.clear();
+        clearPaste();
         setLayout(next);
     };
 
-    const collapse = () => {
-        stopRepeat();
-        pressed.current.clear();
-        updateModifiers(emptyModifiers());
-        setOpen(!open);
+    const cancelPaste = () => {
+        clearPaste();
+        pasteButtonRef.current?.focus();
+    };
+
+    const submitPaste = () => {
+        if (disabled || pasteTarget.current !== contextKey || !pasteText) {
+            return;
+        }
+
+        if (onPaste(pasteText) !== false) {
+            clearPaste();
+        }
     };
 
     return html`
-        <div class="terminal-keyboard" role="group" aria-label="Touch terminal keyboard">
+        <div class="terminal-keyboard" role="group" aria-label="Touch terminal keyboard"
+            hidden=${native && !controls}>
             <div class="terminal-keyboard-toolbar">
                 ${
-                    native
-                        ? html`
-                    <button type="button" disabled=${disabled} onClick=${() => onNative(false)}>
-                        Touch keyboard
-                    </button>
-                `
-                        : html`
+                    !native &&
+                    html`
                     <div class="terminal-keyboard-layouts" role="group" aria-label="Keyboard layout">
                         ${[
                             ["letters", "Letters", "ABC"],
@@ -352,20 +442,46 @@ export function TerminalKeyboard({ disabled, contextKey, onKey, native, onNative
                                     onPointerDown=${(event) => event.preventDefault()}
                                     onClick=${() => {
                                         changeLayout(name);
-                                        setOpen(true);
+                                        onOpen(true);
                                     }}>${text}</button>`,
                         )}
                     </div>
-                    <button type="button" class="terminal-keyboard-native" disabled=${disabled}
-                        aria-label="Native keyboard" onClick=${() => onNative(true)}>Native</button>
-                    <button type="button" aria-label=${open ? "Hide keyboard" : "Show keyboard"}
-                        aria-expanded=${open} onClick=${collapse}>${open ? "Hide" : "Show"}</button>
                 `
                 }
+                ${controls}
+                ${pasteAction}
             </div>
+            ${
+                pasting &&
+                html`
+                <div class="terminal-keyboard-paste">
+                    <label>
+                        Text to paste
+                        <textarea ref=${pasteField} rows="3" value=${pasteText} disabled=${disabled}
+                            spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"
+                            placeholder="Touch and hold here, then choose Paste"
+                            onInput=${(event) => setPasteText(event.currentTarget.value)}
+                            onKeyDown=${(event) => {
+                                event.stopPropagation();
+
+                                if (event.key === "Escape" && !event.isComposing) {
+                                    event.preventDefault();
+                                    cancelPaste();
+                                }
+                            }} />
+                    </label>
+                    <p>Paste text here, then send it to the pane. No extra Enter is sent.</p>
+                    <div class="terminal-keyboard-row">
+                        <button type="button" disabled=${disabled || !pasteText}
+                            onClick=${submitPaste}>Paste into pane</button>
+                        <button type="button" onClick=${cancelPaste}>Cancel paste</button>
+                    </div>
+                </div>`
+            }
             ${
                 open &&
                 !native &&
+                !pasting &&
                 html`
                 <div class="terminal-keyboard-keys">
                     ${row(utility, "terminal-keyboard-utility")}
@@ -417,7 +533,6 @@ export function TerminalKeyboard({ disabled, contextKey, onKey, native, onNative
                         ],
                         "terminal-keyboard-arrows",
                     )}
-                    <p class="terminal-keyboard-hint">Tap a modifier for one key. Tap twice to lock.</p>
                 </div>
             `
             }

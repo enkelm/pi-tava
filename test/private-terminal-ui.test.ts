@@ -562,6 +562,136 @@ test(
             assert.ok(Number(requests[0]?.body.cols) > 0);
             await frames(page);
             await t.test(
+                "idle metadata/surface updates do not re-resize the shared terminal",
+                async () => {
+                    await page.evaluate(`await document.fonts.ready;
+                    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+                    window.fixtureResizeBaseline=window.fixtureSockets[0].sent.filter(f=>f.type==='resize').length;
+                    window.fixtureOriginalSurface=structuredClone(window.fixtureSurface);`);
+
+                    for (let revision = 100; revision < 105; revision++) {
+                        await page.evaluate(`window.fixtureSockets[0].receive({type:'snapshot',
+                        snapshot:{...${JSON.stringify(snapshot)},revision:${revision}}});`);
+                        await until(
+                            () =>
+                                value(
+                                    page,
+                                    "document.querySelector('.terminal-grid').dataset.enabled==='false'",
+                                ),
+                            "metadata update temporarily fences terminal input",
+                        );
+                        await page.evaluate(`await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+                        window.fixtureSurface={...window.fixtureOriginalSurface,
+                            projection_revision:${revision},surface_revision:${revision},
+                            panes:window.fixtureOriginalSurface.panes.map(p=>({...p,alternate_screen_active:true,mouse_reporting:true}))};
+                        window.fixtureSockets[0].receive({type:'surface',surface:window.fixtureSurface});`);
+                        await until(
+                            () =>
+                                value(
+                                    page,
+                                    "document.querySelector('.terminal-grid').dataset.enabled==='true'",
+                                ),
+                            "matching full-screen surface restores terminal input",
+                        );
+                        await page.evaluate(
+                            "await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))",
+                        );
+                    }
+
+                    assert.equal(
+                        await value(
+                            page,
+                            "window.fixtureSockets[0].sent.filter(f=>f.type==='resize').length-window.fixtureResizeBaseline",
+                        ),
+                        0,
+                        "view-only full-screen updates must not keep resizing the pane seen by other clients",
+                    );
+                    await page.evaluate(`window.fixtureSurface=window.fixtureOriginalSurface;
+                    window.fixtureSockets[0].receive({type:'snapshot',snapshot:${JSON.stringify(snapshot)}});
+                    window.fixtureSockets[0].receive({type:'surface',surface:window.fixtureSurface});`);
+                },
+            );
+            await t.test(
+                "temporary diagnostics copy metadata and provide a blocked-clipboard fallback",
+                async () => {
+                    await page.evaluate(`window.fixtureClipboardDescriptor=Object.getOwnPropertyDescriptor(navigator,'clipboard');
+                    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{
+                        writeText:async text=>{window.fixtureDiagnosticsCopy=text}
+                    }});
+                    window.fixtureDiagnosticSurface=window.fixtureSurface;
+                    window.fixtureSockets[0].receive({type:'surface',surface:{...window.fixtureSurface,
+                        panes:window.fixtureSurface.panes.map(p=>({...p,scroll:{offset_from_bottom:4,max_offset_from_bottom:100,viewport_rows:24},alternate_screen_active:true}))}});`);
+
+                    try {
+                        await click(page, ".private-terminal-help summary");
+                        const inputBefore = await value<number>(
+                            page,
+                            "window.fixtureSockets[0].sent.filter(f=>['input','popup-input','clipboard-image','resize'].includes(f.type)).length",
+                        );
+
+                        await page.click({ selector: ".private-diagnostics-copy" });
+                        await until(
+                            () => value(page, "typeof window.fixtureDiagnosticsCopy==='string'"),
+                            "diagnostic clipboard export",
+                        );
+                        assert.equal(
+                            await value(page, "JSON.parse(window.fixtureDiagnosticsCopy).kind"),
+                            "pi-coop-terminal-diagnostics",
+                        );
+                        assert.equal(
+                            await value(
+                                page,
+                                "JSON.parse(window.fixtureDiagnosticsCopy).latest.surface.panes[0].offset",
+                            ),
+                            4,
+                            "the report includes actual received native scroll metadata",
+                        );
+                        assert.equal(
+                            await value(
+                                page,
+                                "document.querySelector('.private-diagnostics-report').value===window.fixtureDiagnosticsCopy",
+                            ),
+                            true,
+                            "a stable selectable snapshot is available alongside clipboard copy",
+                        );
+                        await page.evaluate(
+                            "navigator.clipboard.writeText=async()=>{throw new Error('blocked')}",
+                        );
+                        await page.click({ selector: ".private-diagnostics-copy" });
+                        await until(
+                            () =>
+                                value(
+                                    page,
+                                    "document.querySelector('.private-terminal-diagnostics').textContent.includes('Copy was blocked')",
+                                ),
+                            "clipboard failure explains the manual-copy fallback",
+                        );
+                        assert.equal(
+                            await value(
+                                page,
+                                "document.querySelector('.private-diagnostics-report').readOnly",
+                            ),
+                            true,
+                        );
+                        assert.equal(
+                            await value(
+                                page,
+                                "window.fixtureSockets[0].sent.filter(f=>['input','popup-input','clipboard-image','resize'].includes(f.type)).length",
+                            ),
+                            inputBefore,
+                            "export does not send terminal input or resize shared panes",
+                        );
+                    } finally {
+                        await page.evaluate(`if(window.fixtureClipboardDescriptor){
+                        Object.defineProperty(navigator,'clipboard',window.fixtureClipboardDescriptor)
+                    }else{delete navigator.clipboard}
+                    document.querySelector('.private-terminal-help').open=false;
+                    window.fixtureSockets[0].receive({type:'surface',surface:window.fixtureDiagnosticSurface});
+                    document.querySelector('.terminal-grid-input').focus();`);
+                    }
+                },
+            );
+            await t.test(
                 "native worktree hierarchy, local folds and retained native navigation",
                 async () => {
                     // Native snapshots carry repo membership and branch updates before the next HTTP poll.
@@ -660,10 +790,10 @@ test(
             assert.equal(
                 await value(
                     page,
-                    `getComputedStyle(document.querySelector('.private-mobile-terminal-nav')).display`,
+                    "getComputedStyle(document.querySelector('.private-mobile-terminal-nav')).display",
                 ),
                 "none",
-                "helper navigation is mobile-only",
+                "the quick-action bar stays mobile-only",
             );
             assert.equal(
                 await value(
@@ -1299,23 +1429,179 @@ test(
                 "mobile Terminal choice auto-connects",
             );
             await shot(page, "mobile-terminal");
-            await frames(page);
+
+            for (const viewport of [
+                { ...VIEWPORTS.tablet, width: 1280, height: 900 },
+                VIEWPORTS.mobile,
+            ]) {
+                await page.setViewport(viewport);
+                await frames(page);
+                assert.equal(
+                    await value(page, 'matchMedia("(pointer: coarse)").matches'),
+                    true,
+                    "exercise touch input even at desktop-sized tablet widths",
+                );
+                // Crossing the desktop breakpoint starts the enclosing window's entry
+                // animation. Measure resting hit targets, not its transient scale.
+                await page.evaluate(`await document.fonts.ready;
+                    await Promise.all([...document.querySelectorAll('.private-layout .window')]
+                        .flatMap(element=>element.getAnimations())
+                        .filter(animation=>Number.isFinite(animation.effect.getComputedTiming().endTime))
+                        .map(animation=>animation.finished.catch(()=>{})));
+                    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));`);
+                const layout = await value<{
+                    checks: Record<string, boolean>;
+                    geometry: unknown;
+                }>(
+                    page,
+                    `(() => {
+                    const keyboard=document.querySelector('.terminal-keyboard');
+                    const nav=document.querySelector('.private-mobile-terminal-nav');
+                    const paste=nav?.querySelector('button[aria-label="Paste"]');
+                    const r=paste?.getBoundingClientRect();
+                    const hit=r && document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                    return {
+                        checks:{
+                            keyboardVisible:!!keyboard && getComputedStyle(keyboard).display==='flex',
+                            actionsVisible:!!nav && getComputedStyle(nav).display==='grid',
+                            pasteLast:!!paste && nav.lastElementChild===paste,
+                            pasteIconOnly:!!paste?.querySelector('svg') && !paste.textContent.trim(),
+                            touchWidth:!!r && r.width>=44,
+                            touchHeight:!!r && r.height>=44,
+                            withinViewport:!!r && r.left>=0 && r.right<=innerWidth &&
+                                r.top>=0 && r.bottom<=innerHeight,
+                            reachable:!!paste && paste.contains(hit),
+                        },
+                        geometry:{
+                            paste:r?.toJSON(),
+                            keyboard:keyboard?.getBoundingClientRect().toJSON(),
+                            nav:nav?.getBoundingClientRect().toJSON(),
+                            viewport:[innerWidth,innerHeight],
+                            hit:hit?.tagName,
+                            hitClass:hit?.className,
+                        },
+                    };
+                })()`,
+                );
+
+                assert.deepEqual(
+                    layout.checks,
+                    {
+                        keyboardVisible: true,
+                        actionsVisible: true,
+                        pasteLast: true,
+                        pasteIconOnly: true,
+                        touchWidth: true,
+                        touchHeight: true,
+                        withinViewport: true,
+                        reachable: true,
+                    },
+                    `${viewport.width}px touch: keyboard and final Paste icon remain visible and reachable; ${JSON.stringify(layout.geometry)}`,
+                );
+
+                if (viewport.width > 960) {
+                    await shot(page, "wide-touch-connected");
+                }
+            }
+
+            await click(page, '.private-mobile-terminal-nav button[aria-label="Paste"]');
+            await present(page, ".terminal-keyboard-paste textarea");
             assert.equal(
                 await value(
                     page,
-                    `getComputedStyle(document.querySelector('.private-mobile-terminal-nav')).display`,
+                    "document.activeElement.matches('.terminal-keyboard-paste textarea')",
                 ),
-                "grid",
+                true,
+                "the quick-action Paste icon opens the focused paste editor",
             );
+            await page.type(undefined, "keep this draft");
+            await click(page, '.private-mobile-terminal-nav button[aria-label="Paste"]');
+            assert.equal(
+                await value(
+                    page,
+                    "document.querySelector('.terminal-keyboard-paste textarea').value",
+                ),
+                "keep this draft",
+                "pressing Paste again focuses the editor without clearing its draft",
+            );
+            await click(page, ".terminal-keyboard-paste button:last-child");
+            assert.equal(
+                await value(
+                    page,
+                    "document.activeElement.matches('.private-mobile-terminal-nav button[aria-label=Paste]')",
+                ),
+                true,
+                "Cancel returns focus to the relocated Paste icon",
+            );
+            await click(page, '.private-terminal-footer button[aria-label="Native keyboard"]');
+            assert.equal(
+                await value(
+                    page,
+                    "!!document.querySelector('.private-mobile-terminal-nav button[aria-label=Paste]')",
+                ),
+                false,
+                "Paste is hidden in Native mode",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    "getComputedStyle(document.querySelector('.terminal-keyboard')).display",
+                ),
+                "none",
+                "Native mode does not leave an empty UI keyboard toolbar",
+            );
+            await click(page, '.private-terminal-footer button[aria-label="Touch keyboard"]');
+            assert.equal(
+                await value(
+                    page,
+                    "!!document.querySelector('.private-mobile-terminal-nav button[aria-label=Paste]')",
+                ),
+                true,
+                "the footer selector switches back and restores Paste",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `(() => {
+                    const footer=document.querySelector('.private-terminal-footer');
+                    const group=footer.querySelector('[aria-label="Keyboard type"]');
+                    const toggle=footer.querySelector('button[aria-label="Hide keyboard"]');
+                    const keyboard=document.querySelector('.terminal-keyboard');
+                    const kr=keyboard.getBoundingClientRect(),fr=footer.getBoundingClientRect();
+                    return !!group && !!toggle?.querySelector('svg') && kr.bottom<=fr.top+1 &&
+                        fr.bottom<=innerHeight+1 && [...group.querySelectorAll('button'),toggle].every(b=>{
+                            const r=b.getBoundingClientRect();
+                            return r.width>=40 && r.height>=40 && r.left>=0 && r.right<=innerWidth &&
+                                b.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2));
+                        });
+                })()`,
+                ),
+                true,
+                "keyboard type group and chevron remain reachable in the footer below the keys",
+            );
+            const expandedHeight = await value<number>(
+                page,
+                "document.querySelector('.terminal-grid-viewport').clientHeight",
+            );
+
+            await click(page, '.private-terminal-footer button[aria-label="Hide keyboard"]');
+            assert.ok(
+                (await value<number>(
+                    page,
+                    "document.querySelector('.terminal-grid-viewport').clientHeight",
+                )) > expandedHeight,
+                "footer chevron collapses the touch keyboard, giving space back to the terminal",
+            );
+            await click(page, '.private-terminal-footer button[aria-label="Show keyboard"]');
             await shot(page, "mobile-connected");
             await click(page, ".private-mobile-terminal-nav button:nth-child(4)");
             assert.equal(
                 await value(
                     page,
-                    `window.fixtureSockets[0].sent.some(frame => frame.method === 'pane.split')`,
+                    "window.fixtureSockets[0].sent.some(frame => frame.method === 'pane.split')",
                 ),
                 true,
-                "mobile split helper dispatches native request",
+                "the restored Split quick action still dispatches its native request",
             );
             await click(page, ".private-view-switch button:last-child");
             await present(page, "#private-prompt");

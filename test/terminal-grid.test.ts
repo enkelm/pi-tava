@@ -850,6 +850,8 @@ async function mobileKeyboard(page: BrowserPage) {
         "mobile provides the full touch keyboard, not just the old helper keybar",
     );
     await inputMode();
+    await mobilePaste(page);
+    await touchGestures(page);
 
     for (const cancelFirst of [false, true]) {
         await touchSequence(
@@ -1133,10 +1135,33 @@ async function mobileKeyboard(page: BrowserPage) {
     await modifierState("Control", true, true);
     await tap("Native keyboard");
     await inputMode(true);
+    assert.deepEqual(
+        await value(
+            page,
+            `Array.from(document.querySelectorAll('[aria-label="Keyboard type"] button'),
+            b=>b.getAttribute('aria-pressed'))`,
+        ),
+        ["false", "true"],
+        "both keyboard types stay visible with Native selected",
+    );
+    await tap("Hide keyboard");
+    await inputMode();
+    assert.notEqual(await value(page, "document.activeElement.className"), "terminal-grid-input");
+    await tap("Show keyboard");
+    await inputMode(true);
     assert.equal(await value(page, "document.activeElement.matches('.terminal-grid-input')"), true);
     await page.type(undefined, "native fallback");
     await expectInputs([{ TextCommit: "native fallback" }]);
     await tap("Touch keyboard");
+    assert.deepEqual(
+        await value(
+            page,
+            `Array.from(document.querySelectorAll('[aria-label="Keyboard type"] button'),
+            b=>b.getAttribute('aria-pressed'))`,
+        ),
+        ["true", "false"],
+        "switching back updates the selected segment without sending a terminal key",
+    );
     await modifierState("Control", false);
     await inputMode();
     await layout();
@@ -1324,6 +1349,243 @@ async function mobileKeyboard(page: BrowserPage) {
     await page.evaluate("fixture.draw({surface:fixture.keyboardBase,reportAllKeys:false})");
     await settle(page);
     await tap("Native keyboard");
+}
+
+async function touchGestures(page: BrowserPage) {
+    for (const mouseReporting of [false, true]) {
+        await page.evaluate(`fixture.inputs=[];
+            fixture.draw({surface:{...fixture.keyboardBase,
+                panes:fixture.keyboardBase.panes.map(p=>({...p,mouse_reporting:${mouseReporting}}))}});`);
+        await settle(page);
+        await page.evaluate(`fixture.touch=(type,x,y)=>fixture.point(type,x,y,
+            {pointerType:'touch',isPrimary:true,pointerId:61});
+            fixture.touch('pointerdown',1,4);
+            fixture.touch('pointermove',1,2);
+            fixture.touch('pointerup',1,2);`);
+        await settle(page);
+        assert.deepEqual(
+            await value(
+                page,
+                "fixture.inputs.map(i=>[i.id,i.events.map(e=>[e.Mouse.kind,e.Mouse.lines])])",
+            ),
+            [["pane-left", [["ScrollDown", 2]]]],
+            `${mouseReporting ? "TUI" : "plain pane"}: a swipe scrolls without mouse clicks or selection`,
+        );
+        assert.equal(
+            await value(page, "!!document.querySelector('.terminal-grid-selection')"),
+            false,
+        );
+        await page.evaluate(`fixture.inputs=[];fixture.touch('pointerdown',1,0);
+            await new Promise(resolve=>setTimeout(resolve,600));`);
+        await settle(page);
+        assert.equal(
+            await value(page, "document.querySelector('.terminal-grid').dataset.touchSelecting"),
+            "true",
+            "a deliberate hold visibly activates local selection even in a mouse-reporting TUI",
+        );
+        assert.equal(
+            await value(page, "!!document.querySelector('.terminal-grid-touch-cue')"),
+            true,
+        );
+        await page.evaluate(`fixture.touch('pointermove',5,0);fixture.touch('pointerup',5,0);`);
+        await settle(page);
+        assert.equal(
+            await value(page, "document.querySelector('.terminal-grid-selection')?.value"),
+            "erdr",
+            "selected terminal text omits trailing screen padding",
+        );
+        assert.equal(
+            await value(page, "fixture.inputs.length"),
+            0,
+            "hold-selection never sends an application mouse-down or scroll",
+        );
+        assert.equal(
+            await value(page, "!!document.querySelector('.terminal-grid-touch-cue')"),
+            false,
+        );
+        await page.evaluate(`fixture.inputs=[];fixture.touch('pointerdown',1,2);`);
+        assert.equal(
+            await value(page, "fixture.inputs.length"),
+            0,
+            "touch-down waits for tap/scroll/hold intent before sending anything",
+        );
+        await page.evaluate(`fixture.touch('pointerup',1,2);`);
+        assert.deepEqual(
+            await value(page, "fixture.inputs.flatMap(i=>i.events.map(e=>e.Mouse.kind))"),
+            mouseReporting ? [{ Down: "Left" }, { Up: "Left" }] : [],
+            "a short tap still clicks a mouse-reporting application once",
+        );
+    }
+
+    for (const selecting of [false, true]) {
+        await page.evaluate(`fixture.inputs=[];fixture.touch('pointerdown',1,0);
+            ${selecting ? "await new Promise(resolve=>setTimeout(resolve,600));" : ""}
+            fixture.draw({inputEpoch:fixture.props.inputEpoch+1});
+            await new Promise(resolve=>setTimeout(resolve,600));
+            fixture.touch('pointerup',5,0);`);
+        await settle(page);
+        assert.equal(
+            await value(page, "fixture.inputs.length"),
+            0,
+            "connection changes discard pending and active touch selection without replay",
+        );
+        assert.equal(
+            await value(page, "document.querySelector('.terminal-grid').dataset.touchSelecting"),
+            "false",
+        );
+        assert.equal(
+            await value(page, "!!document.querySelector('.terminal-grid-selection')"),
+            false,
+        );
+    }
+
+    await page.evaluate(
+        `fixture.inputs=[];fixture.draw({surface:fixture.keyboardBase,inputEpoch:1});`,
+    );
+    await settle(page);
+}
+
+async function mobilePaste(page: BrowserPage) {
+    const open = async (text = "") => {
+        await page.click({ label: "Paste" });
+        await settle(page);
+        assert.equal(
+            await value(
+                page,
+                "document.activeElement.matches('.terminal-keyboard-paste textarea')",
+            ),
+            true,
+            "Paste opens a focused, editable field for the native paste menu",
+        );
+        await page.type({ label: "Text to paste" }, text);
+    };
+
+    const text = "echo 'hello'\n日本語 👩‍💻\n";
+
+    await page.evaluate(`fixture.point('pointerdown',1,0,{shiftKey:true});
+        fixture.point('pointermove',5,0,{shiftKey:true});
+        fixture.point('pointerup',5,0,{shiftKey:true});`);
+    await settle(page);
+    assert.equal(
+        await value(page, "document.querySelector('.terminal-grid-selection')?.value"),
+        "erdr",
+        "a terminal selection remains available while opening the separate paste editor",
+    );
+    await open(text);
+    assert.deepEqual(
+        await value(
+            page,
+            `(() => {
+            const data=new DataTransfer();
+            data.setData('text/plain','draft copy');
+            const event=new ClipboardEvent('copy',{bubbles:true,cancelable:true,clipboardData:data});
+            document.querySelector('.terminal-keyboard-paste textarea').dispatchEvent(event);
+            return {prevented:event.defaultPrevented,text:data.getData('text/plain')};
+        })()`,
+        ),
+        { prevented: false, text: "draft copy" },
+        "Copy in the editable paste field stays browser-owned, not replaced by terminal selection",
+    );
+    assert.deepEqual(
+        await value(
+            page,
+            `(() => {
+            const data=new DataTransfer();
+            const event=new ClipboardEvent('copy',{bubbles:true,cancelable:true,clipboardData:data});
+            document.querySelector('.terminal-grid-input').dispatchEvent(event);
+            return {prevented:event.defaultPrevented,text:data.getData('text/plain')};
+        })()`,
+        ),
+        { prevented: true, text: "erdr" },
+        "Copy from the terminal input still uses the selected terminal cells",
+    );
+    assert.equal(
+        await value(page, "fixture.inputs.length"),
+        0,
+        "editing never types into the pane",
+    );
+    await shot(page, "mobile-paste");
+    await page.click({ label: "Paste into pane" });
+    await settle(page);
+    assert.deepEqual(await value(page, "fixture.inputs"), [
+        { id: "pane-left", events: [{ Paste: text }], popup: false },
+    ]);
+    assert.equal(
+        await value(page, "document.activeElement.matches('.terminal-grid-input')"),
+        true,
+        "sending restores terminal input focus without an extra Enter",
+    );
+    await page.evaluate("fixture.inputs=[]");
+
+    await open("discard me");
+    await page.click({ label: "Cancel paste" });
+    await settle(page);
+    assert.equal(await value(page, "fixture.inputs.length"), 0);
+    await open();
+    assert.equal(
+        await value(page, "document.querySelector('.terminal-keyboard-paste textarea').value"),
+        "",
+        "cancelled text is not retained",
+    );
+    assert.equal(
+        await value(page, "document.querySelector('.terminal-keyboard-paste button').disabled"),
+        true,
+        "empty text cannot be sent",
+    );
+    await page.press("Escape");
+    await settle(page);
+
+    // The real send boundary owns the UTF-8 limit, including native paste events.
+    await open();
+    await page.evaluate(`const field=document.querySelector('.terminal-keyboard-paste textarea');
+        field.value='界'.repeat(Math.floor(${MAX_SELECTION_BYTES}/3)+1);
+        field.dispatchEvent(new InputEvent('input',{bubbles:true}));`);
+    await page.click({ label: "Paste into pane" });
+    await settle(page);
+    assert.equal(await value(page, "fixture.inputs.length"), 0, "oversized UTF-8 paste is refused");
+    assert.match(
+        await value<string>(page, "document.querySelector('[role=status]').textContent"),
+        /1 MiB/,
+    );
+    await page.click({ label: "Cancel paste" });
+
+    const base = await value(page, "fixture.props.surface");
+
+    for (const change of [
+        "fixture.draw({inputEpoch:fixture.props.inputEpoch+1})",
+        "fixture.draw({surface:{...fixture.props.surface,boot_id:'paste-restarted'}})",
+        "fixture.draw({surface:{...fixture.props.surface,panes:fixture.props.surface.panes.map((p,i)=>({...p,focused:i===1}))}})",
+        "fixture.draw({surface:{...fixture.props.surface,popup:{terminal_id:'paste-popup',title:'Paste popup',frame:fixture.props.surface.frame}}})",
+        "fixture.focusRef.current.setTarget('pane-right')",
+        "fixture.draw({disabled:true})",
+        "fixture.draw({enabled:false})",
+    ]) {
+        await open("must not cross targets");
+        await page.evaluate(`${change};`);
+        await settle(page);
+        assert.equal(
+            await value(page, "!!document.querySelector('.terminal-keyboard-paste')"),
+            false,
+            `target/connection/access changes discard the open paste: ${change}`,
+        );
+        assert.equal(await value(page, "fixture.inputs.length"), 0);
+        await page.evaluate(
+            `fixture.draw({surface:${JSON.stringify(base)},inputEpoch:1,enabled:true,disabled:false});`,
+        );
+        await settle(page);
+    }
+
+    await page.evaluate(
+        `fixture.draw({surface:{...fixture.props.surface,popup:{terminal_id:'paste-popup',title:'Paste popup',frame:fixture.props.surface.frame}}});`,
+    );
+    await settle(page);
+    await open("popup text");
+    await page.click({ label: "Paste into pane" });
+    assert.deepEqual(await value(page, "fixture.inputs"), [
+        { id: "paste-popup", events: [{ Paste: "popup text" }], popup: true },
+    ]);
+    await page.evaluate(`fixture.inputs=[];fixture.draw({surface:${JSON.stringify(base)}});`);
+    await settle(page);
 }
 
 async function shot(page: BrowserPage, name: string) {

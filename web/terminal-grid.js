@@ -11,7 +11,9 @@
 import { h } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import htm from "htm";
-import { TerminalKeyboard } from "./terminal-keyboard.js";
+import { TerminalKeyboard, TerminalKeyboardControls } from "./terminal-keyboard.js";
+import { terminalTouch } from "./terminal-touch.js";
+import { terminalViewport } from "./terminal-viewport.js";
 
 const html = htm.bind(h);
 
@@ -871,6 +873,8 @@ function paintFrame(
  * focusRef.current: focus() restores desktop input if safe; isFocused() checks it;
  * setTarget(paneId) records a known navigation target without an RPC and returns a
  * cancellation function. Call that function if navigation/focus is rejected.
+ * renderFooter(keyboardControls, pasteAction) optionally places these in sibling chrome;
+ * the embedding view owns that footer's layout. Otherwise controls stay in the key toolbar.
  * Optional exact widths: frame.cell_widths[] from the pinned unicode-width crate.
  */
 export function TerminalGrid({
@@ -893,6 +897,7 @@ export function TerminalGrid({
     altKeys = false,
     reportAllKeys = false,
     showKeybar = true,
+    renderFooter,
     className = "",
     label = "Terminal",
     clipboardOffer = null,
@@ -915,6 +920,14 @@ export function TerminalGrid({
     const pasteState = useRef({ context: "", epoch: 0, pending: false, inputEpoch });
     const pendingPane = useRef(null);
     const touchKeyboard = useRef(null);
+    const touchGesture = useRef(null);
+    const viewportSize = useRef(null);
+    const pasteButton = useRef(null);
+
+    if (!viewportSize.current) {
+        viewportSize.current = terminalViewport();
+    }
+
     const externalActivity = useRef({ composing: false, dragging: false });
     const [metrics, setMetrics] = useState({ cw: cellWidth || fontSize * 0.6, ch: cellHeight });
     const [selection, setSelection] = useState(null),
@@ -926,9 +939,11 @@ export function TerminalGrid({
             window.matchMedia("(max-width: 600px), (pointer: coarse)").matches,
     );
     const [nativeKeyboard, setNativeKeyboard] = useState(false);
-    const touchInput = showKeybar && touchLayout && !nativeKeyboard;
+    const [keyboardOpen, setKeyboardOpen] = useState(true);
+    const touchInput = showKeybar && touchLayout && (!nativeKeyboard || !keyboardOpen);
     const [imageVersion, setImageVersion] = useState(0);
     const [linkOffer, setLinkOffer] = useState(null);
+    const [touchSelection, setTouchSelection] = useState(null);
     const frame = surface?.frame;
     const valid = validFrame(frame) && (!surface.popup || validFrame(surface.popup.frame));
     const { cw, ch } = metrics;
@@ -991,13 +1006,15 @@ export function TerminalGrid({
             seen: surface.panes?.some((p) => p.pane_id === paneId) || false,
         };
 
-        touchKeyboard.current?.();
+        touchKeyboard.current?.reset();
+        touchGesture.current?.cancel();
         pendingPane.current = pending;
         pasteState.current.epoch++;
 
         return () => {
             if (pendingPane.current === pending) {
-                touchKeyboard.current?.();
+                touchKeyboard.current?.reset();
+                touchGesture.current?.cancel();
                 pendingPane.current = null;
                 pasteState.current.epoch++;
             }
@@ -1066,47 +1083,23 @@ export function TerminalGrid({
         };
     }, [fontSize, cellHeight, cellWidth, fontFamily]);
 
-    useEffect(() => {
-        let last = "";
-
-        const resize = () => {
-            const el = viewport.current;
-
-            if (!el || !latest.current.interactive || !el.clientWidth || !el.clientHeight) {
-                return;
-            }
-
-            const cols = clamp(Math.floor(el.clientWidth / cw), 1, 4096);
-            const rows = clamp(
-                Math.floor(el.clientHeight / ch),
-                1,
-                Math.min(4096, Math.floor(MAX_CELLS / cols)),
-            );
-            const size = {
-                cols,
-                rows,
-                cell_width_px: Math.max(1, Math.round(cw)),
-                cell_height_px: Math.max(1, Math.round(ch)),
-            };
-            const key = JSON.stringify(size);
-
-            if (key !== last) {
-                last = key;
-                latest.current.onResize?.(size);
-            }
-        };
-
-        const observer = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
-
-        observer?.observe(viewport.current);
-        window.addEventListener("resize", resize);
-        resize();
-
-        return () => {
-            observer?.disconnect();
-            window.removeEventListener("resize", resize);
-        };
-    }, [cw, ch, interactive]);
+    useEffect(
+        () =>
+            viewportSize.current.observe(viewport.current, {
+                cw,
+                ch,
+                maxCells: MAX_CELLS,
+                read: () => ({
+                    active: latest.current.interactive,
+                    epoch: JSON.stringify([
+                        latest.current.inputEpoch,
+                        latest.current.surface?.boot_id,
+                    ]),
+                }),
+                report: (size) => latest.current.onResize?.(size),
+            }),
+        [cw, ch, interactive, inputEpoch, surface?.boot_id],
+    );
 
     useEffect(() => {
         const media = window.matchMedia("(max-width: 600px), (pointer: coarse)");
@@ -1508,6 +1501,10 @@ export function TerminalGrid({
             target = targetAt(surface, p.x, p.y);
 
         if (!target) {
+            if (event.pointerType === "touch") {
+                touchGesture.current?.start(event, null);
+            }
+
             const split = surface.splits?.find((s) => contains(s.hit_rect, p.x, p.y));
 
             if (split && interactive) {
@@ -1538,6 +1535,15 @@ export function TerminalGrid({
             return;
         }
 
+        if (event.pointerType === "touch") {
+            if (touchGesture.current?.start(event, { target, application, p })) {
+                event.preventDefault();
+                canvas.current.setPointerCapture?.(event.pointerId);
+            }
+
+            return;
+        }
+
         event.preventDefault();
 
         if (!focusPane(target)) {
@@ -1560,7 +1566,7 @@ export function TerminalGrid({
         }
     };
 
-    const move = (event) => {
+    const movePointer = (event) => {
         if (!drawable) {
             return;
         }
@@ -1587,7 +1593,37 @@ export function TerminalGrid({
         }
     };
 
-    const up = (event) => {
+    const offerLink = (target, p, event) => {
+        const head = selectPoint(p, target);
+        const region = target.popup
+            ? { x: 0, y: 0, width: target.rect.width, height: target.rect.height }
+            : target.rect;
+        let x = head.x;
+        const row = head.y * target.frame.width;
+
+        for (let start = region.x; start <= head.x;) {
+            const span = cellSpan(target.frame, row + start, region.x + region.width - start);
+
+            if (start + span > head.x) {
+                x = start;
+                break;
+            }
+
+            start += span;
+        }
+
+        const cell = target.frame.cells[row + x];
+        const url =
+            !(cell?.modifier & HIDDEN) && safeHyperlink(target.frame.hyperlinks?.[cell?.hyperlink]);
+
+        setLinkOffer(url || null);
+
+        if (url && (event.ctrlKey || event.metaKey)) {
+            window.open(url, "_blank", "noopener,noreferrer");
+        }
+    };
+
+    const finishPointer = (event) => {
         const d = drag.current;
 
         if (!d || !drawable) {
@@ -1612,46 +1648,107 @@ export function TerminalGrid({
             );
 
             if (!d.moved) {
-                let x = head.x;
-                const row = head.y * d.target.frame.width;
-
-                for (let start = region.x; start <= head.x;) {
-                    const span = cellSpan(
-                        d.target.frame,
-                        row + start,
-                        region.x + region.width - start,
-                    );
-
-                    if (start + span > head.x) {
-                        x = start;
-                        break;
-                    }
-
-                    start += span;
-                }
-
-                const c = d.target.frame.cells[row + x];
-                const url =
-                    !(c.modifier & HIDDEN) &&
-                    safeHyperlink(d.target.frame.hyperlinks?.[c.hyperlink]);
-
-                setLinkOffer(url || null);
-
-                if (url && (event.ctrlKey || event.metaKey)) {
-                    window.open(url, "_blank", "noopener,noreferrer");
-                }
+                offerLink(d.target, p, event);
             }
         }
 
-        canvas.current.releasePointerCapture?.(event.pointerId);
+        if (event.pointerType !== "touch") {
+            canvas.current.releasePointerCapture?.(event.pointerId);
+        }
     };
 
-    const cancel = () => {
+    const move = (event) => {
+        if (event.pointerType === "touch") {
+            touchGesture.current?.move(event);
+        } else {
+            movePointer(event);
+        }
+    };
+
+    const up = (event) => {
+        if (event.pointerType === "touch") {
+            touchGesture.current?.end(event);
+            canvas.current?.releasePointerCapture?.(event.pointerId);
+        } else {
+            finishPointer(event);
+        }
+    };
+
+    const cancel = (event) => {
+        if (event.pointerType === "touch") {
+            touchGesture.current?.cancel(event.pointerId);
+
+            return;
+        }
+
         if (drag.current?.application) {
             report("Pointer capture was interrupted; the application drag may need a fresh click");
         }
 
         drag.current = null;
+    };
+
+    const scrollTarget = (target, p, dx, dy, event) => {
+        const w = wheel.current;
+        const id = JSON.stringify([
+            latest.current.inputEpoch,
+            latest.current.surface?.boot_id,
+            target.id,
+            target.popup,
+        ]);
+
+        if (w.id !== id) {
+            w.id = id;
+            w.x = 0;
+            w.y = 0;
+        }
+
+        const add = (axis, delta) => {
+            if (Math.sign(delta) !== Math.sign(w[axis])) {
+                w[axis] = 0;
+            }
+
+            const total = clamp(w[axis] + delta, -128, 128);
+            const steps = Math.trunc(total);
+
+            w[axis] = total - steps;
+
+            return steps;
+        };
+
+        const vertical = add("y", dy);
+        const horizontal = dx ? add("x", dx) : 0;
+        const events = [];
+
+        if (vertical) {
+            events.push(
+                mouseEvent(
+                    target,
+                    p.x,
+                    p.y,
+                    vertical < 0 ? "ScrollUp" : "ScrollDown",
+                    event,
+                    metrics,
+                    Math.abs(vertical),
+                ),
+            );
+        }
+
+        if (horizontal) {
+            events.push(
+                mouseEvent(
+                    target,
+                    p.x,
+                    p.y,
+                    horizontal < 0 ? "ScrollLeft" : "ScrollRight",
+                    event,
+                    metrics,
+                    Math.abs(horizontal),
+                ),
+            );
+        }
+
+        latest.current.send(events, target);
     };
 
     useEffect(() => {
@@ -1672,73 +1769,178 @@ export function TerminalGrid({
             }
 
             event.preventDefault();
-            const w = wheel.current;
-
-            if (w.id !== target.id) {
-                w.id = target.id;
-                w.x = 0;
-                w.y = 0;
-            }
-
-            const add = (axis, delta) => {
-                if (Math.sign(delta) !== Math.sign(w[axis])) {
-                    w[axis] = 0;
-                }
-
-                const total = clamp(w[axis] + delta, -128, 128),
-                    steps = Math.trunc(total);
-
-                w[axis] = total - steps;
-
-                return steps;
-            };
-
             const scaleY =
                 event.deltaMode === 1 ? 1 : event.deltaMode === 2 ? target.rect.height : 1 / ch;
             const scaleX =
                 event.deltaMode === 1 ? 1 : event.deltaMode === 2 ? target.rect.width : 1 / cw;
-            const dy = add("y", event.deltaY * scaleY);
+            const dy = event.deltaY * scaleY;
             const dx =
                 target.mouse_reporting && Math.abs(event.deltaX) > Math.abs(event.deltaY)
-                    ? add("x", event.deltaX * scaleX)
+                    ? event.deltaX * scaleX
                     : 0;
-            const events = [];
 
-            if (dy) {
-                events.push(
-                    mouseEvent(
-                        target,
-                        x,
-                        y,
-                        dy < 0 ? "ScrollUp" : "ScrollDown",
-                        event,
-                        metrics,
-                        Math.abs(dy),
-                    ),
-                );
-            }
-
-            if (dx) {
-                events.push(
-                    mouseEvent(
-                        target,
-                        x,
-                        y,
-                        dx < 0 ? "ScrollLeft" : "ScrollRight",
-                        event,
-                        metrics,
-                        Math.abs(dx),
-                    ),
-                );
-            }
-
-            latest.current.send(events, target);
+            scrollTarget(target, { x, y }, dx, dy, event);
         };
 
         element.addEventListener("wheel", scroll, { passive: false });
 
         return () => element.removeEventListener("wheel", scroll);
     }, [cw, ch]);
+
+    latest.current.touchHandlers = {
+        context: (payload) => {
+            if (!payload) {
+                return null;
+            }
+
+            const live = targetAt(surface, payload.p.x, payload.p.y);
+            const active = activeTarget();
+
+            return JSON.stringify([
+                interactive,
+                drawable,
+                inputEpoch,
+                surface?.boot_id,
+                active.id,
+                active.popup,
+                live?.id,
+                live?.popup,
+                live?.rect,
+                live?.mouse_reporting,
+                live?.pixel_width,
+                live?.pixel_height,
+                frame?.width,
+                frame?.height,
+                cw,
+                ch,
+                viewport.current?.clientWidth,
+                viewport.current?.clientHeight,
+                !!canvas.current?.isConnected,
+            ]);
+        },
+        onStart: ({ target: payload }) => {
+            if (!payload || drag.current) {
+                return false;
+            }
+
+            wheel.current = { id: null, x: 0, y: 0 };
+
+            return focusPane(payload.target);
+        },
+        onTap: ({ event, target: payload }) => {
+            focusInput();
+            setSelection(null);
+            const p = point(event);
+
+            if (payload.application) {
+                setLinkOffer(null);
+                send(
+                    [
+                        mouseEvent(payload.target, p.x, p.y, { Down: "Left" }, event, metrics),
+                        mouseEvent(payload.target, p.x, p.y, { Up: "Left" }, event, metrics),
+                    ],
+                    payload.target,
+                );
+            } else {
+                offerLink(payload.target, p, event);
+            }
+        },
+        onScroll: ({ event, target: payload, dx, dy }) => {
+            if (!interactive) {
+                return;
+            }
+
+            setSelection(null);
+            setLinkOffer(null);
+            const target = payload.target;
+            const horizontal = Math.abs(dx) > Math.abs(dy);
+
+            if (horizontal && !target.mouse_reporting && viewport.current) {
+                viewport.current.scrollLeft += dx;
+            }
+
+            scrollTarget(
+                target,
+                point(event),
+                horizontal && target.mouse_reporting ? dx / cw : 0,
+                dy / ch,
+                event,
+            );
+        },
+        onSelectionStart: ({ target: payload }) => {
+            const target = targetAt(surface, payload.p.x, payload.p.y);
+
+            if (
+                !target ||
+                target.id !== payload.target.id ||
+                target.popup !== payload.target.popup
+            ) {
+                return;
+            }
+
+            const anchor = selectPoint(payload.p, target);
+
+            drag.current = {
+                target,
+                start: payload.p,
+                application: false,
+                moved: true,
+                touch: true,
+            };
+            setLinkOffer(null);
+            setSelection({ boot: surface.boot_id, target, anchor, head: anchor, text: "" });
+            setTouchSelection(payload.p);
+        },
+        onSelectionMove: ({ event }) => movePointer(event),
+        onSelectionEnd: ({ event }) => {
+            finishPointer(event);
+            setTouchSelection(null);
+        },
+        onCancel: (mode) => {
+            if (mode === "select") {
+                if (drag.current?.touch) {
+                    drag.current = null;
+                }
+
+                setSelection(null);
+                setTouchSelection(null);
+            }
+        },
+    };
+
+    if (!touchGesture.current) {
+        touchGesture.current = terminalTouch(
+            Object.fromEntries(
+                Object.keys(latest.current.touchHandlers).map((name) => [
+                    name,
+                    (...args) => latest.current.touchHandlers[name](...args),
+                ]),
+            ),
+        );
+    }
+
+    useLayoutEffect(() => {
+        touchGesture.current.sync();
+    });
+
+    useEffect(() => {
+        const cancel = () => touchGesture.current?.cancel();
+
+        const visibility = () => {
+            if (document.hidden) {
+                cancel();
+            }
+        };
+
+        window.addEventListener("blur", cancel);
+        document.addEventListener("visibilitychange", visibility);
+
+        return () => {
+            cancel();
+            window.removeEventListener("blur", cancel);
+            document.removeEventListener("visibilitychange", visibility);
+        };
+    }, []);
 
     const commit = (text) => {
         if (!text) {
@@ -1824,15 +2026,21 @@ export function TerminalGrid({
         }
     };
 
-    const changeKeyboard = (native) => {
+    const changeKeyboard = (native, open = true) => {
+        touchKeyboard.current?.reset();
+        touchGesture.current?.cancel();
         setNativeKeyboard(native);
+        setKeyboardOpen(open);
 
         if (input.current) {
             // Apply synchronously inside the tap so Safari permits the explicit native fallback.
             input.current.blur();
-            input.current.readOnly = !native;
-            input.current.inputMode = native ? "text" : "none";
-            focusInput();
+            input.current.readOnly = !native || !open;
+            input.current.inputMode = native && open ? "text" : "none";
+
+            if (open) {
+                focusInput();
+            }
         }
     };
 
@@ -1944,6 +2152,30 @@ export function TerminalGrid({
         }
     };
 
+    const pasteText = (text) => {
+        const target = activeTarget();
+
+        if (!interactive || !drawable || !target.id) {
+            report("No terminal input target is available for this paste.");
+
+            return false;
+        }
+
+        if (!text) {
+            return false;
+        }
+
+        if (encoder.encode(text).length > MAX_SELECTION_BYTES) {
+            report("Paste exceeds the 1 MiB limit");
+
+            return false;
+        }
+
+        send([{ Paste: text }], target);
+
+        return true;
+    };
+
     const paste = (event) => {
         if (!interactive) {
             return;
@@ -2046,10 +2278,8 @@ export function TerminalGrid({
             return;
         }
 
-        if (text && encoder.encode(text).length <= MAX_SELECTION_BYTES) {
-            send([{ Paste: text }]);
-        } else if (text) {
-            report("Paste exceeds the 1 MiB limit");
+        if (text) {
+            pasteText(text);
         } else if (event.clipboardData?.types?.length) {
             report(
                 "The browser did not provide plain text or a readable PNG image for this paste.",
@@ -2132,11 +2362,43 @@ export function TerminalGrid({
           }
         : {};
 
+    const keyboardControls =
+        showKeybar &&
+        html`<${TerminalKeyboardControls}
+        disabled=${!interactive || !drawable}
+        native=${nativeKeyboard}
+        open=${keyboardOpen}
+        onChange=${changeKeyboard}
+    />`;
+
+    const pasteAction =
+        showKeybar &&
+        !nativeKeyboard &&
+        html`
+        <button
+            ref=${pasteButton}
+            type="button"
+            class="terminal-paste-action"
+            disabled=${!interactive || !drawable}
+            aria-label="Paste"
+            title="Paste text"
+            onPointerDown=${(event) => event.preventDefault()}
+            onClick=${() => touchKeyboard.current?.paste()}
+        >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round" aria-hidden="true">
+                <rect x="8" y="2" width="8" height="4" rx="1" />
+                <path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2" />
+            </svg>
+        </button>`;
+
     return html`
         <section class=${`terminal-grid ${className}`} aria-label=${label}
-            data-enabled=${interactive} data-focused=${focused} onCopy=${copy}>
+            data-enabled=${interactive} data-focused=${focused}
+            data-touch-selecting=${!!touchSelection}>
             <link rel="stylesheet" href="/terminal-grid.css" />
-            <div class="terminal-grid-display">
+            <div class="terminal-grid-display" onCopy=${copy}>
             <div class="terminal-grid-viewport" ref=${viewport} tabIndex="-1"
                 style=${{ backgroundColor: rgb(theme.background) }}>
                 ${
@@ -2144,14 +2406,16 @@ export function TerminalGrid({
                         ? html`
                     <div class="terminal-grid-stage" style=${pixels({ width, height })}>
                         <canvas ref=${canvas} style=${pixels({ width, height })} role="img"
-                            aria-label=${`${label}. ${frame.width} columns, ${frame.height} rows. Click to type; Shift-drag to select; Control-click or Command-click to open links. Shift-Escape leaves keyboard input.`}
+                            aria-label=${`${label}. ${frame.width} columns, ${frame.height} rows. Click to type; Shift-drag to select; Control-click or Command-click to open links. Shift-Escape leaves keyboard input. Touch: swipe to scroll; hold then drag to select text.`}
                             onPointerEnter=${enter}
                             onPointerDown=${down} onPointerMove=${move} onPointerUp=${up}
                             onPointerCancel=${cancel} onLostPointerCapture=${cancel}
                             onContextMenu=${(e) => {
                                 if (
-                                    interactive &&
-                                    targetAt(surface, point(e).x, point(e).y)?.mouse_reporting
+                                    touchSelection ||
+                                    e.pointerType === "touch" ||
+                                    (interactive &&
+                                        targetAt(surface, point(e).x, point(e).y)?.mouse_reporting)
                                 ) {
                                     e.preventDefault();
                                 }
@@ -2162,6 +2426,12 @@ export function TerminalGrid({
                             data-shape=${cursor.shape || 0} style=${pixels(cursorStyle)} />`
                         }
                         ${surface.popup && html`<span class="terminal-grid-popup-title">${surface.popup.title}</span>`}
+                        ${
+                            touchSelection &&
+                            html`
+                            <span class="terminal-grid-touch-cue" aria-hidden="true"
+                                style=${pixels({ left: touchSelection.x * cw, top: touchSelection.y * ch })} />`
+                        }
                         <textarea ref=${input} class="terminal-grid-input" aria-label="Terminal input"
                             disabled=${!interactive} readOnly=${!interactive || touchInput}
                             inputMode=${touchInput ? "none" : "text"} spellcheck="false"
@@ -2293,9 +2563,22 @@ export function TerminalGrid({
                     disabled=${!interactive || !drawable}
                     contextKey=${JSON.stringify([pasteContext, touchLayout])}
                     onKey=${touchKey}
+                    onPaste=${(text) => {
+                        if (!pasteText(text)) {
+                            return false;
+                        }
+
+                        focusInput();
+
+                        return true;
+                    }}
                     native=${nativeKeyboard}
-                    onNative=${changeKeyboard}
-                    resetRef=${touchKeyboard}
+                    open=${keyboardOpen}
+                    onOpen=${setKeyboardOpen}
+                    controls=${renderFooter ? null : keyboardControls}
+                    pasteAction=${renderFooter ? null : pasteAction}
+                    pasteButtonRef=${pasteButton}
+                    keyboardRef=${touchKeyboard}
                 />
             `
             }
@@ -2307,7 +2590,8 @@ export function TerminalGrid({
                 </div>`
             }
             ${notice && html`<p class="terminal-grid-notice" role="status">${notice}</p>`}
-        </section>`;
+        </section>
+        ${renderFooter?.(keyboardControls, pasteAction)}`;
 }
 
 function paintSelection(ctx, selection, cw, ch, theme, clip) {

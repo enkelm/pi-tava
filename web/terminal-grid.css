@@ -39,9 +39,42 @@
 .terminal-grid canvas {
     display: block;
     cursor: text;
-    touch-action: none;
+    touch-action: pinch-zoom;
     user-select: none;
     -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
+.terminal-grid-touch-cue {
+    position: absolute;
+    width: 26px;
+    height: 26px;
+    border: 2px solid var(--accent, #8fbcbb);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    animation: terminal-selection-cue 160ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+}
+
+@keyframes terminal-selection-cue {
+    from {
+        opacity: 0.4;
+        transform: translate(-50%, -50%) scale(0.9);
+    }
+    to {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+    }
+}
+
+:root[data-motion="reduced"] .terminal-grid-touch-cue {
+    animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    :root:not([data-motion="full"]) .terminal-grid-touch-cue {
+        animation: none;
+    }
 }
 
 .terminal-grid-cursor {
@@ -103,6 +136,10 @@
     touch-action: pan-y;
 }
 
+.terminal-keyboard[hidden] {
+    display: none;
+}
+
 .terminal-keyboard-toolbar,
 .terminal-keyboard-layouts,
 .terminal-keyboard-row {
@@ -132,7 +169,8 @@
     gap: 5px;
 }
 
-.terminal-keyboard button {
+.terminal-keyboard button,
+.terminal-keyboard-controls button {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -154,6 +192,8 @@
 /* Only terminal controls suppress native label selection; the selection textarea stays copyable.
  * The keyboard's parent pan-y policy still owns scroll/cancel semantics. */
 .terminal-keyboard button,
+.terminal-keyboard-controls button,
+.terminal-paste-action,
 .terminal-grid-clipboard-offer button,
 .terminal-grid-selection-actions button,
 .terminal-grid-selection-actions a {
@@ -164,11 +204,88 @@
 }
 
 .terminal-keyboard-toolbar button {
-    min-height: 36px;
-    padding-inline: 10px;
+    min-width: 40px;
+    min-height: 40px;
+    padding-inline: 4px;
     border-color: transparent;
     background: transparent;
-    font-size: 12px;
+    font-size: 11px;
+}
+
+.terminal-keyboard-controls {
+    display: none;
+    flex: none;
+    align-items: center;
+    gap: 4px;
+}
+
+.terminal-keyboard-types {
+    display: flex;
+    border: 1px solid var(--line, #39414b);
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.terminal-keyboard-controls button {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 0;
+    font-size: 11px;
+    background: transparent;
+}
+
+.terminal-keyboard-controls .terminal-keyboard-collapse {
+    border-radius: 5px;
+}
+
+.terminal-keyboard-paste {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px;
+}
+
+.terminal-keyboard-paste label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font:
+        13px/1.4 system-ui,
+        sans-serif;
+}
+
+.terminal-keyboard-paste textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 72px;
+    padding: 8px;
+    border: 1px solid var(--line, #39414b);
+    border-radius: 5px;
+    resize: vertical;
+    font: 16px/1.4 monospace;
+    color: var(--text, #d8dee9);
+    caret-color: currentColor;
+    background: var(--raised, #20252d);
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.terminal-keyboard-paste textarea::placeholder {
+    color: var(--text, #d8dee9);
+    opacity: 0.8;
+}
+
+.terminal-keyboard-paste p {
+    margin: 0;
+    font:
+        12px/1.4 system-ui,
+        sans-serif;
+}
+
+.terminal-keyboard-paste button {
+    flex: 1;
 }
 
 .terminal-keyboard-utility button,
@@ -187,11 +304,13 @@
     font-size: 20px;
 }
 
-.terminal-keyboard button:active:not(:disabled):not([aria-pressed="true"]) {
+.terminal-keyboard button:active:not(:disabled):not([aria-pressed="true"]),
+.terminal-keyboard-controls button:active:not(:disabled):not([aria-pressed="true"]) {
     background: var(--pressed, #39414b);
 }
 
-.terminal-keyboard button[aria-pressed="true"] {
+.terminal-keyboard button[aria-pressed="true"],
+.terminal-keyboard-controls button[aria-pressed="true"] {
     border-color: var(--accent, #8fbcbb);
     background: var(--accent-fill, var(--accent, #8fbcbb));
     color: var(--accent-ink, #101419);
@@ -207,29 +326,22 @@
     background: currentColor;
 }
 
-.terminal-keyboard button:disabled {
+.terminal-keyboard button:disabled,
+.terminal-keyboard-controls button:disabled {
     opacity: 0.45;
     cursor: default;
 }
 
-.terminal-keyboard-hint {
-    margin: 0;
-    padding: 0 2px;
-    font:
-        11px/1.5 system-ui,
-        sans-serif;
-    color: var(--text, #d8dee9);
-    text-align: center;
-}
-
 @media (hover: hover) and (pointer: fine) {
-    .terminal-keyboard button:hover:not(:disabled):not([aria-pressed="true"]) {
+    .terminal-keyboard button:hover:not(:disabled):not([aria-pressed="true"]),
+    .terminal-keyboard-controls button:hover:not(:disabled):not([aria-pressed="true"]) {
         background: var(--hover, #39414b);
     }
 }
 
 @media (max-width: 600px), (pointer: coarse) {
-    .terminal-keyboard {
+    .terminal-keyboard,
+    .terminal-keyboard-controls {
         display: flex;
     }
 }
@@ -247,10 +359,6 @@
 
     .terminal-keyboard button {
         min-height: 34px;
-    }
-
-    .terminal-keyboard-hint {
-        display: none;
     }
 }
 
@@ -274,9 +382,12 @@
     touch-action: manipulation;
 }
 
+.terminal-keyboard-controls button:focus-visible,
+.terminal-paste-action:focus-visible,
 .terminal-grid button:focus-visible,
 .terminal-grid a:focus-visible,
-.terminal-grid-selection:focus-visible {
+.terminal-grid-selection:focus-visible,
+.terminal-keyboard-paste textarea:focus-visible {
     outline: 2px solid var(--accent, #8fbcbb);
     outline-offset: -2px;
 }

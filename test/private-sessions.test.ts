@@ -348,6 +348,36 @@ async function spinUntil(check: () => boolean, description: string): Promise<voi
     }
 }
 
+test("private pane polling uses visible snapshots, never interactive application-history reads", async () => {
+    const f = await fixture("passive-pane-polling");
+
+    try {
+        f.calls.length = 0;
+
+        for (const status of ["idle", "working", "blocked"]) {
+            f.state.status = status;
+            const view = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
+
+            assert.equal(view.terminal, "LIVE_PRIVATE_OUTPUT");
+        }
+
+        // Herdr's recent/recent_unwrapped reads may actively wheel-scroll idle
+        // alternate-screen agents. Visible is a passive snapshot in every state.
+        const sources = f.calls
+            .filter((call) => call.method === "pane.read")
+            .map((call) => call.params.source);
+
+        assert.deepEqual([...new Set(sources)], ["visible"]);
+        assert.equal(
+            f.calls.some((call) => call.method === "agent.prompt"),
+            false,
+        );
+        assert.deepEqual(f.state.signals, []);
+    } finally {
+        await f.app.close();
+    }
+});
+
 // Primary upload contract owner: HTTP authentication, persisted bytes and agent-aware input.
 // These cases catch path acceptance, cross-pane/user/revision reuse and attachment-blind dedup.
 test("private HTTP uploads stream concurrent bytes into scoped tokens and deliver quoted file paths", async () => {
