@@ -8,7 +8,12 @@ import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
 import type { CommentReview, ResolveReview } from "../reviews.ts";
-import type { StartHandoff, CompleteHandoff, UpdateWorkItem } from "../handoffs.ts";
+import type {
+    StartHandoff,
+    CompleteHandoff,
+    RecordExternalReview,
+    UpdateWorkItem,
+} from "../handoffs.ts";
 import { serveImage, TYPES } from "./assets.ts";
 import { type ApiRequest, json, readJson, send } from "./io.ts";
 
@@ -58,6 +63,16 @@ export async function conversationRoutes(
 
         if (fourth === "complete" && method === "POST") {
             await app.handoffs.complete(id, user, await readJson<CompleteHandoff>(request));
+
+            return json(response, 200, { ok: true });
+        }
+
+        if (fourth === "external-review" && method === "POST") {
+            await app.handoffs.recordExternalReview(
+                id,
+                user,
+                await readJson<RecordExternalReview>(request),
+            );
 
             return json(response, 200, { ok: true });
         }

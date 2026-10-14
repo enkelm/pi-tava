@@ -85,13 +85,23 @@ async function select(page: BrowserPage, selector: string, option: string) {
         field.dispatchEvent(new Event('change', { bubbles: true }));`);
 }
 
-async function defaultChoice(page: BrowserPage, type: string) {
+async function defaultChoice(page: BrowserPage, type: string, recommendation?: string) {
     await click(page, ".topbar .handoff-button");
     await present(page, `${dialog} input[value="${type}:same-work"]:checked`);
-    assert.equal(
-        await value(page, `document.querySelectorAll('${dialog} .handoff-recommendation').length`),
-        0,
-        "a role-aware default is not an agent recommendation",
+    assert.deepEqual(
+        await value(
+            page,
+            `[...document.querySelectorAll('${dialog} .handoff-recommendation')].map(element => ({
+                option: element.closest('label').querySelector('input').value,
+                text: element.textContent.trim(),
+            }))`,
+        ),
+        recommendation
+            ? [{ option: `${type}:same-work`, text: `Recommended · ${recommendation}` }]
+            : [],
+        recommendation
+            ? "completion displays the server's recommended role and reason"
+            : "a role-aware default is not an agent recommendation",
     );
     await button(page, dialog, "Cancel");
     await present(page, dialog, false);
@@ -408,7 +418,6 @@ test(
                         "checkpoint-gated stages remain visible but disabled",
                     );
                     await shot(page, `${viewport}-empty-role-chooser`);
-                    await button(page, dialog, "Cancel");
                     assert.equal(
                         app.sessions().length,
                         beforeEmptyPicker,
@@ -418,7 +427,33 @@ test(
                     const busyRun = say(app, originId, "UI_BUSY_CHECK");
 
                     await until(() => app.isBusy(originId), "worker held in an active model run");
-                    await click(page, ".topbar .handoff-button");
+                    await page.evaluate(`const fetchBeforeBusy = window.fetch.bind(window);
+                        window.handoffBusyLoads = 0;
+                        window.fetch = async (url, options) => {
+                            const response = await fetchBeforeBusy(url, options);
+
+                            if (String(url).endsWith('/handoffs') && options?.method !== 'POST') {
+                                window.handoffBusyLoads++;
+                                await new Promise(resolve => {
+                                    window.releaseBusyOptions = () => {
+                                        window.fetch = fetchBeforeBusy;
+                                        resolve();
+                                    };
+                                });
+                            }
+
+                            return response;
+                        };
+                        // Same-task close/reopen retains the sheet through its leaving animation.
+                        [...document.querySelectorAll('${dialog} button')].find(button => button.textContent.trim() === 'Cancel').click();
+                        document.querySelector('.topbar .handoff-button').click();`);
+                    await until(
+                        () => value<boolean>(page, "window.handoffBusyLoads === 1"),
+                        "reopening reloads eligibility even while the previous sheet is retained",
+                    );
+                    await present(page, `${dialog} .loader`);
+                    await present(page, `${dialog} input[name="handoff-option"]`, false);
+                    await page.evaluate("window.releaseBusyOptions()");
                     await present(page, `${dialog} input[name="handoff-option"]`);
                     assert.equal(
                         await value(
@@ -1284,7 +1319,50 @@ test(
                     );
 
                     await say(app, followUpId as ConversationId, "UI_FOLLOW_UP_READY");
-                    await defaultChoice(page, "land");
+                    await defaultChoice(page, "worker");
+                    await click(page, ".topbar .handoff-button");
+                    await present(page, `${dialog} input[value="land:same-work"]`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('${dialog} input[value="land:same-work"]').matches(':disabled')`,
+                        ),
+                        true,
+                        "Follow-up without independent review cannot manufacture readiness",
+                    );
+                    await button(page, dialog, "Cancel");
+                    // The human may explicitly obtain an independent review; this is not a default repair loop.
+                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff reviewer");
+                    await click(page, ".composer .send");
+                    await present(page, ".topbar .title-sub .thread-type.reviewer");
+                    await until(
+                        () => app.sessions().every((session) => !session.busy),
+                        "independent reviewer idle",
+                    );
+                    const independentReviewer = await value<number>(
+                        page,
+                        "Number(location.pathname.split('/').at(-1))",
+                    );
+
+                    await say(app, independentReviewer as ConversationId, "UI_REVIEW_READY");
+                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff follow-up");
+                    await click(page, ".composer .send");
+                    await present(page, ".topbar .title-sub .thread-type.follow-up");
+                    await until(
+                        () => app.sessions().every((session) => !session.busy),
+                        "review-backed repair idle",
+                    );
+                    const reviewedRepair = await value<number>(
+                        page,
+                        "Number(location.pathname.split('/').at(-1))",
+                    );
+
+                    await say(app, reviewedRepair as ConversationId, "UI_FOLLOW_UP_READY");
+                    await defaultChoice(
+                        page,
+                        "land",
+                        "Independent review and applicable repair checks support local landing.",
+                    );
                     await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff pull");
                     await click(page, ".composer .send");
                     await present(page, ".topbar .title-sub .thread-type.pull");
@@ -1303,8 +1381,8 @@ test(
                             page,
                             `[...document.querySelectorAll(${JSON.stringify(`${nextItem} .work-item-member .session-state [role="img"]`)})].map(icon => icon.getAttribute('aria-label'))`,
                         ),
-                        ["Worker", "Worker", "Follow-up", "Pull"],
-                        "new roles keep their accessible sidebar indicators in the same Work Item",
+                        ["Worker", "Worker", "Follow-up", "Reviewer", "Follow-up", "Pull"],
+                        "review and repair threads keep accessible sidebar indicators in the same Work Item",
                     );
                     assert.equal(
                         await value(page, "document.documentElement.scrollWidth <= innerWidth"),

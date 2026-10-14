@@ -12,7 +12,7 @@ Thread type is separate from placement:
 
 - **Worker** has a blue agent tag. New project threads default to Worker.
 - **Chat** has a green speech-bubble tag. The one-time-chat flow starts an unassigned Chat.
-- **Reviewer**, **Follow-up**, **Land** and **Publish** are successor types created through handoffs. Reviewer owns bounded independent review; Follow-up handles small review repairs and a short self-review; Land performs local integration and impact checks; Publish handles individually approved external delivery.
+- **Reviewer**, **Follow-up**, **Land** and **Publish** are successor types created through handoffs. Reviewer owns bounded independent review; Follow-up finishes bounded internal or external review repairs with a short delta self-review and normally recommends Land; Land performs local integration and impact checks; Publish handles individually approved external delivery.
 - **Pull** reads upstream/external sources and handles requested local rebases. It can start independently or be selected as a handoff at any stage.
 - Moving a thread does not change its type. Threads grouped in a Work Item move together.
 

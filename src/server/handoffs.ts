@@ -6,6 +6,7 @@ import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import {
@@ -13,6 +14,7 @@ import {
     configure,
     type ConversationId,
     type Cursor,
+    type Storage,
     defineTask,
     defineTool,
     InboxDoc,
@@ -26,12 +28,13 @@ import type { User } from "./config.ts";
 import { ProjectsDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
 import { HttpError } from "./errors.ts";
 import { hasPendingSubagentReports } from "./extensions/subagents.ts";
-import { ownRequest } from "./requests.ts";
+import { ownRequest, requestPerson } from "./requests.ts";
 import { PublicationsDoc } from "./workflow-publication.ts";
 import { userContent } from "./resend.ts";
 import { threadRolePrompt } from "./thread-prompts.ts";
 import {
     type CodeFingerprint,
+    type ExternalReview,
     type HandoffsData,
     HandoffsDoc,
     type Proposal,
@@ -63,14 +66,32 @@ export type CompleteHandoff = {
     summary?: unknown;
     readyForPublish?: unknown;
     recommendations?: unknown;
+    reviewApplicability?: unknown;
+};
+export type RecordExternalReview = {
+    sourceEntryId?: unknown;
+    source?: unknown;
+    scope?: unknown;
+    findings?: unknown;
+    checkpoint?: unknown;
 };
 export type UpdateWorkItem = { archived?: unknown; projectId?: unknown; goalId?: unknown };
 export type HandoffResult = { id: number; handoffId: string; workItemId: string };
+type ExternalReviewInput = {
+    sourceEntryId?: number;
+    sourceSubmissionId?: number;
+    sourceRequestId?: string;
+    source: string;
+    scope: string;
+    findings: string;
+    checkpoint: string;
+};
 type Completion = {
     status: WorkflowStatus;
     summary: string;
     readyForPublish: boolean;
     recommendations: Recommendation[];
+    reviewApplicability?: "preserved" | "invalidated";
 };
 
 function text(value: unknown, name: string, max = 12_000): string {
@@ -121,6 +142,19 @@ function recommendations(value: unknown): Recommendation[] | undefined {
     });
 }
 
+function publicExternalReview(review: Readonly<ExternalReview>) {
+    // Like handoff checkpoints, inspected Git status is private; the human-supplied checkpoint remains public.
+    const {
+        fingerprint: _privateCheckpoint,
+        findings: _privateFindings,
+        sourceSubmissionId: _privateSubmission,
+        sourceRequestId: _privateRequest,
+        ...evidence
+    } = review;
+
+    return evidence;
+}
+
 function publicWorkflow(state?: Readonly<Workflow>) {
     return {
         readOnly: state?.readOnly ?? false,
@@ -129,6 +163,12 @@ function publicWorkflow(state?: Readonly<Workflow>) {
         ...(state?.summary === undefined ? {} : { summary: state.summary }),
         ...(state?.recommendations === undefined ? {} : { recommendations: state.recommendations }),
         ...(state?.proposal === undefined ? {} : { proposal: state.proposal }),
+        ...(state?.externalReview === undefined
+            ? {}
+            : { externalReview: publicExternalReview(state.externalReview) }),
+        ...(state?.reviewApplicability === undefined
+            ? {}
+            : { reviewApplicability: state.reviewApplicability }),
     };
 }
 
@@ -295,6 +335,7 @@ const TITLES: Record<ThreadType, string> = {
 
 export class Handoffs {
     readonly #app: PocketApp;
+    #storage!: Storage;
     #doc: HandoffsData = empty();
     readonly #workflows = new Map<ConversationId, Workflow>();
 
@@ -332,7 +373,7 @@ export class Handoffs {
     readonly tool = defineTool({
         name: "handoff",
         description:
-            "Prepare a brief and advisory recommendation, record code-bound completion, or show status. Finish work and wait for all helpers/background tasks before prepare/complete. Only humans activate and may choose any eligible role; the brief follows their choice.",
+            "Prepare a brief, record completion or show status. record-review records human-pasted external review before repairs: source and findings must be verbatim in the human input; checkpoint must be its full reviewed commit (clean checkout) or fingerprint. sourceEntryId defaults to the latest human input. No external read is performed. scope describes what was independently reviewed. Mark material rewrites reviewApplicability=invalidated with needs-review. Finish all helpers/background tasks first. Only humans activate successors.",
         replay: "safe",
         executionMode: "sequential",
         parameters: Type.Object({
@@ -340,6 +381,7 @@ export class Handoffs {
                 Type.Literal("prepare"),
                 Type.Literal("complete"),
                 Type.Literal("status"),
+                Type.Literal("record-review"),
             ]),
             targetType: Type.Optional(Type.Union(TYPES.map((kind) => Type.Literal(kind)))),
             relationship: Type.Optional(
@@ -349,6 +391,14 @@ export class Handoffs {
             status: Type.Optional(Type.Union(STATUSES.map((state) => Type.Literal(state)))),
             summary: Type.Optional(Type.String()),
             readyForPublish: Type.Optional(Type.Boolean()),
+            reviewApplicability: Type.Optional(
+                Type.Union([Type.Literal("preserved"), Type.Literal("invalidated")]),
+            ),
+            sourceEntryId: Type.Optional(Type.Integer()),
+            source: Type.Optional(Type.String()),
+            scope: Type.Optional(Type.String()),
+            findings: Type.Optional(Type.String()),
+            checkpoint: Type.Optional(Type.String()),
             recommendations: Type.Optional(
                 Type.Array(
                     Type.Object({
@@ -406,16 +456,43 @@ export class Handoffs {
                     state.receipts[key] = input;
                     this.#human(id, user);
                 }, ctx);
-            } else if (args.action === "complete") {
-                const checked = this.#completion(args);
+            } else if (args.action === "record-review") {
+                const checked = await this.#resolveReviewSource(
+                    id,
+                    this.#externalReview(args),
+                    ctx,
+                );
 
-                // Explain unfinished helper work before attempting checkout inspection. Recheck at the final commit.
                 await api.commit(async (tx) => {
                     await this.#idle(
                         tx,
                         this.members(id).map(Number),
                         await this.#invocationTasks(tx, api.taskId),
                     );
+                    await this.#externalReviewInput(tx, id, user, checked);
+                }, ctx);
+                const code = await fingerprint((await api.agent(ctx)).cwd ?? this.#app.cwdOf(id));
+
+                await api.commit(async (tx) => {
+                    await this.#idle(
+                        tx,
+                        this.members(id).map(Number),
+                        await this.#invocationTasks(tx, api.taskId),
+                    );
+                    await this.#recordExternalReview(tx, id, user, checked, code, key);
+                }, ctx);
+            } else if (args.action === "complete") {
+                const checked = this.#completion(args);
+
+                // Refuse unfinished work or missing review provenance before checkout inspection.
+                // Both gates are rechecked at the final commit.
+                await api.commit(async (tx) => {
+                    await this.#idle(
+                        tx,
+                        this.members(id).map(Number),
+                        await this.#invocationTasks(tx, api.taskId),
+                    );
+                    await this.#completionState(tx, id, user, checked, key);
                 }, ctx);
                 const code = await fingerprint((await api.agent(ctx)).cwd ?? this.#app.cwdOf(id));
 
@@ -584,7 +661,8 @@ export class Handoffs {
             runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), ctx),
     });
 
-    async recover(): Promise<void> {
+    async recover(storage: Storage): Promise<void> {
+        this.#storage = storage;
         this.committed(await this.#app.harness.snapshot(HandoffsDoc, context));
 
         for (const item of this.#app.sessions()) {
@@ -723,6 +801,253 @@ export class Handoffs {
         return receipt !== undefined;
     }
 
+    #externalReview(request: RecordExternalReview): ExternalReviewInput {
+        if (
+            request.sourceEntryId !== undefined &&
+            (!Number.isSafeInteger(request.sourceEntryId) || Number(request.sourceEntryId) < 1)
+        ) {
+            throw new HttpError(400, "sourceEntryId must identify a persisted human input");
+        }
+
+        const checkpoint = text(request.checkpoint, "checkpoint", 64);
+
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(checkpoint)) {
+            throw new HttpError(400, "Give the full reviewed commit or code fingerprint");
+        }
+
+        return {
+            ...(request.sourceEntryId === undefined
+                ? {}
+                : { sourceEntryId: Number(request.sourceEntryId) }),
+            source: text(request.source, "source", 2000),
+            scope: text(request.scope, "scope", 2000),
+            findings: text(request.findings, "findings", 8000),
+            checkpoint,
+        };
+    }
+
+    /** Only genuine human input in this thread can ground intake, never assistant text or a copied courier. */
+    async #externalReviewInput(
+        tx: Tx,
+        id: ConversationId,
+        supplied: User,
+        request: ExternalReviewInput,
+    ) {
+        const user = this.#human(id, supplied);
+
+        this.requireWritable(id);
+        const state = await tx.doc(WorkflowDoc, id);
+        const sessions = await tx.doc(SessionsDoc);
+        const turns = await tx.doc(TurnsDoc, id);
+
+        this.#writable(state);
+
+        if (turns.on && turns.driver !== user.id) {
+            throw new HttpError(409, "Take the wheel before recording external review");
+        }
+
+        const groups = await tx.doc(HandoffsDoc);
+        const meta = sessions.items[String(id)];
+        const group =
+            meta?.workItemId === undefined ? undefined : groups.workItems[meta.workItemId];
+
+        if (group !== undefined && group.activeThreadId !== Number(id)) {
+            throw new HttpError(409, "Only the active work-item thread can record external review");
+        }
+
+        if (
+            id !== this.#app.rootOf(id) ||
+            !["chat", "worker", "pull", "follow-up"].includes(
+                sessions.items[String(id)]?.threadType ?? "worker",
+            )
+        ) {
+            throw new HttpError(
+                409,
+                "Record external review in the active pre-landing main thread",
+            );
+        }
+
+        const evidence = await this.#humanReviewSource(tx, id, request);
+        const author = this.#app.config.userById(evidence.suppliedBy);
+
+        if (author === undefined || author.role === "viewer") {
+            throw new HttpError(409, "External review must come from a human with steering rights");
+        }
+
+        return { state, user, ...evidence };
+    }
+
+    /** Resolve immutable submission identity, not deferred AuthorsDoc attribution. Recheck it on the Tx line. */
+    async #resolveReviewSource(
+        id: ConversationId,
+        request: ExternalReviewInput,
+        ctx: Context = context,
+    ): Promise<ExternalReviewInput> {
+        let cursor: Cursor | undefined;
+
+        do {
+            const page = await this.#storage.scanSubmissions(
+                { conversationId: id, order: "descending" },
+                64,
+                cursor,
+                ctx,
+            );
+
+            for (const submission of page.items) {
+                if (
+                    submission.type !== "input" ||
+                    requestPerson(submission.requestId)?.wrote !== true ||
+                    /^u:[^:]+:handoff:/.test(submission.requestId ?? "") ||
+                    submission.entry === undefined ||
+                    (request.sourceEntryId !== undefined &&
+                        request.sourceEntryId !== Number(submission.entry))
+                ) {
+                    continue;
+                }
+
+                return {
+                    ...request,
+                    sourceEntryId: Number(submission.entry),
+                    sourceSubmissionId: Number(submission.id),
+                    sourceRequestId: submission.requestId!,
+                };
+            }
+
+            cursor = page.next;
+        } while (cursor !== undefined);
+
+        throw new HttpError(409, "No matching human-supplied external review input in this thread");
+    }
+
+    async #humanReviewSource(tx: Tx, id: ConversationId, request: ExternalReviewInput) {
+        const submission =
+            request.sourceRequestId === undefined
+                ? undefined
+                : await tx.submissionByRequest(id, request.sourceRequestId);
+        const person = requestPerson(submission?.requestId);
+
+        if (
+            submission?.type !== "input" ||
+            person?.wrote !== true ||
+            /^u:[^:]+:handoff:/.test(submission.requestId ?? "") ||
+            submission.conversationId !== id ||
+            submission.entry === undefined ||
+            Number(submission.id) !== request.sourceSubmissionId ||
+            Number(submission.entry) !== request.sourceEntryId
+        ) {
+            throw new HttpError(
+                409,
+                "No matching human-supplied external review input in this thread",
+            );
+        }
+
+        const entry = await tx.entry(submission.entry);
+        const input = userContent(entry?.model?.[0]).text;
+
+        if (
+            entry?.kind !== "pi.user" ||
+            entry.conversationId !== id ||
+            ![request.source, request.findings, request.checkpoint].every((value) =>
+                input.includes(value),
+            )
+        ) {
+            throw new HttpError(
+                409,
+                "Paste the external review source, findings and reviewed checkpoint in a human message; agent briefs or links alone are not review evidence",
+            );
+        }
+
+        return {
+            sourceEntryId: Number(submission.entry),
+            sourceSubmissionId: Number(submission.id),
+            sourceRequestId: submission.requestId!,
+            suppliedBy: person.userId,
+        };
+    }
+
+    async #recordExternalReview(
+        tx: Tx,
+        id: ConversationId,
+        supplied: User,
+        request: ExternalReviewInput,
+        code: CodeFingerprint,
+        key?: string,
+    ) {
+        const { state, user, sourceEntryId, sourceSubmissionId, sourceRequestId, suppliedBy } =
+            await this.#externalReviewInput(tx, id, supplied, request);
+        const input = digest(request);
+
+        if (key !== undefined && this.#receipt(state, key, input)) {
+            return;
+        }
+
+        if (
+            request.checkpoint !== code.digest &&
+            (code.status !== "" || request.checkpoint !== code.head)
+        ) {
+            throw new HttpError(
+                409,
+                "External review checkpoint does not match the current code; record review before applying repairs",
+            );
+        }
+
+        if (
+            this.#app.cwdOf(id) !== code.cwd ||
+            (await fingerprint(code.cwd)).digest !== code.digest
+        ) {
+            throw new HttpError(409, "Checkout changed while recording external review");
+        }
+
+        const review: ExternalReview = {
+            source: request.source,
+            scope: request.scope,
+            findings: request.findings,
+            checkpoint: request.checkpoint,
+            sourceEntryId,
+            sourceSubmissionId,
+            sourceRequestId,
+            suppliedBy,
+            recordedBy: user.id,
+            recordedAt: Date.now(),
+            fingerprint: code,
+        };
+
+        state.externalReview = review;
+        state.status = "active";
+        state.readyForPublish = false;
+        delete state.reviewApplicability;
+        delete state.fingerprint;
+        delete state.completedAt;
+        delete state.completedBy;
+        this.#human(id, supplied);
+
+        if (key !== undefined) {
+            state.receipts[key] = input;
+        }
+    }
+
+    async recordExternalReview(
+        id: ConversationId,
+        supplied: User,
+        request: RecordExternalReview,
+    ): Promise<void> {
+        this.#human(id, supplied);
+        this.requireWritable(id);
+        await this.#app.requireDriver(id, supplied);
+        const checked = await this.#resolveReviewSource(id, this.#externalReview(request));
+
+        await this.#app.harness.commit(async (tx) => {
+            await this.requireIdle(tx, id);
+            await this.#externalReviewInput(tx, id, supplied, checked);
+        }, context);
+        const code = await fingerprint(this.#app.cwdOf(id));
+
+        await this.#app.harness.commit(async (tx) => {
+            await this.requireIdle(tx, id);
+            await this.#recordExternalReview(tx, id, supplied, checked, code);
+        }, context);
+    }
+
     #completion(request: CompleteHandoff) {
         const status = request.status;
 
@@ -738,22 +1063,183 @@ export class Handoffs {
             throw new HttpError(400, "Only landed work can be readyForPublish");
         }
 
+        if (
+            request.reviewApplicability !== undefined &&
+            request.reviewApplicability !== "preserved" &&
+            request.reviewApplicability !== "invalidated"
+        ) {
+            throw new HttpError(400, "reviewApplicability must be preserved or invalidated");
+        }
+
+        if (request.reviewApplicability === "invalidated" && status !== "needs-review") {
+            throw new HttpError(
+                409,
+                "Material rewrites require needs-review and fresh independent review",
+            );
+        }
+
         return {
             status: status as WorkflowStatus,
             summary: text(request.summary, "summary", 8000),
             readyForPublish: request.readyForPublish === true,
-            recommendations: recommendations(request.recommendations) ?? [],
-        };
+            reviewApplicability: request.reviewApplicability,
+            recommendations:
+                recommendations(request.recommendations) ??
+                (request.reviewApplicability === "invalidated"
+                    ? [
+                          {
+                              targetType: "reviewer",
+                              relationship: "same-work",
+                              reason: "Material changes invalidate the original independent review.",
+                          },
+                      ]
+                    : status === "review-complete"
+                      ? [
+                            {
+                                targetType: "land",
+                                relationship: "same-work",
+                                reason: "Independent review and applicable repair checks support local landing.",
+                            },
+                        ]
+                      : []),
+        } satisfies Completion;
     }
 
-    async #complete(
+    /** Reuse independent internal or human-supplied external review only across same-work repairs.
+     * Unresolved checks do not invalidate review; a material rewrite does.
+     * Research briefs and Follow-up attestations never substitute for independent evidence.
+     */
+    async #reviewProvenanceReason(tx: Tx, id: ConversationId): Promise<string | undefined> {
+        const sessions = await tx.doc(SessionsDoc);
+        const state = await tx.doc(WorkflowDoc, id);
+
+        if (state.reviewApplicability === "invalidated") {
+            return "Material changes invalidate the original review; fresh independent review is required";
+        }
+
+        if (sessions.items[String(id)]?.threadType !== "follow-up") {
+            return undefined;
+        }
+
+        const doc = await tx.doc(HandoffsDoc);
+        const workItemId = sessions.items[String(id)]?.workItemId;
+        const group = workItemId === undefined ? undefined : doc.workItems[workItemId];
+        const members = new Set(group?.threadIds);
+        const incoming = new Map(
+            Object.values(doc.handoffs)
+                .filter((record) => record.workItemId === workItemId)
+                .map((record) => [record.targetThreadId, record]),
+        );
+        const seen = new Set<number>();
+        let current = Number(id);
+        let transfer: CodeFingerprint | undefined;
+
+        while (!seen.has(current)) {
+            seen.add(current);
+            const meta = sessions.items[String(current)];
+            const review = await tx.doc(WorkflowDoc, current as ConversationId);
+
+            if (review.reviewApplicability === "invalidated") {
+                return "Material changes invalidate the original review; fresh independent review is required";
+            }
+
+            const external = review.externalReview;
+
+            if (
+                external?.recordedAt !== undefined &&
+                external.recordedBy !== undefined &&
+                external.suppliedBy !== undefined &&
+                external.fingerprint?.cwd === this.#app.cwdOf(id) &&
+                (external.checkpoint === external.fingerprint.digest ||
+                    (external.fingerprint.status === "" &&
+                        external.checkpoint === external.fingerprint.head))
+            ) {
+                try {
+                    const evidence = await this.#humanReviewSource(tx, current as ConversationId, {
+                        ...this.#externalReview(external),
+                        sourceSubmissionId: external.sourceSubmissionId,
+                        sourceRequestId: external.sourceRequestId,
+                    });
+
+                    if (evidence.suppliedBy === external.suppliedBy) {
+                        if (
+                            meta?.threadType !== "follow-up" &&
+                            transfer?.digest !== external.fingerprint.digest
+                        ) {
+                            return "External review checkpoint changed before entering repairs; record fresh independent review of the implementation or integration checkpoint";
+                        }
+
+                        return undefined;
+                    }
+                } catch (error) {
+                    if (!(error instanceof HttpError)) {
+                        throw error;
+                    }
+
+                    // Historical or manufactured attestations without grounded human input are not provenance.
+                }
+            }
+
+            if (meta?.threadType === "reviewer") {
+                if (
+                    review.readOnly &&
+                    ["review-complete", "needs-review"].includes(review.status) &&
+                    review.completedAt !== undefined &&
+                    review.completedBy !== undefined &&
+                    review.fingerprint?.cwd === this.#app.cwdOf(id)
+                ) {
+                    return undefined;
+                }
+
+                break;
+            }
+
+            if (meta?.threadType !== "follow-up") {
+                break;
+            }
+
+            const record = incoming.get(current);
+
+            if (
+                !members.has(current) ||
+                record?.relationship !== "same-work" ||
+                !members.has(record.sourceThreadId) ||
+                sessions.items[String(record.sourceThreadId)]?.workItemId !== workItemId
+            ) {
+                break;
+            }
+
+            transfer = record.codeCheckpoint;
+            current = record.sourceThreadId;
+        }
+
+        return "Follow-up review completion requires a recorded independent Reviewer outcome or human-supplied external review in this work item's repair chain; research findings and self-attestations do not qualify";
+    }
+
+    /** Update the declared outcome without manufacturing a new inspected checkpoint. */
+    #outcome(state: Workflow, request: Completion): void {
+        state.status = request.status;
+        state.summary = request.summary;
+        state.recommendations = request.recommendations;
+        state.readyForPublish = request.readyForPublish;
+
+        if (state.proposal !== undefined && request.recommendations[0] !== undefined) {
+            // Keep the authored brief, but do not let an earlier suggestion override the latest outcome.
+            const recommendation = request.recommendations[0];
+
+            state.proposal.targetType = recommendation.targetType;
+            state.proposal.relationship = recommendation.relationship;
+        }
+    }
+
+    /** Completion admission is shared by preflight and the final code-bound transaction. */
+    async #completionState(
         tx: Tx,
         id: ConversationId,
         supplied: User,
         request: Completion,
-        code: CodeFingerprint,
         key?: string,
-    ): Promise<void> {
+    ) {
         const user = this.#human(id, supplied);
         const sessions = await tx.doc(SessionsDoc);
         const state = await tx.doc(WorkflowDoc, id);
@@ -781,6 +1267,59 @@ export class Handoffs {
         ) {
             throw new HttpError(409, "Completion status does not match this thread's role");
         }
+
+        if (
+            request.reviewApplicability !== undefined &&
+            !["reviewer", "follow-up"].includes(kind)
+        ) {
+            throw new HttpError(409, "Only review or repair threads assess review applicability");
+        }
+
+        // A replay of an already-recorded outcome must not revoke a newer milestone or fresh review.
+        if (key !== undefined && this.#receipt(state, key, digest(request))) {
+            return { user, state, group };
+        }
+
+        if (request.status === "review-complete" && state.reviewApplicability === "invalidated") {
+            throw new HttpError(
+                409,
+                "Material changes require fresh independent review, not a new self-attestation",
+            );
+        }
+
+        if (request.status === "review-complete") {
+            const reason = await this.#reviewProvenanceReason(tx, id);
+
+            if (reason !== undefined) {
+                throw new HttpError(409, reason);
+            }
+        }
+
+        if (request.status === "needs-review") {
+            // A blocker revokes readiness even if inspection fails. Preserve prior independent evidence
+            // for ordinary repairs, without creating a new code-bound completion identity.
+            this.#outcome(state, request);
+
+            if (request.reviewApplicability === "invalidated") {
+                state.reviewApplicability = "invalidated";
+                delete state.fingerprint;
+                delete state.completedAt;
+                delete state.completedBy;
+            }
+        }
+
+        return { user, state, group };
+    }
+
+    async #complete(
+        tx: Tx,
+        id: ConversationId,
+        supplied: User,
+        request: Completion,
+        code: CodeFingerprint,
+        key?: string,
+    ): Promise<void> {
+        const { user, state, group } = await this.#completionState(tx, id, supplied, request, key);
 
         if (request.status === "published") {
             await this.#requireResolvedPublications(tx, group?.threadIds ?? [Number(id)]);
@@ -831,10 +1370,14 @@ export class Handoffs {
             throw new HttpError(409, "Checkout changed while recording completion");
         }
 
-        state.status = request.status;
-        state.summary = request.summary;
-        state.recommendations = request.recommendations;
-        state.readyForPublish = request.readyForPublish;
+        if (
+            request.reviewApplicability !== undefined &&
+            state.reviewApplicability !== "invalidated"
+        ) {
+            state.reviewApplicability = request.reviewApplicability;
+        }
+
+        this.#outcome(state, request);
         state.fingerprint = code;
         state.completedAt = Date.now();
         state.completedBy = user.id;
@@ -868,7 +1411,10 @@ export class Handoffs {
         await this.#app.requireDriver(id, supplied);
         const checked = this.#completion(request);
 
-        await this.#app.harness.commit((tx) => this.requireIdle(tx, id), context);
+        await this.#app.harness.commit(async (tx) => {
+            await this.requireIdle(tx, id);
+            await this.#completionState(tx, id, supplied, checked);
+        }, context);
         const code = await fingerprint(this.#app.cwdOf(id));
 
         await this.#app.harness.commit(async (tx) => {
@@ -1088,7 +1634,12 @@ export class Handoffs {
                 busyReason = error.message;
             }
 
-            return { hasCompletedWork, busyReason };
+            const reviewReason =
+                state?.status === "review-complete"
+                    ? await this.#reviewProvenanceReason(tx, root)
+                    : undefined;
+
+            return { hasCompletedWork, busyReason, reviewReason };
         }, context);
         const options = TYPES.flatMap((kind) =>
             (kind === "worker"
@@ -1112,6 +1663,8 @@ export class Handoffs {
                 reason = "Every work-item member must be visible to activate a handoff";
             } else if (readiness.busyReason !== undefined) {
                 reason = readiness.busyReason;
+            } else if (kind === "land" && readiness.reviewReason !== undefined) {
+                reason = readiness.reviewReason;
             } else {
                 reason = this.#transitionReason(
                     kind,
@@ -1290,7 +1843,17 @@ export class Handoffs {
         }
 
         await this.#app.requireDriver(id, user);
-        await this.#app.harness.commit((tx) => this.requireIdle(tx, id), context);
+        await this.#app.harness.commit(async (tx) => {
+            await this.requireIdle(tx, id);
+
+            if (kind === "land") {
+                const reason = await this.#reviewProvenanceReason(tx, id);
+
+                if (reason !== undefined) {
+                    throw new HttpError(409, reason);
+                }
+            }
+        }, context);
         let code: CodeFingerprint | undefined;
 
         try {
@@ -1360,6 +1923,14 @@ export class Handoffs {
             // Uncertain external effects belong to the work, not just the Publish thread that attempted them.
             // Keep that writer available for reconciliation rather than retiring it into a fresh ledger or item.
             await this.#requireResolvedPublications(tx, oldItem?.threadIds ?? [Number(id)]);
+
+            if (kind === "land") {
+                const reason = await this.#reviewProvenanceReason(tx, id);
+
+                if (reason !== undefined) {
+                    throw new HttpError(409, reason);
+                }
+            }
 
             if (kind === "land" || kind === "publish") {
                 code = await fingerprint(this.#app.cwdOf(id));

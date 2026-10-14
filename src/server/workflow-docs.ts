@@ -11,6 +11,20 @@ export type Recommendation = {
 };
 export type Proposal = { targetType: ThreadType; relationship: Relationship; brief: string };
 export type CodeFingerprint = { digest: string; cwd: string; head: string; status: string };
+/** Human-supplied third-party review, grounded in an attributed input and an inspected checkpoint. */
+export type ExternalReview = {
+    source: string;
+    scope: string;
+    findings: string;
+    checkpoint: string;
+    sourceEntryId: number;
+    sourceSubmissionId: number;
+    sourceRequestId: string;
+    suppliedBy: string;
+    recordedBy: string;
+    recordedAt: number;
+    fingerprint: CodeFingerprint;
+};
 export type Workflow = {
     readOnly: boolean;
     status: WorkflowStatus;
@@ -21,6 +35,9 @@ export type Workflow = {
     fingerprint?: CodeFingerprint;
     completedAt?: number;
     completedBy?: string;
+    externalReview?: ExternalReview;
+    /** Material rewrites make prior review inapplicable, not ordinary bounded repairs or check blockers. */
+    reviewApplicability?: "preserved" | "invalidated";
     /** Invocation receipts are private and are not projected into the room or HTTP response. */
     receipts: Record<string, string>;
 };

@@ -18,15 +18,19 @@ const DESCRIPTIONS = {
     chat: "Explore, discuss or clarify the next task in a fresh Chat.",
     worker: "Continue implementation and focused tests in a fresh Worker.",
     reviewer: "Independent code and test review, fixes and impact-driven regression checks.",
-    "follow-up": "Make tight, bounded fixes and self-review their impact.",
+    "follow-up":
+        "Finish internal or external review repairs, self-review the delta and normally proceed to Land.",
     pull: "Fetch upstream or external changes, rebase and check the integration.",
     land: "Integrate and verify locally; no external delivery.",
     publish: "Optional external delivery. Each action requires separate human approval.",
 };
 
-export function HandoffSheet({ id, option: initialOption }) {
-    const [data, setData] = useState(null);
-    const [loading, setLoading] = useState(true);
+export function HandoffSheet({ id, option: initialOption, opening }) {
+    // Closing animation can retain this component across a new opening of the same thread.
+    const [loaded, setLoaded] = useState(null);
+    const [pending, setLoading] = useState(true);
+    const data = loaded?.opening === opening ? loaded?.data : null;
+    const loading = pending || loaded?.opening !== opening;
     const [choice, setChoice] = useState(initialOption ? keyOf(initialOption) : "");
     const [busy, setBusy] = useState(false);
     const [uncertain, setUncertain] = useState(false);
@@ -47,7 +51,7 @@ export function HandoffSheet({ id, option: initialOption }) {
                     return;
                 }
 
-                setData(value);
+                setLoaded({ opening, data: value });
                 setLoading(false);
                 setChoice((old) =>
                     data &&
@@ -59,6 +63,7 @@ export function HandoffSheet({ id, option: initialOption }) {
             (failure) => {
                 if (!stopped) {
                     setError(failure.message);
+                    setLoaded({ opening, data: null });
                     setLoading(false);
                 }
             },
@@ -67,7 +72,7 @@ export function HandoffSheet({ id, option: initialOption }) {
         return () => {
             stopped = true;
         };
-    }, [id, type, retry]);
+    }, [id, type, retry, opening]);
 
     if (!handoffsAvailable() || !canSteer()) {
         return null;

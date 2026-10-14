@@ -27,7 +27,7 @@ import {
     type SubmissionId,
     type TaskId,
 } from "@earendil-works/pi-durable";
-import { REPORT_PREFIX, SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
+import { AuthorsDoc, REPORT_PREFIX, SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
 import { HttpError } from "../src/server/errors.ts";
 import { createHandler } from "../src/server/http.ts";
 import { HandoffsDoc, WorkflowDoc } from "../src/server/workflow-docs.ts";
@@ -111,6 +111,47 @@ const model = scriptedModel(async (input) => {
                     ],
                 }),
             ],
+            { stopReason: "toolUse" },
+        );
+    }
+
+    if (last.role === "user" && last.text.endsWith("INVENT_EXTERNAL_REVIEW")) {
+        return fauxAssistantMessage(
+            [
+                fauxToolCall("handoff", {
+                    action: "record-review",
+                    source: "GitHub review by an independent reviewer",
+                    scope: "The implementation",
+                    findings: "Fix the missing retry guard.",
+                    checkpoint: "a".repeat(40),
+                }),
+            ],
+            { stopReason: "toolUse" },
+        );
+    }
+
+    if (last.role === "user" && last.text.endsWith("MATERIAL_REWRITE_CHECKPOINT_UNAVAILABLE")) {
+        return fauxAssistantMessage(
+            [
+                fauxToolCall("handoff", {
+                    action: "complete",
+                    status: "needs-review",
+                    reviewApplicability: "invalidated",
+                    summary:
+                        "A material rewrite invalidated the original independent assessment; checkout inspection is unavailable.",
+                }),
+            ],
+            { stopReason: "toolUse" },
+        );
+    }
+
+    const externalInput = /RECORD_EXTERNAL_REVIEW\n(\{[^\n]+\})$/.exec(last.text);
+
+    if (last.role === "user" && externalInput !== null) {
+        const request = JSON.parse(externalInput[1]!);
+
+        return fauxAssistantMessage(
+            [fauxToolCall("handoff", { action: "record-review", ...request })],
             { stopReason: "toolUse" },
         );
     }
@@ -601,6 +642,22 @@ test("HTTP/native handoffs inherit scope without broadening access; viewers cann
             ).status,
             403,
         );
+
+        for (const token of [viewer.token, elsewhere.token]) {
+            assert.equal(
+                (
+                    await request("/handoffs/external-review", token, {
+                        source: "External review",
+                        scope: "Implementation",
+                        findings: "Fix retries",
+                        checkpoint: "a".repeat(40),
+                    })
+                ).status,
+                token === viewer.token ? 403 : 404,
+                "external intake retains steering and conversation visibility gates",
+            );
+        }
+
         const before = await modelTexts(app, source);
         const picker = await request("/submit", scoped.token, {
             text: "/handoff",
@@ -704,17 +761,50 @@ test("review/land/publish/new-work transitions bind exact code and group archive
         status: "review-complete",
         summary: "Reviewed the changed untracked contents.",
     });
+    // A recorded unresolved review is still independent evidence for bounded repairs.
+    await app.handoffs.complete(reviewer, owner(app), {
+        status: "needs-review",
+        summary: "Independent review found a small remaining gap; investigate and repair it.",
+    });
     const followUp = await start(reviewer, "follow-up", "follow-up-transition");
+
+    assert.equal(followUp.workItemId, review.workItemId);
     const followUpId = cid(followUp.id);
 
     await delivered(followUpId);
     await assert.rejects(start(followUpId, "land", "premature-follow-up-land"), status(409));
     writeFileSync(join(cwd, "new-code.txt"), "small review repair\n");
+    await app.close();
+    app = await openApp(model, data);
+    assert.equal(
+        (await app.harness.snapshot(WorkflowDoc, reviewer, context))?.status,
+        "needs-review",
+    );
+    await say(app, followUpId, "PREPARE_ONLY");
+    const repairBrief = (await app.handoffs.list(followUpId, owner(app))).workflow.proposal?.brief;
+
     await app.handoffs.complete(followUpId, owner(app), {
         status: "review-complete",
         summary:
             "Reused the independent review and self-reviewed the small repair with focused checks.",
     });
+    assert.deepEqual(
+        (await app.handoffs.list(followUpId, owner(app))).workflow.recommendations?.map(
+            (rec) => rec.targetType,
+        ),
+        ["land"],
+        "bounded review repairs normally recommend Land without another review session",
+    );
+    assert.equal(
+        (await app.handoffs.list(followUpId, owner(app))).workflow.proposal?.targetType,
+        "land",
+        "earlier repair suggestions do not override the final completion recommendation",
+    );
+    assert.equal(
+        (await app.handoffs.list(followUpId, owner(app))).workflow.proposal?.brief,
+        repairBrief,
+        "completion preserves the authored successor brief",
+    );
     const land = await start(followUpId, "land", "land-transition");
     const landId = cid(land.id);
 
@@ -780,7 +870,17 @@ test("review/land/publish/new-work transitions bind exact code and group archive
 
     assert.equal(app.canSee(nextOnly, source), false);
     assert.equal(app.canSee(nextOnly, publishId), false);
-    const scopedReview = await app.handoffs.start(nextId, nextOnly, {
+    const newItemRepair = cid((await start(nextId, "follow-up", "new-item-repair")).id);
+
+    await delivered(newItemRepair);
+    await assert.rejects(
+        app.handoffs.complete(newItemRepair, owner(app), {
+            status: "review-complete",
+            summary: "The predecessor work item's independent review must not certify new work.",
+        }),
+        /recorded independent Reviewer outcome/,
+    );
+    const scopedReview = await app.handoffs.start(newItemRepair, nextOnly, {
         targetType: "reviewer",
         relationship: "same-work",
         requestId: "scoped-new-item-review",
@@ -793,7 +893,7 @@ test("review/land/publish/new-work transitions bind exact code and group archive
         true,
         "The original source-scoped grant still flows forward",
     );
-    assert.equal(app.sessionMeta(scopedReviewId)?.accessFrom, Number(nextId));
+    assert.equal(app.sessionMeta(scopedReviewId)?.accessFrom, Number(newItemRepair));
     await delivered(scopedReviewId);
     assert.equal(app.attribution.requesterOf(scopedReviewId), nextOnly.id);
     assert.equal(
@@ -867,6 +967,23 @@ test("review/land/publish/new-work transitions bind exact code and group archive
     assert.equal(app.canSee(restoredNextOnly, scopedReviewId), true);
     assert.equal(app.canSee(restoredNextOnly, source), false);
     await assert.rejects(start(source, "worker", "review-transition", "same-work"), status(409));
+    await app.handoffs.complete(scopedReviewId, owner(app), {
+        status: "needs-review",
+        summary: "This review calls for renewed implementation, not a small repair.",
+    });
+    const implementation = cid((await start(scopedReviewId, "worker", "renewed-worker")).id);
+
+    await delivered(implementation);
+    const renewedRepair = cid((await start(implementation, "follow-up", "renewed-repair")).id);
+
+    await delivered(renewedRepair);
+    await assert.rejects(
+        app.handoffs.complete(renewedRepair, owner(app), {
+            status: "review-complete",
+            summary: "An earlier review must not certify renewed implementation automatically.",
+        }),
+        /recorded independent Reviewer outcome/,
+    );
     const hiddenSource = await newSession(app, cwd);
 
     await app.harness.commit(async (tx) => {
@@ -879,6 +996,480 @@ test("review/land/publish/new-work transitions bind exact code and group archive
     assert.equal(app.canSee(guest, cid(hiddenReview.id)), false);
     assert.equal(app.sessionMeta(cid(hiddenReview.id))?.ownerOnly, true);
     await delivered(cid(hiddenReview.id));
+});
+
+// Intake owner: real human attribution, model calls and courier delivery must not manufacture third-party review.
+test("external review intake rejects agent inventions, links alone and copied handoff evidence", async () => {
+    const source = await newSession(app, repo("ungrounded-external-review"));
+
+    await say(app, source, "INVENT_EXTERNAL_REVIEW");
+    const output = JSON.stringify(await modelTexts(app, source));
+
+    assert.match(output, /Paste the external review source, findings and reviewed checkpoint/);
+    assert.doesNotMatch(output, /Cannot fingerprint/);
+    assert.equal(
+        (await app.harness.snapshot(WorkflowDoc, source, context))?.externalReview,
+        undefined,
+    );
+    const evidence = {
+        source: "https://github.com/example/repo/pull/1#pullrequestreview-123",
+        scope: "Retry behavior",
+        findings: "Fix the missing retry guard.",
+        checkpoint: "a".repeat(40),
+    };
+
+    await say(app, source, `Please follow up on ${evidence.source}`);
+    // Attribution is deferred metadata. Intake must validate the durable human submission even if it is absent.
+    await app.harness.commit(async (tx) => {
+        const entries = await tx.scanEntries({ conversationId: source }, 16);
+        const input = entries.items.find((entry) => entry.kind === "pi.user");
+
+        assert.ok(input);
+        delete (await tx.doc(AuthorsDoc, source)).entries[String(input.id)];
+    }, context);
+    await assert.rejects(
+        app.handoffs.recordExternalReview(source, owner(app), evidence),
+        /Paste the external review/,
+    );
+    const copied = cid(
+        (
+            await start(
+                source,
+                "follow-up",
+                "copied-external-review",
+                "same-work",
+                JSON.stringify(evidence),
+            )
+        ).id,
+    );
+
+    await delivered(copied);
+    await assert.rejects(
+        app.handoffs.recordExternalReview(copied, owner(app), evidence),
+        /No matching human-supplied/,
+    );
+    await assert.rejects(
+        app.handoffs.complete(copied, owner(app), {
+            status: "review-complete",
+            summary: "Material rewrite cannot inherit a passed review.",
+            reviewApplicability: "invalidated",
+        }),
+        /Material rewrites require needs-review/,
+    );
+    assert.equal((await app.handoffs.list(copied, owner(app))).workflow.externalReview, undefined);
+    await say(app, copied, "COMPLETE_FROM_TOOL");
+    const refusedCompletion = JSON.stringify(await modelTexts(app, copied));
+
+    assert.match(refusedCompletion, /recorded independent Reviewer outcome/);
+    assert.doesNotMatch(refusedCompletion, /Cannot fingerprint/);
+    const copiedState = await app.handoffs.list(copied, owner(app));
+
+    assert.equal(copiedState.workflow.status, "active");
+    assert.equal(
+        (await app.harness.snapshot(WorkflowDoc, copied, context))?.fingerprint,
+        undefined,
+    );
+    assert.equal(
+        copiedState.options.find((option) => option.targetType === "land")?.enabled,
+        false,
+    );
+});
+
+// A material rewrite must revoke readiness even when code-bound completion cannot inspect the checkout.
+test("material review invalidation persists without manufacturing completion when checkpoint inspection fails", async () => {
+    const cwd = join(root, "non-git-material-rewrite");
+
+    mkdirSync(cwd);
+    const source = await newSession(app, cwd);
+
+    await say(app, source, "Review the implementation.");
+    const reviewer = cid((await start(source, "reviewer", "unfingerprintable-review")).id);
+
+    await delivered(reviewer);
+    await say(app, reviewer, "MATERIAL_REWRITE_CHECKPOINT_UNAVAILABLE");
+    const state = (await app.handoffs.list(reviewer, owner(app))).workflow;
+    const stored = await app.harness.snapshot(WorkflowDoc, reviewer, context);
+
+    assert.equal(state.status, "needs-review");
+    assert.equal(state.reviewApplicability, "invalidated");
+    assert.deepEqual(
+        state.recommendations?.map((rec) => rec.targetType),
+        ["reviewer"],
+    );
+    assert.equal(
+        stored?.completedAt,
+        undefined,
+        "failed fingerprint inspection never establishes code-bound completion",
+    );
+    assert.equal(stored?.fingerprint, undefined);
+    await app.close();
+    app = await openApp(model, data);
+    const repair = cid((await start(reviewer, "follow-up", "invalidated-without-completion")).id);
+
+    await delivered(repair);
+    await assert.rejects(
+        app.handoffs.complete(repair, owner(app), {
+            status: "review-complete",
+            summary: "Try to reuse invalidated review after a failed completion.",
+        }),
+        /Material changes invalidate/,
+    );
+});
+
+// Stored outcomes are historical input, not a fixture substituting for successful checkpoint inspection.
+test("unresolved checks revoke earlier readiness even when checkpoint inspection fails, preserving independent evidence", async () => {
+    const cwd = join(root, "non-git-unresolved-review");
+
+    mkdirSync(cwd);
+    const source = await newSession(app, cwd);
+
+    await say(app, source, "Review the implementation.");
+    const reviewer = cid((await start(source, "reviewer", "historical-review-blocker")).id);
+
+    await delivered(reviewer);
+    const recordedAt = Date.now() - 1000;
+    const previousCheckpoint = {
+        cwd,
+        digest: "historical-reviewed-checkpoint",
+        head: "historical-head",
+        status: "",
+    };
+
+    await app.harness.commit(async (tx) => {
+        const state = await tx.doc(WorkflowDoc, reviewer);
+
+        state.status = "review-complete";
+        state.summary = "Previously recorded independent review.";
+        state.fingerprint = previousCheckpoint;
+        state.completedAt = recordedAt;
+        state.completedBy = owner(app).id;
+        state.recommendations = [{ targetType: "land", relationship: "same-work" }];
+    }, context);
+    const summary = "A required verification check is unresolved; do not land yet.";
+
+    await assert.rejects(
+        app.handoffs.complete(reviewer, owner(app), { status: "needs-review", summary }),
+        /Cannot fingerprint/,
+    );
+    const state = await app.harness.snapshot(WorkflowDoc, reviewer, context);
+
+    assert.equal(state?.status, "needs-review", "a blocker revokes the previous passed milestone");
+    assert.equal(state?.summary, summary);
+    assert.equal(state?.readyForPublish, false);
+    assert.deepEqual(state?.recommendations, []);
+    assert.equal(
+        state?.reviewApplicability,
+        undefined,
+        "ordinary blockers do not invalidate review",
+    );
+    assert.deepEqual(state?.fingerprint, previousCheckpoint);
+    assert.equal(
+        state?.completedAt,
+        recordedAt,
+        "failed inspection creates no new completion identity",
+    );
+    assert.equal(state?.completedBy, owner(app).id);
+    await app.close();
+    app = await openApp(model, data);
+    const restored = await app.handoffs.list(reviewer, owner(app));
+    const land = restored.options.find((option) => option.targetType === "land");
+
+    assert.equal(restored.workflow.status, "needs-review");
+    assert.equal(land?.enabled, false);
+    assert.match(land?.reason ?? "", /Complete review/);
+});
+
+// Positive checkpoint proof requires the real OS sandbox, just like the internal-review lifecycle above.
+test("external review survives repair and restart; only material rewrites request fresh independent review", async () => {
+    const cwd = repo("external-review-repair");
+    const { id: source } = await app.commands.createSession(owner(app), {
+        cwd,
+        threadType: "worker",
+    });
+
+    await app.commands.configure(source, owner(app), {
+        model: { provider: "faux", modelId: "faux-1" },
+        thinkingLevel: "off",
+    });
+    const evidence = {
+        source: "https://github.com/example/repo/pull/1#pullrequestreview-123",
+        scope: "The complete retry feature and its tests",
+        findings:
+            "Independent reviewer: fix the missing retry guard; the rest of the feature is sound.",
+        checkpoint: git(cwd, "rev-parse", "HEAD").trim(),
+    };
+
+    await say(
+        app,
+        source,
+        `External independent review to repair. RECORD_EXTERNAL_REVIEW\n${JSON.stringify(evidence)}`,
+    );
+    const recorded = (await app.handoffs.list(source, owner(app))).workflow.externalReview;
+
+    assert.ok(recorded, JSON.stringify(await modelTexts(app, source)));
+    assert.equal(recorded.source, evidence.source);
+    assert.equal(recorded.scope, evidence.scope);
+    assert.equal(recorded.suppliedBy, owner(app).id);
+    assert.equal(recorded.checkpoint, evidence.checkpoint);
+    assert.equal(
+        "fingerprint" in recorded,
+        false,
+        "intake does not expose private inspected Git status through HTTP/room projections",
+    );
+    assert.equal(
+        "findings" in recorded,
+        false,
+        "raw review text stays in the attributed input rather than room-wide workflow metadata",
+    );
+    const storedReview = (await app.harness.snapshot(WorkflowDoc, source, context))?.externalReview;
+
+    assert.equal(storedReview?.findings, evidence.findings);
+    assert.ok(storedReview?.sourceSubmissionId);
+    assert.match(storedReview?.sourceRequestId ?? "", /^u:/);
+    assert.equal(
+        (await app.handoffs.list(source, owner(app))).workflow.status,
+        "active",
+        "intake is not review completion",
+    );
+    const repair = cid((await start(source, "follow-up", "external-small-repair")).id);
+
+    await delivered(repair);
+    writeFileSync(join(cwd, "code.txt"), "bounded retry repair\n");
+    await assert.rejects(
+        app.handoffs.recordExternalReview(source, owner(app), evidence),
+        /permanently read-only/,
+    );
+    await app.close();
+    app = await openApp(model, data);
+    await app.handoffs.complete(repair, owner(app), {
+        status: "needs-review",
+        summary:
+            "A required repair check is still unresolved; independent review remains applicable.",
+    });
+    assert.equal(
+        (await app.handoffs.list(repair, owner(app))).workflow.recommendations?.some(
+            (rec) => rec.targetType === "reviewer",
+        ),
+        false,
+    );
+    await app.handoffs.complete(repair, owner(app), {
+        status: "review-complete",
+        summary:
+            "External independent review applies to untouched code; repair checks and delta self-review passed.",
+    });
+    const repaired = await app.handoffs.list(repair, owner(app));
+
+    assert.deepEqual(
+        repaired.workflow.recommendations?.map((rec) => rec.targetType),
+        ["land"],
+    );
+    assert.equal(repaired.options.find((option) => option.targetType === "land")?.enabled, true);
+    const rewrite = cid((await start(repair, "follow-up", "external-material-rewrite")).id);
+
+    await delivered(rewrite);
+    writeFileSync(join(cwd, "code.txt"), "materially redesigned feature\n");
+    await app.handoffs.complete(rewrite, owner(app), {
+        status: "needs-review",
+        summary: "The repair materially reworked the feature; original review no longer applies.",
+        reviewApplicability: "invalidated",
+    });
+    const rewritten = await app.handoffs.list(rewrite, owner(app));
+
+    assert.deepEqual(
+        rewritten.workflow.recommendations?.map((rec) => rec.targetType),
+        ["reviewer"],
+    );
+    assert.equal(rewritten.options.find((option) => option.targetType === "land")?.enabled, false);
+    await assert.rejects(
+        app.handoffs.complete(rewrite, owner(app), {
+            status: "review-complete",
+            summary: "Try to clear invalidation with a self-attestation.",
+            reviewApplicability: "preserved",
+        }),
+        /fresh independent review/,
+    );
+    const repeated = cid((await start(rewrite, "follow-up", "external-invalidated-successor")).id);
+
+    await delivered(repeated);
+    await assert.rejects(
+        app.handoffs.complete(repeated, owner(app), {
+            status: "review-complete",
+            summary: "A new repair thread cannot restore invalidated evidence.",
+        }),
+        /Material changes invalidate/,
+    );
+    const renewed = {
+        ...evidence,
+        source: "External review system: independent assessment by Casey",
+        findings:
+            "Casey independently reviewed the redesigned feature and tests; no findings remain.",
+        checkpoint: await app.handoffs.fingerprint(repeated),
+    };
+
+    await say(
+        app,
+        repeated,
+        `Original reviewed commit ${evidence.checkpoint}; new independent assessment: ${JSON.stringify(renewed)}`,
+    );
+    await assert.rejects(
+        app.handoffs.recordExternalReview(repeated, owner(app), {
+            ...renewed,
+            checkpoint: evidence.checkpoint,
+        }),
+        /checkpoint does not match/,
+    );
+    await app.handoffs.recordExternalReview(repeated, owner(app), renewed);
+    await app.handoffs.complete(repeated, owner(app), {
+        status: "review-complete",
+        summary: "Fresh external review, applicable checks and delta review support landing.",
+    });
+    const landed = cid((await start(repeated, "land", "external-reviewed-land")).id);
+
+    await delivered(landed);
+    assert.equal(app.sessionMeta(landed)?.threadType, "land");
+});
+
+// Migration contract: older versions accepted Follow-up attestations without Reviewer provenance.
+// Stored readiness is historical input here, not a fixture pretending to produce an approved review.
+test("legacy Follow-up attestations require provenance before Land inspection and after restart", async () => {
+    const source = await newSession(app, repo("legacy-follow-up"));
+
+    await say(app, source, "Implemented work without independent review.");
+    const repair = cid((await start(source, "follow-up", "legacy-follow-up")).id);
+
+    await delivered(repair);
+    await app.harness.commit(async (tx) => {
+        const state = await tx.doc(WorkflowDoc, repair);
+
+        state.status = "review-complete";
+        state.summary = "Historical self-attestation without a Reviewer.";
+        state.completedAt = Date.now();
+        state.completedBy = owner(app).id;
+        state.fingerprint = {
+            cwd: app.cwdOf(repair),
+            digest: "historical-attestation",
+            head: "historical-head",
+            status: "",
+        };
+    }, context);
+    const land = (await app.handoffs.list(repair, owner(app))).options.find(
+        (option) => option.targetType === "land",
+    );
+
+    assert.equal(land?.enabled, false);
+    assert.match(land?.reason ?? "", /recorded independent Reviewer outcome/);
+    await app.close();
+    app = await openApp(model, data);
+    await assert.rejects(
+        start(repair, "land", "legacy-land"),
+        /recorded independent Reviewer outcome/,
+    );
+    await assert.rejects(
+        app.handoffs.complete(repair, owner(app), {
+            status: "review-complete",
+            summary: "The earlier Follow-up milestone alone is not independent review.",
+        }),
+        /recorded independent Reviewer outcome/,
+    );
+    const successor = cid((await start(repair, "follow-up", "legacy-successor")).id);
+
+    await delivered(successor);
+    await assert.rejects(
+        app.handoffs.complete(successor, owner(app), {
+            status: "review-complete",
+            summary: "A predecessor Follow-up attestation is not independent review either.",
+        }),
+        /recorded independent Reviewer outcome/,
+    );
+});
+
+// Compatibility admission reads real human submissions plus historical workflow/transfer documents.
+// These stored fixtures do not substitute for positive intake or real sandbox fingerprint coverage.
+test("stored external review cannot cross implementation or integration drift before the repair chain", async () => {
+    for (const threadType of ["worker", "pull", "chat"] as const) {
+        const cwd = join(root, `non-git-historical-external-${threadType}`);
+
+        mkdirSync(cwd);
+        const { id: source } = await app.commands.createSession(owner(app), { cwd, threadType });
+
+        await app.commands.configure(source, owner(app), {
+            model: { provider: "faux", modelId: "faux-1" },
+            thinkingLevel: "off",
+        });
+        const evidence = {
+            source: "External independent review by Casey",
+            scope: "The original feature",
+            findings: "One bounded retry repair remains.",
+            checkpoint: "a".repeat(40),
+        };
+        const requestId = `historical-external-${threadType}`;
+        const submitted = await app.commands.submit(source, owner(app), {
+            text: JSON.stringify(evidence),
+            requestId,
+        });
+
+        await (await app.harness.submission(submitted.submissionId, context))!.wait(context);
+        const inspected = { cwd, head: evidence.checkpoint, digest: "b".repeat(64), status: "" };
+
+        await app.harness.commit(async (tx) => {
+            const submission = await tx.submissionByRequest(
+                source,
+                `u:${owner(app).id}:${requestId}`,
+            );
+
+            assert.ok(submission?.entry);
+            (await tx.doc(WorkflowDoc, source)).externalReview = {
+                ...evidence,
+                sourceEntryId: Number(submission.entry),
+                sourceSubmissionId: Number(submission.id),
+                sourceRequestId: submission.requestId!,
+                suppliedBy: owner(app).id,
+                recordedBy: owner(app).id,
+                recordedAt: Date.now() - 1000,
+                fingerprint: inspected,
+            };
+        }, context);
+        const handoff = await start(
+            source,
+            "follow-up",
+            `historical-external-transfer-${threadType}`,
+        );
+        const repair = cid(handoff.id);
+
+        await delivered(repair);
+        await app.harness.commit(async (tx) => {
+            (await tx.doc(HandoffsDoc)).handoffs[handoff.handoffId]!.codeCheckpoint = {
+                ...inspected,
+                digest: "c".repeat(64),
+            };
+        }, context);
+        await app.close();
+        app = await openApp(model, data);
+        const complete = () =>
+            app.handoffs.complete(repair, owner(app), {
+                status: "review-complete",
+                summary:
+                    "Try to reuse the external review after renewed implementation/integration.",
+            });
+
+        await assert.rejects(
+            complete(),
+            /External review checkpoint changed before entering repairs/,
+        );
+        await app.harness.commit(async (tx) => {
+            delete (await tx.doc(HandoffsDoc)).handoffs[handoff.handoffId]!.codeCheckpoint;
+        }, context);
+        await assert.rejects(
+            complete(),
+            /External review checkpoint changed before entering repairs/,
+        );
+        await app.harness.commit(async (tx) => {
+            (await tx.doc(HandoffsDoc)).handoffs[handoff.handoffId]!.codeCheckpoint = inspected;
+        }, context);
+        // A matching historical transfer passes provenance admission and reaches the missing-checkout guard.
+        // This control proves drift refusal was not an unrelated authorship or identity guard.
+        await assert.rejects(complete(), /Cannot fingerprint/);
+    }
 });
 
 // Configured filters are real child processes: they must remain offline/read-only and cannot alias raw code fingerprints.

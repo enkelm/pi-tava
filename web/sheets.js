@@ -225,7 +225,12 @@ function sheetBody(sheet) {
             />`;
             break;
         case "handoff":
-            body = html`<${HandoffSheet} key=${sheet.id} id=${sheet.id} option=${sheet.option} />`;
+            body = html`<${HandoffSheet}
+                key=${sheet.id}
+                id=${sheet.id}
+                option=${sheet.option}
+                opening=${sheet}
+            />`;
             break;
         case "work-item-options":
             body = html`<${WorkItemOptionsSheet} id=${sheet.id} />`;

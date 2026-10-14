@@ -760,7 +760,7 @@ export class PocketApp {
         } while (cursor !== undefined);
 
         await this.attribution.repair(unrecorded);
-        await this.handoffs.recover();
+        await this.handoffs.recover(storage);
 
         return conversations;
     }

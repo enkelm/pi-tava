@@ -233,7 +233,15 @@ test("Pull can start independently and Follow-up receives focused self-review ra
         roles.find((expected) => expected.type === "follow-up")!,
     );
     assert.match(followUpRole.thread_role!, /Do not re-review the whole application/i);
-    assert.match(followUpRole.thread_role!, /abandon it and notify the human/i);
+    assert.match(followUpRole.thread_role!, /abandon unavailable checks/i);
+    assert.match(followUpRole.thread_role!, /normally.*last repair stage before Land/i);
+    assert.match(followUpRole.thread_role!, /GitHub or another external review system/i);
+    assert.match(followUpRole.thread_role!, /reviewApplicability=invalidated/i);
+    assert.match(followUpRole.thread_role!, /record code-bound review-complete.*recommend Land/i);
+    assert.match(
+        followUpRole.thread_role!,
+        /recording failures and unavailable checks are not reasons/i,
+    );
     assert.match(followUpRole.thread_role!, /wait for every delegated helper/i);
 });
 
