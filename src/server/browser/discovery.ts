@@ -1,6 +1,14 @@
 /** Finding a Chromium-based browser on this machine, and where its profile goes. */
 import { createHash } from "node:crypto";
-import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import {
+    accessSync,
+    closeSync,
+    constants,
+    openSync,
+    readdirSync,
+    readSync,
+    statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, join } from "node:path";
 
@@ -12,10 +20,10 @@ const isFile = (path: string) => {
     }
 };
 
-/** The newest Playwright download of Chromium, if there is one. */
-function playwrightChromium(): string | undefined {
+/** The newest complete Playwright Chromium download in a recognized layout for this platform. */
+function playwrightChromium(env: NodeJS.ProcessEnv): string | undefined {
     const root =
-        process.env.PLAYWRIGHT_BROWSERS_PATH ??
+        env.PLAYWRIGHT_BROWSERS_PATH ??
         (process.platform === "darwin"
             ? join(homedir(), "Library", "Caches", "ms-playwright")
             : process.platform === "win32"
@@ -30,18 +38,44 @@ function playwrightChromium(): string | undefined {
     }
 
     folders.sort((a, b) => Number(b.split("-")[1]) - Number(a.split("-")[1]));
+    // A copied/shared cache can contain other platforms; its newest entry may not be usable here.
+    const layouts =
+        process.platform === "darwin"
+            ? [
+                  ...(process.arch === "arm64"
+                      ? [["chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"]]
+                      : []),
+                  ["chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"],
+              ]
+            : process.platform === "win32"
+              ? [
+                    ["chrome-win", "chrome.exe"],
+                    ["chrome-win64", "chrome.exe"],
+                ]
+              : [
+                    ["chrome-linux64", "chrome"],
+                    ["chrome-linux", "chrome"],
+                ];
 
     for (const folder of folders) {
-        for (const path of [
-            join(root, folder, "chrome-linux64", "chrome"),
-            join(root, folder, "chrome-linux", "chrome"),
-            join(root, folder, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
-            join(root, folder, "chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
-            join(root, folder, "chrome-win", "chrome.exe"),
-            join(root, folder, "chrome-win64", "chrome.exe"),
-        ]) {
-            if (isFile(path)) {
+        // Playwright writes this only after extraction and executable permissions are complete.
+        if (!isFile(join(root, folder, "INSTALLATION_COMPLETE"))) {
+            continue;
+        }
+
+        for (const parts of layouts) {
+            const path = join(root, folder, ...parts);
+
+            if (!isFile(path)) {
+                continue;
+            }
+
+            try {
+                accessSync(path, constants.X_OK);
+
                 return path;
+            } catch {
+                // A copied cache may have lost executable permissions. Keep looking.
             }
         }
     }
@@ -169,7 +203,7 @@ export function findBrowser(
         }
     }
 
-    return playwrightChromium() ?? snap;
+    return playwrightChromium(env) ?? snap;
 }
 
 /** Where browsers are usually installed on this system, besides the PATH. */

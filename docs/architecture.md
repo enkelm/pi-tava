@@ -351,6 +351,14 @@ The file viewer loads CodeMirror only on **Edit**. `http/editor-assets.ts` bundl
 
 Lease heartbeats, expiry, idle recycling and bounded queues keep abandoned editors from retaining servers forever. App shutdown closes the pool and terminates only its own children. Language services never write files or execute browser-provided commands; formatting edits only the browser buffer. A missing, busy or failed server falls back to ordinary editing. This is quick editing, not a multi-file IDE or collaborative buffer.
 
+## Browser application selection
+
+Clean sessions use an installed desktop/PATH browser before a cached Playwright Chromium download. Coop does not require another Chrome installation or download one automatically. The cache is only a fallback and must contain a download-completion marker and an executable browser in a recognized layout for the current platform. An explicit `PI_POCKET_BROWSER` takes precedence; an invalid explicit path does not silently select another browser. Imported defaults continue to use their source browser executable for native credentials.
+
+Separate profile directories do not give headless and desktop Chrome separate macOS application identities. A Dock launch activating the headless process without opening a visible window is one possible explanation for the reported opening problem, but it has not been confirmed. Keeping installed Chrome preferred is not a demonstrated fix for that symptom. A manual diagnostic using the same installation is `open -n -a "Google Chrome"`: Apple's `open(1)` documents `-n` as opening a new instance even if one is already running. Coop does not run this against the owner's personal profile. Whether it opens the usual window, and whether subsequent Dock launches work normally, still needs to be checked.
+
+Discovery does not alter personal profiles, the Chrome app bundle, LaunchServices registration, localhost access or workflow permissions. The executable is cached by the running browser manager, so changed discovery code requires a server restart before it applies.
+
 ## Imported browser defaults
 
 `Browsers.profiles` discovers local Chromium-family profiles for the owner through `/api/browser-profiles`. Discovery reads profile metadata only; an opaque selection ID, not a client-selected import path, identifies the source. Custom discovery accepts a server-local profile path and the executable for that browser. Import requires explicit app-wide confirmation, refuses an in-use source and copies into a private, app-owned directory before atomically selecting it. Source profiles are never launched or modified. Caches, passwords, autofill, extensions and restored tabs are excluded.
