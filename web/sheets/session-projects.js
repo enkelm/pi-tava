@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useBack } from "../back.js";
 import { actions, insertIntoComposer, navigate, store, uid } from "../store.js";
+import { ThreadTypeTag, threadTypeLabel } from "../thread-type.js";
 import { html, Icon, Loader, shortPath } from "../ui.js";
 import { FolderPicker } from "./folder.js";
 import { ProjectForm } from "./project.js";
@@ -33,7 +34,8 @@ export function ProjectSessionPanel({
     const cwd = override ?? (!chat ? project?.cwd : null) ?? server?.defaultCwd ?? "~";
     const noProjects = projectsLoaded && projects.length === 0;
     const pullAvailable = (server?.handoffs ?? 0) >= 2;
-    const typeLabel = threadType === "pull" ? "Pull" : chat ? "Chat" : "Worker";
+    const researcherAvailable = (server?.handoffs ?? 0) >= 4;
+    const typeLabel = threadTypeLabel({ threadType });
 
     const leaveChat = () => {
         setChat(false);
@@ -239,11 +241,13 @@ export function ProjectSessionPanel({
                             }}
                         >
                             <option value=${chat ? "chat" : "worker"}>${chat ? "Chat" : "Worker"}</option>
+                            ${researcherAvailable && html`<option value="researcher">Researcher</option>`}
                             <option value="pull">Pull</option>
                         </select>
                     </label>`
                 }
-                ${threadType === "pull" && html`<p class="muted small">Fetch upstream or external changes, rebase and check the integration.</p>`}
+                ${threadType === "researcher" && html`<p class="muted small">Investigate a pointed question and return findings for the next stage.</p>`}
+                ${threadType === "pull" && html`<p class="muted small">Read tickets and PRs, agree on direction with a human or collect a handoff, and update worktrees.</p>`}
                 ${
                     !chat &&
                     html`<p class="small">
@@ -297,7 +301,7 @@ export function ProjectSessionPanel({
                     /> In a git worktree of its own: a branch, apart from this folder
                 </label>
                 <button class="button primary wide" disabled=${busy} onClick=${start}>
-                    <${Icon} name=${threadType === "pull" ? "reload" : chat ? "chat" : "bot"} size=${16} /> ${busy ? "Starting…" : `Start ${typeLabel}`}
+                    <${ThreadTypeTag} session=${{ threadType }} iconOnly=${true} /> ${busy ? "Starting…" : `Start ${typeLabel}`}
                 </button>
             </div>`
         }

@@ -3,6 +3,7 @@ import { html, Icon } from "./ui.js";
 
 const TYPES = {
     worker: { label: "Worker", icon: "bot" },
+    researcher: { label: "Researcher", icon: "search" },
     chat: { label: "Chat", icon: "chat" },
     reviewer: { label: "Reviewer", icon: "search" },
     "follow-up": { label: "Follow-up", icon: "pencil" },

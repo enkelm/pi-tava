@@ -22,6 +22,8 @@ import {
     section,
     type Tx,
     type TaskId,
+    type TaskRuntime,
+    UsageDoc,
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
@@ -32,13 +34,16 @@ import { ownRequest, requestPerson } from "./requests.ts";
 import { PublicationsDoc } from "./workflow-publication.ts";
 import { userContent } from "./resend.ts";
 import { threadRolePrompt } from "./thread-prompts.ts";
+import { addUsage, cleanTitle, titleModel, TITLE_PROMPT } from "./titles.ts";
+import { withWorkflowPublicationLock, workflowExclusiveReason } from "./workflow-policy.ts";
 import {
     type CodeFingerprint,
     type ExternalReview,
     type HandoffsData,
+    type Handoff,
     HandoffsDoc,
-    type Proposal,
     type Recommendation,
+    type ReviewAssessment,
     type Relationship,
     type ThreadType,
     type Workflow,
@@ -49,7 +54,16 @@ import {
 
 const context = BACKGROUND_CONTEXT;
 const run = promisify(execFile);
-const TYPES: ThreadType[] = ["chat", "worker", "reviewer", "follow-up", "pull", "land", "publish"];
+const TYPES: ThreadType[] = [
+    "chat",
+    "researcher",
+    "worker",
+    "reviewer",
+    "follow-up",
+    "pull",
+    "land",
+    "publish",
+];
 const STATUSES: WorkflowStatus[] = ["review-complete", "landed", "published", "needs-review"];
 const finished = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 const empty = (): HandoffsData => ({ workItems: {}, handoffs: {}, requests: {} });
@@ -60,6 +74,8 @@ export type StartHandoff = {
     relationship?: unknown;
     brief?: unknown;
     requestId?: unknown;
+    /** Reconnect recovery must observe failures, never autonomously rerun a failed summary. */
+    recoverOnly?: unknown;
 };
 export type CompleteHandoff = {
     status?: unknown;
@@ -67,7 +83,10 @@ export type CompleteHandoff = {
     readyForPublish?: unknown;
     recommendations?: unknown;
     reviewApplicability?: unknown;
+    reviewAssessment?: unknown;
 };
+/** Only the authenticated HTTP action records acceptance; never a model tool or parsed message. */
+export type AcceptValidation = { checkpoint?: unknown; assessment?: unknown };
 export type RecordExternalReview = {
     sourceEntryId?: unknown;
     source?: unknown;
@@ -86,12 +105,20 @@ type ExternalReviewInput = {
     findings: string;
     checkpoint: string;
 };
+type HandoffAdmission = {
+    kind: ThreadType;
+    relation: Relationship;
+    brief: string | undefined;
+    key: string;
+    input: string;
+};
 type Completion = {
     status: WorkflowStatus;
     summary: string;
     readyForPublish: boolean;
     recommendations: Recommendation[];
     reviewApplicability?: "preserved" | "invalidated";
+    reviewAssessment?: ReviewAssessment;
 };
 
 function text(value: unknown, name: string, max = 12_000): string {
@@ -104,7 +131,10 @@ function text(value: unknown, name: string, max = 12_000): string {
 
 function target(value: unknown): ThreadType {
     if (!TYPES.includes(value as ThreadType)) {
-        throw new HttpError(400, "Choose chat, worker, reviewer, follow-up, pull, land or publish");
+        throw new HttpError(
+            400,
+            "Choose chat, researcher, worker, reviewer, follow-up, pull, land or publish",
+        );
     }
 
     return value as ThreadType;
@@ -161,11 +191,16 @@ function publicWorkflow(state?: Readonly<Workflow>) {
         status: state?.status ?? "active",
         ...(state?.readyForPublish === undefined ? {} : { readyForPublish: state.readyForPublish }),
         ...(state?.summary === undefined ? {} : { summary: state.summary }),
-        ...(state?.recommendations === undefined ? {} : { recommendations: state.recommendations }),
-        ...(state?.proposal === undefined ? {} : { proposal: state.proposal }),
+
         ...(state?.externalReview === undefined
             ? {}
             : { externalReview: publicExternalReview(state.externalReview) }),
+        ...(state?.reviewAssessment === undefined
+            ? {}
+            : { reviewAssessment: state.reviewAssessment }),
+        ...(state?.validationAcceptances === undefined
+            ? {}
+            : { validationAcceptances: state.validationAcceptances }),
         ...(state?.reviewApplicability === undefined
             ? {}
             : { reviewApplicability: state.reviewApplicability }),
@@ -325,12 +360,72 @@ async function fingerprint(cwd: string): Promise<CodeFingerprint> {
 
 const TITLES: Record<ThreadType, string> = {
     chat: "Chat",
+    researcher: "Focused research",
     worker: "Implementation",
     reviewer: "Review",
     "follow-up": "Follow-up work",
     pull: "Pull upstream",
     land: "Land local work",
     publish: "Publish",
+};
+
+const NEXT: Record<ThreadType, ThreadType[]> = {
+    chat: ["worker", "researcher"],
+    worker: ["reviewer", "researcher"],
+    reviewer: ["follow-up", "worker", "land", "researcher"],
+    researcher: ["worker", "follow-up"],
+    "follow-up": ["land", "worker"],
+    pull: ["worker", "researcher", "follow-up"],
+    land: ["publish", "worker", "follow-up"],
+    publish: [],
+};
+
+function flowOptions(current: ThreadType, history: readonly ThreadType[]) {
+    const same = new Set([...NEXT[current], "pull" as const]);
+
+    if (history.includes("reviewer")) {
+        same.add("land");
+    }
+
+    same.delete(current);
+
+    if (!history.some((kind) => kind === "reviewer" || kind === "pull")) {
+        same.delete("follow-up");
+    }
+
+    return [
+        ...[...same].map((targetType) => ({ targetType, relationship: "same-work" as const })),
+        ...(["worker", "researcher", "pull"] as const).map((targetType) => ({
+            targetType,
+            relationship: "new-work" as const,
+        })),
+    ];
+}
+
+type SummaryRuntime = TaskRuntime<
+    { key: string },
+    { phase: "summarize" },
+    HandoffResult | null,
+    object
+>;
+type SendRuntime = TaskRuntime<{ handoffId: string }, { phase: "send" }, null, object>;
+type TitleResult = {
+    title: string | null;
+    modelKey: string | null;
+    usage: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+        totalTokens: number;
+        cost: {
+            input: number;
+            output: number;
+            cacheRead: number;
+            cacheWrite: number;
+            total: number;
+        };
+    } | null;
 };
 
 export class Handoffs {
@@ -347,166 +442,291 @@ export class Handoffs {
         section("thread_role", (input) => {
             const id = this.#app.rootOf(input.conversationId);
             const kind = this.#app.sessionMeta(id)?.threadType ?? "worker";
-            const instructions = threadRolePrompt(kind, this.#app.config.agentPrompts[kind]);
 
-            return id === input.conversationId
-                ? instructions
-                : `${instructions}\n\nYou are a delegated helper within this role's scope. Carry out your assigned task and report evidence to the parent. The responsible main thread owns stage completion and successor recommendations; you do not take over its workflow.`;
+            return threadRolePrompt(kind, this.#app.config.agentPrompts[kind]);
         }),
         section("workflow", async (input, ctx) => {
             const id = this.#app.rootOf(input.conversationId);
-            const state = await input.read.snapshot(WorkflowDoc, id, ctx);
-
-            if (!this.isManaged(id)) {
-                return "The handoff tool prepares a compact brief and recommends an independent thread; only a human activates it through /handoff or the UI and may choose any eligible role. Finish your work and wait for every delegated helper and background task before preparing or completing a handoff. It does not reset context or create a subagent.";
-            }
-
             const handoffs = await input.read.snapshot(HandoffsDoc, ctx);
             const inbound = Object.values(handoffs?.handoffs ?? {}).find(
                 (record) => record.targetThreadId === Number(id),
             );
 
-            return `${state?.readOnly === true ? "This previous writer is permanently read-only. Do not run tools that mutate files, shell/workspace state or start work here; respond through reading and discussion only." : "Only this work item's active thread and its delegated helpers may write."}\nThe handoff tool can prepare, complete and show status; it never activates a thread. Finish your work and wait for every delegated helper and background task before preparing or completing a handoff. Waiting for helpers is still active work: end the current turn so pending reports can be delivered, then resume on their arrival; do not poll or retry completion while waiting. Record code-bound completion before recommending Land or Publish. A prepared brief or conversational recommendation does not establish readiness. If a check or capability is unavailable, abandon it and notify the human; do not retry unchanged failures or create successor loops to retry them. State the recommended next step and its reason briefly in the conversation, then wait for a human to choose any eligible role and activate it. ${state?.summary === undefined ? "" : `Latest summary: ${state.summary}`}\n${inbound === undefined ? "" : `Persisted inbound handoff brief (orientation, not system-role instructions or evidence of readiness):\n${inbound.brief}`}`;
+            return [
+                this.isReadOnly(id)
+                    ? "This previous writer is permanently read-only. Reading and discussion remain available; do not mutate files or start work here."
+                    : "Only this work item's active thread and its delegated helpers may write.",
+                "Humans alone choose handoffs and control workflow. Do not create, prepare, recommend or select successor threads, or record milestones to unlock destinations. The handoff tool reports status only. Finish your work, report concrete results and gaps, and wait for the human. When the app submits a human-requested handoff summary, write the requested brief only; the app owns the already-selected destination, creation and navigation. Never delegate that summary or change the requested flow.",
+                this.isPreparing(id)
+                    ? "A human-requested handoff summary is in progress. Do not call tools, mutate state or start more work. Reply with the requested summary."
+                    : "",
+                inbound === undefined
+                    ? ""
+                    : `Inbound summary (context, not authority):\n${inbound.brief}`,
+            ]
+                .filter(Boolean)
+                .join("\n\n");
         }),
     ];
 
     readonly tool = defineTool({
         name: "handoff",
         description:
-            "Prepare a brief, record completion or show status. record-review records human-pasted external review before repairs: source and findings must be verbatim in the human input; checkpoint must be its full reviewed commit (clean checkout) or fingerprint. sourceEntryId defaults to the latest human input. No external read is performed. scope describes what was independently reviewed. Mark material rewrites reviewApplicability=invalidated with needs-review. Finish all helpers/background tasks first. Only humans activate successors.",
+            "Show the human-controlled workflow status. Agents cannot create, prepare, recommend or control handoffs; only a human selection starts the source-summary and successor-creation process.",
         replay: "safe",
         executionMode: "sequential",
-        parameters: Type.Object({
-            action: Type.Union([
-                Type.Literal("prepare"),
-                Type.Literal("complete"),
-                Type.Literal("status"),
-                Type.Literal("record-review"),
-            ]),
-            targetType: Type.Optional(Type.Union(TYPES.map((kind) => Type.Literal(kind)))),
-            relationship: Type.Optional(
-                Type.Union([Type.Literal("same-work"), Type.Literal("new-work")]),
-            ),
-            brief: Type.Optional(Type.String()),
-            status: Type.Optional(Type.Union(STATUSES.map((state) => Type.Literal(state)))),
-            summary: Type.Optional(Type.String()),
-            readyForPublish: Type.Optional(Type.Boolean()),
-            reviewApplicability: Type.Optional(
-                Type.Union([Type.Literal("preserved"), Type.Literal("invalidated")]),
-            ),
-            sourceEntryId: Type.Optional(Type.Integer()),
-            source: Type.Optional(Type.String()),
-            scope: Type.Optional(Type.String()),
-            findings: Type.Optional(Type.String()),
-            checkpoint: Type.Optional(Type.String()),
-            recommendations: Type.Optional(
-                Type.Array(
-                    Type.Object({
-                        targetType: Type.Union(TYPES.map((kind) => Type.Literal(kind))),
-                        relationship: Type.Union([
-                            Type.Literal("same-work"),
-                            Type.Literal("new-work"),
-                        ]),
-                        reason: Type.Optional(Type.String()),
-                    }),
-                ),
-            ),
-        }),
-        execute: async (args, api, ctx) => {
-            const id = api.conversationId;
-            const user = this.#requester(id);
-            const key = `${api.taskId}:${api.callId}`;
-
-            if (id !== this.#app.rootOf(id)) {
+        parameters: Type.Object(
+            { action: Type.Literal("status") },
+            { additionalProperties: false },
+        ),
+        execute: async (args, api) => {
+            if (args.action !== "status" || Object.keys(args).some((key) => key !== "action")) {
                 throw new HttpError(
                     403,
-                    "Only the main thread can prepare or complete its workflow",
+                    "Only humans choose and request handoffs; this tool reports status only",
                 );
             }
 
-            if (args.action === "prepare") {
-                const proposal: Proposal = {
-                    targetType: target(args.targetType),
-                    relationship: relationship(args.relationship),
-                    brief: text(args.brief, "brief"),
-                };
-                const recs = recommendations(args.recommendations) ?? [
-                    { targetType: proposal.targetType, relationship: proposal.relationship },
-                ];
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(
+                            this.projection(
+                                api.conversationId,
+                                this.#requester(api.conversationId),
+                            ),
+                        ),
+                    },
+                ],
+            };
+        },
+    });
 
-                await api.commit(async (tx) => {
-                    this.#human(id, user);
-                    const state = await tx.doc(WorkflowDoc, id);
+    readonly summaryTask = defineTask<
+        { key: string },
+        { phase: "summarize" },
+        HandoffResult | null
+    >({
+        name: "pocket.handoff-summary",
+        version: 1,
+        initial: () => ({ phase: "summarize" }),
+        phases: {
+            summarize: async (task, runtime, ctx) => {
+                const key = task.input.key;
+                const data = await runtime.snapshot(HandoffsDoc, ctx);
+                const intent = data?.pending?.[key];
+                const saved = data?.requests[key];
 
-                    this.#writable(state);
-                    this.requireWritable(id);
-                    const input = digest([proposal, recs]);
+                if (saved !== undefined) {
+                    await runtime.commit(async (tx) => {
+                        const pending = (await tx.doc(HandoffsDoc)).pending?.[key];
 
-                    if (this.#receipt(state, key, input)) {
-                        return;
+                        if (pending !== undefined) {
+                            pending.status = "completed";
+                        }
+
+                        return {
+                            status: "terminal",
+                            outcome: {
+                                status: "completed",
+                                result: {
+                                    id: saved.id,
+                                    handoffId: saved.handoffId,
+                                    workItemId: saved.workItemId,
+                                },
+                            },
+                        };
+                    }, ctx);
+
+                    return;
+                }
+
+                if (
+                    intent === undefined ||
+                    intent.taskId !== Number(runtime.taskId) ||
+                    intent.status !== "pending"
+                ) {
+                    await runtime.commit(
+                        () => ({
+                            status: "terminal",
+                            outcome: { status: "completed", result: null },
+                        }),
+                        ctx,
+                    );
+
+                    return;
+                }
+
+                try {
+                    const id = runtime.conversationId;
+                    const user = this.#app.config.userById(intent.requestedBy);
+
+                    if (user === undefined) {
+                        throw new HttpError(401, "Requester's access was removed");
                     }
 
-                    await this.#idle(
-                        tx,
-                        this.members(id).map(Number),
-                        await this.#invocationTasks(tx, api.taskId),
-                    );
-                    state.proposal = proposal;
-                    state.recommendations = recs;
-                    state.receipts[key] = input;
                     this.#human(id, user);
-                }, ctx);
-            } else if (args.action === "record-review") {
-                const checked = await this.#resolveReviewSource(
-                    id,
-                    this.#externalReview(args),
-                    ctx,
-                );
+                    this.#app.spend.check(user, id);
+                    const conversation = await runtime.conversation(id, ctx);
 
-                await api.commit(async (tx) => {
-                    await this.#idle(
-                        tx,
-                        this.members(id).map(Number),
-                        await this.#invocationTasks(tx, api.taskId),
-                    );
-                    await this.#externalReviewInput(tx, id, user, checked);
-                }, ctx);
-                const code = await fingerprint((await api.agent(ctx)).cwd ?? this.#app.cwdOf(id));
+                    if (conversation === undefined) {
+                        throw new Error("The source thread no longer exists");
+                    }
 
-                await api.commit(async (tx) => {
-                    await this.#idle(
-                        tx,
-                        this.members(id).map(Number),
-                        await this.#invocationTasks(tx, api.taskId),
+                    const submission = await conversation.submit(
+                        {
+                            type: "input",
+                            content: this.#app.commands.messageText(
+                                user,
+                                [
+                                    `The human has requested a ${intent.relationship} handoff to ${intent.targetType}. The destination is already chosen; do not recommend, choose or create any thread.`,
+                                    "Write only a compact handoff summary for that destination (at most 12,000 characters). Include the original ask, current direction/decisions, relevant code/files and checkpoint, changes made, actual checks/results, blockers, deferred checks, remaining risks and mutation limits. If this starts a new Work Item, clearly separate its requested scope from unfinished prior work. Do not call tools, delegate work, change files or record completion. The app will create the selected successor after your reply.",
+                                    ...(intent.brief === undefined
+                                        ? []
+                                        : [`Human handoff context:\n${intent.brief}`]),
+                                ].join("\n\n"),
+                            ),
+                            requestId: ownRequest(
+                                user.id,
+                                `handoff-summary:${key}:${intent.attempt}`,
+                            ),
+                            whenBusy: "followUp",
+                        },
+                        ctx,
                     );
-                    await this.#recordExternalReview(tx, id, user, checked, code, key);
-                }, ctx);
-            } else if (args.action === "complete") {
-                const checked = this.#completion(args);
+                    const answered = await submission.wait(ctx);
 
-                // Refuse unfinished work or missing review provenance before checkout inspection.
-                // Both gates are rechecked at the final commit.
-                await api.commit(async (tx) => {
-                    await this.#idle(
-                        tx,
-                        this.members(id).map(Number),
-                        await this.#invocationTasks(tx, api.taskId),
-                    );
-                    await this.#completionState(tx, id, user, checked, key);
-                }, ctx);
-                const code = await fingerprint((await api.agent(ctx)).cwd ?? this.#app.cwdOf(id));
+                    if (answered.type !== "input" || answered.status !== "done") {
+                        throw new HttpError(
+                            409,
+                            "The source summary was stopped or failed; no successor was created",
+                        );
+                    }
 
-                await api.commit(async (tx) => {
-                    await this.#idle(
-                        tx,
-                        this.members(id).map(Number),
-                        await this.#invocationTasks(tx, api.taskId),
+                    await conversation.waitForIdle(ctx);
+                    const entry = await runtime.entry(answered.answer, ctx);
+                    const response = entry?.model?.[0];
+
+                    if (response?.role !== "assistant" || response.stopReason !== "stop") {
+                        throw new HttpError(
+                            409,
+                            "The source did not finish a successful handoff summary; no successor was created",
+                        );
+                    }
+
+                    const brief = text(userContent(response).text, "handoff summary");
+                    const result = await withWorkflowPublicationLock(this.#app, id, () =>
+                        this.#start(
+                            id,
+                            user,
+                            {
+                                kind: intent.targetType,
+                                relation: intent.relationship,
+                                key,
+                                input: intent.input,
+                                brief,
+                            },
+                            runtime,
+                            ctx,
+                        ),
                     );
-                    await this.#complete(tx, id, user, checked, code, key);
-                }, ctx);
+
+                    await runtime.commit(async (tx) => {
+                        const pending = (await tx.doc(HandoffsDoc)).pending?.[key];
+
+                        if (pending !== undefined) {
+                            pending.status = "completed";
+                        }
+
+                        return { status: "terminal", outcome: { status: "completed", result } };
+                    }, ctx);
+                } catch (error) {
+                    if (runtime.signal.aborted) {
+                        throw error;
+                    }
+
+                    const reason =
+                        error instanceof Error ? error.message : "The handoff summary failed";
+
+                    await runtime.commit(async (tx) => {
+                        const doc = await tx.doc(HandoffsDoc);
+                        const pending = doc.pending?.[key];
+                        const saved = doc.requests[key];
+
+                        if (saved !== undefined) {
+                            if (pending !== undefined) {
+                                pending.status = "completed";
+                            }
+
+                            return {
+                                status: "terminal",
+                                outcome: {
+                                    status: "completed",
+                                    result: {
+                                        id: saved.id,
+                                        handoffId: saved.handoffId,
+                                        workItemId: saved.workItemId,
+                                    },
+                                },
+                            };
+                        }
+
+                        if (pending?.taskId === Number(runtime.taskId)) {
+                            pending.status = "blocked";
+                            pending.reason = reason.slice(0, 1000);
+                        }
+
+                        return {
+                            status: "terminal",
+                            outcome: { status: "failed", error: { message: reason } },
+                        };
+                    }, ctx);
+                }
+            },
+        },
+        abort: async (task, runtime, ctx) => {
+            const intent = (await runtime.snapshot(HandoffsDoc, ctx))?.pending?.[task.input.key];
+
+            if (intent?.taskId === Number(runtime.taskId) && intent.status === "pending") {
+                // The summary input is the only admitted work while this request holds the source.
+                const conversation = await runtime.conversation(runtime.conversationId, ctx);
+
+                await conversation?.abort(ctx);
             }
 
-            return { content: [{ type: "text", text: JSON.stringify(await this.list(id, user)) }] };
+            await runtime.commit(async (tx) => {
+                const doc = await tx.doc(HandoffsDoc);
+                const pending = doc.pending?.[task.input.key];
+                const saved = doc.requests[task.input.key];
+
+                // Cancellation cannot undo an atomic activation or report it as an uncreated successor.
+                if (saved !== undefined) {
+                    if (pending !== undefined) {
+                        pending.status = "completed";
+                    }
+
+                    return {
+                        status: "terminal",
+                        outcome: {
+                            status: "completed",
+                            result: {
+                                id: saved.id,
+                                handoffId: saved.handoffId,
+                                workItemId: saved.workItemId,
+                            },
+                        },
+                    };
+                }
+
+                if (pending?.taskId === Number(runtime.taskId)) {
+                    pending.status = "blocked";
+                    pending.reason =
+                        "The human-requested handoff was stopped; no successor was created";
+                }
+
+                return { status: "terminal", outcome: { status: "aborted" } };
+            }, ctx);
         },
     });
 
@@ -553,6 +773,7 @@ export class Handoffs {
                         this.#app.spend.check(user, id);
                     }
 
+                    await this.#nameThread(record, runtime, ctx);
                     const conversation = await runtime.conversation(id, ctx);
 
                     if (conversation === undefined) {
@@ -661,6 +882,133 @@ export class Handoffs {
             runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), ctx),
     });
 
+    /** Destination-owned naming uses the received summary, preserves manual renames and bills once. */
+    async #nameThread(
+        record: Readonly<Handoff>,
+        runtime: SendRuntime,
+        ctx: Context,
+    ): Promise<void> {
+        if (record.titleNamed === true) {
+            return;
+        }
+
+        const id = runtime.conversationId;
+        let named = await runtime.memo<TitleResult>("handoff-title", ctx);
+
+        if (named === undefined) {
+            const agent = await runtime.agent(ctx);
+            const current =
+                agent.model === undefined
+                    ? undefined
+                    : this.#app.models.getModel(agent.model.provider, agent.model.modelId);
+            let candidate: TitleResult = {
+                title:
+                    cleanTitle(
+                        record.brief
+                            .split("\n")
+                            .slice(1)
+                            .find((line) => line.trim()) ?? "",
+                    ) ?? null,
+                modelKey: null,
+                usage: null,
+            };
+
+            if (
+                current !== undefined &&
+                this.#app.spend.heldBack(id) === undefined &&
+                this.#app.sessionMeta(id)?.title === TITLES[record.targetType]
+            ) {
+                try {
+                    const model = titleModel(this.#app.models.getAvailableSnapshot(), current);
+                    const reply = await this.#app.models.completeSimple(
+                        model,
+                        {
+                            messages: [
+                                {
+                                    role: "user",
+                                    content: [
+                                        {
+                                            type: "text",
+                                            text: `${TITLE_PROMPT}\n\n<message>\n${record.brief.slice(0, 3000)}\n</message>`,
+                                        },
+                                    ],
+                                    timestamp: Date.now(),
+                                },
+                            ],
+                        },
+                        { maxTokens: 256, signal: runtime.signal },
+                    );
+
+                    candidate = {
+                        title:
+                            reply.stopReason === "error"
+                                ? candidate.title
+                                : (cleanTitle(
+                                      reply.content
+                                          .flatMap((part) =>
+                                              part.type === "text" ? [part.text] : [],
+                                          )
+                                          .join(""),
+                                  ) ?? candidate.title),
+                        modelKey: `${model.provider}/${model.id}`,
+                        usage: reply.usage,
+                    };
+                } catch (error) {
+                    if (runtime.signal.aborted) {
+                        throw error;
+                    }
+
+                    runtime.report(error);
+                }
+            }
+
+            named = await runtime.memo("handoff-title", candidate, ctx);
+        }
+
+        const result = named;
+
+        await runtime.commit(async (tx) => {
+            const doc = await tx.doc(HandoffsDoc);
+            const saved = doc.handoffs[record.id];
+            const sessions = await tx.doc(SessionsDoc);
+            const meta = sessions.items[String(id)];
+
+            if (saved === undefined || saved.titleNamed === true) {
+                return;
+            }
+
+            if (result.usage !== null && result.modelKey !== null) {
+                const ledger = await tx.doc(UsageDoc, id);
+
+                ledger.models[result.modelKey] ??= {
+                    input: 0,
+                    output: 0,
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    totalTokens: 0,
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                };
+                addUsage(ledger.models[result.modelKey]!, result.usage);
+            }
+
+            if (meta?.title === TITLES[record.targetType] && result.title !== null) {
+                meta.title = result.title;
+                const item = doc.workItems[record.workItemId];
+
+                if (
+                    item?.originThreadId === Number(id) &&
+                    item.title === TITLES[record.targetType]
+                ) {
+                    item.title = result.title;
+                }
+            }
+
+            saved.titleNamed = true;
+
+            return undefined;
+        }, ctx);
+    }
+
     async recover(storage: Storage): Promise<void> {
         this.#storage = storage;
         this.committed(await this.#app.harness.snapshot(HandoffsDoc, context));
@@ -693,8 +1041,9 @@ export class Handoffs {
         const state = this.#workflows.get(root);
 
         return (
+            this.isPreparing(root) ||
             this.#app.sessionMeta(root)?.workItemId !== undefined ||
-            ["worker", "reviewer", "follow-up", "pull", "land", "publish"].includes(
+            ["researcher", "worker", "reviewer", "follow-up", "pull", "land", "publish"].includes(
                 this.#app.sessionMeta(root)?.threadType ?? "",
             ) ||
             state?.proposal !== undefined ||
@@ -715,7 +1064,36 @@ export class Handoffs {
         );
     }
 
+    isPreparing(id: ConversationId): boolean {
+        return Object.values(this.#doc.pending ?? {}).some(
+            (request) =>
+                request.sourceThreadId === Number(this.#app.rootOf(id)) &&
+                request.status === "pending",
+        );
+    }
+
+    /** Stop also cancels a summary task that has not yet placed its foreground model input. */
+    async abortSummary(id: ConversationId, supplied: User): Promise<void> {
+        this.#human(id, supplied);
+        const pending = Object.values(this.#doc.pending ?? {}).filter(
+            (request) => request.sourceThreadId === Number(id) && request.status === "pending",
+        );
+
+        await Promise.all(
+            pending.map((request) =>
+                this.#app.harness.abortTask(request.taskId as TaskId, context),
+            ),
+        );
+    }
+
     requireWritable(id: ConversationId): void {
+        if (this.isPreparing(id)) {
+            throw new HttpError(
+                409,
+                "A human-requested handoff summary is in progress; wait for it to settle",
+            );
+        }
+
         if (this.isReadOnly(id)) {
             throw new HttpError(
                 409,
@@ -738,6 +1116,7 @@ export class Handoffs {
         return {
             workflow: {
                 ...publicWorkflow(this.#workflows.get(root)),
+                preparing: this.isPreparing(root),
                 readOnly: this.isReadOnly(root),
                 managed: this.isManaged(root),
             },
@@ -857,7 +1236,7 @@ export class Handoffs {
 
         if (
             id !== this.#app.rootOf(id) ||
-            !["chat", "worker", "pull", "follow-up"].includes(
+            !["chat", "worker", "researcher", "pull", "follow-up"].includes(
                 sessions.items[String(id)]?.threadType ?? "worker",
             )
         ) {
@@ -897,7 +1276,7 @@ export class Handoffs {
                 if (
                     submission.type !== "input" ||
                     requestPerson(submission.requestId)?.wrote !== true ||
-                    /^u:[^:]+:handoff:/.test(submission.requestId ?? "") ||
+                    /^u:[^:]+:handoff(?:-summary)?:/.test(submission.requestId ?? "") ||
                     submission.entry === undefined ||
                     (request.sourceEntryId !== undefined &&
                         request.sourceEntryId !== Number(submission.entry))
@@ -929,7 +1308,7 @@ export class Handoffs {
         if (
             submission?.type !== "input" ||
             person?.wrote !== true ||
-            /^u:[^:]+:handoff:/.test(submission.requestId ?? "") ||
+            /^u:[^:]+:handoff(?:-summary)?:/.test(submission.requestId ?? "") ||
             submission.conversationId !== id ||
             submission.entry === undefined ||
             Number(submission.id) !== request.sourceSubmissionId ||
@@ -1016,6 +1395,8 @@ export class Handoffs {
         state.status = "active";
         state.readyForPublish = false;
         delete state.reviewApplicability;
+        delete state.reviewAssessment;
+        delete state.reviewAssessmentId;
         delete state.fingerprint;
         delete state.completedAt;
         delete state.completedBy;
@@ -1078,11 +1459,55 @@ export class Handoffs {
             );
         }
 
+        let reviewAssessment: ReviewAssessment | undefined;
+
+        if (request.reviewAssessment !== undefined) {
+            const assessment = request.reviewAssessment as Partial<ReviewAssessment> | null;
+
+            if (
+                assessment === null ||
+                typeof assessment !== "object" ||
+                !["clear", "blocked"].includes(assessment.outcome ?? "") ||
+                !Array.isArray(assessment.validationGaps) ||
+                assessment.validationGaps.length > 20
+            ) {
+                throw new HttpError(
+                    400,
+                    "reviewAssessment needs outcome clear/blocked and at most 20 named validationGaps",
+                );
+            }
+
+            reviewAssessment = {
+                outcome: assessment.outcome!,
+                validationGaps: assessment.validationGaps.map((gap) =>
+                    text(gap, "validation gap", 1000),
+                ),
+            };
+
+            if (
+                (status !== "needs-review" && status !== "review-complete") ||
+                (status === "review-complete" &&
+                    (reviewAssessment.outcome !== "clear" ||
+                        reviewAssessment.validationGaps.length > 0)) ||
+                (status === "needs-review" &&
+                    reviewAssessment.outcome === "clear" &&
+                    reviewAssessment.validationGaps.length === 0) ||
+                (request.reviewApplicability === "invalidated" &&
+                    reviewAssessment.outcome === "clear")
+            ) {
+                throw new HttpError(
+                    409,
+                    "Clear review with validation gaps requires needs-review; blocked or invalidated review cannot claim readiness",
+                );
+            }
+        }
+
         return {
             status: status as WorkflowStatus,
             summary: text(request.summary, "summary", 8000),
             readyForPublish: request.readyForPublish === true,
             reviewApplicability: request.reviewApplicability,
+            reviewAssessment,
             recommendations:
                 recommendations(request.recommendations) ??
                 (request.reviewApplicability === "invalidated"
@@ -1163,6 +1588,7 @@ export class Handoffs {
 
                     if (evidence.suppliedBy === external.suppliedBy) {
                         if (
+                            meta?.threadType !== "researcher" &&
                             meta?.threadType !== "follow-up" &&
                             transfer?.digest !== external.fingerprint.digest
                         ) {
@@ -1194,7 +1620,7 @@ export class Handoffs {
                 break;
             }
 
-            if (meta?.threadType !== "follow-up") {
+            if (meta?.threadType !== "researcher" && meta?.threadType !== "follow-up") {
                 break;
             }
 
@@ -1222,6 +1648,9 @@ export class Handoffs {
         state.summary = request.summary;
         state.recommendations = request.recommendations;
         state.readyForPublish = request.readyForPublish;
+        // New reports invalidate earlier acceptance even when fingerprint inspection subsequently fails.
+        delete state.reviewAssessment;
+        delete state.reviewAssessmentId;
 
         if (state.proposal !== undefined && request.recommendations[0] !== undefined) {
             // Keep the authored brief, but do not let an earlier suggestion override the latest outcome.
@@ -1269,7 +1698,7 @@ export class Handoffs {
         }
 
         if (
-            request.reviewApplicability !== undefined &&
+            (request.reviewApplicability !== undefined || request.reviewAssessment !== undefined) &&
             !["reviewer", "follow-up"].includes(kind)
         ) {
             throw new HttpError(409, "Only review or repair threads assess review applicability");
@@ -1280,20 +1709,29 @@ export class Handoffs {
             return { user, state, group };
         }
 
-        if (request.status === "review-complete" && state.reviewApplicability === "invalidated") {
+        if (
+            (request.status === "review-complete" ||
+                request.reviewAssessment?.outcome === "clear") &&
+            state.reviewApplicability === "invalidated"
+        ) {
             throw new HttpError(
                 409,
                 "Material changes require fresh independent review, not a new self-attestation",
             );
         }
 
-        if (request.status === "review-complete") {
+        if (request.status === "review-complete" || request.reviewAssessment?.outcome === "clear") {
             const reason = await this.#reviewProvenanceReason(tx, id);
 
             if (reason !== undefined) {
                 throw new HttpError(409, reason);
             }
         }
+
+        // Every new admitted report retires the current acceptance identity before inspection,
+        // including a replacement review-complete attempt whose inspection may subsequently fail.
+        delete state.reviewAssessment;
+        delete state.reviewAssessmentId;
 
         if (request.status === "needs-review") {
             // A blocker revokes readiness even if inspection fails. Preserve prior independent evidence
@@ -1378,6 +1816,9 @@ export class Handoffs {
         }
 
         this.#outcome(state, request);
+        state.reviewAssessment = request.reviewAssessment;
+        state.reviewAssessmentId =
+            request.reviewAssessment === undefined ? undefined : randomUUID();
         state.fingerprint = code;
         state.completedAt = Date.now();
         state.completedBy = user.id;
@@ -1439,34 +1880,6 @@ export class Handoffs {
         }
 
         return allowed;
-    }
-
-    /** A completed report is the minimum review input, not proof of code changes or correctness. */
-    async #hasCompletedWork(tx: Tx, id: ConversationId): Promise<boolean> {
-        let cursor: Cursor | undefined;
-
-        do {
-            const page = await tx.scanEntries({ conversationId: id }, 256, cursor);
-
-            if (
-                page.items.some((entry) => {
-                    const message = entry.model?.[0];
-
-                    return (
-                        entry.kind === "pi.assistant" &&
-                        message?.role === "assistant" &&
-                        message.stopReason === "stop" &&
-                        userContent(message).text.trim().length > 0
-                    );
-                })
-            ) {
-                return true;
-            }
-
-            cursor = page.next;
-        } while (cursor !== undefined);
-
-        return false;
     }
 
     /** Busy checks are transaction reads, before creating any destination or reserving a receipt. Never abort writers. */
@@ -1599,6 +2012,13 @@ export class Handoffs {
         await this.#idle(tx, this.members(id).map(Number));
     }
 
+    async #hasDiff(id: ConversationId, user: User): Promise<boolean> {
+        const changes = await this.#app.workspace.changes(id, user);
+
+        // piOnly is historical tool activity (including files already committed), not a current diff.
+        return changes.files.length > 0;
+    }
+
     async list(id: ConversationId, supplied: User) {
         const user = this.#app.config.userById(supplied.id);
 
@@ -1611,74 +2031,76 @@ export class Handoffs {
         const meta = this.#app.sessionMeta(root);
         const item =
             meta?.workItemId === undefined ? undefined : this.#doc.workItems[meta.workItemId];
-        const state = this.#workflows.get(root);
-        let current: CodeFingerprint | undefined;
+        const current = meta?.threadType ?? "worker";
+        const history = (item?.threadIds ?? [Number(root)]).map(
+            (member) => this.#app.sessionMeta(member as ConversationId)?.threadType ?? "worker",
+        );
+        let choices = flowOptions(current, history);
+        let diffReason: string | undefined;
+
+        let busyReason = workflowExclusiveReason(this.#app, root);
 
         try {
-            current = await fingerprint(this.#app.cwdOf(root));
-        } catch {
-            // Listing remains available for non-Git conversations; gated transitions explain why they are unavailable.
-        }
-
-        const readiness = await this.#app.harness.commit(async (tx) => {
-            const hasCompletedWork = await this.#hasCompletedWork(tx, root);
-            let busyReason: string | undefined;
-
-            try {
-                await this.#idle(tx, this.members(root).map(Number));
-            } catch (error) {
-                if (!(error instanceof HttpError)) {
-                    throw error;
-                }
-
-                busyReason = error.message;
+            await this.#app.harness.commit((tx) => this.requireIdle(tx, root), context);
+        } catch (error) {
+            if (!(error instanceof HttpError)) {
+                throw error;
             }
 
-            const reviewReason =
-                state?.status === "review-complete"
-                    ? await this.#reviewProvenanceReason(tx, root)
-                    : undefined;
+            busyReason ??= error.message;
+        }
 
-            return { hasCompletedWork, busyReason, reviewReason };
-        }, context);
-        const options = TYPES.flatMap((kind) =>
-            (kind === "worker"
-                ? (["same-work", "new-work"] as const)
-                : (["same-work"] as const)
-            ).map((relation) => ({ kind, relation })),
-        ).map(({ kind, relation }) => {
+        if (this.isPreparing(root)) {
+            busyReason = "Preparing the human-requested handoff summary";
+        }
+
+        if (choices.some((choice) => choice.targetType === "reviewer")) {
+            let hasDiff = false;
+
+            // Do not inspect a changing checkout, a retired writer, or a caller who cannot steer.
+            if (
+                busyReason === undefined &&
+                root === id &&
+                !this.isReadOnly(root) &&
+                user.role !== "viewer"
+            ) {
+                try {
+                    hasDiff = await this.#hasDiff(root, user);
+                    diffReason = hasDiff
+                        ? undefined
+                        : "Reviewer requires a nonempty current Pi diff.";
+                } catch {
+                    diffReason =
+                        "Review is unavailable because the current Pi diff could not be read.";
+                }
+            }
+
+            if (!hasDiff) {
+                choices = choices.filter((choice) => choice.targetType !== "reviewer");
+            }
+        }
+
+        const options = choices.map((choice) => {
             let reason: string | undefined;
 
             if (user.role === "viewer") {
                 reason = "Steering rights are required";
-            } else if (relation === "new-work" && user.sessions !== undefined) {
+            } else if (choice.relationship === "new-work" && user.sessions !== undefined) {
                 reason = "People invited to particular sessions cannot start new work";
             } else if (root !== id || this.isReadOnly(root)) {
                 reason = "Continue from the active main thread";
-            } else if (meta?.archived === true) {
+            } else if (meta?.archived === true || item?.archived === true) {
                 reason = "Restore the work item first";
             } else if (
                 item?.threadIds.some((member) => !this.#app.canSee(user, member as ConversationId))
             ) {
                 reason = "Every work-item member must be visible to activate a handoff";
-            } else if (readiness.busyReason !== undefined) {
-                reason = readiness.busyReason;
-            } else if (kind === "land" && readiness.reviewReason !== undefined) {
-                reason = readiness.reviewReason;
             } else {
-                reason = this.#transitionReason(
-                    kind,
-                    relation,
-                    state,
-                    item,
-                    current,
-                    readiness.hasCompletedWork,
-                );
+                reason = busyReason;
             }
 
             return {
-                targetType: kind,
-                relationship: relation,
+                ...choice,
                 enabled: reason === undefined,
                 ...(reason === undefined ? {} : { reason }),
             };
@@ -1700,7 +2122,154 @@ export class Handoffs {
                 )
                 .map(({ codeCheckpoint: _privateCheckpoint, ...record }) => record),
             options,
+            ...(diffReason === undefined ? {} : { diffReason }),
         };
+    }
+
+    /** An offer is an exact completed assessment, never inferred from a summary or failed check text. */
+    #validationOffer(state?: Readonly<Workflow>, code?: CodeFingerprint) {
+        if (
+            state?.status !== "needs-review" ||
+            state.reviewApplicability === "invalidated" ||
+            state.reviewAssessment?.outcome !== "clear" ||
+            state.reviewAssessmentId === undefined ||
+            state.reviewAssessment.validationGaps.length === 0 ||
+            state.completedAt === undefined ||
+            state.completedBy === undefined ||
+            code === undefined ||
+            state.fingerprint?.digest !== code.digest
+        ) {
+            return undefined;
+        }
+
+        return {
+            checkpoint: code.digest,
+            assessment: digest([
+                state.reviewAssessmentId,
+                state.fingerprint,
+                state.completedAt,
+                state.completedBy,
+                state.summary,
+                state.reviewAssessment,
+            ]),
+            gaps: state.reviewAssessment.validationGaps,
+        };
+    }
+
+    #acceptedValidation(state?: Readonly<Workflow>, code?: CodeFingerprint) {
+        const offer = this.#validationOffer(state, code);
+
+        return offer === undefined
+            ? undefined
+            : state?.validationAcceptances?.findLast(
+                  (each) =>
+                      each.checkpoint === offer.checkpoint && each.assessment === offer.assessment,
+              );
+    }
+
+    async #validationState(tx: Tx, id: ConversationId, supplied: User) {
+        const user = this.#human(id, supplied);
+
+        this.requireWritable(id);
+        const state = await tx.doc(WorkflowDoc, id);
+        const sessions = await tx.doc(SessionsDoc);
+        const turns = await tx.doc(TurnsDoc, id);
+        const doc = await tx.doc(HandoffsDoc);
+        const meta = sessions.items[String(id)];
+        const item = meta?.workItemId === undefined ? undefined : doc.workItems[meta.workItemId];
+
+        this.#writable(state);
+
+        if (
+            id !== this.#app.rootOf(id) ||
+            !["reviewer", "follow-up"].includes(meta?.threadType ?? "") ||
+            meta?.archived ||
+            item?.archived ||
+            (item !== undefined && item.activeThreadId !== Number(id))
+        ) {
+            throw new HttpError(
+                409,
+                "Accept validation only in the active review or Follow-up main thread",
+            );
+        }
+
+        if (turns.on && turns.driver !== user.id) {
+            throw new HttpError(409, "Take the wheel before accepting validation risk");
+        }
+
+        if (item !== undefined) {
+            this.#requireMembers(item, user);
+        }
+
+        await this.requireIdle(tx, id);
+        await this.#requireResolvedPublications(tx, item?.threadIds ?? [Number(id)]);
+        const reason = await this.#reviewProvenanceReason(tx, id);
+
+        if (reason !== undefined) {
+            throw new HttpError(409, reason);
+        }
+
+        return { state, user };
+    }
+
+    /** Human HTTP action only. There is deliberately no tool action or message-intake equivalent. */
+    async acceptValidation(
+        id: ConversationId,
+        supplied: User,
+        request: AcceptValidation,
+    ): Promise<void> {
+        this.#human(id, supplied);
+        this.requireWritable(id);
+        await this.#app.requireDriver(id, supplied);
+        const checkpoint = text(request.checkpoint, "checkpoint", 64);
+        const assessment = text(request.assessment, "assessment", 64);
+
+        await withWorkflowPublicationLock(this.#app, id, async () => {
+            await this.#app.harness.commit(async (tx) => {
+                await this.#validationState(tx, id, supplied);
+            }, context);
+            const code = await fingerprint(this.#app.cwdOf(id));
+
+            await this.#app.harness.commit(async (tx) => {
+                const { state, user } = await this.#validationState(tx, id, supplied);
+                const offer = this.#validationOffer(state, code);
+
+                if (offer?.checkpoint !== checkpoint || offer.assessment !== assessment) {
+                    throw new HttpError(
+                        409,
+                        "Validation assessment or checkpoint changed; refresh the named risks before accepting",
+                    );
+                }
+
+                if (
+                    this.#app.cwdOf(id) !== code.cwd ||
+                    (await fingerprint(code.cwd)).digest !== code.digest
+                ) {
+                    throw new HttpError(409, "Checkout changed while accepting validation risk");
+                }
+
+                if (this.#acceptedValidation(state, code) === undefined) {
+                    // Assignments store a clone; read back the draft before appending to a new ledger.
+                    state.validationAcceptances ??= [];
+                    const ledger = state.validationAcceptances;
+
+                    if (ledger.length >= 100) {
+                        throw new HttpError(413, "Validation acceptance history limit reached");
+                    }
+
+                    ledger.push({
+                        threadId: Number(id),
+                        checkpoint,
+                        assessment,
+                        gaps: [...offer.gaps],
+                        acceptedBy: user.id,
+                        acceptedAt: Date.now(),
+                    });
+                }
+
+                this.#human(id, supplied);
+            }, context);
+        });
     }
 
     #publicItem(item: WorkItem, user: User) {
@@ -1728,47 +2297,78 @@ export class Handoffs {
         }
     }
 
+    /** Role history, rather than agent-authored milestones, determines which paths exist. */
     #transitionReason(
         kind: ThreadType,
         relation: Relationship,
-        state?: Readonly<Workflow>,
-        item?: WorkItem,
-        code?: CodeFingerprint,
-        hasCompletedWork = false,
-    ): string | undefined {
-        if (kind === "reviewer" && !hasCompletedWork) {
-            return "There is no completed work to review; finish work in this thread first";
+        current: ThreadType,
+        history: ThreadType[],
+    ) {
+        return flowOptions(current, history).some(
+            (option) => option.targetType === kind && option.relationship === relation,
+        )
+            ? undefined
+            : "This handoff is not available from the current thread state";
+    }
+
+    async #admit(
+        tx: Tx,
+        id: ConversationId,
+        supplied: User,
+        kind: ThreadType,
+        relation: Relationship,
+        allowed = new Set<TaskId>(),
+    ) {
+        const user = this.#human(id, supplied);
+        const doc = await tx.doc(HandoffsDoc);
+        const sessions = await tx.doc(SessionsDoc);
+        const meta = sessions.items[String(id)];
+        const state = await tx.doc(WorkflowDoc, id);
+        const turns = await tx.doc(TurnsDoc, id);
+        const item = meta?.workItemId === undefined ? undefined : doc.workItems[meta.workItemId];
+
+        if (meta === undefined) {
+            throw new HttpError(404, "Not a session");
         }
 
-        if (relation === "new-work") {
-            return kind !== "worker" ||
-                (state?.status !== "landed" && state?.status !== "published")
-                ? "New work needs a landed or published predecessor and a Worker target"
-                : undefined;
+        this.#writable(state);
+
+        if (relation === "new-work" && user.sessions !== undefined) {
+            throw new HttpError(
+                403,
+                "You were invited to particular sessions and cannot start new work",
+            );
         }
 
-        if (kind === "land" || kind === "publish") {
-            const expected = kind === "land" ? "review-complete" : "landed";
-
-            if (
-                state?.status !== expected ||
-                (kind === "publish" && state.readyForPublish !== true)
-            ) {
-                return kind === "land"
-                    ? "Complete review before landing"
-                    : "Land and mark readyForPublish before publishing";
-            }
-
-            if (code === undefined || state.fingerprint?.digest !== code.digest) {
-                return "Checkout changed since completion; review the current code again";
-            }
+        if (item !== undefined && item.activeThreadId !== Number(id)) {
+            throw new HttpError(409, "Only the active work-item thread can hand off");
         }
 
-        if (item?.archived === true) {
-            return "Restore the work item first";
+        if (turns.on && turns.driver !== user.id) {
+            throw new HttpError(409, "Take the wheel before starting a handoff");
         }
 
-        return undefined;
+        if (meta.archived === true || item?.archived === true) {
+            throw new HttpError(409, "Restore the work item first");
+        }
+
+        if (item !== undefined) {
+            this.#requireMembers(item, user);
+        }
+
+        const history = (item?.threadIds ?? [Number(id)]).map(
+            (member) => sessions.items[String(member)]?.threadType ?? "worker",
+        );
+        const reason = this.#transitionReason(kind, relation, meta.threadType ?? "worker", history);
+
+        if (reason !== undefined) {
+            throw new HttpError(409, reason);
+        }
+
+        await this.#requireResolvedPublications(tx, item?.threadIds ?? [Number(id)]);
+        await this.#idle(tx, item?.threadIds ?? [Number(id)], allowed, false);
+
+        return { user, doc, sessions, meta, state, item };
     }
 
     /** Bounded useful fallback, read from persisted history; never compacts or changes the source transcript. */
@@ -1806,6 +2406,11 @@ export class Handoffs {
             `Last user message:\n${extract(user, 2000) || "None."}`,
             `Last assistant report / tests / risks:\n${extract(assistant, 2800) || "No completed report. Inspect tests and risks rather than assuming they passed."}`,
             `Workflow summary:\n${state.summary?.slice(0, 1200) ?? "None; tests and unresolved risks must be checked."}`,
+            ...(this.#acceptedValidation(state, code) === undefined
+                ? []
+                : [
+                      `Human validation-risk acceptance (not passing checks): ${JSON.stringify(this.#acceptedValidation(state, code))}. This permits entry to local Land only, for this checkpoint; integration drift needs a fresh assessment. It does not authorize publication.`,
+                  ]),
             `Source checkpoint: thread ${id}, latest transcript entry ${last.items[0]?.id ?? "none"}; cwd ${this.#app.cwdOf(id)}; Git HEAD ${code?.head ?? "unavailable"}; fingerprint ${code?.digest ?? "unavailable"}; status ${code === undefined ? "unavailable" : code.status === "" ? "clean" : "dirty (inspect the current checkout)"}.`,
         ]
             .join("\n\n")
@@ -1820,11 +2425,15 @@ export class Handoffs {
         const key = digest([user.id, Number(id), text(request.requestId, "requestId", 160)]);
         const input = digest([kind, relation, brief ?? null]);
 
+        if (request.recoverOnly !== undefined && typeof request.recoverOnly !== "boolean") {
+            throw new HttpError(400, "recoverOnly must be a boolean");
+        }
+
         if (id !== this.#app.rootOf(id)) {
             throw new HttpError(403, "Start a handoff from the main thread, not its subagent");
         }
 
-        // Successful retries must not depend on the predecessor still being writable or its checkout still existing.
+        // Recover an already-created successor even after the predecessor is retired or its checkout is gone.
         if (this.#doc.requests[key] !== undefined) {
             return this.#app.harness.commit(async (tx) => {
                 this.#human(id, supplied);
@@ -1836,143 +2445,180 @@ export class Handoffs {
                 }
 
                 this.#app.requireSee(user, saved.id as ConversationId);
-                await this.#retryDelivery(tx, doc, saved);
+
+                if (request.recoverOnly !== true) {
+                    await this.#retryDelivery(tx, doc, saved);
+                }
 
                 return { id: saved.id, handoffId: saved.handoffId, workItemId: saved.workItemId };
             }, context);
         }
 
-        await this.#app.requireDriver(id, user);
-        await this.#app.harness.commit(async (tx) => {
-            await this.requireIdle(tx, id);
+        const taskId = await withWorkflowPublicationLock(this.#app, id, async () => {
+            await this.#app.requireDriver(id, user);
+            const existing = this.#doc.pending?.[key];
 
-            if (kind === "land") {
-                const reason = await this.#reviewProvenanceReason(tx, id);
-
-                if (reason !== undefined) {
-                    throw new HttpError(409, reason);
-                }
+            if (existing !== undefined && existing.input !== input) {
+                throw new HttpError(409, "This requestId already requested a different handoff");
             }
-        }, context);
-        let code: CodeFingerprint | undefined;
 
-        try {
-            code = await fingerprint(this.#app.cwdOf(id));
-        } catch (error) {
-            if (kind === "land" || kind === "publish") {
-                throw error;
-            }
-        }
+            if (existing?.status === "pending") {
+                const task = await this.#app.harness.getTask(existing.taskId as TaskId, context);
 
-        return this.#app.harness.commit(async (tx) => {
-            const doc = await tx.doc(HandoffsDoc);
-            const currentUser = this.#human(id, supplied);
-            const saved = doc.requests[key];
-
-            if (saved !== undefined) {
-                if (saved.input !== input) {
-                    throw new HttpError(409, "This requestId already started a different handoff");
+                if (task !== undefined && task.state.status !== "terminal") {
+                    return existing.taskId as TaskId<HandoffResult | null>;
                 }
 
-                this.#app.requireSee(currentUser, saved.id as ConversationId);
-                await this.#retryDelivery(tx, doc, saved);
+                await this.#app.harness.commit(async (tx) => {
+                    const pending = (await tx.doc(HandoffsDoc)).pending?.[key];
 
-                return { id: saved.id, handoffId: saved.handoffId, workItemId: saved.workItemId };
+                    if (pending?.status === "pending") {
+                        pending.status = "blocked";
+                        pending.reason =
+                            "The previous handoff summary did not complete; a human may explicitly retry";
+                    }
+                }, context);
             }
 
-            if (Object.keys(doc.requests).length >= 10_000) {
-                throw new HttpError(413, "The handoff request limit was reached");
-            }
-
-            const sessions = await tx.doc(SessionsDoc);
-            const meta = sessions.items[String(id)];
-            const state = await tx.doc(WorkflowDoc, id);
-            const turns = await tx.doc(TurnsDoc, id);
-            const oldItem =
-                meta?.workItemId === undefined ? undefined : doc.workItems[meta.workItemId];
-
-            if (meta === undefined) {
-                throw new HttpError(404, "Not a session");
-            }
-
-            this.#writable(state);
-
-            if (relation === "new-work" && currentUser.sessions !== undefined) {
+            if (request.recoverOnly === true) {
                 throw new HttpError(
-                    403,
-                    "You were invited to particular sessions and cannot start new work",
+                    409,
+                    this.#doc.pending?.[key]?.reason ??
+                        (existing === undefined
+                            ? "No saved handoff request exists; a human may explicitly start it"
+                            : "The handoff summary failed; choose whether to retry"),
                 );
             }
 
-            if (oldItem !== undefined && oldItem.activeThreadId !== Number(id)) {
-                throw new HttpError(409, "Only the active work-item thread can hand off");
+            if (kind === "reviewer" && !(await this.#hasDiff(id, user))) {
+                throw new HttpError(409, "There is no current Pi diff to review");
             }
 
-            if (turns.on && turns.driver !== currentUser.id) {
-                throw new HttpError(409, "Take the wheel before starting a handoff");
-            }
+            return this.#app.harness.commit(async (tx) => {
+                const { doc } = await this.#admit(tx, id, user, kind, relation);
+                const pending = Object.entries(doc.pending ?? {}).find(
+                    ([, value]) =>
+                        value.sourceThreadId === Number(id) && value.status === "pending",
+                );
 
-            if (meta.archived === true) {
-                throw new HttpError(409, "Restore the work item first");
-            }
-
-            if (oldItem !== undefined) {
-                this.#requireMembers(oldItem, currentUser);
-            }
-
-            // Uncertain external effects belong to the work, not just the Publish thread that attempted them.
-            // Keep that writer available for reconciliation rather than retiring it into a fresh ledger or item.
-            await this.#requireResolvedPublications(tx, oldItem?.threadIds ?? [Number(id)]);
-
-            if (kind === "land") {
-                const reason = await this.#reviewProvenanceReason(tx, id);
-
-                if (reason !== undefined) {
-                    throw new HttpError(409, reason);
+                if (pending !== undefined && pending[0] !== key) {
+                    throw new HttpError(
+                        409,
+                        "Another human-requested handoff summary is in progress",
+                    );
                 }
-            }
 
-            if (kind === "land" || kind === "publish") {
-                code = await fingerprint(this.#app.cwdOf(id));
-            }
+                if (
+                    doc.pending?.[key] === undefined &&
+                    new Set([...Object.keys(doc.requests), ...Object.keys(doc.pending ?? {})])
+                        .size >= 10_000
+                ) {
+                    throw new HttpError(413, "The handoff request limit was reached");
+                }
 
-            const why = this.#transitionReason(
-                kind,
-                relation,
-                state,
-                oldItem,
-                code,
-                await this.#hasCompletedWork(tx, id),
+                const attempt = (doc.pending?.[key]?.attempt ?? -1) + 1;
+                const taskId = await tx.createTask(
+                    this.summaryTask,
+                    { key },
+                    {
+                        conversationId: id,
+                        ownership: { kind: "conversation" },
+                        background: true,
+                    },
+                );
+
+                doc.pending ??= {};
+                doc.pending[key] = {
+                    sourceThreadId: Number(id),
+                    targetType: kind,
+                    relationship: relation,
+                    requestedBy: user.id,
+                    input,
+                    ...(brief === undefined ? {} : { brief }),
+                    taskId: Number(taskId),
+                    attempt,
+                    status: "pending",
+                };
+
+                return taskId;
+            }, context);
+        });
+        const settled = await this.#app.harness.waitForTask(taskId, context);
+
+        const outcome = settled.state.outcome;
+
+        if (outcome?.status !== "completed" || outcome.result === null) {
+            throw new HttpError(
+                409,
+                this.#doc.pending?.[key]?.reason ??
+                    "The handoff summary did not complete; retry the same request",
             );
+        }
 
-            if (why !== undefined) {
-                throw new HttpError(409, why);
+        return outcome.result;
+    }
+
+    async #start(
+        id: ConversationId,
+        supplied: User,
+        request: HandoffAdmission,
+        runtime: SummaryRuntime,
+        ctx: Context,
+    ): Promise<HandoffResult> {
+        const { kind, relation, brief, key, input } = request;
+        const user = this.#human(id, supplied);
+
+        await this.#app.requireDriver(id, user);
+
+        if (kind === "reviewer" && !(await this.#hasDiff(id, user))) {
+            throw new HttpError(409, "There is no current Pi diff to review");
+        }
+
+        let result: HandoffResult | undefined;
+
+        await runtime.commit(async (tx) => {
+            const saved = (await tx.doc(HandoffsDoc)).requests[key];
+
+            if (saved !== undefined) {
+                result = { id: saved.id, handoffId: saved.handoffId, workItemId: saved.workItemId };
+
+                return;
             }
 
-            await this.#idle(tx, oldItem?.threadIds ?? [Number(id)]);
+            const {
+                doc,
+                sessions,
+                meta,
+                state,
+                item: oldItem,
+            } = await this.#admit(tx, id, supplied, kind, relation, new Set([runtime.taskId]));
+            const intent = doc.pending?.[key];
+
+            if (
+                intent?.taskId !== Number(runtime.taskId) ||
+                intent.status !== "pending" ||
+                intent.input !== input ||
+                intent.requestedBy !== user.id
+            ) {
+                throw new HttpError(409, "The human's handoff request is no longer current");
+            }
+
             const agent = await tx.doc(AgentDoc, id);
             const cwd = agent.cwd ?? meta.cwd;
 
-            if (cwd !== this.#app.cwdOf(id) || (code !== undefined && cwd !== code.cwd)) {
+            if (cwd !== this.#app.cwdOf(id)) {
                 throw new HttpError(409, "Source checkout changed; try again");
             }
 
-            this.#app.spend.check(currentUser, id);
-            // The brief describes the work, not a role-specific authorization. A human may override the recommendation.
-            const suppliedBrief = brief ?? state.proposal?.brief;
-            const freshBrief = await this.#brief(
+            const fresh = await this.#brief(
                 tx,
                 id,
                 (oldItem?.originThreadId ?? Number(id)) as ConversationId,
-                code,
             );
+            const initialBrief = `Human-requested handoff summary:\n${brief}\n\nPersisted source context:\n${fresh.slice(0, 4000)}`;
             const sourceEntry = (
                 await tx.scanEntries({ conversationId: id, order: "descending" }, 1)
             ).items[0]?.id;
-            const initialBrief =
-                suppliedBrief === undefined
-                    ? freshBrief
-                    : `Prepared/user brief (claims must be rechecked against this activation):\n${suppliedBrief}\n\nFresh persisted context at activation:\n${freshBrief.slice(0, 4000)}\n\nFresh source entry ${sourceEntry ?? "none"}; Git HEAD ${code?.head ?? "unavailable"}; code fingerprint ${code?.digest ?? "unavailable"}.`;
             const now = Date.now();
             const item: WorkItem =
                 relation === "same-work" && oldItem !== undefined
@@ -1991,16 +2637,8 @@ export class Handoffs {
                           createdAt: now,
                       };
 
-            if (relation === "new-work" && this.#human(id, supplied).sessions !== undefined) {
-                throw new HttpError(
-                    403,
-                    "You were invited to particular sessions and cannot start new work",
-                );
-            }
-
             this.#human(id, supplied);
-            this.#app.spend.check(currentUser, id);
-            // Every table read is above this first table write (Durable forbids reads after writes).
+            this.#app.spend.check(user, id);
             const destination = await tx.createConversation({ ownership: { kind: "ownerless" } });
             const targetId = destination.id;
 
@@ -2010,16 +2648,7 @@ export class Handoffs {
                 ...(agent.thinkingLevel === undefined
                     ? {}
                     : { thinkingLevel: agent.thinkingLevel }),
-                // Thread-local instructions belong to the source agent, not its independent successor.
             });
-            const targetState = await tx.doc(WorkflowDoc, targetId);
-
-            if (kind === "publish") {
-                targetState.fingerprint = { ...state.fingerprint! };
-                targetState.readyForPublish = true;
-                targetState.summary = state.summary;
-            }
-
             item.activeThreadId = Number(targetId);
             item.threadIds.push(Number(targetId));
 
@@ -2036,7 +2665,7 @@ export class Handoffs {
                 title: TITLES[kind],
                 createdAt: now,
                 updatedAt: now,
-                createdBy: currentUser.id,
+                createdBy: user.id,
                 threadType: kind,
                 accessFrom: Number(id),
                 workItemId: item.id,
@@ -2058,29 +2687,27 @@ export class Handoffs {
                 workItemId: item.id,
                 brief: initialBrief,
                 ...(sourceEntry === undefined ? {} : { sourceEntryId: Number(sourceEntry) }),
-                ...(code === undefined ? {} : { codeCheckpoint: code }),
-                requestedBy: currentUser.id,
+                requestedBy: user.id,
                 createdAt: now,
                 delivery: "pending",
             };
             doc.requests[key] = { input, id: Number(targetId), handoffId, workItemId: item.id };
+            intent.status = "completed";
             await tx.createTask(
                 this.task,
                 { handoffId },
-                { conversationId: targetId, ownership: { kind: "conversation" }, background: true },
+                {
+                    conversationId: targetId,
+                    ownership: { kind: "conversation" },
+                    background: true,
+                },
             );
+            result = { id: Number(targetId), handoffId, workItemId: item.id };
 
-            if (relation === "new-work" && this.#human(id, supplied).sessions !== undefined) {
-                throw new HttpError(
-                    403,
-                    "You were invited to particular sessions and cannot start new work",
-                );
-            }
+            return undefined;
+        }, ctx);
 
-            this.#human(id, supplied);
-
-            return { id: Number(targetId), handoffId, workItemId: item.id };
-        }, context);
+        return result!;
     }
 
     async #retryDelivery(

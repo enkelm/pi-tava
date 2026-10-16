@@ -288,6 +288,7 @@ test("live role and retirement prevent external reads, including resumed calls",
     for (const threadType of [
         "chat",
         "worker",
+        "researcher",
         "reviewer",
         "follow-up",
         "land",

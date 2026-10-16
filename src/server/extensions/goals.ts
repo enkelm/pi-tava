@@ -27,6 +27,11 @@ export default function createGoals(host: PocketHost) {
         name: GOALS_EXTENSION,
         sections: [
             section("goal", async (input, context) => {
+                // Extensions reload before a server restart installs the new Goals host method.
+                if (host.goals.mayCheck?.(input.conversationId) === false) {
+                    return undefined;
+                }
+
                 const goal = (await input.read.snapshot(GoalDoc, input.conversationId, context))
                     ?.goal;
 
@@ -40,6 +45,10 @@ export default function createGoals(host: PocketHost) {
         hooks: [
             hook(GenerationTask, {
                 onYield: async (_answer, api, context) => {
+                    if (host.goals.mayCheck?.(api.conversationId) === false) {
+                        return undefined;
+                    }
+
                     const goal = (await api.snapshot(GoalDoc, api.conversationId, context))?.goal;
 
                     if (goal?.status !== "working") {

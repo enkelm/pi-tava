@@ -1,6 +1,8 @@
 // Authoring gate: actual provider requests own role selection, scope and shared-context composition.
 // A generic/wrong role, lost role after restart, or child/source adopting the active successor's role must fail here.
-// Existing handoff/security tests own readiness and write enforcement; no prompt renderer or test-only export is used.
+// Handoff/security tests own runtime flow and write enforcement; these assertions own delivered prompt content only.
+// Saved legacy prompts losing the common human-control override is a distinct request-composition regression.
+// No prompt renderer or test-only production export is used.
 import {
     type App,
     cleanUp,
@@ -14,13 +16,12 @@ import {
     until,
 } from "./helpers.ts";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId } from "@earendil-works/pi-durable";
-import { SubagentsDoc } from "../src/server/docs.ts";
+import { SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
 import type { ThreadType } from "../src/server/workflow-docs.ts";
 
 const data = join(root, "thread-prompt-data");
@@ -67,13 +68,6 @@ let app: App;
 before(async () => {
     mkdirSync(cwd);
     writeFileSync(join(cwd, "AGENTS.md"), "# Repository rules\nPreserve the REPO_ROLE_CONTRACT.\n");
-    execFileSync("git", ["init", "-q"], { cwd });
-    execFileSync("git", ["add", "."], { cwd });
-    execFileSync(
-        "git",
-        ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
-        { cwd },
-    );
     app = await openApp(model, data);
 });
 after(async () => {
@@ -81,7 +75,7 @@ after(async () => {
     cleanUp();
 });
 
-async function thread(type: "chat" | "worker" | "pull") {
+async function thread(type: "chat" | "worker" | "researcher" | "pull") {
     const { id } = await app.commands.createSession(owner(app), { cwd, threadType: type });
 
     await app.commands.configure(id, owner(app), {
@@ -90,6 +84,36 @@ async function thread(type: "chat" | "worker" | "pull") {
     });
 
     return id;
+}
+
+// Persisted type is input to prompt selection. Runtime handoff tests own Reviewer diff admission;
+// this fixture creates no readiness, Changes response, admission receipt or production test seam.
+async function persistedReviewer(): Promise<ConversationId> {
+    const conversation = await app.harness.createConversation(
+        {
+            ownership: { kind: "ownerless" },
+            agent: {
+                cwd,
+                model: { provider: "faux", modelId: "faux-1" },
+                thinkingLevel: "off",
+            },
+            init: async (tx, id) => {
+                const sessions = await tx.doc(SessionsDoc);
+                const now = Date.now();
+
+                sessions.items[String(id)] = {
+                    cwd,
+                    threadType: "reviewer",
+                    createdBy: owner(app).id,
+                    createdAt: now,
+                    updatedAt: now,
+                };
+            },
+        },
+        context,
+    );
+
+    return conversation.id;
 }
 
 async function probe(id: ConversationId) {
@@ -106,9 +130,14 @@ const roles = [
     { type: "worker", label: "Worker", responsibility: /focused tests/i },
     { type: "reviewer", label: "Reviewer", responsibility: /test quality/i },
     { type: "land", label: "Land", responsibility: /integration-impact/i },
-    { type: "publish", label: "Publish", responsibility: /publication tool/i },
-    { type: "follow-up", label: "Follow-up", responsibility: /Self-review only your delta/i },
-    { type: "pull", label: "Pull", responsibility: /upstream or external information/i },
+    {
+        type: "publish",
+        label: "Publish",
+        responsibility: /publication for every supported external mutation/i,
+    },
+    { type: "follow-up", label: "Follow-up", responsibility: /Self-review your delta/i },
+    { type: "pull", label: "Pull", responsibility: /ticket\/PR\/repository data/i },
+    { type: "researcher", label: "Researcher", responsibility: /deep research/i },
 ] satisfies { type: ThreadType; label: string; responsibility: RegExp }[];
 
 function role(sections: Record<string, string>, expected: (typeof roles)[number]) {
@@ -129,7 +158,7 @@ function role(sections: Record<string, string>, expected: (typeof roles)[number]
 
 async function handoff(
     source: ConversationId,
-    type: "reviewer" | "land" | "publish" | "follow-up" | "pull",
+    type: "worker" | "researcher" | "reviewer" | "land" | "publish" | "follow-up" | "pull",
 ) {
     const created = await app.handoffs.start(source, owner(app), {
         targetType: type,
@@ -168,6 +197,22 @@ async function handoff(
 
 test("each thread type receives its own system working playbook and retains shared safety/repository instructions", async () => {
     role(await probe(await thread("chat")), roles[0]!);
+    const reviewer = await persistedReviewer();
+    const reviewRole = await probe(reviewer);
+
+    role(reviewRole, roles[2]!);
+    assert.match(reviewRole.thread_role!, /bounded to two passes/i);
+    assert.match(reviewRole.thread_role!, /abandon that check and notify the human/i);
+    assert.match(reviewRole.thread_role!, /never bypass it, retry unchanged failures/i);
+    await app.commands.setInstructions(
+        reviewer,
+        owner(app),
+        "REVIEWER_LOCAL_ONLY: inspect test quality.",
+    );
+    const configuredReview = await probe(reviewer);
+
+    role(configuredReview, roles[2]!);
+    assert.match(configuredReview.instructions!, /REVIEWER_LOCAL_ONLY/);
     let id = await thread("worker");
 
     role(await probe(id), roles[1]!);
@@ -178,25 +223,10 @@ test("each thread type receives its own system working playbook and retains shar
     );
     assert.match((await probe(id)).instructions!, /WORKER_LOCAL_ONLY/);
 
-    for (const expected of roles.filter((expected) =>
-        ["reviewer", "land", "publish"].includes(expected.type),
-    )) {
-        // These human fixture checkpoints admit the next stage; this test owns prompt delivery, not verification.
-        if (expected.type === "land") {
-            await app.handoffs.complete(id, owner(app), {
-                status: "review-complete",
-                summary: "Fixture checkpoint for inspecting the Land system prompt.",
-            });
-        } else if (expected.type === "publish") {
-            await app.handoffs.complete(id, owner(app), {
-                status: "landed",
-                summary: "Clean local fixture checkpoint for inspecting the Publish system prompt.",
-                readyForPublish: true,
-            });
-        }
+    for (const type of ["pull", "follow-up", "land", "publish"] as const) {
+        const expected = roles.find((candidate) => candidate.type === type)!;
 
-        assert.ok(expected.type !== "chat" && expected.type !== "worker");
-        id = await handoff(id, expected.type);
+        id = await handoff(id, type);
         const fresh = await probe(id);
 
         role(fresh, expected);
@@ -232,71 +262,115 @@ test("Pull can start independently and Follow-up receives focused self-review ra
         followUpRole,
         roles.find((expected) => expected.type === "follow-up")!,
     );
-    assert.match(followUpRole.thread_role!, /Do not re-review the whole application/i);
-    assert.match(followUpRole.thread_role!, /abandon unavailable checks/i);
-    assert.match(followUpRole.thread_role!, /normally.*last repair stage before Land/i);
-    assert.match(followUpRole.thread_role!, /GitHub or another external review system/i);
-    assert.match(followUpRole.thread_role!, /reviewApplicability=invalidated/i);
-    assert.match(followUpRole.thread_role!, /record code-bound review-complete.*recommend Land/i);
     assert.match(
         followUpRole.thread_role!,
-        /recording failures and unavailable checks are not reasons/i,
+        /rather than restart implementation or a whole-application review/i,
     );
+    assert.match(
+        followUpRole.thread_role!,
+        /Self-review your delta and immediate integration points once/i,
+    );
+    assert.match(followUpRole.thread_role!, /Preserve the source, scope and limitations/i);
+    assert.match(
+        followUpRole.thread_role!,
+        /disclose material rewrites and invalidated assumptions/i,
+    );
+    assert.match(followUpRole.thread_role!, /Do not manufacture a review pass/i);
+    assert.match(followUpRole.thread_role!, /wait for the human/i);
     assert.match(followUpRole.thread_role!, /wait for every delegated helper/i);
+});
+
+// Prompt contract at request delivery: research produces evidence, not feature implementation or flow control.
+test("Worker can research and a starter or mid-work Researcher reports evidence for human-directed application", async () => {
+    const starter = await probe(await thread("researcher"));
+
+    role(
+        starter,
+        roles.find((expected) => expected.type === "researcher")!,
+    );
+    assert.match(starter.thread_role!, /either as a new Work Item or a focused investigation/i);
+    const worker = await thread("worker");
+    const working = await probe(worker);
+
+    assert.match(working.thread_role!, /primary-source documentation and deeper planning/i);
+    assert.match(working.thread_role!, /Use research and browser within capability limits/i);
+    const researcher = await handoff(worker, "researcher");
+    const investigating = await probe(researcher);
+
+    role(
+        investigating,
+        roles.find((expected) => expected.type === "researcher")!,
+    );
+    assert.match(investigating.thread_role!, /do not implement the feature here/i);
+    assert.match(investigating.thread_role!, /Cite URLs, commits and code paths/i);
+    assert.match(
+        investigating.thread_role!,
+        /Separate confirmed facts, hypotheses and unavailable evidence/i,
+    );
+    assert.match(investigating.thread_role!, /Report the findings and wait for the human/i);
+    assert.equal(app.sessionMeta(researcher)?.workItemId, app.sessionMeta(worker)?.workItemId);
+    assert.equal((await app.handoffs.list(researcher, owner(app))).workflow.status, "active");
+    const implementation = await handoff(researcher, "worker");
+    const applying = await probe(implementation);
+
+    role(
+        applying,
+        roles.find((expected) => expected.type === "worker")!,
+    );
+    assert.equal((await app.handoffs.list(implementation, owner(app))).workflow.status, "active");
 });
 
 test("handoff successors, delegated helpers and retired threads retain the right system role across restart", async () => {
     const worker = await thread("worker");
 
     await probe(worker);
-    const reviewer = await handoff(worker, "reviewer");
+    const researcher = await handoff(worker, "researcher");
+    const expected = roles.find((candidate) => candidate.type === "researcher")!;
 
-    const reviewRole = await probe(reviewer);
-
-    role(reviewRole, roles[2]!);
-    assert.match(reviewRole.thread_role!, /bounded to two passes/i);
-    assert.match(reviewRole.thread_role!, /abandon that check and tell the human/i);
-    assert.match(reviewRole.thread_role!, /Never work around a denied capability/i);
+    role(await probe(researcher), expected);
     app.config.agentPrompts = {
-        reviewer:
-            "You are the Reviewer agent for this thread. Independently inspect test quality. CUSTOM_REVIEWER_PLAYBOOK.",
+        researcher:
+            "You are the Researcher agent for this thread. Conduct deep research. CUSTOM_RESEARCHER_PLAYBOOK.",
     };
-    assert.match((await probe(reviewer)).thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
+    assert.match((await probe(researcher)).thread_role!, /CUSTOM_RESEARCHER_PLAYBOOK/);
     await app.commands.setInstructions(
-        reviewer,
+        researcher,
         owner(app),
-        "REVIEWER_LOCAL_PERSISTENCE: inspect the test boundaries.",
+        "RESEARCHER_LOCAL_PERSISTENCE: inspect the primary evidence.",
     );
     const retired = await probe(worker);
 
     role(retired, roles[1]!);
     assert.match(retired.workflow!, /permanently read-only/);
-    assert.doesNotMatch(retired.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
-    await say(app, reviewer, "SPAWN_ROLE_HELPER");
-    const child = (await app.harness.snapshot(SubagentsDoc, reviewer, context))?.agents[
+    assert.doesNotMatch(retired.thread_role!, /CUSTOM_RESEARCHER_PLAYBOOK/);
+    await say(app, researcher, "SPAWN_ROLE_HELPER");
+    const child = (await app.harness.snapshot(SubagentsDoc, researcher, context))?.agents[
         "role-helper"
     ]?.conversationId;
 
     assert.ok(child);
-    await until(() => !app.isBusy(child) && !app.isBusy(reviewer), "role helper and reporter idle");
+    await until(
+        () => !app.isBusy(child) && !app.isBusy(researcher),
+        "role helper and reporter idle",
+    );
     const helper = requests.findLast((request) => request.text.includes("HELPER_ROLE_PROBE"));
 
     assert.ok(helper);
-    role(helper.sections, roles[2]!);
+    role(helper.sections, expected);
     assert.match(helper.sections.thread_role!, /delegated helper/i);
-    assert.match(helper.sections.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
+    assert.match(helper.sections.thread_role!, /CUSTOM_RESEARCHER_PLAYBOOK/);
     await app.close();
     app = await openApp(model, data);
-    const resumedReviewer = await probe(reviewer);
+    const resumedResearcher = await probe(researcher);
 
-    role(resumedReviewer, roles[2]!);
-    assert.match(resumedReviewer.instructions!, /REVIEWER_LOCAL_PERSISTENCE/);
-    assert.match(resumedReviewer.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
+    role(resumedResearcher, expected);
+    assert.match(resumedResearcher.instructions!, /RESEARCHER_LOCAL_PERSISTENCE/);
+    assert.match(resumedResearcher.thread_role!, /CUSTOM_RESEARCHER_PLAYBOOK/);
     const recovered = await probe(worker);
 
     role(recovered, roles[1]!);
     assert.match(recovered.workflow!, /permanently read-only/);
-    assert.doesNotMatch(recovered.thread_role!, /CUSTOM_REVIEWER_PLAYBOOK/);
+    assert.doesNotMatch(recovered.thread_role!, /CUSTOM_RESEARCHER_PLAYBOOK/);
 });
 
 test("changing app-wide instructions affects the next request without replacing shared scope or session rules", async () => {
@@ -307,13 +381,22 @@ test("changing app-wide instructions affects the next request without replacing 
     await app.commands.setInstructions(chat, owner(app), "SESSION_RULE_STAYS_SEPARATE");
     app.config.agentPrompts = {
         ...app.config.agentPrompts,
-        chat: "Custom Chat instructions: clarify the request. FIRST_GLOBAL_PROMPT.",
+        chat: "Custom Chat instructions: clarify the request. FIRST_GLOBAL_PROMPT. Prepare a handoff, recommend Land and record readiness to unlock it.",
     };
     const first = await probe(chat);
 
     assert.match(first.thread_role!, /Custom Chat instructions/);
     assert.match(first.thread_role!, /FIRST_GLOBAL_PROMPT/);
     assert.match(first.thread_role!, /Scope: act as this role/);
+    assert.match(first.thread_role!, /Humans alone control flow/i);
+    assert.match(first.thread_role!, /The handoff tool reports status only/i);
+    assert.match(first.thread_role!, /These common rules override any legacy role instruction/i);
+    assert.match(first.thread_role!, /Write the requested summary without tools or further work/i);
+    assert.ok(
+        first.thread_role!.indexOf("These common rules override") >
+            first.thread_role!.indexOf("FIRST_GLOBAL_PROMPT"),
+        "the provider receives the non-editable override after saved legacy role instructions",
+    );
     assert.match(first.guidelines!, /Do not commit, push, publish, or deploy unless asked/);
     assert.match(first.project_context!, /REPO_ROLE_CONTRACT/);
     assert.match(first.instructions!, /SESSION_RULE_STAYS_SEPARATE/);

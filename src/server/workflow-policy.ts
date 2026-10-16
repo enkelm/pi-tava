@@ -15,8 +15,9 @@ import {
 } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { PocketApp } from "./app.ts";
-import { describe } from "./errors.ts";
+import { describe, HttpError } from "./errors.ts";
 import { commandWords, readOnlyCommand } from "./extensions/plan.ts";
+import { requireResearch } from "./workflow-research.ts";
 
 /** Apple's /usr/bin/git is an xcrun trampoline that needs writes/services even for reads. Use the actual binary. */
 export function workflowGitPath(): string | undefined {
@@ -30,8 +31,122 @@ export function workflowGitPath(): string | undefined {
     ].find((path) => existsSync(path));
 }
 
-/** Conservative lexical refusal, not a general shell interpreter or a filesystem jail for trusted programs. */
-function shellPublication(command: string | readonly string[]): boolean {
+/** Built-ins whose arguments are not Git publication operations. Unknown aliases keep lexical refusal. */
+const LOCAL_GIT_OPERATIONS = new Set([
+    "add",
+    "am",
+    "apply",
+    "bisect",
+    "blame",
+    "branch",
+    "checkout",
+    "cherry-pick",
+    "commit",
+    "config",
+    "describe",
+    "diff",
+    "grep",
+    "init",
+    "log",
+    "ls-files",
+    "ls-tree",
+    "merge",
+    "rebase",
+    "reflog",
+    "remote",
+    "restore",
+    "rev-parse",
+    "revert",
+    "show",
+    "stash",
+    "status",
+    "switch",
+    "tag",
+    "worktree",
+]);
+
+/** Recognize Git's operation, not a subcommand (stash push) or an option's value (-C push). */
+function gitPublication(args: readonly string[]): boolean {
+    for (let at = 0; at < args.length; at++) {
+        const arg = args[at]!;
+
+        if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"].includes(arg)) {
+            at++;
+        } else if (
+            /^(?:-C.|-c.|--(?:git-dir|work-tree|namespace|config-env|exec-path|attr-source|list-cmds)=)/.test(
+                arg,
+            ) ||
+            [
+                "--no-pager",
+                "-P",
+                "--paginate",
+                "-p",
+                "--bare",
+                "--no-replace-objects",
+                "--literal-pathspecs",
+                "--glob-pathspecs",
+                "--noglob-pathspecs",
+                "--icase-pathspecs",
+                "--no-optional-locks",
+                "--no-lazy-fetch",
+                "--no-advice",
+            ].includes(arg)
+        ) {
+            continue;
+        } else if (arg.startsWith("-")) {
+            // Do not guess how an unknown option consumes the remaining words.
+            return lexicalPublication(["git", ...args]);
+        } else {
+            return (
+                ["push", "send-pack", "receive-pack"].includes(arg.toLowerCase()) ||
+                (!LOCAL_GIT_OPERATIONS.has(arg) && lexicalPublication(["git", ...args]))
+            );
+        }
+    }
+
+    return false;
+}
+
+/** Bounded lexical inspection, not a shell interpreter or a filesystem jail for trusted programs. */
+function shellPublication(command: string | readonly string[], depth = 0): boolean {
+    if (depth > 8) {
+        return true;
+    }
+
+    const commands =
+        typeof command === "string" ? commandWords(command.replace(/\\\r?\n/g, "")) : [command];
+
+    if (commands === undefined) {
+        // Redirects, substitutions and other unsupported syntax keep the conservative refusal.
+        return lexicalPublication(command);
+    }
+
+    return commands.some((words) =>
+        words.some((word, at) => {
+            const program = basename(word);
+
+            if (/^(?:gh|git-(?:send|receive)-pack)(?:\.exe)?$/i.test(program)) {
+                return true;
+            }
+
+            if (/^git(?:\.exe)?$/i.test(program) && gitPublication(words.slice(at + 1))) {
+                return true;
+            }
+
+            // Inspect shell/wrapper arguments and config/environment values, including ! shell aliases.
+            const value = word.includes("=")
+                ? word.slice(word.indexOf("=") + 1).replace(/^!/, "")
+                : undefined;
+
+            return [word, ...(value === undefined ? [] : [value])].some(
+                (nested) => /[\s'"\\;|&()<>{}]/.test(nested) && shellPublication(nested, depth + 1),
+            );
+        }),
+    );
+}
+
+/** Unsupported shell syntax must not hide explicit publication behind quotes, escapes or wrappers. */
+function lexicalPublication(command: string | readonly string[]): boolean {
     const words =
         typeof command === "string" ? (commandWords(command)?.flat() ?? [command]) : command;
     // Also inspect nested command text (for example bash -c), resolving lexical quotes/escapes conservatively.
@@ -150,19 +265,20 @@ function publicationKey(app: PocketApp, id: ConversationId): string {
     return app.sessionMeta(root)?.workItemId ?? `thread:${root}`;
 }
 
-/** Local tools cannot race an approved publication's final checkpoint and external execution. */
+/** Local writers cannot race an exclusive workflow operation's final checks and execution. */
 export function requireWorkflowLocalWrite(app: PocketApp, id: ConversationId): void {
     app.handoffs.requireWritable(id);
 
     if (publicationLocks.get(app)?.has(publicationKey(app, id))) {
-        throw new Error(
-            "Publication is executing for this workflow. Wait before changing files or running shell commands.",
+        throw new HttpError(
+            409,
+            "Publication is executing for this workflow. Wait before changing files, running shell commands or using the browser.",
         );
     }
 }
 
-/** Reserve before the first await and release only once the filesystem operation or child has settled. */
-function reserveWorkflowLocalWrite(app: PocketApp, id: ConversationId): () => void {
+/** Reserve before the first await; release only once the filesystem, child or panel action has settled. */
+export function reserveWorkflowLocalWrite(app: PocketApp, id: ConversationId): () => void {
     requireWorkflowLocalWrite(app, id);
     let writers = localWriters.get(app);
 
@@ -186,6 +302,21 @@ function reserveWorkflowLocalWrite(app: PocketApp, id: ConversationId): () => vo
     };
 }
 
+/** Discovery and exclusive admission share the same in-flight writer/operation gate. */
+export function workflowExclusiveReason(app: PocketApp, id: ConversationId): string | undefined {
+    const key = publicationKey(app, id);
+
+    if (publicationLocks.get(app)?.has(key)) {
+        return "Another publication is executing for this workflow.";
+    }
+
+    if ((localWriters.get(app)?.get(key) ?? 0) > 0) {
+        return "Local workflow writes are still executing. Wait before an exclusive workflow operation.";
+    }
+
+    return undefined;
+}
+
 export async function withWorkflowPublicationLock<T>(
     app: PocketApp,
     id: ConversationId,
@@ -200,14 +331,10 @@ export async function withWorkflowPublicationLock<T>(
 
     const root = publicationKey(app, id);
 
-    if (locks.has(root)) {
-        throw new Error("Another publication is executing for this workflow.");
-    }
+    const reason = workflowExclusiveReason(app, id);
 
-    if ((localWriters.get(app)?.get(root) ?? 0) > 0) {
-        throw new Error(
-            "Local workflow writes are still executing. Wait before fetching or publishing.",
-        );
+    if (reason !== undefined) {
+        throw new HttpError(409, reason);
     }
 
     locks.add(root);
@@ -249,6 +376,12 @@ export function createWorkflowHooks(app: PocketApp) {
                     const args = call.arguments as Record<string, unknown>;
                     const readOnly = app.handoffs.isReadOnly(id);
 
+                    if (app.handoffs.isPreparing(id)) {
+                        return {
+                            block: "The human requested a handoff summary only. Reply with the summary; do not call tools or change workflow.",
+                        };
+                    }
+
                     if (!readOnly) {
                         if (call.name !== "publication") {
                             requireWorkflowLocalWrite(app, id);
@@ -281,6 +414,29 @@ export function createWorkflowHooks(app: PocketApp) {
                         };
                     }
 
+                    if (call.name === "research" || call.name === "browser") {
+                        requireResearch(app, id);
+
+                        if (
+                            call.name === "browser" &&
+                            ![
+                                "navigate",
+                                "snapshot",
+                                "screenshot",
+                                "scroll",
+                                "viewport",
+                                "console",
+                                "wait",
+                            ].includes(String(args.action))
+                        ) {
+                            return {
+                                block: "Managed research browsing is a static reader. Use navigate with a public HTTPS document URL, snapshot, screenshot, scroll, viewport, console or wait; scripts, clicks, typing, history and form actions are blocked.",
+                            };
+                        }
+
+                        return undefined;
+                    }
+
                     if (call.name === "pull") {
                         return app.sessionMeta(app.rootOf(id))?.threadType === "pull"
                             ? undefined
@@ -303,7 +459,7 @@ export function createWorkflowHooks(app: PocketApp) {
                     }
 
                     return {
-                        block: `${call.name} is not permitted in managed workflows. Browser and unknown extension tools may publish or access the network; use publication for supported, individually approved external operations.`,
+                        block: `${call.name} is not permitted in managed workflows. Unknown extension tools may publish or access the network; use publication for supported, individually approved external operations.`,
                     };
                 } catch (error) {
                     return { block: describe(error) };

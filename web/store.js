@@ -339,6 +339,8 @@ export const collab = () => (store.state.server?.collab ?? 0) >= 2;
 /** Project organization is unavailable until the server has restarted with this capability. */
 export const projectsAvailable = () => (store.state.server?.projects ?? 0) >= 1;
 export const handoffsAvailable = () => (store.state.server?.handoffs ?? 0) >= 1;
+/** Summary-first creation and lookup-only recovery require the restarted version-four backend. */
+export const handoffSummaryAvailable = () => (store.state.server?.handoffs ?? 0) >= 4;
 /** Viewers read and chat; they never steer Pi. */
 export const canSteer = () => store.state.me?.role !== "viewer";
 
@@ -461,6 +463,15 @@ class ApiError extends Error {
     }
 }
 
+function requireHandoffSummary() {
+    if (!handoffSummaryAvailable()) {
+        throw new ApiError(
+            409,
+            "Restart the server to use the updated summary-first handoff flow.",
+        );
+    }
+}
+
 /** Call the server's API: a GET without `body`, a POST with one, or `options.method`; `options.signal` stops it. */
 export async function api(path, body, options = {}) {
     const init = {
@@ -494,6 +505,212 @@ export async function api(path, body, options = {}) {
     }
 
     return data;
+}
+
+const HANDOFF_REQUEST_KEY = "pocket.handoffRequest";
+let pendingHandoff = readHandoffRequest();
+let handoffCompletion = null;
+const handoffRequests = new Map();
+
+/** Only this tab's authenticated human choice may recover a handoff after a lost HTTP response. */
+function readHandoffRequest() {
+    try {
+        const saved = JSON.parse(sessionStorage.getItem(HANDOFF_REQUEST_KEY));
+
+        if (
+            Number.isSafeInteger(saved?.sourceId) &&
+            saved.sourceId > 0 &&
+            typeof saved.userId === "string" &&
+            typeof saved.requestId === "string" &&
+            saved.requestId.length > 0 &&
+            (typeof saved.command === "string"
+                ? /^\/handoff\s+\S/.test(saved.command)
+                : typeof saved.targetType === "string" &&
+                  ["same-work", "new-work"].includes(saved.relationship))
+        ) {
+            return saved;
+        }
+    } catch {
+        // Invalid or unavailable browser storage must not prevent the app from opening.
+    }
+
+    return null;
+}
+
+function saveHandoffRequest(request) {
+    pendingHandoff = request;
+    handoffCompletion = null;
+
+    try {
+        if (request === null) {
+            sessionStorage.removeItem(HANDOFF_REQUEST_KEY);
+        } else {
+            sessionStorage.setItem(HANDOFF_REQUEST_KEY, JSON.stringify(request));
+        }
+    } catch {
+        if (request !== null) {
+            notify(
+                "warning",
+                "This browser cannot save handoff recovery. Keep this page open until the handoff finishes.",
+            );
+        }
+    }
+}
+
+function forgetHandoffRequest(request = pendingHandoff) {
+    if (request === pendingHandoff) {
+        saveHandoffRequest(null);
+    }
+}
+
+function rememberHandoffRequest(sourceId, request) {
+    const userId = store.state.me?.id;
+
+    if (userId === undefined) {
+        throw new ApiError(401, "Sign in before starting a handoff");
+    }
+
+    if (
+        pendingHandoff !== null &&
+        pendingHandoff.sourceId === sourceId &&
+        pendingHandoff.userId === userId
+    ) {
+        if (
+            pendingHandoff.requestId !== request.requestId ||
+            pendingHandoff.command !== request.command ||
+            pendingHandoff.targetType !== request.targetType ||
+            pendingHandoff.relationship !== request.relationship
+        ) {
+            throw new ApiError(
+                409,
+                "Your previous handoff is still pending. Its saved choice will be recovered without starting another handoff.",
+            );
+        }
+
+        return { request: pendingHandoff, fresh: false };
+    }
+
+    const saved = { sourceId, userId, ...request };
+
+    saveHandoffRequest(saved);
+
+    return { request: saved, fresh: true };
+}
+
+/** Recovery only awaits existing work or receipts; only a fresh human action may retry a blocked summary. */
+function sendHandoffRequest(request, fresh = false, recoverOnly = !fresh) {
+    const key = JSON.stringify([request.userId, request.sourceId, request.requestId]);
+    const existing = handoffRequests.get(key);
+
+    if (existing) {
+        return existing.promise;
+    }
+
+    const flight = { promise: null, recover: false, explicit: false };
+    let failed = false;
+
+    flight.promise = (async () => {
+        try {
+            const native = request.command !== undefined;
+            const result = await api(`c/${request.sourceId}/${native ? "submit" : "handoffs"}`, {
+                requestId: request.requestId,
+                ...(native
+                    ? { text: request.command, handoffRecoverOnly: recoverOnly }
+                    : {
+                          targetType: request.targetType,
+                          relationship: request.relationship,
+                          recoverOnly,
+                      }),
+            });
+            const destination = native ? result.handoffThreadId : result.id;
+            const follow =
+                pendingHandoff === request &&
+                store.state.me?.id === request.userId &&
+                store.state.conversationId === request.sourceId;
+
+            forgetHandoffRequest(request);
+
+            if (follow && Number.isSafeInteger(destination)) {
+                navigate(destination);
+            }
+
+            return result;
+        } catch (error) {
+            failed = true;
+
+            // A later rejection cannot disprove an earlier uncertain admission, including across reloads.
+            if (fresh && error.status >= 400 && error.status < 500) {
+                forgetHandoffRequest(request);
+            }
+
+            throw error;
+        } finally {
+            handoffRequests.delete(key);
+
+            // A reconnect/completion can arrive before the interrupted HTTP request reports its failure.
+            if (failed && flight.recover && pendingHandoff === request) {
+                recoverHandoffRequest(flight.explicit);
+            }
+        }
+    })();
+    handoffRequests.set(key, flight);
+
+    return flight.promise;
+}
+
+function recoverHandoffRequest(explicit = false) {
+    const request = pendingHandoff;
+
+    if (request === null || store.state.me === undefined || store.state.me === null) {
+        return;
+    }
+
+    if (store.state.me.id !== request.userId || store.state.conversationId !== request.sourceId) {
+        forgetHandoffRequest(request);
+
+        return;
+    }
+
+    // Web files reload before server code. Keep the saved choice dormant until the new backend is live.
+    if (!handoffSummaryAvailable()) {
+        return;
+    }
+
+    const key = JSON.stringify([request.userId, request.sourceId, request.requestId]);
+    const flight = handoffRequests.get(key);
+
+    if (flight) {
+        flight.recover = true;
+        flight.explicit ||= explicit;
+
+        return;
+    }
+
+    sendHandoffRequest(request, false, !explicit).catch((error) => {
+        if (pendingHandoff === request) {
+            notify(
+                "error",
+                `${error.message} Your handoff choice is saved. Tap to retry the same request.`,
+                () => recoverHandoffRequest(true),
+            );
+        }
+    });
+}
+
+function handoffSessionsChanged(sessions) {
+    const request = pendingHandoff;
+    const source = request && sessions.find((session) => session.id === request.sourceId);
+
+    if (!source?.workflow?.readOnly || source.workflow.preparing) {
+        return;
+    }
+
+    const key = JSON.stringify([request.userId, request.sourceId, request.requestId]);
+
+    if (handoffCompletion !== key) {
+        handoffCompletion = key;
+        recoverHandoffRequest();
+    }
 }
 
 let nextNotice = 1;
@@ -663,7 +880,7 @@ export function onExtensionEvent(listener) {
 
 /** What the server sends, by event name. Both transports deliver the same events. */
 const handlers = {
-    hello: (data) =>
+    hello: (data) => {
         store.set({
             me: data.user,
             users: data.users,
@@ -675,13 +892,17 @@ const handlers = {
             themeList: Array.isArray(data.themes) ? data.themes : [],
             // This connection's id, which peek lists name (`peeks.js`). `GET /api/me` answers without one.
             ...(data.connection === undefined ? {} : { streamId: data.connection }),
-        }),
-    sessions: (sessions) =>
+        });
+        recoverHandoffRequest();
+    },
+    sessions: (sessions) => {
         store.set((state) => ({
             sessions,
             sessionsLoaded: true,
             moving: stillMoving(state.moving, sessions),
-        })),
+        }));
+        handoffSessionsChanged(sessions);
+    },
     "folder-favorites": (folderFavorites) => store.set({ folderFavorites }),
     projects: (data) =>
         store.set({ projects: data.projects, projectGoals: data.goals, projectsLoaded: true }),
@@ -1032,6 +1253,10 @@ export function closeSignIn(flowId) {
 }
 
 export function navigate(conversationId, { replace = false, sheet = null, privateId = null } = {}) {
+    if (pendingHandoff !== null && pendingHandoff.sourceId !== conversationId) {
+        forgetHandoffRequest();
+    }
+
     const path =
         privateId !== null
             ? `/private/${encodeURIComponent(privateId)}`
@@ -1090,6 +1315,10 @@ export function navigate(conversationId, { replace = false, sheet = null, privat
 onRoute(() => {
     const id = routeConversation();
     const privateId = routePrivate();
+
+    if (pendingHandoff !== null && pendingHandoff.sourceId !== id) {
+        forgetHandoffRequest();
+    }
 
     if (id !== store.state.conversationId || privateId !== store.state.privateId) {
         opened(id);
@@ -1153,16 +1382,29 @@ export const actions = {
         id = current(),
         requestId = uid(),
     ) => {
-        const result = await api(`c/${id}/submit`, {
-            text,
-            attachments,
-            mode,
-            requestId,
-            ...(inlineFiles ? { inlineFiles } : {}),
-        });
+        const nativeHandoff = /^\/handoff(?:\s|$)/.test(text.trim());
+        let result;
+
+        if (nativeHandoff) {
+            requireHandoffSummary();
+        }
+
+        if (nativeHandoff && /^\/handoff\s+\S/.test(text.trim()) && !attachments?.length) {
+            const saved = rememberHandoffRequest(id, { requestId, command: text.trim() });
+
+            result = await sendHandoffRequest(saved.request, saved.fresh, false);
+        } else {
+            result = await api(`c/${id}/submit`, {
+                text,
+                attachments,
+                mode,
+                requestId,
+                ...(inlineFiles ? { inlineFiles } : {}),
+            });
+        }
 
         // Native handoffs do not submit model input. Do not steal navigation if the sender left meanwhile.
-        if (handoffsAvailable() && store.state.conversationId === id) {
+        if (handoffSummaryAvailable() && store.state.conversationId === id) {
             if (result.handoffThreadId !== undefined) {
                 navigate(result.handoffThreadId);
             } else if (result.handoffPicker) {
@@ -1173,7 +1415,17 @@ export const actions = {
         return result;
     },
     handoffs: (id = current()) => api(`c/${id}/handoffs`),
-    createHandoff: (id, request) => api(`c/${id}/handoffs`, request),
+    createHandoff: async (id, request) => {
+        requireHandoffSummary();
+        const saved = rememberHandoffRequest(id, {
+            requestId: request.requestId,
+            targetType: request.targetType,
+            relationship: request.relationship,
+        });
+
+        return sendHandoffRequest(saved.request, saved.fresh, false);
+    },
+    acceptValidation: (id, request) => api(`c/${id}/handoffs/accept-validation`, request),
     updateWorkItem: (id, patch) => api(`c/${id}/handoffs/work-item`, patch),
     /** Run a command in the session's folder (`!`); `context: false` keeps it from Pi (`!!`). */
     shell: (command, context, requestId = uid()) =>

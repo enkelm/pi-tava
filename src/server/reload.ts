@@ -120,6 +120,7 @@ export const BUILT_IN_TOOLS: ReadonlySet<string> = new Set([
     "handoff",
     "publication",
     "pull",
+    "research",
 ]);
 
 /** Pi Pocket's own modules, or the owner's from the drop-in folder. */

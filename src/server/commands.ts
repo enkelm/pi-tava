@@ -111,6 +111,8 @@ export interface SubmitRequest {
     requestId: string;
     /** Send the files the message mentions with `@` along with it, so Pi need not read them first. */
     inlineFiles?: boolean;
+    /** Automatic handoff reconnects observe a failed request without rerunning its source summary. */
+    handoffRecoverOnly?: boolean;
 }
 
 /** Attached images that also go to the model itself, when it takes images. */
@@ -895,7 +897,7 @@ export class Commands {
         const typed = request.text.trim();
 
         // Only a person's own command activates this native route, never an assistant's relayed text.
-        // It wins over templates; its passive receipt never enters model context or starts generation.
+        // It wins over templates. Its receipt stays passive; Handoffs owns any requested summary.
         if (via === undefined && /^\/handoff(?:\s|$)/.test(typed)) {
             if ((request.attachments?.length ?? 0) > 0) {
                 throw new HttpError(400, "Handoff commands do not accept attachments");
@@ -914,17 +916,11 @@ export class Commands {
                     throw new HttpError(400, "Use /handoff <kind> [--same|--new]");
                 }
 
-                if (kind === "worker" && flag === undefined) {
-                    throw new HttpError(
-                        400,
-                        "Choose /handoff worker --same or /handoff worker --new",
-                    );
-                }
-
                 const started = await app.handoffs.start(id, user, {
                     targetType: kind === "review" ? "reviewer" : kind,
                     relationship: flag === "--new" ? "new-work" : "same-work",
                     requestId: request.requestId,
+                    recoverOnly: request.handoffRecoverOnly,
                 });
 
                 destination = started.id;
@@ -957,6 +953,13 @@ export class Commands {
                     ? { handoffPicker: true as const }
                     : { handoffThreadId: destination }),
             };
+        }
+
+        if (app.handoffs.isPreparing(id)) {
+            throw new HttpError(
+                409,
+                "Wait for the requested handoff summary before sending more work",
+            );
         }
 
         // `/skill:name request` sends the skill with the request; `/name arguments`, Pi's prompt template of that name.
@@ -1342,10 +1345,11 @@ export class Commands {
         app.requireSee(user, id);
         app.requireSteer(user);
         const conversation = await app.conversation(id);
-        const busy = app.isBusy(id);
+        const busy = app.isBusy(id) || app.handoffs.isPreparing(id);
 
         // Stop withdraws what waits in the queue, subagents' reports too: a person meant them gone.
         await this.#discardReports(id);
+        await app.handoffs.abortSummary(id, user);
         void conversation
             .abort(context)
             .catch((error: unknown) => app.notice("error", `Abort failed: ${describe(error)}`, id));

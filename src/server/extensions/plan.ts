@@ -271,6 +271,11 @@ export function blockedInPlanMode(
         return undefined;
     }
 
+    // Research writes only isolated downloaded evidence, never the working checkout. Cleanup is still a change.
+    if (tool === "research" && ["read", "clone"].includes(String(args.action))) {
+        return undefined;
+    }
+
     // Asking how a subagent does, or stopping it, changes nothing.
     if (tool === "subagent" && (args.action === "status" || args.action === "stop")) {
         return undefined;

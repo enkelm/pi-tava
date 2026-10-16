@@ -1,6 +1,14 @@
-// Agents author briefs and readiness; only an explicit human action starts the next independent thread.
+// Humans choose the next role; the source agent summarizes before the backend starts that thread.
 import { useEffect } from "preact/hooks";
-import { actions, canSteer, handoffsAvailable, navigate, openSheet, store } from "./store.js";
+import {
+    actions,
+    canSteer,
+    handoffsAvailable,
+    handoffSummaryAvailable,
+    navigate,
+    openSheet,
+    store,
+} from "./store.js";
 import { ThreadTypeTag } from "./thread-type.js";
 import { html, Icon } from "./ui.js";
 
@@ -10,6 +18,7 @@ export const HANDOFF_LABELS = {
     land: "Start land",
     publish: "Start publish",
     worker: "Start worker",
+    researcher: "Start researcher",
     "follow-up": "Start follow-up",
     pull: "Start pull",
 };
@@ -27,45 +36,6 @@ export function handoffOptions(data) {
     return data?.options ?? [];
 }
 
-export function preferredHandoff(data, type) {
-    const options = handoffOptions(data).filter((option) => option.enabled);
-    const defaults = {
-        chat: ["worker"],
-        worker: ["reviewer", "follow-up", "worker"],
-        reviewer: ["land", "follow-up", "worker"],
-        "follow-up": ["land", "worker"],
-        pull: ["reviewer", "follow-up", "worker"],
-        land: ["publish", "reviewer", "follow-up", "worker"],
-        publish: ["worker"],
-    }[type ?? "worker"] ?? ["worker"];
-    const recommendations = [
-        data?.workflow?.proposal,
-        ...(data?.workflow?.recommendations ?? []),
-    ].filter(Boolean);
-
-    for (const recommendation of recommendations) {
-        const option = options.find(
-            (each) =>
-                each.targetType === recommendation.targetType &&
-                each.relationship === recommendation.relationship,
-        );
-
-        if (option) {
-            return option;
-        }
-    }
-
-    for (const targetType of defaults) {
-        const option = options.find((each) => each.targetType === targetType);
-
-        if (option) {
-            return option;
-        }
-    }
-
-    return options[0] ?? null;
-}
-
 export async function refreshHandoffs(id) {
     const data = await actions.handoffs(id);
 
@@ -78,7 +48,7 @@ export async function refreshHandoffs(id) {
 
 export function HandoffButton() {
     const { conversationId: id, view, sessions } = store.state;
-    const available = handoffsAvailable() && view.conversation?.kind === "session";
+    const available = handoffSummaryAvailable() && view.conversation?.kind === "session";
     const session = sessions.find((each) => each.id === id);
     const status = session?.workflow?.status;
     const readOnly = session?.workflow?.readOnly;
@@ -116,21 +86,21 @@ export function HandoffButton() {
     }
 
     const data = store.state.handoff?.id === id ? store.state.handoff.data : null;
-    const type = view.conversation.threadType ?? session?.threadType ?? "worker";
+    const preparing = Boolean(session?.workflow?.preparing ?? data?.workflow?.preparing);
 
     if (data?.workflow?.readOnly || readOnly) {
         return null;
     }
 
-    const preferred = preferredHandoff(data, type);
-
     return html`<button
         class="icon-button handoff-button"
         aria-label="Choose next thread"
-        title="Choose the next thread · starting it makes this thread read-only"
-        onClick=${() => openSheet({ type: "handoff", id, option: preferred })}
+        aria-busy=${preparing}
+        disabled=${preparing}
+        title=${preparing ? "Preparing handoff summary…" : "Choose the next thread · starting it makes this thread read-only"}
+        onClick=${() => openSheet({ type: "handoff", id })}
     >
-        ${preferred ? html`<${ThreadTypeTag} session=${{ threadType: preferred.targetType }} iconOnly=${true} />` : html`<${Icon} name="fork" />`}
+        <${Icon} name="fork" />
     </button>`;
 }
 

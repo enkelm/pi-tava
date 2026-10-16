@@ -7,8 +7,8 @@
 // coarse-pointer hover-only traps and status text/icon regressions are not reached by app tests.
 // Header geometry owns invisible shortcuts reserving width and capped labels stranding the count.
 // Session-moves UI owns thread menus; this covers project/goal menus through DOM and trusted input.
-// Direct Pull creation owns rendered selection, new-goal atomicity and type indicators; backend tests
-// do not reach that UI boundary. Legacy hello delivery must keep unsupported Pull controls hidden.
+// Pull/Researcher starters own rendered selection, new-goal atomicity and type indicators; backend
+// tests do not reach that boundary. Legacy hello delivery must hide unsupported starter controls.
 // Uses public app/model/browser APIs; no test-only production seams or state flags.
 import {
     type App,
@@ -529,7 +529,7 @@ async function destination(page: BrowserPage, cwd: string) {
     );
 }
 
-async function start(page: BrowserPage, app: App, type: "Worker" | "Chat" | "Pull") {
+async function start(page: BrowserPage, app: App, type: "Worker" | "Chat" | "Pull" | "Researcher") {
     const before = new Set(app.sessions().map((session) => session.id));
 
     await button(page, panel, `Start ${type}`);
@@ -576,7 +576,7 @@ async function rowTag(
     page: BrowserPage,
     scope: string,
     id: number,
-    type: "Chat" | "Worker" | "Pull",
+    type: "Chat" | "Worker" | "Pull" | "Researcher",
 ) {
     const row = `${scope} .session-row[data-id="${id}"]`;
 
@@ -1397,54 +1397,82 @@ test(
                     await home(page, scope);
                     assert.equal(await rowTag(page, scope, chat.id, "Chat"), true);
                     await present(peer, `${scope} .session-row[data-id="${chat.id}"]`);
-                    await click(page, `${scope} .new-button[aria-label="New session"]`);
-                    await button(page, panel, "Start a one-time chat");
-                    await page.evaluate(`const field = document.querySelector('${panel} select[aria-label="Thread type"]');
-                        field.value = 'pull';
-                        field.dispatchEvent(new Event('change', { bubbles: true }));`);
-                    const standalonePull = await start(page, app, "Pull");
 
-                    assert.equal(standalonePull.threadType, "pull");
-                    assert.equal(standalonePull.projectId, undefined);
-                    assert.equal(standalonePull.goalId, undefined);
-                    await home(page, scope);
-                    assert.equal(await rowTag(page, scope, standalonePull.id, "Pull"), true);
-                    await present(peer, `${scope} .session-row[data-id="${standalonePull.id}"]`);
-                    await click(page, `${scope} .new-button[aria-label="New session"]`);
-                    await chooseProject(page, name);
-                    await button(page, `${panel} .project-goal-choices`, "New Goal");
-                    await page.evaluate(`const field = document.querySelector('${panel} select[aria-label="Thread type"]');
-                        field.value = 'pull';
-                        field.dispatchEvent(new Event('change', { bubbles: true }));`);
-                    await shot(page, `${viewport}-new-goal-pull`);
-                    const pull = await start(page, app, "Pull");
-                    const pullGoal = app.projects
-                        .list(user)
-                        .goals.find((item) => item.id === pull.goalId);
+                    for (const [index, type] of (["Pull", "Researcher"] as const).entries()) {
+                        const threadType = type.toLowerCase();
 
-                    assert.equal(pull.threadType, "pull");
-                    assert.equal(pull.projectId, project.id);
-                    assert.equal(pull.cwd, cwd);
-                    assert.ok(
-                        pullGoal,
-                        "starting a Pull with New Goal creates its goal, not an orphan or Worker",
-                    );
-                    assert.equal(pullGoal.status, "active");
-                    assert.equal(app.projects.list(user).goals.length, 2);
-                    await home(page, scope);
-                    assert.equal(await rowTag(page, scope, pull.id, "Pull"), false);
-                    await present(peer, `${scope} .session-row[data-id="${pull.id}"]`);
+                        await click(page, `${scope} .new-button[aria-label="New session"]`);
+                        await button(page, panel, "Start a one-time chat");
+                        await page.evaluate(`const field = document.querySelector('${panel} select[aria-label="Thread type"]');
+                            field.value = '${threadType}';
+                            field.dispatchEvent(new Event('change', { bubbles: true }));`);
+                        const standalone = await start(page, app, type);
+
+                        assert.equal(standalone.threadType, threadType);
+                        assert.equal(standalone.projectId, undefined);
+                        assert.equal(standalone.goalId, undefined);
+                        await home(page, scope);
+                        assert.equal(await rowTag(page, scope, standalone.id, type), true);
+                        await present(peer, `${scope} .session-row[data-id="${standalone.id}"]`);
+                        await click(page, `${scope} .new-button[aria-label="New session"]`);
+                        await chooseProject(page, name);
+                        await button(page, `${panel} .project-goal-choices`, "New Goal");
+                        await page.evaluate(`const field = document.querySelector('${panel} select[aria-label="Thread type"]');
+                            field.value = '${threadType}';
+                            field.dispatchEvent(new Event('change', { bubbles: true }));`);
+                        await shot(page, `${viewport}-new-goal-${threadType}`);
+                        const starter = await start(page, app, type);
+                        const starterGoal = app.projects
+                            .list(user)
+                            .goals.find((item) => item.id === starter.goalId);
+
+                        assert.equal(starter.threadType, threadType);
+                        assert.equal(starter.projectId, project.id);
+                        assert.equal(starter.cwd, cwd);
+                        assert.ok(
+                            starterGoal,
+                            `starting ${type} with New Goal creates its goal, not an orphan or Worker`,
+                        );
+                        assert.equal(starterGoal.status, "active");
+                        assert.equal(app.projects.list(user).goals.length, 2 + index);
+                        await home(page, scope);
+                        assert.equal(await rowTag(page, scope, starter.id, type), false);
+                        await present(peer, `${scope} .session-row[data-id="${starter.id}"]`);
+                    }
 
                     // Advertise the real older hello over the event stream; do not inject UI state.
                     const hello = app.hello.bind(app);
+                    let handoffs = 3;
 
                     app.hello = async (supplied) => {
                         const result = await hello(supplied);
 
-                        return { ...result, server: { ...result.server, handoffs: 1 } };
+                        return { ...result, server: { ...result.server, handoffs } };
                     };
 
                     try {
+                        await page.reload();
+                        await click(page, `${scope} .new-button[aria-label="New session"]`);
+                        await chooseProject(page, name);
+                        await present(page, `${panel} select[aria-label="Thread type"]`);
+                        assert.equal(
+                            await value(
+                                page,
+                                `document.querySelector('${panel} option[value="researcher"]') === null`,
+                            ),
+                            true,
+                            "pre-summary servers must not offer unsupported Researcher starters",
+                        );
+                        assert.equal(
+                            await value(
+                                page,
+                                `document.querySelector('${panel} option[value="pull"]') !== null`,
+                            ),
+                            true,
+                            "version 3 retains its existing Pull starter",
+                        );
+                        await closeDialog(page);
+                        handoffs = 1;
                         await page.reload();
                         await click(page, `${scope} .new-button[aria-label="New session"]`);
                         await chooseProject(page, name);

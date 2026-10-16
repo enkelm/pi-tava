@@ -78,8 +78,16 @@ export function fitDock(dock) {
         return;
     }
 
-    const queue = dock.querySelector(":scope > .inbox");
-    const count = dock.querySelector(":scope > .inbox-count");
+    // Coop owns expansion (including editing/focus) through its wrapper and hidden inbox.
+    // Hidden or unlaid-out rows contribute no scroll budget; their wrapper's toggle stays fixed.
+    const owner = dock.querySelector(":scope > .queue");
+    const nested = owner?.querySelector(":scope > .inbox");
+    const queue = owner
+        ? !nested?.hidden && height(nested?.querySelector(":scope > .queued")) > 0
+            ? nested
+            : null
+        : dock.querySelector(":scope > .inbox");
+    const count = owner ? null : dock.querySelector(":scope > .inbox-count");
     const bar = dock.querySelector(":scope > .agents-bar");
     const list = bar?.querySelector(".agents-list");
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
@@ -99,8 +107,10 @@ export function fitDock(dock) {
     const listAll = list?.scrollHeight ?? 0;
     // One whole row, and the line above the rows.
     const listLeast = list ? Math.min(listAll, height(list.querySelector(".agent-row")) + 1) : 0;
+    // Beside the list, Coop still needs a row rather than the flat queue's foldable count.
+    const listQueueLeast = owner ? row + queueMargin : countHeight;
     const least = list
-        ? listLeast + (queue ? countHeight : 0)
+        ? listLeast + (queue ? listQueueLeast : 0)
         : queue
           ? row + queueMargin + (queueAll > row + 1 ? countHeight : 0)
           : 0;
@@ -111,7 +121,11 @@ export function fitDock(dock) {
 
         for (const child of dock.children) {
             if (child !== queue && child !== count) {
-                sum += outer(child) - (child === bar && list ? height(list) : 0);
+                // The wrapper includes the inbox's current height and margins, not just its toggle.
+                sum +=
+                    outer(child) -
+                    (child === bar && list ? height(list) : 0) -
+                    (child === owner && queue ? outer(queue) : 0);
             }
         }
 
@@ -158,7 +172,9 @@ export function fitDock(dock) {
                 listHeight = Math.min(listMost, room - taken(queueHeight));
             }
 
-            if (listHeight < listLeast) {
+            // Only the flat queue has an independent count to fold into. An open Coop queue
+            // keeps a whole row, and the dock can grow/cap rather than hiding an edit or focus.
+            if (listHeight < listLeast && !owner) {
                 folded = true;
                 listHeight = Math.min(listMost, room - countHeight);
             }

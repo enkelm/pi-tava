@@ -5,6 +5,7 @@ import { localServers } from "../browser/local-servers.ts";
 import { displayUrl, normalizeUrl } from "../browser/urls.ts";
 import { viewportFrom } from "../browser/viewport.ts";
 import { HttpError } from "../errors.ts";
+import { requireWorkflowLocalWrite, reserveWorkflowLocalWrite } from "../workflow-policy.ts";
 import { type ApiRequest, json, readJson } from "./io.ts";
 
 /** What people may do to a conversation's browser page. */
@@ -114,60 +115,83 @@ export async function browserRoutes(
         throw new HttpError(404, "Unknown browser route");
     }
 
-    await app.requireDriver(id, user);
-    await app.conversation(id);
-    const body = await readJson<Record<string, unknown>>(request);
+    // An authenticated request can outlive its captured User and its source's write authority.
+    const currentUser = () => {
+        const current = app.config.userById(user.id);
 
-    // Typing into, stopping, or clearing a page that is not open opens nothing.
-    if (action === "input" || action === "stop" || action === "clear") {
-        const page = browsers.page(key);
-
-        if (page === undefined) {
-            throw new HttpError(409, "Nothing is open in the browser.");
+        if (current === undefined) {
+            throw new HttpError(401, "Your access was removed");
         }
 
-        if (action === "input") {
-            if (!Array.isArray(body.events)) {
-                throw new HttpError(400, "events must be a list");
-            }
+        app.requireSee(current, id);
+        app.requireSteer(current);
+        requireWorkflowLocalWrite(app, id);
 
-            await page.input(body.events.slice(0, 200)).catch(readable);
+        return current;
+    };
 
-            return json(response, 200, { ok: true });
-        }
-
-        if (action === "stop") {
-            await page.stop().catch(readable);
-        } else {
-            page.clearLogs();
-        }
-
-        return json(response, 200, browsers.state(key));
-    }
-
-    const viewport = viewportFrom(body.viewport);
-    const target =
-        action === "navigate"
-            ? normalizeUrl(String(body.url ?? ""), {
-                  trusted: user.role === "owner",
-                  cwd: app.cwdOf(id),
-              })
-            : undefined;
-
-    if (action === "navigate" && target === undefined) {
-        throw new HttpError(
-            400,
-            user.role === "owner"
-                ? "That is not an address: try localhost:5173, example.com, or a file path."
-                : "That is not a web address: try localhost:5173 or example.com.",
-        );
-    }
-
-    if (action === "viewport" && viewport === undefined) {
-        throw new HttpError(400, "Say mobile, tablet, desktop, or a size such as 1024x768.");
-    }
+    currentUser();
+    // Covers admission, slow/aborted bodies, page creation and action settlement. Passive GETs stay outside.
+    const release = reserveWorkflowLocalWrite(app, id);
 
     try {
+        await app.requireDriver(id, currentUser());
+        await app.conversation(id);
+        const body = await readJson<Record<string, unknown>>(request);
+
+        await app.requireDriver(id, currentUser());
+        // Driver lookup is asynchronous too: recheck live identity/ownership on the dispatch line.
+        const current = currentUser();
+
+        // Typing into, stopping, or clearing a page that is not open opens nothing.
+        if (action === "input" || action === "stop" || action === "clear") {
+            const page = browsers.page(key);
+
+            if (page === undefined) {
+                throw new HttpError(409, "Nothing is open in the browser.");
+            }
+
+            if (action === "input") {
+                if (!Array.isArray(body.events)) {
+                    throw new HttpError(400, "events must be a list");
+                }
+
+                await page.input(body.events.slice(0, 200));
+
+                return json(response, 200, { ok: true });
+            }
+
+            if (action === "stop") {
+                await page.stop();
+            } else {
+                page.clearLogs();
+            }
+
+            return json(response, 200, browsers.state(key));
+        }
+
+        const viewport = viewportFrom(body.viewport);
+        const target =
+            action === "navigate"
+                ? normalizeUrl(String(body.url ?? ""), {
+                      trusted: current.role === "owner",
+                      cwd: app.cwdOf(id),
+                  })
+                : undefined;
+
+        if (action === "navigate" && target === undefined) {
+            throw new HttpError(
+                400,
+                current.role === "owner"
+                    ? "That is not an address: try localhost:5173, example.com, or a file path."
+                    : "That is not a web address: try localhost:5173 or example.com.",
+            );
+        }
+
+        if (action === "viewport" && viewport === undefined) {
+            throw new HttpError(400, "Say mobile, tablet, desktop, or a size such as 1024x768.");
+        }
+
         // Opening restores the last address without waiting for it: frames show it loading.
         const page = await browsers.open(key, {
             wait: false,
@@ -175,18 +199,23 @@ export async function browserRoutes(
             ...(viewport === undefined ? {} : { viewport }),
         });
 
+        await app.requireDriver(id, currentUser());
+        const actor = currentUser();
+
         if (action === "open") {
             return json(response, 200, browsers.state(key));
         }
 
         if (action === "navigate") {
-            // Everyone in the session sees what people open: the browser reaches what this machine reaches.
-            void app.collab.activity(
+            // Keep the activity write inside the reservation as well as the browser action.
+            await app.collab.activity(
                 id,
-                user,
+                actor,
                 `opened ${displayUrl(target!) || target!} in the browser`,
                 false,
             );
+            await app.requireDriver(id, currentUser());
+            currentUser();
             const result = await page.navigate(target!, { wait: false });
 
             return json(response, 200, {
@@ -206,5 +235,7 @@ export async function browserRoutes(
         return json(response, 200, browsers.state(key));
     } catch (error) {
         readable(error);
+    } finally {
+        release();
     }
 }

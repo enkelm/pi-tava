@@ -9,6 +9,11 @@
  * pages instead share that copied profile's persistent cookies and storage. A restart closes pages, and each
  * conversation's last address and size come back from its saved state when its page is next opened.
  */
+import {
+    awaitWithContext,
+    BACKGROUND_CONTEXT,
+    withAbortSignal,
+} from "@earendil-works/chord/context";
 import { COOKIE } from "./auth.ts";
 import { BrowserError, Chromium } from "./browser/cdp.ts";
 import { findBrowser, profileFolder } from "./browser/discovery.ts";
@@ -24,6 +29,14 @@ export type OpenOptions = {
     restore?: boolean;
     /** Wait for the saved address to load (default), or (false) only start loading it. */
     wait?: boolean;
+    /** Cancel this caller's wait; restoration stops only when no caller still needs it. */
+    signal?: AbortSignal;
+};
+
+type Opening = {
+    promise: Promise<BrowserPage>;
+    controller: AbortController;
+    waiters: Set<symbol>;
 };
 
 export interface BrowsersOptions {
@@ -40,6 +53,8 @@ export interface BrowsersOptions {
     log?(line: string): void;
     /** A page nobody used or watched for this long closes. */
     idleMs?: number;
+    /** Managed conversations use isolated, network-disabled static research pages, never imported accounts. */
+    researchReader?(conversationId: number): boolean;
 }
 
 /**
@@ -54,7 +69,7 @@ export class Browsers {
     #chromium: Promise<Chromium> | undefined;
     #stopping: Promise<void> | undefined;
     readonly #pages = new Map<number, BrowserPage>();
-    readonly #opening = new Map<number, Promise<BrowserPage>>();
+    readonly #opening = new Map<number, Opening>();
     readonly #listeners = new Set<(conversationId: number, state: BrowserState) => void>();
     readonly #observed = new Set<number>();
     readonly #pending = new Map<number, NodeJS.Timeout>();
@@ -101,15 +116,15 @@ export class Browsers {
     /** A conversation's page as it is now; a closed one has no address. */
     state(conversationId: number): BrowserState {
         this.#observed.add(conversationId);
-        const page = this.#pages.get(conversationId);
+        const page = this.page(conversationId);
         const imported = this.profiles.current();
         const profile =
-            imported === undefined
+            imported === undefined || this.#options.researchReader?.(conversationId) === true
                 ? {}
                 : { sharedProfile: `${imported.browser} · ${imported.label}` };
 
         if (page !== undefined && !page.closed) {
-            return { ...page.state(this.available), ...profile };
+            return { ...page.state(this.available), ...(page.researchReader ? {} : profile) };
         }
 
         const problem = this.#problems.get(conversationId);
@@ -136,6 +151,15 @@ export class Browsers {
         const page = this.#pages.get(conversationId);
 
         return page === undefined || page.closed ? undefined : page;
+    }
+
+    /** A newly managed Chat must not keep its old unrestricted/shared-account tab alive. */
+    reconcilePolicy(): void {
+        for (const [id, page] of this.#pages) {
+            if (page.researchReader !== (this.#options.researchReader?.(id) ?? false)) {
+                void this.#discard(id, page);
+            }
+        }
     }
 
     /** Coalesce a page's changes: frames of logs and loads arrive in bursts. */
@@ -263,6 +287,8 @@ export class Browsers {
      * has no saved size.
      */
     async open(conversationId: number, options: OpenOptions = {}): Promise<BrowserPage> {
+        options.signal?.throwIfAborted();
+
         if (this.#closing) {
             throw new BrowserError("The server is stopping.");
         }
@@ -272,35 +298,78 @@ export class Browsers {
         }
 
         const open = this.page(conversationId);
+        const opening = this.#opening.get(conversationId);
 
-        if (open !== undefined) {
+        // A caller explicitly opening another address need not wait for saved-address restoration.
+        if (
+            open !== undefined &&
+            open.researchReader === (this.#options.researchReader?.(conversationId) ?? false) &&
+            (options.restore === false || options.wait === false)
+        ) {
             return open;
         }
 
-        const opening = this.#opening.get(conversationId);
-
         if (opening !== undefined) {
-            return opening;
+            return this.#waitForOpening(opening, options.signal);
         }
 
-        const created = this.#create(conversationId, options);
+        if (open !== undefined) {
+            if (open.researchReader === (this.#options.researchReader?.(conversationId) ?? false)) {
+                return open;
+            }
 
-        this.#opening.set(conversationId, created);
+            await this.close(conversationId);
+            options.signal?.throwIfAborted();
+        }
+
+        const controller = new AbortController();
+        const created = this.#create(conversationId, { ...options, signal: controller.signal })
+            .then((page) => {
+                this.#problems.delete(conversationId);
+
+                return page;
+            })
+            .catch((error: unknown) => {
+                this.#problems.set(conversationId, describe(error));
+
+                throw error;
+            })
+            .finally(() => {
+                this.#opening.delete(conversationId);
+                this.#changed(conversationId);
+            });
+        const pending: Opening = { promise: created, controller, waiters: new Set() };
+
+        this.#opening.set(conversationId, pending);
         this.#changed(conversationId);
 
+        return this.#waitForOpening(pending, options.signal);
+    }
+
+    async #waitForOpening(opening: Opening, signal?: AbortSignal): Promise<BrowserPage> {
+        const waiter = Symbol();
+
+        const cancel = () => {
+            opening.waiters.delete(waiter);
+
+            if (opening.waiters.size === 0) {
+                opening.controller.abort();
+            }
+        };
+
+        opening.waiters.add(waiter);
+        signal?.addEventListener("abort", cancel, { once: true });
+
         try {
-            const page = await created;
-
-            this.#problems.delete(conversationId);
-
-            return page;
-        } catch (error) {
-            this.#problems.set(conversationId, describe(error));
-
-            throw error;
+            return await awaitWithContext(
+                opening.promise,
+                signal === undefined
+                    ? BACKGROUND_CONTEXT
+                    : withAbortSignal(signal, BACKGROUND_CONTEXT),
+            );
         } finally {
-            this.#opening.delete(conversationId);
-            this.#changed(conversationId);
+            signal?.removeEventListener("abort", cancel);
+            opening.waiters.delete(waiter);
         }
     }
 
@@ -320,8 +389,9 @@ export class Browsers {
         }
 
         const connection = chromium.connection;
+        const researchReader = this.#options.researchReader?.(conversationId) ?? false;
         const browserContextId: string | undefined =
-            this.profiles.current() === undefined
+            researchReader || this.profiles.current() === undefined
                 ? (await connection.send("Target.createBrowserContext", { disposeOnDetach: false }))
                       .browserContextId
                 : undefined;
@@ -343,6 +413,7 @@ export class Browsers {
 
             page = new BrowserPage({
                 conversationId,
+                researchReader,
                 connection,
                 session: sessionId,
                 target: targetId!,
@@ -355,7 +426,10 @@ export class Browsers {
             });
             await page.init();
 
-            if (stale()) {
+            if (
+                stale() ||
+                researchReader !== (this.#options.researchReader?.(conversationId) ?? false)
+            ) {
                 page.close();
 
                 throw new BrowserError("The browser was closed.");
@@ -365,7 +439,12 @@ export class Browsers {
             this.#idleSince = Date.now();
 
             if (options.restore !== false && saved?.url !== undefined && saved.url !== "") {
-                const restoring = page.navigate(saved.url, { timeoutMs: 15_000 }).catch(() => {});
+                const restoring = page
+                    .navigate(saved.url, {
+                        timeoutMs: 15_000,
+                        ...(options.signal === undefined ? {} : { signal: options.signal }),
+                    })
+                    .catch(() => {});
 
                 if (options.wait !== false) {
                     await restoring;
@@ -485,7 +564,7 @@ export class Browsers {
 
         try {
             await this.closeAll();
-            await Promise.allSettled([...this.#opening.values()]);
+            await Promise.allSettled([...this.#opening.values()].map((opening) => opening.promise));
 
             if (this.#closing) {
                 throw new BrowserError("The server is stopping.");

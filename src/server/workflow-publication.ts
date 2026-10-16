@@ -16,7 +16,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { PocketApp } from "./app.ts";
 import type { ApprovalAnswer } from "./host.ts";
 import { DecisionsDoc } from "./docs.ts";
-import { HandoffsDoc, WorkflowDoc } from "./workflow-docs.ts";
+import { HandoffsDoc, type HandoffsData } from "./workflow-docs.ts";
 import {
     requireWorkflowRequester,
     safeWorkflowGit,
@@ -252,7 +252,7 @@ function validateCommand(command: readonly string[]): void {
 
     if (command[1] === "pr" && command[2] === "create" && headCount !== 1) {
         throw new Error(
-            "PR creation requires exactly one explicit --head local branch matching the inherited Land checkpoint.",
+            "PR creation requires exactly one explicit --head local branch matching the approved Publish checkout.",
         );
     }
 }
@@ -362,7 +362,7 @@ async function requirePublicationSource(
 
     if (commit !== landedHead) {
         throw new Error(
-            "Publication source is not the inherited Land head. Review and Land that source before publishing it.",
+            "Publication source does not match the current Publish checkout. Use its exact checked-out commit or branch.",
         );
     }
 }
@@ -411,7 +411,7 @@ async function pinCommand(
 
     if (commit !== landedHead) {
         throw new Error(
-            "Publication source is not the inherited Land head. Review and Land that source before publishing it.",
+            "Publication source does not match the current Publish checkout. Use its exact checked-out commit or branch.",
         );
     }
 
@@ -504,6 +504,44 @@ async function checkpoint(
     return hash.digest("hex");
 }
 
+/** Human selection of Publish must follow Land; action approval pins the actual clean checkout. */
+async function publishHead(
+    app: PocketApp,
+    root: ConversationId,
+    handoffs: Readonly<HandoffsData> | undefined,
+    context: Context,
+): Promise<string> {
+    const inbound = Object.values(handoffs?.handoffs ?? {}).find(
+        (handoff) => handoff.targetThreadId === Number(root),
+    );
+
+    if (
+        inbound?.targetType !== "publish" ||
+        inbound.relationship !== "same-work" ||
+        app.sessionMeta(inbound.sourceThreadId as ConversationId)?.threadType !== "land"
+    ) {
+        throw new Error("Publication requires a human-selected Publish handoff from Land.");
+    }
+
+    const cwd = await realpath(app.cwdOf(root));
+    const git = await executable("git");
+    const head = (await inspectGit(cwd, git, ["rev-parse", "--verify", "HEAD"], context)).trim();
+    const dirty = await inspectGit(
+        cwd,
+        git,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        context,
+    );
+
+    if (!/^[0-9a-f]{40,64}$/.test(head) || dirty !== "") {
+        throw new Error(
+            "Publication requires a concrete commit and a clean checkout. No external operation ran.",
+        );
+    }
+
+    return head;
+}
+
 function requirePublisher(app: PocketApp, id: ConversationId, expectedRequester?: string): string {
     const requester = requireWorkflowRequester(app, id);
 
@@ -593,7 +631,7 @@ export function createPublicationTool(app: PocketApp) {
     return defineTool({
         name: "publication",
         description:
-            "Individually human-approved git push or gh pr/issue operations, only in the active ready Publish workflow. Managed bash is offline. An interrupted publication is uncertain: use status and human-approved resolve, never blindly repeat.",
+            "Individually human-approved git push or gh pr/issue operations, only in the active Publish workflow after Land. Managed bash is offline. An interrupted publication is uncertain: use status and human-approved resolve, never blindly repeat.",
         parameters: Type.Object({
             action: Type.Union([
                 Type.Literal("execute"),
@@ -640,26 +678,13 @@ export function createPublicationTool(app: PocketApp) {
                 );
             }
 
-            const workflow = await api.snapshot(WorkflowDoc, root, context);
-
-            if (workflow?.status !== "active" || workflow.readyForPublish !== true) {
-                throw new Error(
-                    "This Publish workflow is not active and ready for publication. Complete its local review/land prerequisites first.",
-                );
-            }
-
-            const landedFingerprint = workflow.fingerprint?.digest;
-            const landedHead = workflow.fingerprint?.head;
-
-            if (
-                landedFingerprint === undefined ||
-                landedHead === undefined ||
-                (await app.handoffs.fingerprint(id)) !== landedFingerprint
-            ) {
-                throw new Error(
-                    "The checkout differs from the inherited successful Land checkpoint (or has no checkpoint). Review and Land the changed tracked, staged or untracked content again before publication.",
-                );
-            }
+            const landedHead = await publishHead(
+                app,
+                root,
+                await api.snapshot(HandoffsDoc, context),
+                context,
+            );
+            const landedFingerprint = await app.handoffs.fingerprint(id);
 
             if (args.command === undefined) {
                 throw new Error("Give the exact publication argv command.");
@@ -757,16 +782,13 @@ export function createPublicationTool(app: PocketApp) {
                         roots.map((each) => tx.doc(PublicationsDoc, each)),
                     );
                     const state = await tx.doc(PublicationsDoc, root);
-                    const workflow = await tx.doc(WorkflowDoc, root);
+                    const handoffs = await tx.doc(HandoffsDoc);
 
                     requirePublisher(app, id, requester);
                     approverOf(app, id, answer, approver);
 
                     if (
-                        workflow.status !== "active" ||
-                        workflow.readyForPublish !== true ||
-                        workflow.fingerprint?.digest !== landedFingerprint ||
-                        workflow.fingerprint?.head !== landedHead ||
+                        (await publishHead(app, root, handoffs, context)) !== landedHead ||
                         (await app.handoffs.fingerprint(id)) !== landedFingerprint ||
                         history.some((saved) =>
                             Object.values(saved.receipts).some(

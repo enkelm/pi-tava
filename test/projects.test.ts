@@ -108,6 +108,7 @@ test("projects have opaque identity, multi-thread goals and independent type and
     assert.notEqual(projectId, otherProjectId);
     assert.equal(app.sessionMeta(first.id)?.threadType, "worker");
     assert.equal(app.sessionMeta(second.id)?.goalId, first.goalId);
+    assert.equal(app.sessionMeta(second.id)?.threadType, "worker");
     assert.equal(app.sessionMeta(chat.id)?.threadType, "chat");
     assert.equal(app.sessionMeta(ungrouped.id)?.threadType, "chat");
     assert.equal(app.cwdOf(first.id), source);
@@ -136,17 +137,20 @@ test("projects have opaque identity, multi-thread goals and independent type and
 
     assert.equal(app.sessionMeta(completed.id)?.projectId, projectId);
     assert.equal(app.sessionMeta(completed.id)?.goalId, first.goalId);
-    const pull = await app.commands.createSession(owner(app), {
-        projectId,
-        newGoal: true,
-        threadType: "pull",
-    });
-    const pullGoalId = app.sessionMeta(pull.id)?.goalId;
 
-    assert.ok(pullGoalId);
-    assert.equal(app.sessionMeta(pull.id)?.threadType, "pull");
-    assert.equal(findGoal(pullGoalId).namingThreadId, Number(pull.id));
-    assert.equal(app.cwdOf(pull.id), destination);
+    for (const threadType of ["pull", "researcher"] as const) {
+        const starter = await app.commands.createSession(owner(app), {
+            projectId,
+            newGoal: true,
+            threadType,
+        });
+        const goalId = app.sessionMeta(starter.id)?.goalId;
+
+        assert.ok(goalId);
+        assert.equal(app.sessionMeta(starter.id)?.threadType, threadType);
+        assert.equal(findGoal(goalId).namingThreadId, Number(starter.id));
+        assert.equal(app.cwdOf(starter.id), destination);
+    }
 });
 
 // HTTP owns shape, authentication/CSRF, role denial and filtered live catalogue delivery.
@@ -573,6 +577,8 @@ test("preflight creates no goal and transactional revalidation rolls back raced 
     for (const [request, expected] of [
         [{ newGoal: true }, 400],
         [{ projectId, newGoal: true, threadType: "chat" }, 400],
+        [{ projectId, newGoal: true, threadType: "reviewer" }, 400],
+        [{ threadType: "publish" }, 400],
         [{ projectId, newGoal: true, goalId: first.goalId }, 400],
         [{ projectId: 2 }, 400],
         [{ goalId: false }, 400],

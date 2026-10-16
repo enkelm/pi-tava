@@ -117,9 +117,16 @@ function selection(doc: ProjectsData, request: SelectProject): ProjectSelection 
             : request.threadType;
 
     if (
-        !["chat", "worker", "reviewer", "follow-up", "pull", "land", "publish"].includes(
-            String(threadType),
-        )
+        ![
+            "chat",
+            "researcher",
+            "worker",
+            "reviewer",
+            "follow-up",
+            "pull",
+            "land",
+            "publish",
+        ].includes(String(threadType))
     ) {
         throw new HttpError(400, "Unknown thread type");
     }
@@ -128,7 +135,7 @@ function selection(doc: ProjectsData, request: SelectProject): ProjectSelection 
         request.newGoal === true &&
         (projectId === undefined ||
             goalId !== undefined ||
-            !["worker", "pull"].includes(String(threadType)))
+            !["worker", "researcher", "pull"].includes(String(threadType)))
     ) {
         throw new HttpError(
             400,
@@ -428,6 +435,7 @@ export class Projects {
             request.threadType !== undefined &&
             request.threadType !== "chat" &&
             request.threadType !== "worker" &&
+            request.threadType !== "researcher" &&
             request.threadType !== "pull"
         ) {
             throw new HttpError(

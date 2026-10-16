@@ -122,6 +122,7 @@ import { HandoffsDoc, WorkflowDoc } from "./workflow-docs.ts";
 import { createWorkflowEnv, createWorkflowHooks } from "./workflow-policy.ts";
 import { createPublicationTool } from "./workflow-publication.ts";
 import { createPullTool } from "./workflow-pull.ts";
+import { createResearchTool } from "./workflow-research.ts";
 import { PI_PROVIDERS_FILE, ProviderPackages } from "./provider-packages.ts";
 import { ProviderExtensions } from "./provider-extensions.ts";
 
@@ -376,6 +377,7 @@ export class PocketApp {
         this.#log = options.log ?? ((line) => console.log(line));
         this.browsers = new Browsers({
             dataDir: options.dataDir,
+            researchReader: (id) => this.handoffs.isManaged(id as ConversationId),
             ...(options.browser === undefined ? {} : { executable: options.browser }),
             log: (line) => this.#log(line),
             load: async (id) =>
@@ -539,7 +541,12 @@ export class PocketApp {
         registry.install(
             defineExtension({
                 name: "pocket-core",
-                tools: [this.handoffs.tool, createPublicationTool(this), createPullTool(this)],
+                tools: [
+                    this.handoffs.tool,
+                    createPublicationTool(this),
+                    createPullTool(this),
+                    createResearchTool(this),
+                ],
                 tasks: [
                     ResendTask,
                     this.shell.task,
@@ -547,6 +554,7 @@ export class PocketApp {
                     this.commands.followTask,
                     this.extensionCommands.task,
                     this.handoffs.task,
+                    this.handoffs.summaryTask,
                 ],
                 sections: this.handoffs.sections,
                 hooks: createWorkflowHooks(this),
@@ -827,6 +835,7 @@ export class PocketApp {
         }
 
         if (sessionsChanged) {
+            this.browsers.reconcilePolicy();
             this.#scheduleSessions();
         }
     }
@@ -1866,7 +1875,7 @@ export class PocketApp {
                 localReviews: 2,
                 // Durable project/goal organization and independently typed threads.
                 projects: 1,
-                handoffs: 2,
+                handoffs: 4,
                 // Owner-editable system instructions for the built-in thread agents.
                 agentSettings: 1,
                 // Owner-managed, restart-only Pi provider package compatibility.

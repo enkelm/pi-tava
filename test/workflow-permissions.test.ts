@@ -30,7 +30,7 @@ import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { ArtifactsDoc, SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
-import { HandoffsDoc, WorkflowDoc } from "../src/server/workflow-docs.ts";
+import { HandoffsDoc, WorkflowDoc, type ThreadType } from "../src/server/workflow-docs.ts";
 import { PublicationsDoc } from "../src/server/workflow-publication.ts";
 import { workflowGitPath } from "../src/server/workflow-policy.ts";
 import { createHandler } from "../src/server/http.ts";
@@ -146,44 +146,48 @@ export default function(){return defineExtension({name:'workflow-test-extension'
         await submission.wait(context);
     };
 
-    const handoff = async (
-        id: ConversationId,
-        targetType: "reviewer" | "land" | "publish",
-        liveApp = app,
-    ) => {
-        const created = await liveApp.handoffs.start(id, owner(liveApp), {
-            targetType,
-            relationship: "same-work",
-            brief: "Inspect this disposable checkout.",
-            requestId: crypto.randomUUID(),
-        });
-        const target = created.id as unknown as ConversationId;
+    const handoff = async (id: ConversationId, targetType: ThreadType, liveApp = app) => {
+        // These tests own permissions, not review admission. Give Reviewer a real disposable draft,
+        // then discard that draft after its response without changing the publication fixture's commits.
+        const draft =
+            targetType === "reviewer" && git(cwd, "status", "--porcelain", "--", "code.txt") === ""
+                ? readFileSync(join(cwd, "code.txt"))
+                : undefined;
 
-        await until(
-            async () =>
-                (await liveApp.harness.snapshot(HandoffsDoc, context))?.handoffs[created.handoffId]
-                    ?.delivery === "delivered",
-            "handoff delivery",
-        );
-        await (await liveApp.conversation(target)).waitForIdle(context);
+        if (draft !== undefined) {
+            writeFileSync(join(cwd, "code.txt"), `${draft.toString()}reviewable draft\n`);
+        }
 
-        return target;
+        try {
+            const created = await liveApp.handoffs.start(id, owner(liveApp), {
+                targetType,
+                relationship: "same-work",
+                brief: "Inspect this disposable checkout.",
+                requestId: crypto.randomUUID(),
+            });
+            const target = created.id as unknown as ConversationId;
+
+            await until(
+                async () =>
+                    (await liveApp.harness.snapshot(HandoffsDoc, context))?.handoffs[
+                        created.handoffId
+                    ]?.delivery === "delivered",
+                "handoff delivery",
+            );
+            await (await liveApp.conversation(target)).waitForIdle(context);
+
+            return target;
+        } finally {
+            if (draft !== undefined) {
+                writeFileSync(join(cwd, "code.txt"), draft);
+            }
+        }
     };
 
     const publish = async () => {
         const reviewer = await handoff(worker, "reviewer");
 
-        await app.handoffs.complete(reviewer, owner(app), {
-            status: "review-complete",
-            summary: "Reviewed.",
-        });
         const land = await handoff(reviewer, "land");
-
-        await app.handoffs.complete(land, owner(app), {
-            status: "landed",
-            readyForPublish: true,
-            summary: "Integrated and reviewed.",
-        });
 
         return handoff(land, "publish");
     };
@@ -274,7 +278,7 @@ test("mandatory core checks stop resumed predecessor tools and codemode; cached 
     const f = await fixture("chat");
     const cached = f.app.envFor(f.worker);
 
-    await f.handoff(f.worker, "reviewer");
+    await f.handoff(f.worker, "worker");
     const original = readFileSync(join(f.cwd, "code.txt"), "utf8");
     const calls: { name: string; args: Parameters<typeof fauxToolCall>[1] }[] = [
         { name: "write", args: { path: "code.txt", content: "blocked\n" } },
@@ -488,10 +492,13 @@ test(
     },
 );
 
-test("managed artifacts are blocked before creation, including prepared originals and nested calls; unrelated Chats still work", async () => {
+test("managed artifacts are blocked in typed, retired and successor threads and nested calls; unrelated Chats still work", async () => {
     const f = await fixture();
+    const chatCwd = join(root, `artifact-chat-${++serial}`);
+
+    mkdirSync(chatCwd, { recursive: true });
     const { id: chat } = await f.app.commands.createSession(owner(f.app), {
-        cwd: f.cwd,
+        cwd: chatCwd,
         threadType: "chat",
     });
 
@@ -526,43 +533,19 @@ test("managed artifacts are blocked before creation, including prepared original
         (await modelTexts(f.app, f.worker)).at(-1)!,
         /Artifacts are blocked in managed workflows/,
     );
-    await f.send(f.worker, "handoff", {
-        action: "prepare",
-        targetType: "reviewer",
-        relationship: "same-work",
-        brief: "Review this prepared work.",
-    });
-    assert.equal(f.app.handoffs.isManaged(f.worker), true);
-
-    await f.send(f.worker, "artifact", artifact);
-    assert.equal(
-        Object.keys((await f.app.harness.snapshot(ArtifactsDoc, f.worker, context))?.items ?? {})
-            .length,
-        0,
-        "A prepared original is already managed and must not publish executable content",
-    );
-    assert.match(
-        (await modelTexts(f.app, f.worker)).at(-1)!,
-        /Artifacts are blocked in managed workflows/,
-    );
-    await f.send(chat, "handoff", {
-        action: "prepare",
-        targetType: "reviewer",
-        relationship: "same-work",
-        brief: "This previously unrelated Chat is now a prepared workflow original.",
-    });
+    await f.handoff(chat, "worker");
     await f.send(chat, "artifact", artifact);
     assert.equal(
         (await f.app.harness.snapshot(ArtifactsDoc, chat, context))?.items["network-bypass"],
         undefined,
-        "Existing Chat artifacts do not permit new executable publications after preparation",
+        "Existing Chat artifacts do not permit new executable publications after human handoff",
     );
     assert.ok((await f.app.harness.snapshot(ArtifactsDoc, chat, context))?.items["ordinary-chat"]);
     assert.match(
         (await modelTexts(f.app, chat)).at(-1)!,
         /Artifacts are blocked in managed workflows/,
     );
-    const reviewer = await f.handoff(f.worker, "reviewer");
+    const reviewer = await f.handoff(f.worker, "researcher");
 
     for (const call of [
         { name: "artifact", args: artifact },
@@ -863,7 +846,7 @@ test(
 );
 
 test(
-    "publication rejects non-Publish roles, indirect payloads/wrappers and code not matching the inherited Land checkpoint",
+    "publication rejects non-Publish roles, indirect payloads/wrappers, other source commits and dirty checkouts",
     { skip: process.platform !== "darwin" },
     async () => {
         const f = await fixture();
@@ -959,7 +942,7 @@ test(
             });
             assert.match(
                 (await modelTexts(f.app, publisher)).at(-1)!,
-                /source is not the inherited Land head/,
+                /source does not match the current Publish checkout/,
                 JSON.stringify(command),
             );
             assert.equal(
@@ -982,10 +965,7 @@ test(
             }
 
             await f.send(publisher, "publication", push());
-            assert.equal(
-                (await f.app.harness.snapshot(WorkflowDoc, publisher, context))?.readyForPublish,
-                true,
-            );
+
             assert.equal(
                 f.app.approvals.all().length,
                 0,
@@ -998,82 +978,156 @@ test(
 
         assert.match(
             (await modelTexts(f.app, publisher)).join("\n"),
-            /inherited successful Land checkpoint/,
+            /requires a concrete commit and a clean checkout/,
         );
     },
 );
 
 test(
-    "approval binds concrete source commit, push URL and bytes; managed shell cannot bypass human-approved publication even to file remotes",
+    "managed shell permits local stash restoration and rebase without confusing stash push with publication",
+    { skip: process.platform !== "darwin" },
+    async () => {
+        const f = await fixture();
+        const env = f.app.envFor(f.worker);
+
+        const run = async (command: string | readonly string[]) => {
+            let output = "";
+            const execution = await env.exec(
+                command,
+                {
+                    timeout: 10,
+                    env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+                    onOutput: (text) => {
+                        output += text;
+                    },
+                },
+                context,
+            );
+
+            assert.ok(
+                execution.ok,
+                `${JSON.stringify(command)}: ${!execution.ok ? execution.error.message : ""}`,
+            );
+            assert.equal(execution.value.exitCode, 0, `${JSON.stringify(command)}: ${output}`);
+        };
+
+        const commands: (string | readonly string[])[] = [
+            ["git", "stash", "push", "--message", "local changes"],
+            `git --no-pager -C '${f.cwd}' -ccore.fsmonitor=false stash push --message options`,
+            ["/bin/bash", "-c", "git stash push --message nested"],
+            "env GIT_TERMINAL_PROMPT=0 git stash push --message wrapped",
+            "git status --short && git stash push --message compound",
+        ];
+
+        for (const command of commands) {
+            writeFileSync(join(f.cwd, "code.txt"), "preserved local changes\n");
+            await run(command);
+            assert.equal(readFileSync(join(f.cwd, "code.txt"), "utf8"), "landed\n");
+            assert.notEqual(git(f.cwd, "stash", "list"), "");
+            await run(["git", "stash", "pop"]);
+            assert.equal(
+                readFileSync(join(f.cwd, "code.txt"), "utf8"),
+                "preserved local changes\n",
+            );
+            assert.equal(git(f.cwd, "stash", "list"), "");
+        }
+
+        // A later command's data is not an operation of the preceding Git command.
+        await run("git status --short; printf '%s\\n' push send-pack receive-pack");
+        writeFileSync(join(f.cwd, "code.txt"), "landed\n");
+        git(f.cwd, "checkout", "-qb", "local-rebase", "HEAD~1");
+        writeFileSync(join(f.cwd, "local.txt"), "local commit\n");
+        git(f.cwd, "add", "local.txt");
+        git(f.cwd, "commit", "-qm", "local commit");
+        await run(["git", "rebase", "topic"]);
+        assert.equal(git(f.cwd, "rev-parse", "HEAD^"), git(f.cwd, "rev-parse", "topic"));
+        assert.equal(readFileSync(join(f.cwd, "code.txt"), "utf8"), "landed\n");
+        assert.equal(readFileSync(join(f.cwd, "local.txt"), "utf8"), "local commit\n");
+        assert.equal(git(f.cwd, "status", "--porcelain"), "");
+        assert.equal(remoteRefs(f.remote), "");
+        assert.equal(f.app.approvals.all().length, 0);
+    },
+);
+
+test("managed shell refuses publication before spawning, including wrappers and file remotes", async () => {
+    const f = await fixture();
+
+    await f.send(f.worker, "bash", { command: push().command.join(" ") });
+    assert.equal(
+        remoteRefs(f.remote),
+        "",
+        "An active Worker's direct push must not mutate even a local bare remote",
+    );
+    assert.equal(
+        f.app.approvals.all().length,
+        0,
+        "Shell publication cannot bypass the mandatory publication tool by creating an ordinary approval",
+    );
+    const env = f.app.envFor(f.worker);
+    const program = workflowGitPath() ?? "git";
+    const helpers = git(f.cwd, "--exec-path");
+    const commands: (string | readonly string[])[] = [
+        push().command,
+        ["git", "push", `file://${f.remote}`, "HEAD:refs/heads/published"],
+        ["git", "-C", "stash", "push", f.remote, "HEAD:refs/heads/published"],
+        ["git", "--unknown-option", "stash", "push", f.remote],
+        `git stash list; ${push().command.join(" ")}`,
+        `git stash push && ${push().command.join(" ")}`,
+        `/bin/bash -c 'git stash list; ${push().command.join(" ")}'`,
+        `git status | /bin/sh -c '${push().command.join(" ")}'`,
+        `(${push().command.join(" ")})`,
+        `echo "$(${push().command.join(" ")})"`,
+        `git -c alias.publish='!${push().command.join(" ")}' publish`,
+        ["git", "-c", "alias.publish=!git", "publish", ...push().command.slice(1)],
+        ["git", "publish", "push", f.remote, "HEAD:refs/heads/published"],
+        ["git", "-c", `core.fsmonitor=${push().command.join(" ")}`, "stash", "list"],
+        ["/bin/bash", "-c", `git -c core.fsmonitor=false ${push().command.slice(1).join(" ")}`],
+        ["/bin/bash", "--noprofile", "--norc", "-c", push().command.join(" ")],
+        ["/bin/bash", "-c", `/bin/sh -c '${push().command.join(" ")}'`],
+        "gi\\\nt pu\\\nsh origin HEAD:refs/heads/published",
+        `/bin/bash -c '${push().command.join(" ")}'`,
+        `env GIT_TERMINAL_PROMPT=0 ${push().command.join(" ")}`,
+        [
+            program,
+            "--no-pager",
+            "-C",
+            f.cwd,
+            "-c",
+            "core.fsmonitor=false",
+            ...push().command.slice(1),
+        ],
+        ["/usr/bin/git", "--git-dir", join(f.cwd, ".git"), ...push().command.slice(1)],
+        `'${program}' --no-pager -C '${f.cwd}' -c core.fsmonitor=false push origin HEAD:refs/heads/published`,
+        `g'it' pu"sh" origin HEAD:refs/heads/published`,
+        `git -C'${f.cwd}' -ccore.fsmonitor=false push origin HEAD:refs/heads/published > /dev/null`,
+        ["git", "send-pack", f.remote, "HEAD:refs/heads/published"],
+        `true && '${join(helpers, "git-send-pack")}' '${f.remote}' HEAD:refs/heads/published`,
+        ["git", "receive-pack", f.remote],
+        [join(helpers, "git-receive-pack"), f.remote],
+        ["gh", "api", "--method", "POST", "repos/example/test/issues"],
+        `'/no-such/bin/gh' pr create --repo example/test --title Test --body Test`,
+    ];
+
+    for (const command of commands) {
+        const execution = await env.exec(command, { timeout: 5 }, context);
+
+        assert.equal(execution.ok, false, JSON.stringify(command));
+        assert.match(
+            !execution.ok ? execution.error.message : "",
+            /publication/,
+            "Known publication CLI commands must be refused before spawning, not merely fail offline or because a binary is missing",
+        );
+        assert.equal(remoteRefs(f.remote), "", JSON.stringify(command));
+        assert.equal(f.app.approvals.all().length, 0);
+    }
+});
+
+test(
+    "approval binds concrete source commit, push URL and bytes",
     { skip: process.platform !== "darwin" },
     async () => {
         const f = await fixture();
 
-        await f.send(f.worker, "bash", { command: push().command.join(" ") });
-        assert.equal(
-            remoteRefs(f.remote),
-            "",
-            "An active Worker's direct push must not mutate even a local bare remote",
-        );
-        assert.equal(
-            f.app.approvals.all().length,
-            0,
-            "Shell publication cannot bypass the mandatory publication tool by creating an ordinary approval",
-        );
-        const env = f.app.envFor(f.worker);
-        const program = workflowGitPath()!;
-        const helpers = git(f.cwd, "--exec-path");
-        const commands: (string | readonly string[])[] = [
-            push().command,
-            ["/bin/bash", "--noprofile", "--norc", "-c", push().command.join(" ")],
-            `/bin/bash -c '${push().command.join(" ")}'`,
-            `env GIT_TERMINAL_PROMPT=0 ${push().command.join(" ")}`,
-            [
-                program,
-                "--no-pager",
-                "-C",
-                f.cwd,
-                "-c",
-                "core.fsmonitor=false",
-                ...push().command.slice(1),
-            ],
-            ["/usr/bin/git", "--git-dir", join(f.cwd, ".git"), ...push().command.slice(1)],
-            `'${program}' --no-pager -C '${f.cwd}' -c core.fsmonitor=false push origin HEAD:refs/heads/published`,
-            `g'it' pu"sh" origin HEAD:refs/heads/published`,
-            `git -C'${f.cwd}' -ccore.fsmonitor=false push origin HEAD:refs/heads/published > /dev/null`,
-            ["git", "send-pack", f.remote, "HEAD:refs/heads/published"],
-            `true && '${join(helpers, "git-send-pack")}' '${f.remote}' HEAD:refs/heads/published`,
-            ["git", "receive-pack", f.remote],
-            [join(helpers, "git-receive-pack"), f.remote],
-            ["gh", "api", "--method", "POST", "repos/example/test/issues"],
-            `'/no-such/bin/gh' pr create --repo example/test --title Test --body Test`,
-        ];
-
-        for (const command of commands) {
-            const execution = await env.exec(command, { timeout: 5 }, context);
-
-            assert.equal(execution.ok, false, JSON.stringify(command));
-            assert.match(
-                !execution.ok ? execution.error.message : "",
-                /publication/,
-                "Known publication CLI commands must be refused before spawning, not merely fail offline or because a binary is missing",
-            );
-            assert.equal(remoteRefs(f.remote), "", JSON.stringify(command));
-            assert.equal(f.app.approvals.all().length, 0);
-        }
-
-        const inspection = await env.exec(
-            [program, "-C", f.cwd, "status", "--short"],
-            undefined,
-            context,
-        );
-
-        assert.ok(inspection.ok);
-        assert.equal(
-            inspection.value.exitCode,
-            0,
-            "The lexical refusal must not disable ordinary local Git inspection",
-        );
         git(f.cwd, "tag", "-a", "landed-tag", "-m", "Reviewed Land head", "HEAD");
         const publisher = await f.publish();
 
@@ -1097,7 +1151,7 @@ test(
             assert.equal(
                 subject.command.at(-1),
                 `${git(f.cwd, "rev-parse", "topic")}:refs/heads/published`,
-                "Sources, including annotated tags, are peeled and bound to the inherited Land head",
+                "Sources, including annotated tags, are peeled and bound to the approved checkout head",
             );
             assert.equal(subject.cwd, realpathSync(f.cwd));
             assert.match(subject.fingerprint, /^[0-9a-f]{64}$/);
@@ -1209,7 +1263,7 @@ test(
             "A duplicate attempt cannot even ask until uncertainty is reconciled",
         );
         assert.equal(readFileSync(trace, "utf8"), "attempt\n");
-        await assert.rejects(f.handoff(publisher, "reviewer"), {
+        await assert.rejects(f.handoff(publisher, "pull"), {
             status: 409,
             message: /Reconcile uncertain publication actions/,
         });
@@ -1349,7 +1403,7 @@ test(
 
         assert.equal(needsReview?.status, "needs-review");
         assert.equal(needsReview?.readyForPublish, false);
-        await assert.rejects(f.handoff(publisher, "reviewer", reopened), {
+        await assert.rejects(f.handoff(publisher, "pull", reopened), {
             status: 409,
             message: /Reconcile uncertain publication actions/,
         });
@@ -1388,7 +1442,9 @@ test(
             "attempt\n",
             "Resolution itself never invokes the CLI",
         );
-        const nextReviewer = await f.handoff(publisher, "reviewer", reopened);
+        const intake = await f.handoff(publisher, "pull", reopened);
+        const repair = await f.handoff(intake, "worker", reopened);
+        const nextReviewer = await f.handoff(repair, "reviewer", reopened);
 
         git(f.cwd, "commit", "-qam", "Locally reviewed hook repair");
         await reopened.handoffs.complete(nextReviewer, owner(reopened), {

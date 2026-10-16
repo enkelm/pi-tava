@@ -100,6 +100,29 @@ test("Pi keeps going until the check passes, and the goal says it is met", async
     assert.equal(goal?.last?.passed, true);
 });
 
+test("reloaded goals still prompt and check with a pre-restart host that lacks mayCheck", async () => {
+    const id = await sessionIn("pre-restart-host");
+
+    // A watched extension can be newer than the core host. Keep the real app/loader and hide only
+    // the newly added host method, as on a server that has not restarted yet.
+    Object.defineProperty(app.goals, "mayCheck", { value: undefined, configurable: true });
+
+    try {
+        await app.setExtensionEnabled(owner(app), "goals.ts", false);
+        await app.setExtensionEnabled(owner(app), "goals.ts", true);
+        await app.commands.setGoal(id, owner(app), "test -f done.txt");
+        await sayAndSettle(id, "finish the job");
+        const goal = await app.goals.get(id);
+
+        assert.equal(goal?.status, "met");
+        assert.equal(goal?.tries, 2, "legacy host still runs its ordinary check/continue loop");
+        assert.equal((await goalMessages(id)).length, 1);
+    } finally {
+        Reflect.deleteProperty(app.goals, "mayCheck");
+        await app.goals.clear(id);
+    }
+});
+
 test("after the last check fails, Pi stops trying", async () => {
     const id = await sessionIn("gave-up");
 

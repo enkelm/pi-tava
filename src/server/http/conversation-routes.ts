@@ -9,6 +9,7 @@ import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
 import type { CommentReview, ResolveReview } from "../reviews.ts";
 import type {
+    AcceptValidation,
     StartHandoff,
     CompleteHandoff,
     RecordExternalReview,
@@ -59,6 +60,16 @@ export async function conversationRoutes(
                 200,
                 await app.handoffs.start(id, user, await readJson<StartHandoff>(request)),
             );
+        }
+
+        if (fourth === "accept-validation" && method === "POST") {
+            await app.handoffs.acceptValidation(
+                id,
+                user,
+                await readJson<AcceptValidation>(request),
+            );
+
+            return json(response, 200, { ok: true });
         }
 
         if (fourth === "complete" && method === "POST") {

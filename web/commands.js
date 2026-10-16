@@ -8,7 +8,7 @@ import { askPip, openPip, pipAvailable } from "./pip.js";
 import {
     actions,
     collab,
-    handoffsAvailable,
+    handoffSummaryAvailable,
     navigate,
     notify,
     openSheet,
@@ -370,9 +370,9 @@ const COMMANDS = [
     },
     {
         name: "handoff",
-        args: "[chat|worker|reviewer|follow-up|pull|land|publish] [--same|--new]",
-        description: "Start the next workflow thread; without arguments, choose a handoff",
-        available: () => handoffsAvailable() && isSession(),
+        args: "[worker|researcher|reviewer|follow-up|pull|land|publish] [--same|--new]",
+        description: "Choose the next role; --new starts a Worker, Researcher or Pull Work Item",
+        available: () => handoffSummaryAvailable() && isSession(),
         native: true,
     },
     { name: "stop", description: "Stop the current run", run: () => actions.abort() },

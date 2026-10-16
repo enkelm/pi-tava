@@ -2,6 +2,7 @@
  * One conversation's page in the built-in browser: its events, screencast frames, console, and navigation, and what Pi
  * and people do to it.
  */
+import { readPublicDocument } from "../public-read.ts";
 import { BrowserError, type Connection, type Json } from "./cdp.ts";
 import { KEYS, keyEvents, parseKeys } from "./keys.ts";
 import {
@@ -135,6 +136,7 @@ function evaluated(response: Json): Json {
 /** One conversation's page. Everything it knows comes from the browser's events; nothing here is stored. */
 export class BrowserPage {
     readonly conversationId: number;
+    readonly researchReader: boolean;
     readonly #connection: Connection;
     readonly #session: string;
     readonly #target: string;
@@ -146,6 +148,11 @@ export class BrowserPage {
     #url = "about:blank";
     #title = "";
     #loading = false;
+    /** Node owns reader downloads; Chromium's navigation cancellation cannot stop them. */
+    #readerNavigation: AbortController | undefined;
+    /** CDP writes cannot be revoked after dispatch: drain/undo them before a newer write. */
+    #readerRendering: Promise<void> = Promise.resolve();
+    #readerContent = "<!doctype html><html><head><title></title></head><body></body></html>";
     #starts = 0;
     #stops = 0;
     readonly #stopWaiters = new Set<() => void>();
@@ -173,6 +180,7 @@ export class BrowserPage {
 
     constructor(options: {
         conversationId: number;
+        researchReader?: boolean;
         connection: Connection;
         session: string;
         target: string;
@@ -183,6 +191,7 @@ export class BrowserPage {
         saved: (saved: Saved) => void;
     }) {
         this.conversationId = options.conversationId;
+        this.researchReader = options.researchReader === true;
         this.#connection = options.connection;
         this.#session = options.session;
         this.#target = options.target;
@@ -249,6 +258,19 @@ export class BrowserPage {
     }
 
     async init(): Promise<void> {
+        if (this.researchReader) {
+            // Fail closed before any content arrives. Browser networking is never the research transport.
+            await this.#send("Network.enable");
+            await this.#send("Network.emulateNetworkConditions", {
+                offline: true,
+                latency: 0,
+                downloadThroughput: 0,
+                uploadThroughput: 0,
+            });
+            await this.#send("Emulation.setScriptExecutionDisabled", { value: true });
+            await this.#send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
+        }
+
         await Promise.all([
             this.#send("Page.enable"),
             this.#send("Runtime.enable"),
@@ -281,6 +303,16 @@ export class BrowserPage {
 
     #event(method: string, params: Json): void {
         switch (method) {
+            case "Fetch.requestPaused":
+                if (this.researchReader) {
+                    void this.#send("Fetch.failRequest", {
+                        requestId: params.requestId,
+                        errorReason: "BlockedByClient",
+                    }).catch(() => {});
+                }
+
+                return;
+
             case "Page.frameNavigated": {
                 const frame = params.frame;
 
@@ -501,7 +533,8 @@ export class BrowserPage {
                 // Opened from here, the address would skip the browser's own rules (a web page may not open a file): only
                 // web addresses follow, and files from a page that is a file itself.
                 const web =
-                    /^https?:/i.test(url) || (/^file:/i.test(url) && /^file:/i.test(this.#url));
+                    !this.researchReader &&
+                    (/^https?:/i.test(url) || (/^file:/i.test(url) && /^file:/i.test(this.#url)));
 
                 if (web) {
                     void this.navigate(url, { wait: false }).catch(() => {});
@@ -878,7 +911,90 @@ export class BrowserPage {
         url: string,
         options: { wait?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
     ): Promise<{ error?: string; status?: number; slow?: boolean }> {
+        if (this.closed) {
+            throw new BrowserError("This page is closed.");
+        }
+
         this.usedAt = Date.now();
+
+        if (this.researchReader) {
+            this.#readerNavigation?.abort();
+            const navigation = new AbortController();
+            const signal =
+                options.signal === undefined
+                    ? navigation.signal
+                    : AbortSignal.any([navigation.signal, options.signal]);
+
+            this.#readerNavigation = navigation;
+            this.#loading = true;
+            this.#changed();
+
+            try {
+                const document = await readPublicDocument(url, signal);
+
+                aborted(signal);
+                const source = document.contentType.includes("html")
+                    ? document.body
+                    : `<pre>${document.body.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</pre>`;
+                // DOMParser is inert and networking is disabled. Keep semantic content, not forms, links or resources.
+                const content = await this.#evaluate(`(() => {
+                    const doc = new DOMParser().parseFromString(${JSON.stringify(source)}, 'text/html');
+                    doc.querySelectorAll('script,style,link,meta,img,iframe,object,embed,svg,math,input,button,select,textarea').forEach(node => node.remove());
+                    // Unwrap disclosures too: evidence must be readable without interactive controls.
+                    const allowed = new Set('html head title body main article section nav header footer div span h1 h2 h3 h4 h5 h6 p pre code a ul ol li dl dt dd table thead tbody tfoot tr td th caption blockquote strong em b i small sup sub hr br'.split(' '));
+                    for (const node of Array.from(doc.querySelectorAll('*')).reverse()) {
+                        if (node.tagName === 'A' && node.hasAttribute('href')) {
+                            try { node.append(' (' + new URL(node.getAttribute('href'), ${JSON.stringify(document.url)}).href + ')'); } catch {}
+                        }
+                        for (const attribute of Array.from(node.attributes)) node.removeAttribute(attribute.name);
+                        if (!allowed.has(node.tagName.toLowerCase())) node.replaceWith(...node.childNodes);
+                    }
+                    return {body: doc.body.innerHTML, title: doc.title};
+                })()`);
+                const title = String(content.title || document.url)
+                    .replaceAll("&", "&amp;")
+                    .replaceAll("<", "&lt;");
+
+                aborted(signal);
+                const html = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"><title>${title}</title><style>body{font:16px/1.6 system-ui;margin:24px auto;padding:0 24px;max-width:75ch;color:#202020;background:#fff}pre,table{overflow:auto}pre{white-space:pre-wrap}a{overflow-wrap:anywhere}</style></head><body>${content.body}</body></html>`;
+                const rendering = this.#readerRendering.then(async () => {
+                    aborted(signal);
+                    await this.#send("Page.setDocumentContent", { frameId: this.#frameId, html });
+
+                    if (signal.aborted) {
+                        // Stop/replacement can race an already-dispatched write. Restore the last committed document
+                        // before releasing the render queue so an older write cannot overtake the new document.
+                        if (!this.closed) {
+                            await this.#send("Page.setDocumentContent", {
+                                frameId: this.#frameId,
+                                html: this.#readerContent,
+                            });
+                        }
+
+                        aborted(signal);
+                    }
+
+                    this.#readerContent = html;
+                    this.#url = document.url;
+                    this.#title = String(content.title || document.url);
+                    this.#log("nav", document.url);
+                    this.#saved({ url: document.url, viewport: this.viewport });
+                    this.#changed();
+                });
+
+                this.#readerRendering = rendering.catch(() => {});
+                await rendering;
+
+                return { status: 200 };
+            } finally {
+                if (this.#readerNavigation === navigation) {
+                    this.#readerNavigation = undefined;
+                    this.#loading = false;
+                    this.#changed();
+                }
+            }
+        }
+
         const mark = this.#mark();
         const budget = options.wait === false ? 3000 : (options.timeoutMs ?? 30_000);
         // The browser answers once the page starts to arrive: a server that never responds keeps it waiting, while the
@@ -924,6 +1040,10 @@ export class BrowserPage {
         delta: -1 | 1,
         options: { wait?: boolean; signal?: AbortSignal } = {},
     ): Promise<boolean> {
+        if (this.researchReader) {
+            return false;
+        }
+
         this.usedAt = Date.now();
         const history = await this.#send("Page.getNavigationHistory");
         const entry = history.entries?.[history.currentIndex + delta];
@@ -944,6 +1064,12 @@ export class BrowserPage {
     }
 
     async reload(options: { wait?: boolean; signal?: AbortSignal } = {}): Promise<void> {
+        if (this.researchReader) {
+            await this.navigate(this.#url, options);
+
+            return;
+        }
+
         this.usedAt = Date.now();
         this.#crashed = false;
         const mark = this.#mark();
@@ -956,6 +1082,7 @@ export class BrowserPage {
     }
 
     async stop(): Promise<void> {
+        this.#readerNavigation?.abort();
         await this.#send("Page.stopLoading");
     }
 
@@ -1354,6 +1481,9 @@ export class BrowserPage {
         }
 
         this.#closed = true;
+        this.#readerNavigation?.abort();
+        this.#readerNavigation = undefined;
+        this.#loading = false;
         this.#casting = false;
         clearInterval(this.#castTimer);
         clearTimeout(this.#historyTimer);

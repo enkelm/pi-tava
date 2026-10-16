@@ -2834,6 +2834,10 @@ pre.diff .del {
     overscroll-behavior: auto;
 }
 
+.dock[data-capped] > .queue > .inbox {
+    overscroll-behavior: auto;
+}
+
 /* Little room for the conversation: each bar keeps one line, its words cut short, its buttons whole. */
 .dock[data-compact] > :is(.plan-bar, .goal-bar, .watch-bar, .trust-bar) {
     flex-wrap: nowrap;

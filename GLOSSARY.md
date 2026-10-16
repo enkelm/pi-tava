@@ -18,25 +18,28 @@ _Avoid_: Session when describing project organization; session remains the exist
 A thread for conversation, initially created without a project or goal. Its type does not prevent it from being organized within a project or goal later.
 
 **Worker**:
-A thread for implementation and focused tests. New project threads default to Worker.
+A thread for research, planning, implementation and focused tests. New project threads default to Worker.
+
+**Researcher**:
+A thread for a focused investigation, either starting a Work Item or contributing evidence within existing work. Its output is cited findings and application guidance, not feature implementation.
 
 **Reviewer**:
 A thread that independently reviews the current work in a bounded pass. Small remaining repairs belong in Follow-up; substantial implementation belongs in a fresh Worker.
 
 **Follow-up**:
-A thread for closing specific review gaps with a short self-review limited to its repairs.
+A thread for bounded repairs after review or Pull intake, with a short self-review limited to its delta and immediate integration points.
 
 **Pull**:
-A thread for reading external sources and integrating upstream changes locally, independent of the work's current stage.
+A thread for reading upstream repository, pull request and issue information and integrating upstream changes locally, independent of the work's current stage.
 
 **Land**:
-A thread for local integration, commits, hook fixes, worktree cleanup and checking the impact of integration changes.
+A thread for human-authorized local integration, commits, hook fixes, cleanup and integration-impact checks. Entering Land does not mean review or tests passed or authorize mutations.
 
 **Publish**:
-A thread for external delivery, including pushes, pull requests and ticket updates.
+A thread after Land for external delivery, including pushes, pull request creation and ticket updates. Each external action needs separate human approval.
 
 **Handoff**:
-A transfer of responsibility from a thread to a new successor, accompanied by a brief describing the work and its current state. Related handoffs can continue the same work or start subsequent work.
+A human-chosen transfer from a thread to a new successor, with a source summary describing the work and its current state. It continues the same Work Item or starts distinct new work; it is not a model readiness recommendation.
 
 **Work Item**:
 One piece of work carried through related threads, named after its first thread. Its members share placement and are archived or restored together.

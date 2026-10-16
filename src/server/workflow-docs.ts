@@ -1,7 +1,8 @@
 /** Durable handoff grouping and per-thread workflow state; no executable context reset or task ownership. */
 import { defineDoc } from "@earendil-works/pi-durable";
 
-export type ThreadType = "chat" | "worker" | "reviewer" | "follow-up" | "pull" | "land" | "publish";
+export type ThreadType =
+    "chat" | "researcher" | "worker" | "reviewer" | "follow-up" | "pull" | "land" | "publish";
 export type Relationship = "same-work" | "new-work";
 export type WorkflowStatus = "active" | "review-complete" | "landed" | "published" | "needs-review";
 export type Recommendation = {
@@ -25,6 +26,16 @@ export type ExternalReview = {
     recordedAt: number;
     fingerprint: CodeFingerprint;
 };
+/** Code findings and validation readiness are separate; a clear review may still have failed/deferred checks. */
+export type ReviewAssessment = { outcome: "clear" | "blocked"; validationGaps: string[] };
+export type ValidationAcceptance = {
+    threadId: number;
+    checkpoint: string;
+    assessment: string;
+    gaps: string[];
+    acceptedBy: string;
+    acceptedAt: number;
+};
 export type Workflow = {
     readOnly: boolean;
     status: WorkflowStatus;
@@ -36,6 +47,11 @@ export type Workflow = {
     completedAt?: number;
     completedBy?: string;
     externalReview?: ExternalReview;
+    reviewAssessment?: ReviewAssessment;
+    /** Fresh identity on every successfully checkpoint-bound assessment, including identical reports. */
+    reviewAssessmentId?: string;
+    /** Append-only human decisions, not passed-check evidence. Each binds one completed assessment. */
+    validationAcceptances?: ValidationAcceptance[];
     /** Material rewrites make prior review inapplicable, not ordinary bounded repairs or check blockers. */
     reviewApplicability?: "preserved" | "invalidated";
     /** Invocation receipts are private and are not projected into the room or HTTP response. */
@@ -78,11 +94,26 @@ export type Handoff = {
     delivery: "pending" | "delivered" | "blocked";
     deliveryReason?: string;
     deliveryAttempt?: number;
+    titleNamed?: boolean;
+};
+/** Immutable human intent; only its summary and settlement are produced by background work. */
+export type HandoffRequest = {
+    sourceThreadId: number;
+    targetType: ThreadType;
+    relationship: Relationship;
+    requestedBy: string;
+    input: string;
+    brief?: string;
+    taskId: number;
+    attempt: number;
+    status: "pending" | "blocked" | "completed";
+    reason?: string;
 };
 export type HandoffsData = {
     workItems: Record<string, WorkItem>;
     handoffs: Record<string, Handoff>;
     requests: Record<string, { input: string; id: number; handoffId: string; workItemId: string }>;
+    pending?: Record<string, HandoffRequest>;
 };
 
 /** Application-wide retry receipts and grouping. Never exposed wholesale as a room document. */

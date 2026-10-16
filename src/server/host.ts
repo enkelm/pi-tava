@@ -238,7 +238,7 @@ export interface PocketHost {
     /** Messages to Pi for later: the schedule tool sets up Pi's own. */
     readonly schedules: Pick<Schedules, "add" | "cancel" | "list" | "task">;
     /** Sessions' goals: the goals extension runs their checks and counts them. */
-    readonly goals: Pick<Goals, "get" | "run" | "record" | "mayContinue">;
+    readonly goals: Pick<Goals, "get" | "run" | "record" | "mayCheck" | "mayContinue">;
     /** The built-in browser: a page per conversation, which the people in it watch and use too. */
     readonly browsers: Pick<Browsers, "open">;
     /** PiP, the owner's assistant: what its tools do, each as PiP's person (`pip.ts`). */

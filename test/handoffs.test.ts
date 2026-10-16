@@ -1,4 +1,7 @@
-// Real app/HTTP, Git and restart boundaries own durable handoffs; no production test-only hooks.
+// Public app/Durable boundaries own human handoffs: policy, summary isolation, atomic transfer,
+// attribution, retries and recovery. Changes fixtures below exercise policy, not real Git inspection.
+// Superseded prepare/complete/recommendation/validation-gate assertions belonged to the old contract;
+// the human chooser no longer depends on those milestones. Execution/publication safety stays separate.
 import {
     type App,
     cleanUp,
@@ -13,57 +16,151 @@ import {
     say,
     scriptedModel,
     until,
+    work,
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { Socket } from "node:net";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import type { SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
     type ConversationId,
     InboxDoc,
     type SubmissionId,
     type TaskId,
+    UsageDoc,
 } from "@earendil-works/pi-durable";
-import { AuthorsDoc, REPORT_PREFIX, SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
+import type { Changes } from "../src/server/changes.ts";
+import { REPORT_PREFIX, SessionsDoc, SubagentsDoc, TurnsDoc } from "../src/server/docs.ts";
 import { HttpError } from "../src/server/errors.ts";
 import { createHandler } from "../src/server/http.ts";
-import { HandoffsDoc, WorkflowDoc } from "../src/server/workflow-docs.ts";
+import { TITLE_PROMPT } from "../src/server/titles.ts";
+import { type ThreadType, HandoffsDoc, WorkflowDoc } from "../src/server/workflow-docs.ts";
+import { PublicationsDoc } from "../src/server/workflow-publication.ts";
+import { withWorkflowPublicationLock } from "../src/server/workflow-policy.ts";
 
 let app: App;
 const data = join(root, "handoffs-data");
-let releaseChild: (() => void) | undefined;
-let childGate: Promise<void> | undefined;
-const model = scriptedModel(async (input) => {
+const cid = (id: number) => id as ConversationId;
+const status = (expected: number) => (error: unknown) =>
+    error instanceof HttpError && error.status === expected;
+const changed: Changes = {
+    files: [{ path: "code.ts", kind: "modified", byPi: true }],
+    piOnly: [],
+    more: 0,
+};
+const unchanged: Changes = { files: [], piOnly: [], more: 0 };
+const summary =
+    "Original ask: repair retry delivery. Decisions: durable source summary, independent successor. " +
+    "Files: src/server/handoffs.ts. Tests: focused lifecycle checks passed. " +
+    "Deferred: Chromium unavailable. Risks: interrupted delivery. Limits: no commit, push or restart.";
+const title = "Repair durable retry delivery";
+const summaryPrompts: string[] = [];
+const titlePrompts: string[] = [];
+
+type Gate = { promise: Promise<void>; release: () => void };
+let summaryGate: Gate | undefined;
+let titleGate: Gate | undefined;
+let childGate: Gate | undefined;
+let courierGate: Gate | undefined;
+let summaryMode: "text" | "empty" | "error" | "aborted" | "length" | "tools" = "text";
+
+function gate(): Gate {
+    let release = () => {};
+
+    const promise = new Promise<void>((resolve) => {
+        release = resolve;
+    });
+
+    return { promise, release };
+}
+
+async function held(gate: Gate | undefined, options: SimpleStreamOptions | undefined) {
+    if (gate === undefined) {
+        return;
+    }
+
+    const signal = options?.signal;
+
+    let abort = () => {};
+
+    try {
+        await Promise.race([
+            gate.promise,
+            new Promise<void>((_resolve, reject) => {
+                abort = () => reject(new Error("Fixture model request interrupted"));
+                signal?.addEventListener("abort", abort, { once: true });
+
+                if (signal?.aborted) {
+                    abort();
+                }
+            }),
+        ]);
+    } finally {
+        signal?.removeEventListener("abort", abort);
+    }
+}
+
+const model = scriptedModel(async (input, options) => {
     const last = lastText(input as never);
 
-    if (last.role === "user" && /SPAWN_AND_(?:PREPARE|COMPLETE)$/.test(last.text)) {
-        const handoff: Record<string, string> = last.text.endsWith("SPAWN_AND_COMPLETE")
-            ? {
-                  action: "complete",
-                  status: "needs-review",
-                  summary: "Premature completion while a helper still works.",
-              }
-            : {
-                  action: "prepare",
-                  targetType: "reviewer",
-                  relationship: "same-work",
-                  brief: "Premature brief while a helper still works.",
-              };
+    if (last.role === "user" && last.text.startsWith(TITLE_PROMPT)) {
+        titlePrompts.push(last.text);
+        await held(titleGate, options);
 
-        return fauxAssistantMessage(
-            [
-                fauxToolCall("subagent", {
-                    action: "spawn",
-                    name: "writer",
-                    message: "HOLD_CHILD",
-                }),
-                fauxToolCall("handoff", handoff),
-            ],
-            { stopReason: "toolUse" },
-        );
+        return fauxAssistantMessage(title);
+    }
+
+    if (
+        last.role === "user" &&
+        /^(?:\[from:[^\]]+\]\s*)?The human has requested a /.test(last.text)
+    ) {
+        summaryPrompts.push(last.text);
+        await held(summaryGate, options);
+
+        if (summaryMode === "empty") {
+            return fauxAssistantMessage("   ");
+        }
+
+        if (summaryMode === "error" || summaryMode === "aborted" || summaryMode === "length") {
+            return fauxAssistantMessage(
+                "Nonempty partial source summary; do not treat this as a successful handoff.",
+                {
+                    stopReason: summaryMode,
+                    errorMessage: `Fixture summary provider stopped with ${summaryMode}`,
+                },
+            );
+        }
+
+        if (summaryMode === "tools") {
+            return fauxAssistantMessage(
+                [
+                    fauxToolCall("write", { path: "forbidden-summary.txt", content: "bad" }),
+                    fauxToolCall("subagent", {
+                        action: "spawn",
+                        name: "forbidden",
+                        message: "work",
+                    }),
+                    fauxToolCall("handoff", { action: "status" }),
+                ],
+                { stopReason: "toolUse" },
+            );
+        }
+
+        return fauxAssistantMessage(summary);
+    }
+
+    const toolRequest = /CALL_HANDOFF (\{[^\n]+\})$/.exec(last.text);
+
+    if (last.role === "user" && toolRequest !== null) {
+        return fauxAssistantMessage([fauxToolCall("handoff", JSON.parse(toolRequest[1]!))], {
+            stopReason: "toolUse",
+        });
     }
 
     if (last.role === "user" && last.text.endsWith("SPAWN_CHILD")) {
@@ -74,140 +171,57 @@ const model = scriptedModel(async (input) => {
     }
 
     if (last.role === "user" && last.text.includes("HOLD_CHILD")) {
-        await childGate;
+        await held(childGate, options);
     }
 
-    if (last.role === "user" && /PREPARE_(?:ONLY|LONG)$/.test(last.text)) {
-        return fauxAssistantMessage(
-            [
-                fauxToolCall("handoff", {
-                    action: "prepare",
-                    targetType: "reviewer",
-                    relationship: "same-work",
-                    brief:
-                        "COMPLETE_FROM_TOOL. Original ask: repair the retry path. Spec: docs/retries.md. Tests: run the lifecycle tests. Risks: duplicate delivery. Git checkpoint: inspect the current HEAD." +
-                        (last.text.endsWith("PREPARE_LONG")
-                            ? `\n${"Relevant implementation context. ".repeat(140)}\nDeferred checks: browser unavailable; manual UI verification still required.`
-                            : ""),
-                }),
-            ],
-            { stopReason: "toolUse" },
-        );
+    if (last.role === "user" && last.text.includes("Continue as the ")) {
+        await held(courierGate, options);
     }
 
-    if (last.role === "user" && last.text.includes("COMPLETE_FROM_TOOL")) {
-        return fauxAssistantMessage(
-            [
-                fauxToolCall("handoff", {
-                    action: "complete",
-                    status: "review-complete",
-                    summary: "Reviewer fixed the retry issue and reran lifecycle tests.",
-                    recommendations: [
-                        {
-                            targetType: "land",
-                            relationship: "same-work",
-                            reason: "Review passed; continue with local landing.",
-                        },
-                    ],
-                }),
-            ],
-            { stopReason: "toolUse" },
-        );
-    }
-
-    if (last.role === "user" && last.text.endsWith("INVENT_EXTERNAL_REVIEW")) {
-        return fauxAssistantMessage(
-            [
-                fauxToolCall("handoff", {
-                    action: "record-review",
-                    source: "GitHub review by an independent reviewer",
-                    scope: "The implementation",
-                    findings: "Fix the missing retry guard.",
-                    checkpoint: "a".repeat(40),
-                }),
-            ],
-            { stopReason: "toolUse" },
-        );
-    }
-
-    if (last.role === "user" && last.text.endsWith("MATERIAL_REWRITE_CHECKPOINT_UNAVAILABLE")) {
-        return fauxAssistantMessage(
-            [
-                fauxToolCall("handoff", {
-                    action: "complete",
-                    status: "needs-review",
-                    reviewApplicability: "invalidated",
-                    summary:
-                        "A material rewrite invalidated the original independent assessment; checkout inspection is unavailable.",
-                }),
-            ],
-            { stopReason: "toolUse" },
-        );
-    }
-
-    const externalInput = /RECORD_EXTERNAL_REVIEW\n(\{[^\n]+\})$/.exec(last.text);
-
-    if (last.role === "user" && externalInput !== null) {
-        const request = JSON.parse(externalInput[1]!);
-
-        return fauxAssistantMessage(
-            [fauxToolCall("handoff", { action: "record-review", ...request })],
-            { stopReason: "toolUse" },
-        );
-    }
-
-    if (last.role === "user" && last.text.includes("RESTART_DELAY")) {
-        await new Promise((resolve) => setTimeout(resolve, 400));
-    }
-
-    return fauxAssistantMessage([fauxText(`checked: ${last.text.slice(0, 100)}`)]);
+    return fauxAssistantMessage(last.role === "toolResult" ? summary : "Fixture answer.");
 });
 
 before(async () => {
     app = await openApp(model, data);
 });
 after(async () => {
-    releaseChild?.();
+    summaryGate?.release();
+    titleGate?.release();
+    childGate?.release();
+    courierGate?.release();
     await app.close();
     cleanUp();
 });
 
-function git(cwd: string, ...args: string[]) {
-    return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], { cwd, encoding: "utf8" });
+async function source(threadType: ThreadType = "worker", cwd = work) {
+    const { id } = await app.commands.createSession(owner(app), {
+        cwd,
+        threadType,
+        title: "Retry delivery origin",
+    });
+
+    await app.commands.configure(id, owner(app), {
+        model: { provider: "faux", modelId: "faux-1" },
+        thinkingLevel: "off",
+    });
+
+    return id;
 }
 
-function repo(name: string) {
-    const cwd = join(root, name);
-
-    mkdirSync(cwd);
-    git(cwd, "init", "-q");
-    writeFileSync(join(cwd, "code.txt"), "original\n");
-    commit(cwd, "baseline");
-
-    return cwd;
-}
-
-function commit(cwd: string, message: string) {
-    git(cwd, "add", ".");
-    git(cwd, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", message);
-}
-
-const cid = (id: number) => id as ConversationId;
-const status = (expected: number) => (error: unknown) =>
-    error instanceof HttpError && error.status === expected;
-const start = (
+function start(
     id: ConversationId,
-    targetType: string,
+    targetType: ThreadType,
     requestId: string,
     relationship = "same-work",
     brief?: string,
-) =>
-    app.handoffs.start(id, owner(app), {
+) {
+    return app.handoffs.start(id, owner(app), {
         targetType,
         relationship,
         requestId,
         ...(brief === undefined ? {} : { brief }),
     });
+}
 
 async function delivered(id: ConversationId) {
     await until(async () => {
@@ -220,6 +234,7 @@ async function delivered(id: ConversationId) {
             )
         );
     }, "handoff delivery and answer");
+    await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
 }
 
 // Attribution, not slash text, decides whether submission is a native human command.
@@ -495,1226 +510,1319 @@ test("handoff quiescence rejects stranded reports but allows delivered and expli
     }
 });
 
-// Empty history is not reviewable work; both discovery and actual activation must agree.
-test("an untouched thread cannot start review, but completed work can", async () => {
-    const { id: source } = await app.commands.createSession(owner(app), {
-        cwd: repo("empty-handoff"),
-        threadType: "worker",
-    });
+async function move(id: ConversationId, kind: ThreadType, key: string, relationship = "same-work") {
+    const result = await start(id, kind, key, relationship);
+    const next = cid(result.id);
 
-    await app.commands.configure(source, owner(app), {
-        model: { provider: "faux", modelId: "faux-1" },
-        thinkingLevel: "off",
-    });
+    await delivered(next);
+
+    return next;
+}
+
+async function entries(id: ConversationId) {
+    return (
+        await (await app.conversation(id)).entries({ order: "ascending" }, 200, undefined, context)
+    ).items;
+}
+
+// Authenticated transport without sockets/listeners; only byte capture is substituted.
+async function http(
+    id: ConversationId,
+    path: string,
+    body?: unknown,
+    token: string | null = app.config.ownerToken,
+    pocket = true,
+) {
+    const request = new IncomingMessage(new Socket());
+    const response = new ServerResponse(request);
+    let output = "";
+
+    request.url = `/api/c/${id}${path}`;
+    request.method = body === undefined ? "GET" : "POST";
+    request.headers = {
+        ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+        ...(pocket ? { "x-pocket": "1" } : {}),
+        "content-type": "application/json",
+    };
+
+    response.end = (chunk?: unknown) => {
+        output = String(chunk ?? "");
+
+        return response;
+    };
+
+    const handled = createHandler({
+        app,
+        listen: { host: "127.0.0.1", port: 0 },
+        restart: () => {},
+    })(request, response);
+
+    if (body !== undefined) {
+        request.push(Buffer.from(JSON.stringify(body)));
+    }
+
+    request.push(null);
+    await handled;
+
+    return { status: response.statusCode, output };
+}
+
+// One public policy owner, with independent role/relationship expectations rather than copied predicates.
+test("state policy offers only permitted edges; Review needs Changes, not a completed model answer", async (t) => {
+    let changes = changed;
+
+    t.mock.method(app.workspace, "changes", async () => changes);
+    const rows: [ThreadType, ThreadType[]][] = [
+        ["worker", ["reviewer", "researcher", "pull"]],
+        ["reviewer", ["follow-up", "worker", "land", "researcher", "pull"]],
+        ["land", ["publish", "worker", "follow-up", "pull"]],
+        ["follow-up", ["land", "worker", "pull"]],
+        ["researcher", ["worker", "pull"]],
+        ["pull", ["worker", "researcher", "follow-up"]],
+        ["publish", ["land", "pull"]],
+    ];
+
+    for (const [role, expected] of rows) {
+        let id = await source(["worker", "researcher", "pull"].includes(role) ? role : "worker");
+
+        if (["reviewer", "follow-up", "land", "publish"].includes(role)) {
+            id = await move(id, "reviewer", `matrix-${role}-review`);
+
+            if (role === "follow-up") {
+                id = await move(id, "follow-up", "matrix-follow-up");
+            } else if (["land", "publish"].includes(role)) {
+                id = await move(id, "land", `matrix-${role}-land`);
+
+                if (role === "publish") {
+                    id = await move(id, "publish", "matrix-publish");
+                }
+            }
+        }
+
+        const list = await app.handoffs.list(id, owner(app));
+
+        assert.deepEqual(
+            list.options
+                .filter((option) => option.relationship === "same-work")
+                .map((option) => option.targetType)
+                .sort(),
+            expected.sort(),
+            `${role} same-work edges in its admitted history`,
+        );
+        assert.deepEqual(
+            list.options
+                .filter((option) => option.relationship === "new-work")
+                .map((option) => option.targetType)
+                .sort(),
+            ["pull", "researcher", "worker"],
+            "new Work Items always have the three starter roles, including the current role",
+        );
+        assert.ok(list.options.every((option) => option.enabled));
+        assert.equal("validation" in list, false);
+        assert.equal("proposal" in list.workflow, false);
+        assert.equal("recommendations" in list.workflow, false);
+    }
+
+    const worker = await source();
     const count = app.sessions().length;
-    const option = (await app.handoffs.list(source, owner(app))).options.find(
-        (each) => each.targetType === "reviewer",
-    );
 
-    assert.equal(option?.enabled, false);
-    assert.match(option?.reason ?? "", /completed work/i);
-    await assert.rejects(start(source, "reviewer", "empty-review"), status(409));
-    assert.equal(app.sessions().length, count);
-    await say(app, source, "Implement and report the work to review.");
+    changes = unchanged;
     assert.equal(
-        (await app.handoffs.list(source, owner(app))).options.find(
-            (each) => each.targetType === "reviewer",
-        )?.enabled,
-        true,
-    );
-    await delivered(cid((await start(source, "reviewer", "empty-review")).id));
-});
-
-// Recommendations are advisory: an alternate successor still needs the author's detailed brief.
-test("choosing a different role retains the prepared handoff brief", async () => {
-    const source = await newSession(app, repo("alternate-handoff"));
-
-    await say(app, source, "PREPARE_LONG");
-    const created = await start(source, "worker", "choose-alternate");
-    const id = cid(created.id);
-
-    await delivered(id);
-    const record = (await app.handoffs.list(id, owner(app))).handoffs.find(
-        (each) => each.targetThreadId === created.id,
-    );
-
-    assert.equal(app.sessionMeta(id)?.threadType, "worker");
-    assert.match(record?.brief ?? "", /COMPLETE_FROM_TOOL\. Original ask/);
-    assert.match(record?.brief ?? "", /Risks: duplicate delivery/);
-    assert.match(
-        record?.brief ?? "",
-        /Deferred checks: browser unavailable; manual UI verification still required/,
-        "a long prepared brief must not lose its final verification gaps",
-    );
-});
-
-// Helper work belongs to its parent even when the parent has returned from spawning it.
-test("preparing or completing a handoff waits for delegated helpers instead of recording unfinished work", async () => {
-    for (const action of ["PREPARE", "COMPLETE"]) {
-        const source = await newSession(app, repo(`${action.toLowerCase()}-helper-handoff`));
-        let child: ConversationId | undefined;
-
-        childGate = new Promise<void>((resolve) => {
-            releaseChild = resolve;
-        });
-
-        try {
-            await say(app, source, `SPAWN_AND_${action}`);
-            child = (await app.harness.snapshot(SubagentsDoc, source, context))?.agents.writer
-                ?.conversationId;
-
-            assert.ok(child);
-            await until(() => app.isBusy(child!), "delegated helper remains running");
-            const list = await app.handoffs.list(source, owner(app));
-            const output = JSON.stringify(await modelTexts(app, source));
-
-            assert.equal(list.workflow.proposal, undefined);
-            assert.equal(list.workflow.status, "active");
-            assert.equal(list.workflow.summary, undefined);
-            assert.match(output, /delegated helpers/);
-            assert.doesNotMatch(output, /Cannot fingerprint/);
-            assert.equal(
-                list.options.every((each) => !each.enabled),
-                true,
-            );
-            assert.equal(app.isBusy(child), true, "handoff tools must not abort helpers");
-            await assert.rejects(
-                app.handoffs.complete(source, owner(app), {
-                    status: "needs-review",
-                    summary: "Cannot complete while the delegated helper still works.",
-                }),
-                (error: unknown) =>
-                    error instanceof HttpError &&
-                    error.status === 409 &&
-                    /delegated helpers/.test(error.message),
-                "human completion also explains helper work before inspecting the checkpoint",
-            );
-        } finally {
-            releaseChild?.();
-            await until(
-                () => !app.isBusy(source) && (child === undefined || !app.isBusy(child)),
-                "helper and parent reporter idle",
-            );
-        }
-    }
-});
-
-// Gate: transport/native semantics, scoped visibility and no model activation are new public contracts.
-test("HTTP/native handoffs inherit scope without broadening access; viewers cannot activate and hidden members stay private", async () => {
-    const cwd = repo("http-handoff");
-    const source = await newSession(app, cwd);
-
-    await say(app, source, "Original ask: keep durable receipts; spec docs/retries.md");
-    await app.commands.updateSession(source, owner(app), { title: "Private original work title" });
-    const scoped = app.config.addUser("Scoped steering", "guest", [String(source)]);
-    const viewer = app.config.addUser("Scoped viewer", "viewer", [String(source)]);
-    const elsewhere = app.config.addUser("Elsewhere", "guest", ["999999"]);
-    const server = createServer(
-        createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
-    );
-
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-
-    assert.ok(address && typeof address === "object");
-    const base = `http://127.0.0.1:${address.port}/api/c/${source}`;
-    const request = (path: string, token: string, body?: unknown) =>
-        fetch(base + path, {
-            method: body === undefined ? "GET" : "POST",
-            headers: {
-                authorization: `Bearer ${token}`,
-                "x-pocket": "1",
-                "content-type": "application/json",
-            },
-            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        });
-
-    try {
-        assert.equal((await request("/handoffs", viewer.token)).status, 200);
-        assert.equal((await request("/handoffs", elsewhere.token)).status, 404);
-        assert.equal(
-            (
-                await request("/handoffs", viewer.token, {
-                    targetType: "reviewer",
-                    relationship: "same-work",
-                    requestId: "viewer-start",
-                })
-            ).status,
-            403,
-        );
-
-        for (const token of [viewer.token, elsewhere.token]) {
-            assert.equal(
-                (
-                    await request("/handoffs/external-review", token, {
-                        source: "External review",
-                        scope: "Implementation",
-                        findings: "Fix retries",
-                        checkpoint: "a".repeat(40),
-                    })
-                ).status,
-                token === viewer.token ? 403 : 404,
-                "external intake retains steering and conversation visibility gates",
-            );
-        }
-
-        const before = await modelTexts(app, source);
-        const picker = await request("/submit", scoped.token, {
-            text: "/handoff",
-            requestId: "picker",
-        });
-        const picked = await picker.json();
-
-        assert.equal(picker.status, 200);
-        assert.equal(picked.handoffPicker, true);
-        assert.equal(typeof picked.submissionId, "number");
-        assert.deepEqual(await modelTexts(app, source), before);
-        assert.equal(app.isBusy(source), false);
-        assert.equal(
-            (
-                await request("/submit", scoped.token, {
-                    text: "/handoff worker",
-                    requestId: "ambiguous",
-                })
-            ).status,
-            400,
-        );
-        const response = await request("/submit", scoped.token, {
-            text: "/handoff reviewer",
-            requestId: "native-review",
-        });
-        const result = await response.json();
-        const reviewer = cid(result.handoffThreadId);
-
-        assert.equal(response.status, 200);
-        assert.equal(typeof result.submissionId, "number");
-        assert.equal(app.canSee(scoped.user, reviewer), true);
-        assert.equal(app.canSee(viewer.user, reviewer), true);
-        assert.equal(app.canSee(elsewhere.user, reviewer), false);
-        assert.equal(app.cwdOf(reviewer), cwd);
-        await delivered(reviewer);
-        assert.deepEqual(await modelTexts(app, source), before);
-        const limited = app.config.addUser("Only reviewer", "guest", [String(reviewer)]).user;
-        const projected = await app.handoffs.list(reviewer, limited);
-
-        assert.equal(projected.workItem?.title, "Work item");
-        assert.deepEqual(projected.workItem?.threadIds, [Number(reviewer)]);
-        assert.equal(projected.workItem?.originThreadId, undefined);
-        assert.deepEqual(projected.handoffs, []);
-        assert.equal(app.sessions(limited)[0]?.workItemTitle, "Work item");
-        assert.equal(app.sessions(limited)[0]?.title, "Review");
-        assert.equal("accessFrom" in app.sessions(limited)[0]!, false);
-        await assert.rejects(
-            app.handoffs.updateWorkItem(reviewer, limited, { archived: true }),
-            status(404),
-        );
-        const retry = await request("/submit", scoped.token, {
-            text: "/handoff reviewer",
-            requestId: "native-review",
-        });
-
-        assert.equal((await retry.json()).handoffThreadId, Number(reviewer));
-        await say(app, source, "Discuss the earlier design without modifying code");
-        assert.equal(app.handoffs.isReadOnly(source), true);
-        await assert.rejects(app.commands.configure(source, owner(app), { cwd }), status(409));
-        await assert.rejects(app.commands.fork(source, owner(app), { entryId: 0 }), status(409));
-    } finally {
-        server.closeAllConnections();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-});
-
-// Gate: origin grouping, milestone/fingerprint safety, atomic organization and persisted retry independently guard lifecycle.
-test("review/land/publish/new-work transitions bind exact code and group archive/move survives restart and retries", async () => {
-    const cwd = repo("transition-handoff");
-    const textconvMarker = join(root, "textconv-was-executed");
-
-    writeFileSync(join(cwd, ".gitattributes"), "code.txt diff=offline\n");
-    commit(cwd, "diff attributes");
-    git(cwd, "config", "diff.offline.textconv", `touch ${textconvMarker}`);
-    const source = await newSession(app, cwd);
-
-    await say(app, source, "Implement the original work and run tests");
-    await app.commands.updateSession(source, owner(app), { title: "Origin title" });
-    const review = await start(source, "reviewer", "review-transition");
-    const reviewer = cid(review.id);
-
-    await delivered(reviewer);
-    await assert.rejects(start(reviewer, "land", "premature-land"), status(409));
-    writeFileSync(join(cwd, "code.txt"), "tracked change\n");
-    writeFileSync(join(cwd, "new-code.txt"), "one\n");
-    await app.handoffs.complete(reviewer, owner(app), {
-        status: "review-complete",
-        summary: "Reviewed tracked and untracked code; tests pass.",
-    });
-    const firstFingerprint = await app.handoffs.fingerprint(reviewer);
-
-    assert.equal(
-        existsSync(textconvMarker),
-        false,
-        "readiness inspection must never execute configured textconv programs",
-    );
-    writeFileSync(join(cwd, "new-code.txt"), "two\n");
-    assert.notEqual(await app.handoffs.fingerprint(reviewer), firstFingerprint);
-    await assert.rejects(start(reviewer, "land", "drift-land"), status(409));
-    await app.handoffs.complete(reviewer, owner(app), {
-        status: "review-complete",
-        summary: "Reviewed the changed untracked contents.",
-    });
-    // A recorded unresolved review is still independent evidence for bounded repairs.
-    await app.handoffs.complete(reviewer, owner(app), {
-        status: "needs-review",
-        summary: "Independent review found a small remaining gap; investigate and repair it.",
-    });
-    const followUp = await start(reviewer, "follow-up", "follow-up-transition");
-
-    assert.equal(followUp.workItemId, review.workItemId);
-    const followUpId = cid(followUp.id);
-
-    await delivered(followUpId);
-    await assert.rejects(start(followUpId, "land", "premature-follow-up-land"), status(409));
-    writeFileSync(join(cwd, "new-code.txt"), "small review repair\n");
-    await app.close();
-    app = await openApp(model, data);
-    assert.equal(
-        (await app.harness.snapshot(WorkflowDoc, reviewer, context))?.status,
-        "needs-review",
-    );
-    await say(app, followUpId, "PREPARE_ONLY");
-    const repairBrief = (await app.handoffs.list(followUpId, owner(app))).workflow.proposal?.brief;
-
-    await app.handoffs.complete(followUpId, owner(app), {
-        status: "review-complete",
-        summary:
-            "Reused the independent review and self-reviewed the small repair with focused checks.",
-    });
-    assert.deepEqual(
-        (await app.handoffs.list(followUpId, owner(app))).workflow.recommendations?.map(
-            (rec) => rec.targetType,
+        (await app.handoffs.list(worker, owner(app))).options.some(
+            (option) => option.targetType === "reviewer",
         ),
-        ["land"],
-        "bounded review repairs normally recommend Land without another review session",
-    );
-    assert.equal(
-        (await app.handoffs.list(followUpId, owner(app))).workflow.proposal?.targetType,
-        "land",
-        "earlier repair suggestions do not override the final completion recommendation",
-    );
-    assert.equal(
-        (await app.handoffs.list(followUpId, owner(app))).workflow.proposal?.brief,
-        repairBrief,
-        "completion preserves the authored successor brief",
-    );
-    const land = await start(followUpId, "land", "land-transition");
-    const landId = cid(land.id);
-
-    assert.equal(land.workItemId, review.workItemId);
-    await delivered(landId);
-    await assert.rejects(
-        app.handoffs.complete(landId, owner(app), {
-            status: "landed",
-            summary: "Not yet committed",
-            readyForPublish: true,
-        }),
-        status(409),
-    );
-    commit(cwd, "land changes");
-    await app.handoffs.complete(landId, owner(app), {
-        status: "landed",
-        summary: "Committed locally, hooks/tests and impact review pass.",
-        readyForPublish: true,
-    });
-    const publish = await start(landId, "publish", "publish-transition");
-    const publishId = cid(publish.id);
-
-    await delivered(publishId);
-    const publishState = await app.harness.snapshot(WorkflowDoc, publishId, context);
-
-    assert.equal(publishState?.status, "active");
-    assert.equal(publishState?.readyForPublish, true);
-    assert.equal(publishState?.fingerprint?.digest, await app.handoffs.fingerprint(landId));
-    await app.handoffs.complete(publishId, owner(app), {
-        status: "published",
-        summary: "Human attests the separately approved publication completed.",
-    });
-    const scoped = app.config.addUser("Scoped completion participant", "guest", [
-        String(source),
-    ]).user;
-
-    await assert.rejects(
-        app.handoffs.start(publishId, scoped, {
-            targetType: "worker",
-            relationship: "new-work",
-            requestId: "scoped-new-work",
-        }),
-        status(403),
-    );
-    const next = await start(
-        publishId,
-        "worker",
-        "new-work",
-        "new-work",
-        "New ask: implement independent follow-up",
-    );
-    const nextId = cid(next.id);
-
-    await delivered(nextId);
-    assert.notEqual(next.workItemId, review.workItemId);
-    const nextItem = (await app.handoffs.list(nextId, owner(app))).workItem;
-
-    assert.equal(nextItem?.originThreadId, Number(nextId));
-    const doc = await app.harness.snapshot(HandoffsDoc, context);
-
-    assert.equal(doc?.workItems[next.workItemId]?.predecessorWorkItemId, review.workItemId);
-    const nextOnly = app.config.addUser("Only new-work origin", "guest", [String(nextId)]).user;
-
-    assert.equal(app.canSee(nextOnly, source), false);
-    assert.equal(app.canSee(nextOnly, publishId), false);
-    const newItemRepair = cid((await start(nextId, "follow-up", "new-item-repair")).id);
-
-    await delivered(newItemRepair);
-    await assert.rejects(
-        app.handoffs.complete(newItemRepair, owner(app), {
-            status: "review-complete",
-            summary: "The predecessor work item's independent review must not certify new work.",
-        }),
-        /recorded independent Reviewer outcome/,
-    );
-    const scopedReview = await app.handoffs.start(newItemRepair, nextOnly, {
-        targetType: "reviewer",
-        relationship: "same-work",
-        requestId: "scoped-new-item-review",
-    });
-    const scopedReviewId = cid(scopedReview.id);
-
-    assert.equal(app.canSee(nextOnly, scopedReviewId), true);
-    assert.equal(
-        app.canSee(scoped, scopedReviewId),
-        true,
-        "The original source-scoped grant still flows forward",
-    );
-    assert.equal(app.sessionMeta(scopedReviewId)?.accessFrom, Number(newItemRepair));
-    await delivered(scopedReviewId);
-    assert.equal(app.attribution.requesterOf(scopedReviewId), nextOnly.id);
-    assert.equal(
-        app.canSee(nextOnly, source),
         false,
-        "Creating a descendant never grants its caller access to older ancestors",
     );
-    const project = await app.projects.create(owner(app), {
-        name: "Grouped",
-        cwd,
-        requestId: "grouped-project",
-    });
-
-    await app.projects.assign(owner(app), reviewer, { projectId: project.id });
-    const goalWorker = await app.commands.createSession(owner(app), {
-        projectId: project.id,
-        newGoal: true,
-    });
-    const goalId = app.sessionMeta(goalWorker.id)?.goalId;
-
-    assert.ok(goalId);
-    await app.projects.assign(owner(app), reviewer, { projectId: project.id, goalId });
-    const oldMembers = [source, reviewer, followUpId, landId, publishId];
-
-    assert.deepEqual(
-        oldMembers.map((id) => app.sessionMeta(id)?.projectId),
-        oldMembers.map(() => project.id),
-    );
-    assert.equal(app.sessionMeta(nextId)?.projectId, undefined);
-    await app.projects.updateGoal(owner(app), goalId, { archived: true });
-    assert.equal(
-        oldMembers.every((id) => app.sessionMeta(id)?.archivedByGoal === goalId),
-        true,
-    );
-    await app.commands.updateSession(landId, owner(app), { archived: false });
-    assert.equal(
-        oldMembers.every((id) => app.sessionMeta(id)?.archivedByGoal === undefined),
-        true,
-    );
-    assert.equal(
-        oldMembers.every((id) => app.sessionMeta(id)?.archived !== true),
-        true,
-    );
-    await app.projects.updateGoal(owner(app), goalId, { archived: false });
-    assert.equal(app.sessionMeta(goalWorker.id)?.archived, false);
-    await app.commands.updateSession(landId, owner(app), { archived: true });
-    assert.equal(
-        oldMembers.every((id) => app.sessionMeta(id)?.archived === true),
-        true,
-    );
-    await app.commands.updateSession(source, owner(app), { archived: false });
-    assert.equal(
-        oldMembers.every((id) => app.sessionMeta(id)?.archived !== true),
-        true,
-    );
-    await app.commands.updateSession(source, owner(app), { title: "Renamed origin" });
-    assert.equal((await app.handoffs.list(reviewer, owner(app))).workItem?.title, "Renamed origin");
-    const count = app.sessions().length;
-
-    await app.close();
-    app = await openApp(model, data);
-    assert.deepEqual(await start(source, "reviewer", "review-transition"), review);
-    assert.deepEqual(await start(landId, "publish", "publish-transition"), publish);
+    await assert.rejects(start(worker, "reviewer", "no-diff"), /no current Pi diff/i);
     assert.equal(app.sessions().length, count);
-    assert.equal(app.handoffs.isReadOnly(source), true);
-    assert.equal(app.handoffs.isReadOnly(publishId), true);
-    assert.equal(app.handoffs.isReadOnly(nextId), true);
-    assert.equal(app.handoffs.isReadOnly(scopedReviewId), false);
-    const restoredNextOnly = app.config.userById(nextOnly.id)!;
-
-    assert.equal(app.canSee(restoredNextOnly, scopedReviewId), true);
-    assert.equal(app.canSee(restoredNextOnly, source), false);
-    await assert.rejects(start(source, "worker", "review-transition", "same-work"), status(409));
-    await app.handoffs.complete(scopedReviewId, owner(app), {
-        status: "needs-review",
-        summary: "This review calls for renewed implementation, not a small repair.",
-    });
-    const implementation = cid((await start(scopedReviewId, "worker", "renewed-worker")).id);
-
-    await delivered(implementation);
-    const renewedRepair = cid((await start(implementation, "follow-up", "renewed-repair")).id);
-
-    await delivered(renewedRepair);
-    await assert.rejects(
-        app.handoffs.complete(renewedRepair, owner(app), {
-            status: "review-complete",
-            summary: "An earlier review must not certify renewed implementation automatically.",
-        }),
-        /recorded independent Reviewer outcome/,
-    );
-    const hiddenSource = await newSession(app, cwd);
-
-    await app.harness.commit(async (tx) => {
-        (await tx.doc(SessionsDoc)).items[String(hiddenSource)]!.ownerOnly = true;
-    }, context);
-    await say(app, hiddenSource, "Report the owner-only implementation for review.");
-    const hiddenReview = await start(hiddenSource, "reviewer", "owner-only-review");
-    const guest = app.config.addUser("Unrestricted guest", "guest").user;
-
-    assert.equal(app.canSee(guest, cid(hiddenReview.id)), false);
-    assert.equal(app.sessionMeta(cid(hiddenReview.id))?.ownerOnly, true);
-    await delivered(cid(hiddenReview.id));
-});
-
-// Intake owner: real human attribution, model calls and courier delivery must not manufacture third-party review.
-test("external review intake rejects agent inventions, links alone and copied handoff evidence", async () => {
-    const source = await newSession(app, repo("ungrounded-external-review"));
-
-    await say(app, source, "INVENT_EXTERNAL_REVIEW");
-    const output = JSON.stringify(await modelTexts(app, source));
-
-    assert.match(output, /Paste the external review source, findings and reviewed checkpoint/);
-    assert.doesNotMatch(output, /Cannot fingerprint/);
+    changes = { files: [], piOnly: [{ path: "committed-by-pi.ts", entryId: 123 }], more: 0 };
     assert.equal(
-        (await app.harness.snapshot(WorkflowDoc, source, context))?.externalReview,
-        undefined,
-    );
-    const evidence = {
-        source: "https://github.com/example/repo/pull/1#pullrequestreview-123",
-        scope: "Retry behavior",
-        findings: "Fix the missing retry guard.",
-        checkpoint: "a".repeat(40),
-    };
-
-    await say(app, source, `Please follow up on ${evidence.source}`);
-    // Attribution is deferred metadata. Intake must validate the durable human submission even if it is absent.
-    await app.harness.commit(async (tx) => {
-        const entries = await tx.scanEntries({ conversationId: source }, 16);
-        const input = entries.items.find((entry) => entry.kind === "pi.user");
-
-        assert.ok(input);
-        delete (await tx.doc(AuthorsDoc, source)).entries[String(input.id)];
-    }, context);
-    await assert.rejects(
-        app.handoffs.recordExternalReview(source, owner(app), evidence),
-        /Paste the external review/,
-    );
-    const copied = cid(
-        (
-            await start(
-                source,
-                "follow-up",
-                "copied-external-review",
-                "same-work",
-                JSON.stringify(evidence),
-            )
-        ).id,
-    );
-
-    await delivered(copied);
-    await assert.rejects(
-        app.handoffs.recordExternalReview(copied, owner(app), evidence),
-        /No matching human-supplied/,
-    );
-    await assert.rejects(
-        app.handoffs.complete(copied, owner(app), {
-            status: "review-complete",
-            summary: "Material rewrite cannot inherit a passed review.",
-            reviewApplicability: "invalidated",
-        }),
-        /Material rewrites require needs-review/,
-    );
-    assert.equal((await app.handoffs.list(copied, owner(app))).workflow.externalReview, undefined);
-    await say(app, copied, "COMPLETE_FROM_TOOL");
-    const refusedCompletion = JSON.stringify(await modelTexts(app, copied));
-
-    assert.match(refusedCompletion, /recorded independent Reviewer outcome/);
-    assert.doesNotMatch(refusedCompletion, /Cannot fingerprint/);
-    const copiedState = await app.handoffs.list(copied, owner(app));
-
-    assert.equal(copiedState.workflow.status, "active");
-    assert.equal(
-        (await app.harness.snapshot(WorkflowDoc, copied, context))?.fingerprint,
-        undefined,
-    );
-    assert.equal(
-        copiedState.options.find((option) => option.targetType === "land")?.enabled,
+        (await app.handoffs.list(worker, owner(app))).options.some(
+            (option) => option.targetType === "reviewer",
+        ),
         false,
+        "piOnly is historical committed/non-repository activity, not current reviewable diff",
     );
-});
+    await assert.rejects(start(worker, "reviewer", "historical-edits-only"), /no current Pi diff/i);
+    changes = changed;
+    const reviewer = await move(worker, "reviewer", "current-diff-review");
 
-// A material rewrite must revoke readiness even when code-bound completion cannot inspect the checkout.
-test("material review invalidation persists without manufacturing completion when checkpoint inspection fails", async () => {
-    const cwd = join(root, "non-git-material-rewrite");
-
-    mkdirSync(cwd);
-    const source = await newSession(app, cwd);
-
-    await say(app, source, "Review the implementation.");
-    const reviewer = cid((await start(source, "reviewer", "unfingerprintable-review")).id);
-
-    await delivered(reviewer);
-    await say(app, reviewer, "MATERIAL_REWRITE_CHECKPOINT_UNAVAILABLE");
-    const state = (await app.handoffs.list(reviewer, owner(app))).workflow;
-    const stored = await app.harness.snapshot(WorkflowDoc, reviewer, context);
-
-    assert.equal(state.status, "needs-review");
-    assert.equal(state.reviewApplicability, "invalidated");
-    assert.deepEqual(
-        state.recommendations?.map((rec) => rec.targetType),
-        ["reviewer"],
-    );
+    assert.equal(app.sessionMeta(reviewer)?.threadType, "reviewer");
     assert.equal(
-        stored?.completedAt,
-        undefined,
-        "failed fingerprint inspection never establishes code-bound completion",
-    );
-    assert.equal(stored?.fingerprint, undefined);
-    await app.close();
-    app = await openApp(model, data);
-    const repair = cid((await start(reviewer, "follow-up", "invalidated-without-completion")).id);
-
-    await delivered(repair);
-    await assert.rejects(
-        app.handoffs.complete(repair, owner(app), {
-            status: "review-complete",
-            summary: "Try to reuse invalidated review after a failed completion.",
-        }),
-        /Material changes invalidate/,
+        (await entries(worker)).filter((entry) => entry.kind === "pi.user").length,
+        1,
+        "an empty source needs only the human-requested summary input, not an earlier completion",
     );
 });
 
-// Stored outcomes are historical input, not a fixture substituting for successful checkpoint inspection.
-test("unresolved checks revoke earlier readiness even when checkpoint inspection fails, preserving independent evidence", async () => {
-    const cwd = join(root, "non-git-unresolved-review");
+test("history permits Land globally and Follow-up after Review or Pull without readiness gates", async (t) => {
+    t.mock.method(app.workspace, "changes", async () => changed);
+    const initial = await source();
 
-    mkdirSync(cwd);
-    const source = await newSession(app, cwd);
+    await assert.rejects(start(initial, "follow-up", "missing-history"), status(409));
+    await assert.rejects(start(initial, "worker", "same-worker"), status(409));
+    const reviewer = await move(initial, "reviewer", "history-review");
 
-    await say(app, source, "Review the implementation.");
-    const reviewer = cid((await start(source, "reviewer", "historical-review-blocker")).id);
-
-    await delivered(reviewer);
-    const recordedAt = Date.now() - 1000;
-    const previousCheckpoint = {
-        cwd,
-        digest: "historical-reviewed-checkpoint",
-        head: "historical-head",
-        status: "",
-    };
-
+    // Stored historical blockers remain history, not admission gates and not projected suggestions.
     await app.harness.commit(async (tx) => {
         const state = await tx.doc(WorkflowDoc, reviewer);
 
-        state.status = "review-complete";
-        state.summary = "Previously recorded independent review.";
-        state.fingerprint = previousCheckpoint;
-        state.completedAt = recordedAt;
-        state.completedBy = owner(app).id;
-        state.recommendations = [{ targetType: "land", relationship: "same-work" }];
+        state.status = "needs-review";
+        state.readyForPublish = false;
+        state.reviewApplicability = "invalidated";
+        state.reviewAssessment = { outcome: "blocked", validationGaps: ["Checks unavailable"] };
+        state.proposal = { targetType: "worker", relationship: "same-work", brief: "Old proposal" };
+        state.recommendations = [{ targetType: "worker", relationship: "same-work" }];
     }, context);
-    const summary = "A required verification check is unresolved; do not land yet.";
+    const research = await move(reviewer, "researcher", "history-research");
+    const choices = await app.handoffs.list(research, owner(app));
 
-    await assert.rejects(
-        app.handoffs.complete(reviewer, owner(app), { status: "needs-review", summary }),
-        /Cannot fingerprint/,
+    assert.deepEqual(
+        choices.options
+            .filter((option) => option.relationship === "same-work")
+            .map((option) => option.targetType)
+            .sort(),
+        ["follow-up", "land", "pull", "worker"],
     );
-    const state = await app.harness.snapshot(WorkflowDoc, reviewer, context);
+    const land = await move(research, "land", "history-land");
+    const publication = await move(land, "publish", "history-publish");
+    const publishedPull = await move(publication, "pull", "history-published-pull");
+    const repair = await move(publishedPull, "follow-up", "history-repair");
+    const landedAgain = await move(repair, "land", "history-reland");
 
-    assert.equal(state?.status, "needs-review", "a blocker revokes the previous passed milestone");
-    assert.equal(state?.summary, summary);
-    assert.equal(state?.readyForPublish, false);
-    assert.deepEqual(state?.recommendations, []);
+    assert.equal((await app.handoffs.list(landedAgain, owner(app))).workflow.status, "active");
+    const pull = await source("pull");
+    const pulledRepair = await move(pull, "follow-up", "pull-repair");
+
     assert.equal(
-        state?.reviewApplicability,
-        undefined,
-        "ordinary blockers do not invalidate review",
+        (await app.handoffs.list(pulledRepair, owner(app))).options.some(
+            (option) => option.targetType === "land",
+        ),
+        true,
+        "Follow-up's direct Land edge does not require a separate milestone",
     );
-    assert.deepEqual(state?.fingerprint, previousCheckpoint);
+    const independent = await source("researcher");
+
+    await assert.rejects(start(independent, "follow-up", "research-without-history"), status(409));
+    const newWorker = await move(landedAgain, "worker", "fresh-item", "new-work");
+
     assert.equal(
-        state?.completedAt,
-        recordedAt,
-        "failed inspection creates no new completion identity",
-    );
-    assert.equal(state?.completedBy, owner(app).id);
-    await app.close();
-    app = await openApp(model, data);
-    const restored = await app.handoffs.list(reviewer, owner(app));
-    const land = restored.options.find((option) => option.targetType === "land");
-
-    assert.equal(restored.workflow.status, "needs-review");
-    assert.equal(land?.enabled, false);
-    assert.match(land?.reason ?? "", /Complete review/);
-});
-
-// Positive checkpoint proof requires the real OS sandbox, just like the internal-review lifecycle above.
-test("external review survives repair and restart; only material rewrites request fresh independent review", async () => {
-    const cwd = repo("external-review-repair");
-    const { id: source } = await app.commands.createSession(owner(app), {
-        cwd,
-        threadType: "worker",
-    });
-
-    await app.commands.configure(source, owner(app), {
-        model: { provider: "faux", modelId: "faux-1" },
-        thinkingLevel: "off",
-    });
-    const evidence = {
-        source: "https://github.com/example/repo/pull/1#pullrequestreview-123",
-        scope: "The complete retry feature and its tests",
-        findings:
-            "Independent reviewer: fix the missing retry guard; the rest of the feature is sound.",
-        checkpoint: git(cwd, "rev-parse", "HEAD").trim(),
-    };
-
-    await say(
-        app,
-        source,
-        `External independent review to repair. RECORD_EXTERNAL_REVIEW\n${JSON.stringify(evidence)}`,
-    );
-    const recorded = (await app.handoffs.list(source, owner(app))).workflow.externalReview;
-
-    assert.ok(recorded, JSON.stringify(await modelTexts(app, source)));
-    assert.equal(recorded.source, evidence.source);
-    assert.equal(recorded.scope, evidence.scope);
-    assert.equal(recorded.suppliedBy, owner(app).id);
-    assert.equal(recorded.checkpoint, evidence.checkpoint);
-    assert.equal(
-        "fingerprint" in recorded,
-        false,
-        "intake does not expose private inspected Git status through HTTP/room projections",
-    );
-    assert.equal(
-        "findings" in recorded,
-        false,
-        "raw review text stays in the attributed input rather than room-wide workflow metadata",
-    );
-    const storedReview = (await app.harness.snapshot(WorkflowDoc, source, context))?.externalReview;
-
-    assert.equal(storedReview?.findings, evidence.findings);
-    assert.ok(storedReview?.sourceSubmissionId);
-    assert.match(storedReview?.sourceRequestId ?? "", /^u:/);
-    assert.equal(
-        (await app.handoffs.list(source, owner(app))).workflow.status,
-        "active",
-        "intake is not review completion",
-    );
-    const repair = cid((await start(source, "follow-up", "external-small-repair")).id);
-
-    await delivered(repair);
-    writeFileSync(join(cwd, "code.txt"), "bounded retry repair\n");
-    await assert.rejects(
-        app.handoffs.recordExternalReview(source, owner(app), evidence),
-        /permanently read-only/,
-    );
-    await app.close();
-    app = await openApp(model, data);
-    await app.handoffs.complete(repair, owner(app), {
-        status: "needs-review",
-        summary:
-            "A required repair check is still unresolved; independent review remains applicable.",
-    });
-    assert.equal(
-        (await app.handoffs.list(repair, owner(app))).workflow.recommendations?.some(
-            (rec) => rec.targetType === "reviewer",
+        (await app.handoffs.list(newWorker, owner(app))).options.some(
+            (option) =>
+                option.relationship === "same-work" &&
+                ["land", "follow-up"].includes(option.targetType),
         ),
         false,
-    );
-    await app.handoffs.complete(repair, owner(app), {
-        status: "review-complete",
-        summary:
-            "External independent review applies to untouched code; repair checks and delta self-review passed.",
-    });
-    const repaired = await app.handoffs.list(repair, owner(app));
-
-    assert.deepEqual(
-        repaired.workflow.recommendations?.map((rec) => rec.targetType),
-        ["land"],
-    );
-    assert.equal(repaired.options.find((option) => option.targetType === "land")?.enabled, true);
-    const rewrite = cid((await start(repair, "follow-up", "external-material-rewrite")).id);
-
-    await delivered(rewrite);
-    writeFileSync(join(cwd, "code.txt"), "materially redesigned feature\n");
-    await app.handoffs.complete(rewrite, owner(app), {
-        status: "needs-review",
-        summary: "The repair materially reworked the feature; original review no longer applies.",
-        reviewApplicability: "invalidated",
-    });
-    const rewritten = await app.handoffs.list(rewrite, owner(app));
-
-    assert.deepEqual(
-        rewritten.workflow.recommendations?.map((rec) => rec.targetType),
-        ["reviewer"],
-    );
-    assert.equal(rewritten.options.find((option) => option.targetType === "land")?.enabled, false);
-    await assert.rejects(
-        app.handoffs.complete(rewrite, owner(app), {
-            status: "review-complete",
-            summary: "Try to clear invalidation with a self-attestation.",
-            reviewApplicability: "preserved",
-        }),
-        /fresh independent review/,
-    );
-    const repeated = cid((await start(rewrite, "follow-up", "external-invalidated-successor")).id);
-
-    await delivered(repeated);
-    await assert.rejects(
-        app.handoffs.complete(repeated, owner(app), {
-            status: "review-complete",
-            summary: "A new repair thread cannot restore invalidated evidence.",
-        }),
-        /Material changes invalidate/,
-    );
-    const renewed = {
-        ...evidence,
-        source: "External review system: independent assessment by Casey",
-        findings:
-            "Casey independently reviewed the redesigned feature and tests; no findings remain.",
-        checkpoint: await app.handoffs.fingerprint(repeated),
-    };
-
-    await say(
-        app,
-        repeated,
-        `Original reviewed commit ${evidence.checkpoint}; new independent assessment: ${JSON.stringify(renewed)}`,
-    );
-    await assert.rejects(
-        app.handoffs.recordExternalReview(repeated, owner(app), {
-            ...renewed,
-            checkpoint: evidence.checkpoint,
-        }),
-        /checkpoint does not match/,
-    );
-    await app.handoffs.recordExternalReview(repeated, owner(app), renewed);
-    await app.handoffs.complete(repeated, owner(app), {
-        status: "review-complete",
-        summary: "Fresh external review, applicable checks and delta review support landing.",
-    });
-    const landed = cid((await start(repeated, "land", "external-reviewed-land")).id);
-
-    await delivered(landed);
-    assert.equal(app.sessionMeta(landed)?.threadType, "land");
-});
-
-// Migration contract: older versions accepted Follow-up attestations without Reviewer provenance.
-// Stored readiness is historical input here, not a fixture pretending to produce an approved review.
-test("legacy Follow-up attestations require provenance before Land inspection and after restart", async () => {
-    const source = await newSession(app, repo("legacy-follow-up"));
-
-    await say(app, source, "Implemented work without independent review.");
-    const repair = cid((await start(source, "follow-up", "legacy-follow-up")).id);
-
-    await delivered(repair);
-    await app.harness.commit(async (tx) => {
-        const state = await tx.doc(WorkflowDoc, repair);
-
-        state.status = "review-complete";
-        state.summary = "Historical self-attestation without a Reviewer.";
-        state.completedAt = Date.now();
-        state.completedBy = owner(app).id;
-        state.fingerprint = {
-            cwd: app.cwdOf(repair),
-            digest: "historical-attestation",
-            head: "historical-head",
-            status: "",
-        };
-    }, context);
-    const land = (await app.handoffs.list(repair, owner(app))).options.find(
-        (option) => option.targetType === "land",
-    );
-
-    assert.equal(land?.enabled, false);
-    assert.match(land?.reason ?? "", /recorded independent Reviewer outcome/);
-    await app.close();
-    app = await openApp(model, data);
-    await assert.rejects(
-        start(repair, "land", "legacy-land"),
-        /recorded independent Reviewer outcome/,
-    );
-    await assert.rejects(
-        app.handoffs.complete(repair, owner(app), {
-            status: "review-complete",
-            summary: "The earlier Follow-up milestone alone is not independent review.",
-        }),
-        /recorded independent Reviewer outcome/,
-    );
-    const successor = cid((await start(repair, "follow-up", "legacy-successor")).id);
-
-    await delivered(successor);
-    await assert.rejects(
-        app.handoffs.complete(successor, owner(app), {
-            status: "review-complete",
-            summary: "A predecessor Follow-up attestation is not independent review either.",
-        }),
-        /recorded independent Reviewer outcome/,
+        "history from a predecessor Work Item cannot grant new-item edges",
     );
 });
 
-// Compatibility admission reads real human submissions plus historical workflow/transfer documents.
-// These stored fixtures do not substitute for positive intake or real sandbox fingerprint coverage.
-test("stored external review cannot cross implementation or integration drift before the repair chain", async () => {
-    for (const threadType of ["worker", "pull", "chat"] as const) {
-        const cwd = join(root, `non-git-historical-external-${threadType}`);
+test("agent handoff calls are status-only and cannot write proposals, milestones or recommendations", async () => {
+    const id = await source();
+    const count = app.sessions().length;
 
-        mkdirSync(cwd);
-        const { id: source } = await app.commands.createSession(owner(app), { cwd, threadType });
-
-        await app.commands.configure(source, owner(app), {
-            model: { provider: "faux", modelId: "faux-1" },
-            thinkingLevel: "off",
-        });
-        const evidence = {
-            source: "External independent review by Casey",
-            scope: "The original feature",
-            findings: "One bounded retry repair remains.",
+    for (const args of [
+        { action: "prepare", targetType: "reviewer", relationship: "same-work", brief: "Invented" },
+        { action: "complete", status: "review-complete", summary: "Invented" },
+        {
+            action: "record-review",
+            source: "Invented",
+            findings: "Invented",
             checkpoint: "a".repeat(40),
-        };
-        const requestId = `historical-external-${threadType}`;
-        const submitted = await app.commands.submit(source, owner(app), {
-            text: JSON.stringify(evidence),
-            requestId,
+        },
+        { action: "recommend", targetType: "land" },
+        { action: "unknown" },
+        { action: "status", targetType: "land" },
+        { action: "status", unknown: true },
+    ]) {
+        await say(app, id, `CALL_HANDOFF ${JSON.stringify(args)}`);
+        await until(() => !app.isBusy(id), "agent rejection settles");
+        const tool = (await entries(id)).findLast((entry) => entry.kind === "pi.tool-result");
+
+        assert.ok(tool, "the attempted real tool call produces a result");
+        const result = tool.model?.[0];
+
+        assert.ok(result?.role === "toolResult" && result.isError === true);
+        assert.equal((await app.harness.snapshot(WorkflowDoc, id, context))?.proposal, undefined);
+        assert.equal(
+            (await app.harness.snapshot(WorkflowDoc, id, context))?.recommendations,
+            undefined,
+        );
+    }
+
+    await say(app, id, 'CALL_HANDOFF {"action":"status"}');
+    await until(() => !app.isBusy(id), "status call settles");
+    const output = JSON.stringify(
+        (await entries(id)).findLast((entry) => entry.kind === "pi.tool-result")?.model,
+    );
+
+    assert.match(output, /workflow/);
+    assert.doesNotMatch(output, /proposal|recommendations/);
+    assert.equal(app.sessions().length, count, "agent calls never create a successor");
+    const state = await app.harness.snapshot(WorkflowDoc, id, context);
+
+    assert.equal(state?.status ?? "active", "active");
+    assert.equal(state?.externalReview, undefined);
+    assert.equal(state?.summary, undefined);
+    assert.equal(app.handoffs.isReadOnly(id), false);
+});
+
+test("human request persists before summary, blocks work/tools and creates one fixed destination only after the answer", async (t) => {
+    t.mock.method(app.workspace, "changes", async () => changed);
+    const id = await source();
+    const count = app.sessions().length;
+    const prompts = summaryPrompts.length;
+
+    summaryGate = gate();
+    const pending = start(
+        id,
+        "researcher",
+        "human-summary",
+        "same-work",
+        "Investigate receipt replay only",
+    );
+
+    await until(() => summaryPrompts.length > prompts, "source is asked for the selected summary");
+    const retry = app.handoffs.start(id, owner(app), {
+        targetType: "researcher",
+        relationship: "same-work",
+        requestId: "human-summary",
+        brief: "Investigate receipt replay only",
+        recoverOnly: true,
+    });
+
+    // Observe both promises even when an intermediate assertion fails, so fixture work cannot leak.
+    void pending.catch(() => {});
+    void retry.catch(() => {});
+
+    try {
+        const doc = await app.harness.snapshot(HandoffsDoc, context);
+        const intent = Object.values(doc?.pending ?? {}).find(
+            (request) => request.sourceThreadId === Number(id),
+        );
+
+        assert.equal(intent?.targetType, "researcher");
+        assert.equal(intent?.relationship, "same-work");
+        assert.equal(intent?.requestedBy, owner(app).id);
+        assert.equal(intent?.status, "pending");
+        assert.equal(app.sessions().length, count, "no provisional successor before summary");
+        assert.equal(
+            app.handoffs.isReadOnly(id),
+            false,
+            "source not retired before creation commits",
+        );
+        assert.equal(app.handoffs.isPreparing(id), true);
+        assert.match(summaryPrompts.at(-1)!, /same-work handoff to researcher/);
+        assert.match(summaryPrompts.at(-1)!, /Investigate receipt replay only/);
+        assert.match(summaryPrompts.at(-1)!, /Do not call tools/);
+        await assert.rejects(start(id, "pull", "different-concurrent"), status(409));
+        await assert.rejects(start(id, "pull", "human-summary"), status(409));
+        await assert.rejects(
+            app.commands.submit(id, owner(app), { text: "More work", requestId: "during-summary" }),
+            /summary/,
+        );
+        const refused = await app.envFor(id).writeFile("forbidden-summary.txt", "bad", context);
+
+        assert.equal(refused.ok, false);
+        assert.equal(existsSync(join(work, "forbidden-summary.txt")), false);
+        assert.ok(
+            (await app.handoffs.list(id, owner(app))).options.every((option) => !option.enabled),
+        );
+    } finally {
+        summaryGate.release();
+        summaryGate = undefined;
+    }
+
+    const [created, retried] = await Promise.all([pending, retry]);
+
+    assert.deepEqual(retried, created);
+    assert.equal(app.sessions().length, count + 1);
+    assert.equal(app.handoffs.isReadOnly(id), true);
+    const destination = cid(created.id);
+
+    await delivered(destination);
+    const record = (await app.harness.snapshot(HandoffsDoc, context))?.handoffs[created.handoffId];
+
+    assert.equal(record?.targetType, "researcher");
+    assert.match(record?.brief ?? "", /Original ask: repair retry delivery/);
+    assert.match(record?.brief ?? "", /Deferred: Chromium unavailable/);
+    assert.match(record?.brief ?? "", /no commit, push or restart/);
+    assert.equal((await entries(id)).filter((entry) => entry.kind === "pi.user").length, 1);
+    assert.equal(
+        (await entries(destination)).filter((entry) => entry.kind === "pi.user").length,
+        1,
+    );
+    assert.equal(app.attribution.requesterOf(destination), owner(app).id);
+    assert.equal(
+        (await app.harness.commit((tx) => tx.conversation(destination), context))?.owner,
+        undefined,
+    );
+    assert.deepEqual(
+        await app.handoffs.start(id, owner(app), {
+            targetType: "researcher",
+            relationship: "same-work",
+            requestId: "human-summary",
+            brief: "Investigate receipt replay only",
+            recoverOnly: true,
+        }),
+        created,
+    );
+    await assert.rejects(app.commands.configure(id, owner(app), { cwd: work }), status(409));
+    await say(app, id, "Discuss the earlier design without modifications");
+    assert.equal(app.handoffs.isReadOnly(id), true, "discussion never reacquires the writer");
+});
+
+test("lookup-only recovery cannot create an intent or retry a failed summary; only a human retry restarts it", async () => {
+    for (const native of [false, true]) {
+        const id = await source();
+        const count = app.sessions().length;
+        const attempts = summaryPrompts.length;
+        const tasksBefore = (
+            await app.harness.commit((tx) => tx.scanTasks({ conversationId: id }, 100), context)
+        ).items.map((task) => task.id);
+        const recovered = await http(id, native ? "/submit" : "/handoffs", {
+            requestId: "not-admitted",
+            ...(native
+                ? { text: "/handoff researcher", handoffRecoverOnly: true }
+                : { targetType: "researcher", relationship: "same-work", recoverOnly: true }),
         });
 
-        await (await app.harness.submission(submitted.submissionId, context))!.wait(context);
-        const inspected = { cwd, head: evidence.checkpoint, digest: "b".repeat(64), status: "" };
+        assert.equal(recovered.status, 409, recovered.output);
+        assert.equal(summaryPrompts.length, attempts, "lookup cannot initiate a source model call");
+        assert.equal((await entries(id)).filter((entry) => entry.kind === "pi.user").length, 0);
+        assert.equal(app.sessions().length, count);
+        assert.equal(app.handoffs.isPreparing(id), false);
+        assert.equal(app.handoffs.isReadOnly(id), false);
+        assert.equal(
+            Object.values((await app.harness.snapshot(HandoffsDoc, context))?.pending ?? {}).some(
+                (intent) => intent.sourceThreadId === Number(id),
+            ),
+            false,
+            "lookup cannot leave a blocked or pending intent",
+        );
+        assert.deepEqual(
+            (
+                await app.harness.commit((tx) => tx.scanTasks({ conversationId: id }, 100), context)
+            ).items.map((task) => task.id),
+            tasksBefore,
+            "lookup cannot schedule a summary task",
+        );
+    }
 
-        await app.harness.commit(async (tx) => {
-            const submission = await tx.submissionByRequest(
-                source,
-                `u:${owner(app).id}:${requestId}`,
+    for (const mode of ["empty", "error", "aborted", "length"] as const) {
+        const id = await source();
+        const count = app.sessions().length;
+
+        summaryMode = mode;
+
+        try {
+            await assert.rejects(start(id, "researcher", `failed-${mode}`), status(409));
+            const attempts = summaryPrompts.length;
+            const inputs = (await entries(id)).filter((entry) => entry.kind === "pi.user").length;
+
+            if (mode === "empty") {
+                await assert.rejects(
+                    app.handoffs.start(id, owner(app), {
+                        targetType: "researcher",
+                        relationship: "same-work",
+                        requestId: `failed-${mode}`,
+                        recoverOnly: true,
+                    }),
+                    status(409),
+                );
+            } else {
+                const recovered = await http(id, "/submit", {
+                    text: "/handoff researcher",
+                    requestId: `failed-${mode}`,
+                    handoffRecoverOnly: true,
+                });
+
+                assert.equal(recovered.status, 409, recovered.output);
+            }
+
+            assert.equal(
+                summaryPrompts.length,
+                attempts,
+                "a reconnect recovery cannot autonomously call the source model again",
             );
+            assert.equal(
+                (await entries(id)).filter((entry) => entry.kind === "pi.user").length,
+                inputs,
+                "recovery does not enqueue another synthetic summary input",
+            );
+            assert.equal(app.sessions().length, count);
+            assert.equal(app.handoffs.isReadOnly(id), false);
+            assert.equal(app.handoffs.isPreparing(id), false);
+            assert.equal((await app.handoffs.list(id, owner(app))).handoffs.length, 0);
+            await say(app, id, "Continue after the failed summary");
+        } finally {
+            summaryMode = "text";
+        }
 
-            assert.ok(submission?.entry);
-            (await tx.doc(WorkflowDoc, source)).externalReview = {
-                ...evidence,
-                sourceEntryId: Number(submission.entry),
-                sourceSubmissionId: Number(submission.id),
-                sourceRequestId: submission.requestId!,
-                suppliedBy: owner(app).id,
-                recordedBy: owner(app).id,
-                recordedAt: Date.now() - 1000,
-                fingerprint: inspected,
-            };
-        }, context);
-        const handoff = await start(
-            source,
-            "follow-up",
-            `historical-external-transfer-${threadType}`,
-        );
-        const repair = cid(handoff.id);
+        const beforeExplicitRetry = summaryPrompts.length;
+        const next = await move(id, "researcher", `failed-${mode}`);
 
-        await delivered(repair);
-        await app.harness.commit(async (tx) => {
-            (await tx.doc(HandoffsDoc)).handoffs[handoff.handoffId]!.codeCheckpoint = {
-                ...inspected,
-                digest: "c".repeat(64),
-            };
-        }, context);
-        await app.close();
-        app = await openApp(model, data);
-        const complete = () =>
-            app.handoffs.complete(repair, owner(app), {
-                status: "review-complete",
-                summary:
-                    "Try to reuse the external review after renewed implementation/integration.",
-            });
-
-        await assert.rejects(
-            complete(),
-            /External review checkpoint changed before entering repairs/,
+        assert.equal(
+            summaryPrompts.length,
+            beforeExplicitRetry + 1,
+            "an explicit human retry of the same request makes exactly one new source-summary attempt",
         );
-        await app.harness.commit(async (tx) => {
-            delete (await tx.doc(HandoffsDoc)).handoffs[handoff.handoffId]!.codeCheckpoint;
-        }, context);
-        await assert.rejects(
-            complete(),
-            /External review checkpoint changed before entering repairs/,
-        );
-        await app.harness.commit(async (tx) => {
-            (await tx.doc(HandoffsDoc)).handoffs[handoff.handoffId]!.codeCheckpoint = inspected;
-        }, context);
-        // A matching historical transfer passes provenance admission and reaches the missing-checkout guard.
-        // This control proves drift refusal was not an unrelated authorship or identity guard.
-        await assert.rejects(complete(), /Cannot fingerprint/);
+        assert.equal(app.sessions().length, count + 1);
+        assert.equal(app.handoffs.isReadOnly(next), false);
     }
 });
 
-// Configured filters are real child processes: they must remain offline/read-only and cannot alias raw code fingerprints.
-test(
-    "fingerprint inspection sandboxes Git filters and binds actual tracked bytes rather than normalized output",
-    { skip: process.platform !== "darwin" },
-    async () => {
-        const cwd = repo("filter-handoff");
-        const probe = join(root, "clean-filter-probe");
-        const helper = join(root, "malicious-clean-filter.sh");
-        let requests = 0;
-        const server = createServer((_request, response) => {
-            requests++;
-            response.end("normalized\\n");
-        });
+test("a summary pauses an existing until goal without running checks or consuming attempts", async (t) => {
+    const id = await source();
 
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-        const address = server.address();
+    await app.commands.setGoal(id, owner(app), "test -f goal-done.txt");
+    const goal = await app.goals.get(id);
+    const run = t.mock.method(app.goals, "run", async () => ({
+        passed: false,
+        code: -1,
+        tail: "The work goal is still unmet",
+    }));
+    const attempts = summaryPrompts.length;
+    const next = await move(id, "researcher", "summary-with-goal");
 
-        assert.ok(address && typeof address === "object");
+    assert.equal(run.mock.callCount(), 0);
+    assert.deepEqual(
+        await app.goals.get(id),
+        goal,
+        "handoff does not exhaust or complete the goal",
+    );
+    assert.equal(summaryPrompts.length, attempts + 1);
+    assert.equal((await entries(id)).filter((entry) => entry.kind === "pi.assistant").length, 1);
+    assert.equal(
+        await app.goals.get(next),
+        undefined,
+        "a source goal is not inherited as new work",
+    );
+    await say(app, id, "Discuss this retired thread without resuming its goal");
+    assert.equal(run.mock.callCount(), 0, "read-only discussion does not resume the work goal");
+    assert.deepEqual(await app.goals.get(id), goal);
+});
+
+test("summary final admission rechecks the human's current steering rights", async () => {
+    const id = await source();
+    const guest = app.config.addUser("Summary requester", "guest", [String(id)]).user;
+    const count = app.sessions().length;
+    const prompts = summaryPrompts.length;
+
+    summaryGate = gate();
+    const request = {
+        targetType: "researcher",
+        relationship: "same-work",
+        requestId: "revoked-summary",
+    };
+    const pending = app.handoffs.start(id, guest, request);
+    const refused = assert.rejects(pending, status(409));
+
+    try {
+        await until(() => summaryPrompts.length > prompts, "authorized human summary starts");
+        app.config.updateUser(guest.id, { role: "viewer" });
+    } finally {
+        summaryGate.release();
+        summaryGate = undefined;
+    }
+
+    await refused;
+    assert.equal(app.sessions().length, count);
+    assert.equal(app.handoffs.isReadOnly(id), false);
+    assert.equal(app.handoffs.isPreparing(id), false);
+    app.config.updateUser(guest.id, { role: "guest" });
+    const next = await app.handoffs.start(id, guest, request);
+
+    await delivered(cid(next.id));
+    assert.equal(app.attribution.requesterOf(cid(next.id)), guest.id);
+});
+
+test("legacy external review intake never treats the app's synthetic summary request as human evidence", async () => {
+    const id = await source();
+    const evidence = {
+        source: "Independent reviewer Casey",
+        scope: "Retry feature",
+        findings: "Repair the retry guard.",
+        checkpoint: "a".repeat(40),
+    };
+
+    summaryMode = "empty";
+
+    try {
+        await assert.rejects(
+            start(
+                id,
+                "researcher",
+                "synthetic-external-review",
+                "same-work",
+                JSON.stringify(evidence),
+            ),
+            status(409),
+        );
+    } finally {
+        summaryMode = "text";
+    }
+
+    assert.equal(app.handoffs.isPreparing(id), false);
+    assert.equal(app.handoffs.isReadOnly(id), false);
+    assert.match(
+        JSON.stringify(await modelTexts(app, id)),
+        /Independent reviewer Casey/,
+        "the synthetic, attributed summary input really contains the matching evidence",
+    );
+    await assert.rejects(
+        app.handoffs.recordExternalReview(id, owner(app), evidence),
+        /No matching human-supplied|Paste the external review/,
+    );
+    assert.equal((await app.harness.snapshot(WorkflowDoc, id, context))?.externalReview, undefined);
+});
+
+test("summary generation cannot dispatch write, delegate or status tools from Worker or an initial Chat", async () => {
+    for (const role of ["worker", "chat"] as const) {
+        const id = await source(role);
+
+        assert.equal(app.sessionMeta(id)?.workItemId, undefined);
+        assert.equal(
+            app.handoffs.isManaged(id),
+            role === "worker",
+            "an initial Chat is unmanaged before its first human handoff request",
+        );
+        summaryMode = "tools";
 
         try {
-            writeFileSync(join(cwd, ".gitattributes"), "code.txt filter=alias\n");
-            git(cwd, "config", "filter.alias.clean", "printf 'normalized\\n'");
-            git(cwd, "add", "--renormalize", ".");
-            commit(cwd, "normalized baseline");
-            assert.equal(git(cwd, "show", "HEAD:code.txt"), "normalized\n");
-            writeFileSync(
-                helper,
-                `printf escaped > ${JSON.stringify(probe)} 2>/dev/null\n/usr/bin/curl --max-time 2 --silent http://127.0.0.1:${address.port}/ > /dev/null\nprintf 'normalized\\n'\n`,
-            );
-            git(cwd, "config", "filter.alias.clean", `/bin/sh ${JSON.stringify(helper)}`);
-            const source = await newSession(app, cwd);
+            const result = await start(id, "researcher", `summary-no-tools-${role}`);
 
-            writeFileSync(join(cwd, "code.txt"), "changedA\n");
-            await say(app, source, "Report the physical tracked-byte change for review.");
-            const reviewer = cid((await start(source, "reviewer", "filter-review")).id);
-
-            await delivered(reviewer);
-            await app.handoffs.complete(reviewer, owner(app), {
-                status: "review-complete",
-                summary: "Inspected the physical tracked bytes.",
-            });
-            const state = await app.harness.snapshot(WorkflowDoc, reviewer, context);
-            const first = await app.handoffs.fingerprint(reviewer);
-
+            await delivered(cid(result.id));
             assert.equal(
-                state?.fingerprint?.status,
-                "",
-                "The actual configured clean filter normalized Git status",
-            );
-            writeFileSync(join(cwd, "code.txt"), "changedB\n");
-            assert.notEqual(
-                await app.handoffs.fingerprint(reviewer),
-                first,
-                "Equal-length raw changes cannot alias through Git clean filters",
-            );
-            assert.equal(
-                existsSync(probe),
+                existsSync(join(work, "forbidden-summary.txt")),
                 false,
-                "A configured filter cannot write outside the inspection sandbox",
+                JSON.stringify(await modelTexts(app, id)),
             );
             assert.equal(
-                requests,
-                0,
-                "Git filters and descendants cannot reach even a local HTTP listener",
+                (await app.harness.snapshot(SubagentsDoc, id, context))?.agents.forbidden,
+                undefined,
             );
-            await assert.rejects(start(reviewer, "land", "filter-drift"), status(409));
+            const results = (await entries(id)).filter((entry) => entry.kind === "pi.tool-result");
+
+            assert.equal(
+                results.length,
+                3,
+                `${role}: each attempted model tool is rejected at the real invocation boundary`,
+            );
+
+            for (const entry of results) {
+                const result = entry.model?.[0];
+
+                assert.ok(
+                    result?.role === "toolResult" && result.isError === true,
+                    `${role}: even status tools are forbidden during summary generation`,
+                );
+                assert.match(JSON.stringify(entry.model), /summary|handoff|prepar/i);
+            }
+
+            assert.match(JSON.stringify(await modelTexts(app, id)), /summary|prepar/i);
         } finally {
-            server.closeAllConnections();
-            await new Promise<void>((resolve) => server.close(() => resolve()));
+            summaryMode = "text";
         }
-    },
-);
+    }
+});
 
-// Gate: actual invocation commits and live descendant/background writers—not metadata-only mocks—guard activation.
-test("tools prepare/complete but never activate; descendant and background writers reject activation without aborting", async () => {
-    const cwd = repo("writer-handoff");
-    const source = await newSession(app, cwd);
-    const before = app.sessions().length;
+test("HTTP/native handoffs enforce steering, driving, scope and whole-item privacy without a listener", async () => {
+    const id = await source();
+    const scoped = app.config.addUser("Scoped steering", "guest", [String(id)]);
+    const viewer = app.config.addUser("Scoped viewer", "viewer", [String(id)]);
+    const elsewhere = app.config.addUser("Elsewhere", "guest", ["999999"]);
+    const request = {
+        targetType: "researcher",
+        relationship: "same-work",
+        requestId: "native-research",
+    };
 
-    await say(app, source, "PREPARE_ONLY");
-    assert.equal(app.sessions().length, before);
+    for (const [token, pocket, expected] of [
+        [null, true, 401],
+        [app.config.ownerToken, false, 403],
+        [viewer.token, true, 403],
+        [elsewhere.token, true, 404],
+    ] as const) {
+        assert.equal((await http(id, "/handoffs", request, token, pocket)).status, expected);
+    }
+
+    assert.equal((await http(id, "/handoffs", undefined, viewer.token)).status, 200);
+    const before = await modelTexts(app, id);
+    const picker = await http(
+        id,
+        "/submit",
+        { text: "/handoff", requestId: "picker" },
+        scoped.token,
+    );
+
+    assert.equal(picker.status, 200);
+    assert.equal(JSON.parse(picker.output).handoffPicker, true);
+    assert.deepEqual(await modelTexts(app, id), before, "opening the chooser sends no model work");
+    await app.harness.commit(async (tx) => {
+        const turns = await tx.doc(TurnsDoc, id);
+
+        turns.on = true;
+        turns.driver = owner(app).id;
+    }, context);
+    assert.equal((await http(id, "/handoffs", request, scoped.token)).status, 409);
+    await app.harness.commit(async (tx) => {
+        (await tx.doc(TurnsDoc, id)).on = false;
+    }, context);
     assert.equal(
-        (await app.handoffs.list(source, owner(app))).workflow.proposal?.targetType,
-        "reviewer",
-        JSON.stringify(
-            await app.harness.commit(
-                (tx) => tx.scanTasks({ conversationId: source }, 100),
-                context,
-            ),
-        ),
+        (await http(id, "/handoffs", { ...request, relationship: "new-work" }, scoped.token))
+            .status,
+        403,
     );
-    const prepared = await start(source, "reviewer", "prepared-review");
-    const reviewer = cid(prepared.id);
+    const response = await http(
+        id,
+        "/submit",
+        { text: "/handoff researcher", requestId: "native-research" },
+        scoped.token,
+    );
+    const result = JSON.parse(response.output);
 
-    await delivered(reviewer);
-    const review = await app.handoffs.list(reviewer, owner(app));
+    assert.equal(response.status, 200, response.output);
+    const next = cid(result.handoffThreadId);
 
+    await delivered(next);
+    assert.equal(app.canSee(scoped.user, next), true);
+    assert.equal(app.canSee(viewer.user, next), true);
+    assert.equal(app.canSee(elsewhere.user, next), false);
+    assert.equal(app.cwdOf(next), work);
+    assert.equal(app.attribution.requesterOf(next), scoped.user.id);
     assert.equal(
-        review.workflow.status,
-        "review-complete",
-        JSON.stringify(await modelTexts(app, reviewer)),
+        JSON.parse(
+            (
+                await http(
+                    id,
+                    "/submit",
+                    { text: "/handoff researcher", requestId: "native-research" },
+                    scoped.token,
+                )
+            ).output,
+        ).handoffThreadId,
+        Number(next),
     );
-    assert.equal(
-        review.workflow.summary,
-        "Reviewer fixed the retry issue and reran lifecycle tests.",
-    );
-    assert.equal(review.workflow.recommendations?.[0]?.targetType, "land");
-    assert.ok(
-        review.handoffs.some(
-            (record) =>
-                record.targetThreadId === prepared.id &&
-                record.brief.includes("COMPLETE_FROM_TOOL. Original ask"),
-        ),
-        "human activation consumes the agent-authored brief without a replacement human payload",
-    );
-    assert.equal(
-        app.sessions().length,
-        before + 1,
-        "agent completion/recommendation never activates Land",
-    );
-    const free = await newSession(app, cwd);
+    const limited = app.config.addUser("Only successor", "guest", [String(next)]).user;
+    const projected = await app.handoffs.list(next, limited);
 
-    childGate = new Promise<void>((resolve) => {
-        releaseChild = resolve;
+    assert.equal(projected.workItem?.title, "Work item");
+    assert.deepEqual(projected.workItem?.threadIds, [Number(next)]);
+    assert.equal(projected.workItem?.originThreadId, undefined);
+    assert.deepEqual(projected.handoffs, []);
+    assert.equal("accessFrom" in app.sessions(limited)[0]!, false);
+    await assert.rejects(
+        app.handoffs.updateWorkItem(next, limited, { archived: true }),
+        status(404),
+    );
+    const hidden = await source();
+
+    await app.harness.commit(async (tx) => {
+        (await tx.doc(SessionsDoc)).items[String(hidden)]!.ownerOnly = true;
+    }, context);
+    const hiddenNext = await move(hidden, "researcher", "owner-only");
+    const guest = app.config.addUser("Unrestricted guest", "guest").user;
+
+    assert.equal(app.canSee(guest, hiddenNext), false);
+    assert.equal(app.sessionMeta(hiddenNext)?.ownerOnly, true);
+});
+
+test("descendant writers and unresolved publications block human handoff without stopping work", async (t) => {
+    t.mock.method(app.workspace, "changes", async () => changed);
+    const id = await source();
+
+    childGate = gate();
+
+    try {
+        await say(app, id, "SPAWN_CHILD");
+        const child = (await app.harness.snapshot(SubagentsDoc, id, context))?.agents.writer
+            ?.conversationId;
+
+        assert.ok(child);
+        await until(() => app.isBusy(child), "helper writer running");
+        const count = app.sessions().length;
+
+        await assert.rejects(start(id, "researcher", "writer-busy"), status(409));
+        await assert.rejects(start(child, "researcher", "child-handoff"), /main thread/);
+        assert.equal(app.sessions().length, count);
+        assert.equal(app.isBusy(child), true);
+        assert.ok(
+            (await app.handoffs.list(id, owner(app))).options.every((option) => !option.enabled),
+        );
+    } finally {
+        childGate.release();
+        childGate = undefined;
+    }
+
+    await until(async () => {
+        try {
+            await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
+
+            return true;
+        } catch {
+            return false;
+        }
+    }, "helper and reporter settle");
+    await withWorkflowPublicationLock(app, id, async () => {
+        await assert.rejects(
+            start(id, "researcher", "exclusive-activation"),
+            /Another publication/,
+        );
     });
-    await say(app, free, "SPAWN_CHILD");
-    const child = (await app.harness.snapshot(SubagentsDoc, free, context))?.agents.writer
-        ?.conversationId;
+    await app.harness.commit(async (tx) => {
+        (await tx.doc(PublicationsDoc, id)).receipts.uncertain = {
+            id: "uncertain",
+            command: ["git", "push", "origin", "HEAD:topic"],
+            cwd: work,
+            fingerprint: "historical",
+            requester: owner(app).id,
+            approver: owner(app).id,
+            approvedAt: 1,
+            reason: "Historical uncertain effect",
+            state: "executing",
+        };
+    }, context);
+    await assert.rejects(
+        start(id, "researcher", "uncertain-activation"),
+        /Reconcile uncertain publication/,
+    );
+    await app.harness.commit(async (tx) => {
+        delete (await tx.doc(PublicationsDoc, id)).receipts.uncertain;
+    }, context);
+    await move(id, "researcher", "writer-busy");
+    const child = (await app.harness.snapshot(SubagentsDoc, id, context))!.agents.writer!
+        .conversationId;
 
-    assert.ok(child);
-    await until(() => app.isBusy(child), "child writer running");
-    const count = app.sessions().length;
-
-    await assert.rejects(start(free, "reviewer", "child-busy"), status(409));
-    assert.equal(app.sessions().length, count);
-    assert.equal(app.isBusy(child), true);
-    releaseChild?.();
-    await until(() => !app.isBusy(child) && !app.isBusy(free), "child writer and reporter idle");
-    const resumed = await start(free, "reviewer", "child-busy");
-
-    await delivered(cid(resumed.id));
     assert.equal(app.handoffs.isReadOnly(child), true);
-    assert.equal(app.handoffs.isManaged(child), true);
-    assert.equal((await app.envFor(child).writeFile("forbidden.txt", "bad", context)).ok, false);
-    const shellSource = await newSession(app, cwd);
-
-    await app.shell.start(shellSource, owner(app), {
-        command: "sleep 1; printf done > background-finished.txt",
-        requestId: "background-writer",
-    });
     assert.equal(
-        (await app.handoffs.list(shellSource, owner(app))).options.every((each) => !each.enabled),
-        true,
-        "discovery must include background work even without a main-thread run",
+        (await app.envFor(child).writeFile("forbidden-child.txt", "bad", context)).ok,
+        false,
     );
-    await assert.rejects(start(shellSource, "reviewer", "shell-busy"), status(409));
-    await until(
-        () => existsSync(join(cwd, "background-finished.txt")),
-        "background shell was not aborted",
+});
+
+test("pending source summary recovers after restart without duplicate intent, source input or successor", async () => {
+    const id = await source();
+    const count = app.sessions().length;
+    const prompts = summaryPrompts.length;
+
+    summaryGate = gate();
+    const interrupted = start(id, "researcher", "restart-summary").catch((error: unknown) => error);
+
+    await until(() => summaryPrompts.length > prompts, "summary generation started before restart");
+    await app.close();
+    summaryGate.release();
+    summaryGate = undefined;
+    await interrupted;
+    app = await openApp(model, data);
+    const result = await start(id, "researcher", "restart-summary");
+    const next = cid(result.id);
+
+    await delivered(next);
+    assert.equal(app.sessions().length, count + 1);
+    assert.equal((await entries(id)).filter((entry) => entry.kind === "pi.user").length, 1);
+    assert.equal((await entries(next)).filter((entry) => entry.kind === "pi.user").length, 1);
+    assert.equal(
+        Object.values((await app.harness.snapshot(HandoffsDoc, context))?.pending ?? {}).filter(
+            (request) => request.sourceThreadId === Number(id),
+        ).length,
+        1,
     );
+    assert.equal(app.handoffs.isReadOnly(id), true);
+    assert.deepEqual(await start(id, "researcher", "restart-summary"), result);
+});
+
+// Observe real committed activation, then request cancellation before the summary task's final
+// settlement. A stored successor is authoritative even if its source task is cancelled afterward.
+test("human cancellation respects the atomic activation boundary and preserves a committed redirect", async () => {
+    for (const phase of ["before-activation", "activation-frame"] as const) {
+        const id = await source();
+        const count = app.sessions().length;
+        const prompts = summaryPrompts.length;
+
+        summaryGate = gate();
+        const pending = start(id, "researcher", `cancel-${phase}`);
+
+        void pending.catch(() => {});
+        await until(() => summaryPrompts.length > prompts, "cancellable source summary started");
+        const doc = await app.harness.snapshot(HandoffsDoc, context);
+        const intent = Object.entries(doc?.pending ?? {}).find(
+            ([, request]) => request.sourceThreadId === Number(id),
+        );
+
+        assert.ok(intent);
+        const [key, request] = intent;
+        const taskId = request.taskId as TaskId;
+        const watch = await app.harness.watchDoc(HandoffsDoc, context);
+
+        assert.ok(watch);
+        let cancellation: Promise<"marked" | "terminal"> | undefined;
+        let activationTarget: number | undefined;
+
+        if (phase === "activation-frame") {
+            watch.start(async (frame) => {
+                if (frame?.requests[key] === undefined || cancellation !== undefined) {
+                    return;
+                }
+
+                activationTarget = frame.requests[key].id;
+                // No await before abortTask: its real cancellation races the final task commit.
+                cancellation = app.harness.abortTask(taskId, context);
+                await cancellation;
+            });
+        }
+
+        try {
+            if (phase === "before-activation") {
+                await app.commands.abort(id, owner(app));
+                await assert.rejects(pending, status(409));
+                const settled = await app.harness.waitForTask(taskId, context);
+
+                assert.equal(
+                    settled.state.outcome.status,
+                    "aborted",
+                    "human Stop aborts the durable background summary task, not just its foreground input",
+                );
+                assert.equal(app.sessions().length, count);
+                assert.equal(app.handoffs.isReadOnly(id), false);
+                assert.equal(app.handoffs.isPreparing(id), false);
+                const stopped = await app.harness.snapshot(HandoffsDoc, context);
+
+                assert.equal(stopped?.requests[key], undefined);
+                assert.equal(stopped?.pending?.[key]?.status, "blocked");
+                summaryGate.release();
+                summaryGate = undefined;
+                await move(id, "researcher", `cancel-${phase}`);
+                assert.equal(
+                    app.sessions().length,
+                    count + 1,
+                    "an explicit human retry may restart the stopped request after source ownership is restored",
+                );
+            } else {
+                summaryGate.release();
+                const created = await pending;
+
+                assert.ok(cancellation, "activation observer actually requested cancellation");
+                assert.equal(
+                    await cancellation,
+                    "marked",
+                    "cancellation arrived before terminal settlement, not after an already-completed task",
+                );
+                assert.equal(activationTarget, created.id);
+                const settled = await app.harness.waitForTask(taskId, context);
+
+                assert.equal(settled.state.outcome.status, "completed");
+
+                if (settled.state.outcome.status === "completed") {
+                    assert.deepEqual(settled.state.outcome.result, created);
+                }
+
+                const activated = await app.harness.snapshot(HandoffsDoc, context);
+
+                assert.equal(activated?.pending?.[key]?.status, "completed");
+                assert.equal(activated?.requests[key]?.id, created.id);
+                assert.equal(app.sessions().length, count + 1);
+                assert.equal(app.handoffs.isReadOnly(id), true);
+                assert.deepEqual(
+                    await app.handoffs.start(id, owner(app), {
+                        targetType: "researcher",
+                        relationship: "same-work",
+                        requestId: `cancel-${phase}`,
+                        recoverOnly: true,
+                    }),
+                    created,
+                    "the caller recovers the authoritative redirect, never a fresh admission error",
+                );
+                await delivered(cid(created.id));
+            }
+        } finally {
+            summaryGate?.release();
+            summaryGate = undefined;
+            await watch.stop();
+
+            if (cancellation !== undefined) {
+                await cancellation;
+            }
+        }
+    }
+});
+
+test("successor names from received summary, bills once and resumes its courier after restart", async (t) => {
+    const id = await source();
+    const titlesBefore = titlePrompts.length;
+    const actualComplete = app.models.completeSimple.bind(app.models);
+    let titleUsage: Awaited<ReturnType<typeof actualComplete>>["usage"] | undefined;
+
+    t.mock.method(
+        app.models,
+        "completeSimple",
+        async (...args: Parameters<typeof actualComplete>) => {
+            const response = await actualComplete(...args);
+
+            titleUsage = response.usage;
+
+            return response;
+        },
+    );
+    courierGate = gate();
+    const result = await start(id, "researcher", "restart-courier", "new-work");
+    const next = cid(result.id);
+
     await until(
         async () =>
-            (await app.harness.snapshot(InboxDoc, shellSource, context))?.items.length === 0,
-        "shell result admitted",
+            (await app.harness.snapshot(HandoffsDoc, context))?.handoffs[result.handoffId]
+                ?.titleNamed === true,
+        "destination title commits before courier answer",
+    );
+    assert.equal(app.sessionMeta(next)?.title, title);
+    assert.equal((await app.handoffs.list(next, owner(app))).workItem?.title, title);
+    assert.equal(titlePrompts.length, titlesBefore + 1);
+    assert.match(titlePrompts.at(-1)!, /Original ask: repair retry delivery/);
+    assert.match(titlePrompts.at(-1)!, /Deferred: Chromium unavailable/);
+    assert.ok(titleUsage);
+    const namedLedger = await app.harness.snapshot(UsageDoc, next, context);
+
+    assert.deepEqual(
+        namedLedger?.models["faux/faux-1"],
+        titleUsage,
+        "naming's actual response usage is committed to the destination, before its first assistant answer",
+    );
+    assert.equal(app.handoffs.isReadOnly(id), true);
+    assert.equal(
+        app.handoffs.isReadOnly(next),
+        false,
+        "start resolves with writer transfer, not courier completion",
+    );
+    await app.close();
+    courierGate.release();
+    courierGate = undefined;
+    app = await openApp(model, data);
+    await delivered(next);
+    const settledLedger = await app.harness.snapshot(UsageDoc, next, context);
+    const count = app.sessions().length;
+
+    await withWorkflowPublicationLock(app, next, async () => {
+        assert.deepEqual(await start(id, "researcher", "restart-courier", "new-work"), result);
+        await assert.rejects(start(id, "pull", "restart-courier", "new-work"), /different handoff/);
+    });
+    assert.deepEqual(await app.harness.snapshot(UsageDoc, next, context), settledLedger);
+    assert.equal(
+        titlePrompts.length,
+        titlesBefore + 1,
+        "recovered courier never names or bills a second title",
+    );
+    assert.equal(app.sessions().length, count);
+    assert.equal((await entries(next)).filter((entry) => entry.kind === "pi.user").length, 1);
+    assert.equal(app.attribution.requesterOf(next), owner(app).id);
+
+    // A real courier may be blocked after atomic creation if its human loses steering rights.
+    // Recovery is a receipt lookup, not permission to restart that destination's provider work.
+    const blockedSource = await source();
+    const requester = app.config.addUser("Blocked courier requester", "guest").user;
+    const blockedRequest = {
+        targetType: "researcher",
+        relationship: "new-work",
+        requestId: "blocked-courier-lookup",
+    };
+    const watch = await app.harness.watchDoc(HandoffsDoc, context);
+
+    assert.ok(watch);
+    let revoked = false;
+
+    watch.start(async (frame) => {
+        const activated = Object.values(frame?.handoffs ?? {}).some(
+            (record) => record.sourceThreadId === Number(blockedSource),
+        );
+
+        if (activated && !revoked) {
+            revoked = true;
+            app.config.updateUser(requester.id, { role: "viewer" });
+        }
+    });
+    let blocked: Awaited<ReturnType<typeof app.handoffs.start>>;
+
+    try {
+        blocked = await app.handoffs.start(blockedSource, requester, blockedRequest);
+        await until(
+            async () =>
+                (await app.harness.snapshot(HandoffsDoc, context))?.handoffs[blocked.handoffId]
+                    ?.delivery === "blocked",
+            "courier observes the real post-activation authorization loss",
+        );
+    } finally {
+        await watch.stop();
+        app.config.updateUser(requester.id, { role: "guest" });
+    }
+
+    const blockedTarget = cid(blocked.id);
+
+    await app.harness.commit((tx) => app.handoffs.requireIdle(tx, blockedTarget), context);
+    const tasksBeforeLookup = (
+        await app.harness.commit(
+            (tx) => tx.scanTasks({ conversationId: blockedTarget }, 100),
+            context,
+        )
+    ).items.map((task) => task.id);
+    const callsBeforeLookup = model.state.callCount;
+
+    assert.equal(revoked, true);
+    assert.deepEqual(
+        await app.handoffs.start(blockedSource, requester, {
+            ...blockedRequest,
+            recoverOnly: true,
+        }),
+        blocked,
+    );
+    assert.equal(
+        (await app.harness.snapshot(HandoffsDoc, context))?.handoffs[blocked.handoffId]?.delivery,
+        "blocked",
+    );
+    assert.deepEqual(
+        (
+            await app.harness.commit(
+                (tx) => tx.scanTasks({ conversationId: blockedTarget }, 100),
+                context,
+            )
+        ).items.map((task) => task.id),
+        tasksBeforeLookup,
+        "automatic receipt recovery schedules no new destination task",
+    );
+    assert.equal(
+        model.state.callCount,
+        callsBeforeLookup,
+        "automatic recovery never repeats blocked courier/provider work",
+    );
+    assert.deepEqual(await app.handoffs.start(blockedSource, requester, blockedRequest), blocked);
+    await delivered(blockedTarget);
+    assert.ok(
+        model.state.callCount > callsBeforeLookup,
+        "an explicit human retry still authorizes delivery of the existing successor",
     );
 });
 
-// Gate: restart between activation and first prompt proves delivery reservations are durable and destination ownerless.
-test("a committed destination resumes delivery after restart with one attributed input and no source ownership", async () => {
-    const cwd = repo("restart-handoff");
-    const source = await newSession(app, cwd);
+test("a human successor rename wins over an in-flight title model response", async () => {
+    const id = await source();
+    const titlesBefore = titlePrompts.length;
 
-    await say(app, source, "Original specification: restart must deliver exactly once.");
-    const created = await start(
-        source,
-        "reviewer",
-        "pending-delivery",
-        "same-work",
-        "RESTART_DELAY",
+    titleGate = gate();
+    const result = await start(id, "researcher", "manual-name");
+    const next = cid(result.id);
+
+    try {
+        await until(() => titlePrompts.length > titlesBefore, "destination naming model entered");
+        await app.commands.updateSession(next, owner(app), { title: "Human-owned thread name" });
+    } finally {
+        titleGate.release();
+        titleGate = undefined;
+    }
+
+    await delivered(next);
+    assert.equal(app.sessionMeta(next)?.title, "Human-owned thread name");
+    assert.equal(
+        (await app.harness.snapshot(HandoffsDoc, context))?.handoffs[result.handoffId]?.titleNamed,
+        true,
     );
-    const id = cid(created.id);
-
     await app.close();
     app = await openApp(model, data);
-    await delivered(id);
-    const record = await app.harness.commit((tx) => tx.conversation(id), context);
+    assert.equal(app.sessionMeta(next)?.title, "Human-owned thread name");
+});
 
-    assert.ok(record);
-    assert.equal(record.owner, undefined);
-    assert.deepEqual(
-        await start(source, "reviewer", "pending-delivery", "same-work", "RESTART_DELAY"),
-        created,
-    );
-    const entries = (
-        await (await app.conversation(id)).entries({ order: "ascending" }, 100, undefined, context)
-    ).items;
+test("same-work organization is atomic, new-work starts independent history and receipts survive restart", async () => {
+    const id = await source("pull");
+    const repair = await move(id, "follow-up", "group-repair");
+    const worker = await move(repair, "worker", "group-worker");
+    const item = (await app.handoffs.list(worker, owner(app))).workItem!;
+    const native = await http(worker, "/submit", {
+        text: "/handoff worker --new",
+        requestId: "new-worker-item",
+    });
 
-    assert.equal(entries.filter((entry) => entry.kind === "pi.user").length, 1);
-    assert.equal(app.attribution.requesterOf(id), owner(app).id);
+    assert.equal(native.status, 200, native.output);
+    const next = cid(JSON.parse(native.output).handoffThreadId);
+
+    await delivered(next);
+    const nextItem = (await app.handoffs.list(next, owner(app))).workItem!;
+    const doc = await app.harness.snapshot(HandoffsDoc, context);
+
+    assert.notEqual(item.id, nextItem.id);
+    assert.deepEqual(item.threadIds, [Number(id), Number(repair), Number(worker)]);
+    assert.deepEqual(nextItem.threadIds, [Number(next)]);
+    assert.equal(nextItem.originThreadId, Number(next));
+    assert.equal(doc?.workItems[nextItem.id]?.predecessorWorkItemId, item.id);
+    const project = await app.projects.create(owner(app), {
+        name: "Grouped",
+        cwd: work,
+        requestId: "grouped-project",
+    });
+
+    await app.projects.assign(owner(app), repair, { projectId: project.id });
     assert.ok(
-        (await app.handoffs.list(id, owner(app))).handoffs[0]?.brief.includes(
-            "Original specification",
-        ),
+        [id, repair, worker].every((member) => app.sessionMeta(member)?.projectId === project.id),
+    );
+    assert.equal(app.sessionMeta(next)?.projectId, undefined);
+    await app.commands.updateSession(repair, owner(app), { archived: true });
+    assert.ok([id, repair, worker].every((member) => app.sessionMeta(member)?.archived === true));
+    assert.equal(app.sessionMeta(next)?.archived, undefined);
+    await app.commands.updateSession(id, owner(app), { archived: false, title: "Renamed origin" });
+    assert.ok([id, repair, worker].every((member) => app.sessionMeta(member)?.archived !== true));
+    assert.equal((await app.handoffs.list(repair, owner(app))).workItem?.title, "Renamed origin");
+    await app.close();
+    app = await openApp(model, data);
+    const count = app.sessions().length;
+    const retry = await start(id, "follow-up", "group-repair");
+
+    assert.equal(retry.id, Number(repair));
+    assert.equal(app.sessions().length, count);
+    assert.equal(app.handoffs.isReadOnly(id), true);
+    assert.equal(app.handoffs.isReadOnly(repair), true);
+    assert.equal(app.handoffs.isReadOnly(worker), true);
+    assert.equal(app.handoffs.isReadOnly(next), false);
+    assert.deepEqual(
+        (await app.handoffs.list(worker, owner(app))).workItem?.threadIds,
+        item.threadIds,
     );
 });
 
-// Cleanup owns a distinct filesystem lifecycle: all metadata moves together and deleted checkouts cannot stay ready.
-test("human worktree cleanup moves the whole item and invalidates readiness when the source checkout differs", async () => {
-    const cwd = repo("cleanup-handoff");
-    const source = (await app.commands.createSession(owner(app), { cwd, worktree: true })).id;
-    const checkout = app.cwdOf(source);
+// Fingerprints still secure publication execution even though they no longer gate human Land.
+// Retain the raw-byte/configured-filter regression without any agent milestone assertions.
+test("Git fingerprint inspection contains configured filters and binds physical tracked bytes", async () => {
+    const cwd = join(root, "fingerprint-filters");
+    const marker = join(root, "escaped-clean-filter");
+    const textconv = join(root, "executed-textconv");
 
-    await say(app, source, "Report the worktree implementation for review.");
-    const review = await start(source, "reviewer", "cleanup-review");
-    const reviewer = cid(review.id);
+    mkdirSync(cwd);
+    const git = (...args: string[]) =>
+        execFileSync("git", ["-c", "core.fsmonitor=false", ...args], { cwd, encoding: "utf8" });
 
-    await delivered(reviewer);
-    assert.equal(app.cwdOf(reviewer), checkout);
-    writeFileSync(join(checkout, "code.txt"), "landed feature\n");
-    await app.handoffs.complete(reviewer, owner(app), {
-        status: "review-complete",
-        summary: "Reviewed the feature and checks.",
-    });
-    const land = await start(reviewer, "land", "cleanup-land");
-    const landId = cid(land.id);
-
-    await delivered(landId);
-    commit(checkout, "local feature");
-    await app.handoffs.complete(landId, owner(app), {
-        status: "landed",
-        summary: "Local hooks and impact checks passed.",
-        readyForPublish: true,
-    });
-    await assert.rejects(app.commands.removeWorktree(landId, owner(app), true), status(409));
-    await app.commands.removeWorktree(landId, owner(app), false);
-    assert.equal(existsSync(checkout), false);
-    assert.deepEqual(
-        [source, reviewer, landId].map((id) => app.cwdOf(id)),
-        [cwd, cwd, cwd],
+    git("init", "-q");
+    writeFileSync(join(cwd, "code.txt"), "original\n");
+    writeFileSync(join(cwd, ".gitattributes"), "code.txt filter=alias diff=offline\n");
+    git("config", "filter.alias.clean", "printf 'normalized\\n'");
+    git("config", "diff.offline.textconv", `touch ${JSON.stringify(textconv)}`);
+    git("add", ".");
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "-qm",
+        "normalized baseline",
     );
-    assert.equal(app.handoffs.isReadOnly(source), true);
-    assert.equal(app.handoffs.isReadOnly(reviewer), true);
-    assert.equal(app.handoffs.isReadOnly(landId), false);
-    assert.equal((await app.handoffs.list(landId, owner(app))).workflow.readyForPublish, false);
-    await assert.rejects(start(landId, "publish", "cleanup-publish"), status(409));
+    assert.equal(git("show", "HEAD:code.txt"), "normalized\n");
+    const filter = join(root, "clean-filter.sh");
+
+    writeFileSync(
+        filter,
+        `printf escaped > ${JSON.stringify(marker)} 2>/dev/null\nprintf 'normalized\\n'\n`,
+    );
+    git("config", "filter.alias.clean", `/bin/sh ${JSON.stringify(filter)}`);
+    const id = await source("worker", cwd);
+
+    writeFileSync(join(cwd, "code.txt"), "changedA\n");
+    const first = await app.handoffs.fingerprint(id);
+
+    writeFileSync(join(cwd, "code.txt"), "changedB\n");
+    assert.notEqual(
+        await app.handoffs.fingerprint(id),
+        first,
+        "equal-length tracked bytes cannot alias through configured clean normalization",
+    );
+    assert.equal(
+        existsSync(marker),
+        false,
+        "configured Git filters cannot escape read-only inspection",
+    );
+    assert.equal(
+        existsSync(textconv),
+        false,
+        "workflow fingerprints never execute configured textconv",
+    );
+});
+
+// Retained inherited Chord regression: initializing [] stores a clone, so pushing a detached
+// local array used to lose the FIRST human acceptance. Legacy HTTP/storage clients still exist;
+// this proves their durable ledger only, not a requirement for human Land admission.
+// Requires real offline Git fingerprinting. Do not run in a nested sandbox lacking that capability.
+test("Git legacy first validation acceptance persists once across HTTP retry and restart", async (t) => {
+    const cwd = join(root, "legacy-validation-ledger");
+
+    mkdirSync(cwd);
+    writeFileSync(join(cwd, "code.txt"), "baseline\n");
+    const git = (...args: string[]) =>
+        execFileSync("git", ["-c", "core.fsmonitor=false", ...args], { cwd });
+
+    git("init", "-q");
+    git("add", "code.txt");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "baseline");
+    writeFileSync(join(cwd, "code.txt"), "reviewed repair\n");
+    t.mock.method(app.workspace, "changes", async () => changed);
+    const id = await source("worker", cwd);
+    const reviewer = await move(id, "reviewer", "legacy-ledger-review");
+
+    await app.handoffs.complete(reviewer, owner(app), {
+        status: "needs-review",
+        summary: "Independent findings clear; checks are unavailable.",
+        reviewAssessment: { outcome: "clear", validationGaps: ["Chromium unavailable."] },
+    });
+    const historical = await app.harness.snapshot(WorkflowDoc, reviewer, context);
+
+    assert.ok(historical?.fingerprint);
+    assert.equal(
+        historical.validationAcceptances,
+        undefined,
+        "the first acceptance must initialize and append to the real Chord draft",
+    );
+    // Legacy clients submit an opaque assessment identity computed from these persisted fields.
+    // This fixture exercises that old wire identity; list() intentionally no longer offers a gate.
+    const request = {
+        checkpoint: historical.fingerprint.digest,
+        assessment: createHash("sha256")
+            .update(
+                JSON.stringify([
+                    historical.reviewAssessmentId,
+                    historical.fingerprint,
+                    historical.completedAt,
+                    historical.completedBy,
+                    historical.summary,
+                    historical.reviewAssessment,
+                ]),
+            )
+            .digest("hex"),
+    };
+    const response = await http(reviewer, "/handoffs/accept-validation", request);
+
+    assert.equal(response.status, 200, response.output);
+    const first = (await app.harness.snapshot(WorkflowDoc, reviewer, context))
+        ?.validationAcceptances;
+
+    assert.equal(
+        first?.length,
+        1,
+        "one successful request, not a second retry, persists the first record",
+    );
+    assert.equal(first[0]?.acceptedBy, owner(app).id);
+    assert.deepEqual(first[0]?.gaps, ["Chromium unavailable."]);
+    assert.equal(first[0]?.checkpoint, request.checkpoint);
+    assert.equal((await http(reviewer, "/handoffs/accept-validation", request)).status, 200);
+    assert.deepEqual(
+        (await app.harness.snapshot(WorkflowDoc, reviewer, context))?.validationAcceptances,
+        first,
+    );
+    await app.close();
+    app = await openApp(model, data);
+    assert.deepEqual(
+        (await app.harness.snapshot(WorkflowDoc, reviewer, context))?.validationAcceptances,
+        first,
+    );
+    assert.equal((await http(reviewer, "/handoffs/accept-validation", request)).status, 200);
+    assert.deepEqual(
+        (await app.harness.snapshot(WorkflowDoc, reviewer, context))?.validationAcceptances,
+        first,
+    );
+    assert.equal(
+        "validation" in (await app.handoffs.list(reviewer, owner(app))),
+        false,
+        "historical acceptance persistence does not resurrect the chooser's validation gate",
+    );
 });

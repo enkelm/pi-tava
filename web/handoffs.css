@@ -104,6 +104,13 @@
     min-width: 0;
 }
 
+.handoff-validation-history > summary {
+    min-height: 44px;
+    padding-block: 0.65rem;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
 .handoff-options {
     display: flex;
     flex-direction: column;

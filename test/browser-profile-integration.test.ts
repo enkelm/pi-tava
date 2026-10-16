@@ -1,5 +1,5 @@
 // The profile switch's HTTP permissions and its real persistent-browser behavior.
-import { cleanUp, newSession, openApp, root, scriptedModel, until } from "./helpers.ts";
+import { cleanUp, newSession, openApp, owner, root, scriptedModel, until } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { createServer } from "node:http";
@@ -14,7 +14,7 @@ const executable = findBrowser();
 after(cleanUp);
 
 test(
-    "owner imports a profile; tabs share persistent storage without capturing other conversations",
+    "owner imports a profile; Chats share storage while workflow commits retire shared tabs and isolate managed pages",
     {
         skip:
             process.platform === "win32"
@@ -23,7 +23,18 @@ test(
                   ? "no Chromium-based browser"
                   : false,
     },
-    async () => {
+    async (t) => {
+        let appBrowser: Chromium | undefined;
+        const launch = Chromium.launch;
+
+        // Observe the real browser, without substituting profile/context selection or Chromium behavior.
+        t.mock.method(Chromium, "launch", async (...args: Parameters<typeof launch>) => {
+            const browser = await launch(...args);
+
+            appBrowser = browser;
+
+            return browser;
+        });
         const source = mkdtempSync(join(root, "profile-source-"));
         const data = mkdtempSync(join(root, "profile-app-"));
         const receivedCookies: string[] = [];
@@ -37,6 +48,7 @@ test(
 
         assert.ok(address && typeof address !== "string");
         const url = `http://127.0.0.1:${address.port}/`;
+
         const originalArgs = process.env.PI_POCKET_BROWSER_ARGS;
 
         // Synthetic credentials only: neither the fixture nor its imported copy touches the OS keychain.
@@ -199,6 +211,53 @@ test(
             );
             assert.equal(page.closed, false);
             assert.equal(page.url, url);
+
+            // A real workflow commit must retire an unrestricted Chat tab, not only a manually reconciled callback.
+            const chat = await newSession(app);
+            const unrestricted = await app.browsers.open(Number(chat), { restore: false });
+
+            assert.equal(
+                unrestricted.contextId,
+                undefined,
+                "the imported Chat uses the shared default context",
+            );
+            await app.handoffs.start(chat, owner(app), {
+                targetType: "researcher",
+                relationship: "same-work",
+                requestId: crypto.randomUUID(),
+                brief: "Investigate a pointed question without importing browser accounts.",
+            });
+            assert.equal(
+                unrestricted.closed,
+                true,
+                "committed workflow ownership closes the old Chat tab",
+            );
+            assert.equal(app.browsers.page(Number(chat)), undefined);
+            assert.equal(other.closed, false, "an unrelated Chat keeps its imported-profile page");
+            const managed = await app.browsers.open(Number(chat), { restore: false });
+
+            assert.equal(managed.researchReader, true);
+            assert.ok(
+                managed.contextId,
+                "a managed page isolates even when an imported default is selected",
+            );
+            assert.equal(app.browsers.state(Number(chat)).sharedProfile, undefined);
+            assert.ok(appBrowser);
+            const isolatedCookies = await appBrowser.connection.send("Storage.getCookies", {
+                browserContextId: managed.contextId,
+            });
+
+            assert.equal(
+                isolatedCookies.cookies.some(
+                    (cookie: { name: string }) => cookie.name === "profile_fixture",
+                ),
+                false,
+                "the reader context does not inherit the synthetic account cookie",
+            );
+            // Do not open a probe tab in the reader context: the production one-page policy closes it.
+            // The actual fresh context and its cookies above are the managed isolation contract here;
+            // ordinary clean-context site storage is checked below without bypassing reader restrictions.
+            await app.browsers.close(Number(chat));
             await app.browsers.close(Number(first));
             assert.equal(other.closed, false);
             await app.close();

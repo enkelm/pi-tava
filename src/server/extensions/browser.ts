@@ -48,7 +48,9 @@ const CHANGING = new Set<Action>([
 ]);
 const MAX_TEXT = 20_000;
 
-const GUIDE = `You have a browser tool: a real Chromium on this machine. The people in this conversation see the same page live in the app's Browser panel and can click and type in it too, so it is how you show and test web work: local dev servers (http://localhost:5173), HTML files on this machine (give their path), or any site.
+const GUIDE = `Managed Worker, Researcher and Follow-up workflows use a credential-free static research reader: navigate to public HTTPS documents, snapshot, screenshot, scroll, viewport, console and wait. Scripts, resource loads, forms, clicks, typing, evaluation, history, local files/servers and imported accounts are unavailable. For links, use the URL shown in the snapshot with navigate. JavaScript-only sites may need another primary source. These limits preserve external-mutation gates; report unavailable checks.
+
+Outside managed workflows, you have a browser tool: a real Chromium on this machine. The people in this conversation see the same page live in the app's Browser panel and can click and type in it too, so it is how you show and test web work: local dev servers (http://localhost:5173), HTML files on this machine (give their path), or any site.
 - Start a dev server in the background with bash first, for example \`nohup npm run dev > /tmp/dev.log 2>&1 &\`, then navigate to it.
 - snapshot lists the page's text and its controls with refs like [e12]; click, type, select, and hover take a ref (or a CSS selector, or the visible label). Refs last until the next snapshot.
 - screenshot shows you how the page looks: use it to check layout and styling. viewport switches between mobile, tablet, and desktop sizes.
@@ -185,7 +187,10 @@ export default function createBrowser(host: PocketHost) {
             const cwd = agent?.cwd ?? process.cwd();
             // A page opened again comes back at its last address, unless Pi is about to open another.
             const page = await awaitWithContext(
-                host.browsers.open(Number(api.conversationId), { restore: action !== "navigate" }),
+                host.browsers.open(Number(api.conversationId), {
+                    restore: action !== "navigate",
+                    ...(signal === undefined ? {} : { signal }),
+                }),
                 context,
             );
             const before = page.logSeq;
@@ -421,9 +426,7 @@ export default function createBrowser(host: PocketHost) {
                 );
 
                 if (outline.truncated) {
-                    lines.push(
-                        "… the snapshot stops here: scroll, or use evaluate to read the rest.",
-                    );
+                    lines.push("… the snapshot stops here: scroll to read the rest.");
                 }
             }
 

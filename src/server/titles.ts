@@ -81,7 +81,7 @@ export function cleanTitle(reply: string): string | undefined {
 }
 
 /** Add one response's usage to the session's ledger, as Pi Durable does for its own. */
-function addUsage(total: Usage, usage: Usage): void {
+export function addUsage(total: Usage, usage: Usage): void {
     total.input += usage.input;
     total.output += usage.output;
     total.cacheRead += usage.cacheRead;

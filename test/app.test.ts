@@ -39,6 +39,14 @@ const route: FauxResponseStep = (context, options) => {
         return fauxAssistantMessage([fauxText(`tool said: ${text}`)]);
     }
 
+    if (text.includes("The human has requested a same-work handoff to researcher.")) {
+        return fauxAssistantMessage([
+            fauxText(
+                "The preview Chat published demo-page v1 with <h1>one</h1>. Keep executable previews disabled after handoff; no implementation or external actions were requested.",
+            ),
+        ]);
+    }
+
     if (text.includes("make an artifact")) {
         return call("artifact", { id: "Demo Page", title: "Demo", content: "<h1>one</h1>" });
     }
@@ -194,9 +202,9 @@ test("the page that runs a reply's HTML is for people signed in, sandboxed, and 
         const artifact = `${base}/a/${id}/demo-page/latest`;
 
         assert.equal((await fetch(artifact, { headers: { authorization } })).status, 200);
-        // A human's native command transfers write ownership; no agent preparation API is involved.
+        // The human's native command awaits the source summary before returning its successor.
         const transferred = await app.commands.submit(id, owner(), {
-            text: "/handoff reviewer",
+            text: "/handoff researcher",
             requestId: crypto.randomUUID(),
         });
 
