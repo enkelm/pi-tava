@@ -86,7 +86,11 @@ function goal(doc: ProjectsData, id: string): ProjectGoal {
     return doc.goals[id]!;
 }
 
-function selection(doc: ProjectsData, request: SelectProject): ProjectSelection {
+function selection(
+    doc: ProjectsData,
+    request: SelectProject,
+    defaultStarter?: string,
+): ProjectSelection {
     let projectId = optionalId(request.projectId, "projectId");
     const goalId = optionalId(request.goalId, "goalId");
     const selectedGoal = goalId === undefined ? undefined : goal(doc, goalId);
@@ -113,33 +117,23 @@ function selection(doc: ProjectsData, request: SelectProject): ProjectSelection 
         request.threadType === undefined
             ? projectId === undefined
                 ? "chat"
-                : "worker"
+                : defaultStarter
             : request.threadType;
 
-    if (
-        ![
-            "chat",
-            "researcher",
-            "worker",
-            "reviewer",
-            "follow-up",
-            "pull",
-            "land",
-            "publish",
-        ].includes(String(threadType))
-    ) {
-        throw new HttpError(400, "Unknown thread type");
+    if (typeof threadType !== "string" || !threadType) {
+        throw new HttpError(
+            400,
+            "Select an available starter profile or enable a workflow extension",
+        );
     }
 
     if (
         request.newGoal === true &&
-        (projectId === undefined ||
-            goalId !== undefined ||
-            !["worker", "researcher", "pull"].includes(String(threadType)))
+        (projectId === undefined || goalId !== undefined || threadType === "chat")
     ) {
         throw new HttpError(
             400,
-            "A new goal needs a project and a new Worker or Pull thread without an existing goal",
+            "A new goal needs a project and a non-Chat starter thread without an existing goal",
         );
     }
 
@@ -431,24 +425,22 @@ export class Projects {
             );
         }
 
-        if (
-            request.threadType !== undefined &&
-            request.threadType !== "chat" &&
-            request.threadType !== "worker" &&
-            request.threadType !== "researcher" &&
-            request.threadType !== "pull"
-        ) {
-            throw new HttpError(
-                400,
-                "Start reviewer, follow-up, land and publish threads through a human handoff",
-            );
-        }
+        const prepared = Object.freeze(selection(this.#doc, request, this.#app.defaultStarter()));
 
-        const prepared = Object.freeze(selection(this.#doc, request));
+        this.#requireStarter(prepared.threadType);
 
         this.#prepared.set(prepared, user.id);
 
         return prepared;
+    }
+
+    #requireStarter(type: string): void {
+        if (this.#app.agentProfile(type)?.starter !== true) {
+            throw new HttpError(
+                400,
+                "Choose an available starter profile; other profiles require a human handoff",
+            );
+        }
     }
 
     /** Safe in conversation init: only document reads, including after the conversation's table writes. */
@@ -477,6 +469,8 @@ export class Projects {
         }
 
         const current = selection(doc, prepared);
+
+        this.#requireStarter(current.threadType);
 
         if (current.cwd !== prepared.cwd) {
             throw new HttpError(409, "The project folder changed; try starting the session again");

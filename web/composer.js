@@ -12,7 +12,7 @@ import {
 } from "./commands.js";
 import { loadFiles, mentionAt, mentionText, suggestFiles } from "./files.js";
 import { remember, searchHistory, sentHistory } from "./history.js";
-import { WorkflowTools } from "./handoffs.js";
+import { ExtensionSessionControls, extensionInputSuggestions } from "./extension-ui.js";
 import { MessageBox, SendButton } from "./message-box.js";
 import {
     actions,
@@ -520,6 +520,7 @@ export function Composer() {
     const [editing, setEditing] = useState(null);
     // Slash command suggestions: the highlighted one, and whether Escape hid the list.
     const [pick, setPick] = useState(0);
+    const argumentPicked = useRef(false);
     const [hideCommands, setHideCommands] = useState(false);
     // File mentions: where the caret is, and the mention Escape hid (by where it starts).
     const [caret, setCaret] = useState(() => drafts.get(conversationId).length);
@@ -575,6 +576,7 @@ export function Composer() {
         dictation.stop(true);
         setText(draft);
         setCaret(draft.length);
+        argumentPicked.current = false;
         setPastes(loadPastes(conversationId));
         setBrowsing(null);
         setSearching(false);
@@ -652,6 +654,7 @@ export function Composer() {
         }
 
         setPick(0);
+        argumentPicked.current = false;
 
         if (!value.startsWith("/") || value === "/") {
             setHideCommands(false);
@@ -668,8 +671,52 @@ export function Composer() {
     // Ctrl+R: what was sent before that has the words in the box.
     const recalled = searching ? searchHistory(text, historyScope) : [];
     const chosenRecall = recalled[Math.min(pick, recalled.length - 1)];
-    const suggestions = editing || hideCommands || searching ? [] : suggestCommands(text);
-    const chosen = suggestions[Math.min(pick, suggestions.length - 1)];
+    const [extensionHints, setExtensionHints] = useState(null);
+    const hintUser = store.state.me?.id;
+
+    useEffect(() => {
+        if (editing || searching || hideCommands || !text.startsWith("/")) {
+            return;
+        }
+
+        let stopped = false;
+
+        extensionInputSuggestions(text, caret).then((rows) => {
+            if (!stopped) {
+                setExtensionHints({ text, caret, id: conversationId, userId: hintUser, rows });
+            }
+        });
+
+        return () => {
+            stopped = true;
+        };
+    }, [
+        text,
+        caret,
+        conversationId,
+        hintUser,
+        editing,
+        searching,
+        hideCommands,
+        busy,
+        store.state.extensionsRev,
+    ]);
+
+    const hinted =
+        extensionHints?.text === text &&
+        extensionHints.caret === caret &&
+        extensionHints.id === conversationId &&
+        extensionHints.userId === hintUser
+            ? extensionHints.rows
+            : [];
+    const suggestions =
+        editing || hideCommands || searching
+            ? []
+            : hinted.length > 0
+              ? hinted
+              : suggestCommands(text, caret);
+    const selectable = suggestions.filter((command) => !command.disabled);
+    const chosen = selectable[Math.min(pick, selectable.length - 1)];
     const parsed = editing ? null : parseCommand(text);
     const template = editing || parsed ? null : parseTemplate(text);
     // `!command` runs in the session's folder and Pi sees it; `!!command`, only the people here.
@@ -784,9 +831,18 @@ export function Composer() {
         });
     };
 
-    /** A tapped suggestion: commands that take text, and prompt templates, fill the box; the others run at once. */
+    /** Argument suggestions only edit the draft, leaving room for steering before a separate send. */
     const choose = (command) => {
-        if (command.args || command.template) {
+        if (command.disabled) {
+            return;
+        }
+
+        if (command.action) {
+            command.action();
+        } else if (command.completion) {
+            update(command.completion);
+            focusEnd();
+        } else if (command.args || command.template) {
             update(`/${command.name} `);
             focusEnd();
         } else {
@@ -907,9 +963,14 @@ export function Composer() {
     }, [editing, sending]);
 
     /** What went out stays for ↑; its pastes are done with. */
-    const sent = (full) => {
+    const sent = (full, revision) => {
         if (full.length <= REMEMBER_CHARS) {
             remember(full, historyScope);
+        }
+
+        // A slow acceptance must clear only the submitted draft, not edits made while it was in flight.
+        if (drafts.revision(conversationId) !== revision || drafts.get(conversationId) !== text) {
+            return;
         }
 
         setPastes({});
@@ -925,6 +986,8 @@ export function Composer() {
         if (command === "") {
             return notify("info", "Say which command to run, such as !git status.");
         }
+
+        const revision = drafts.revision(conversationId);
 
         setSending(true);
         const started = await attempt(() =>
@@ -944,7 +1007,7 @@ export function Composer() {
             ],
         }));
         requestId.current = uid();
-        sent(full);
+        sent(full, revision);
     };
 
     const send = async () => {
@@ -972,7 +1035,7 @@ export function Composer() {
 
         const full = expandPastes(text, pastes);
 
-        if (parsed && !parsed.command.native) {
+        if (parsed && !parsed.command.modelInput) {
             if (full.length <= REMEMBER_CHARS) {
                 remember(full, historyScope);
             }
@@ -983,6 +1046,8 @@ export function Composer() {
         if (shell) {
             return runShell(full);
         }
+
+        const revision = drafts.revision(conversationId);
 
         setSending(true);
         const attachments = files
@@ -1000,9 +1065,9 @@ export function Composer() {
         setSending(false);
 
         if (ok) {
-            sent(full);
+            sent(full, revision);
             forget(files);
-            setFiles([]);
+            setFiles((current) => current.filter((file) => !files.includes(file)));
 
             if (!coarse) {
                 box.current?.focus();
@@ -1176,10 +1241,14 @@ export function Composer() {
 
             if (move !== undefined) {
                 event.preventDefault();
-                setPick(
-                    (Math.min(pick, suggestions.length - 1) + move + suggestions.length) %
-                        suggestions.length,
-                );
+
+                if (selectable.length > 0) {
+                    argumentPicked.current = true;
+                    setPick(
+                        (Math.min(pick, selectable.length - 1) + move + selectable.length) %
+                            selectable.length,
+                    );
+                }
 
                 return;
             }
@@ -1192,11 +1261,14 @@ export function Composer() {
             }
 
             // Tab completes; Enter completes too, unless the name is typed out already, which runs it.
-            const typedOut = parsed && text.trim() === `/${chosen.name}`;
+            const typedOut = chosen?.completion
+                ? !chosen.completeOnEnter && !argumentPicked.current
+                : parsed && text.trim() === `/${chosen?.name}` && chosen?.name !== "handoff";
 
             if (
-                event.key === "Tab" ||
-                (event.key === "Enter" && !event.shiftKey && !coarse && !typedOut)
+                chosen &&
+                (event.key === "Tab" ||
+                    (event.key === "Enter" && !event.shiftKey && !coarse && !typedOut))
             ) {
                 event.preventDefault();
                 choose(chosen);
@@ -1500,9 +1572,11 @@ export function Composer() {
                     html`<div class="commands" role="listbox" ref=${list}>
                         ${suggestions.map(
                             (command) => html`<button
-                                class=${`command ${command === chosen ? "on" : ""}`}
+                                class=${`command ${command === chosen ? "on" : ""} ${command.completion ? "input-argument" : ""}`}
                                 role="option"
                                 aria-selected=${command === chosen}
+                                aria-disabled=${command.disabled || undefined}
+                                disabled=${command.disabled || undefined}
                                 onMouseDown=${(event) => event.preventDefault()}
                                 onClick=${() => choose(command)}
                             >
@@ -1519,12 +1593,12 @@ export function Composer() {
                 ${
                     suggestions.length === 0 &&
                     parsed &&
-                    html`<div class="command-hint">
+                    html`<div class=${`command-hint ${parsed.command.modelInput ? "wraps" : ""}`}>
                         <span class="command-name">/${parsed.command.name}</span>
                         ${
                             parsed.command.args &&
                             html` <span class="command-args">${parsed.command.args}</span>`
-                        } <span class="muted">· ${parsed.command.description} · not sent to Pi</span>
+                        } <span class="muted">· ${parsed.command.description} · ${parsed.command.modelInput ? "sent to Pi as your message" : "not sent to Pi"}</span>
                     </div>`
                 }
                 ${
@@ -1691,7 +1765,7 @@ export function Composer() {
                                 Plan
                             </button>`
                         }
-                        <${WorkflowTools} />`
+                        <${ExtensionSessionControls} slot="composer" />`
                     }
                     <span class="grow"></span>
                     ${

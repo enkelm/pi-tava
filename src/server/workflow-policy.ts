@@ -374,7 +374,8 @@ export function createWorkflowHooks(app: PocketApp) {
                 try {
                     requireWorkflowRequester(app, id);
                     const args = call.arguments as Record<string, unknown>;
-                    const readOnly = app.handoffs.isReadOnly(id);
+                    const readOnly =
+                        app.handoffs.isReadOnly(id) || app.handoffs.profileUnavailable(id);
 
                     if (app.handoffs.isPreparing(id)) {
                         return {
@@ -394,7 +395,12 @@ export function createWorkflowHooks(app: PocketApp) {
                         return undefined;
                     }
 
-                    if (call.name === "handoff" && args.action === "status") {
+                    if (
+                        call.name === "handoff" &&
+                        (args.action === "status" || args.action === "start")
+                    ) {
+                        // The owner may recover an existing start receipt after source retirement.
+                        // Its final admission still rejects every fresh transfer from a retired source.
                         return undefined;
                     }
 
@@ -526,7 +532,7 @@ class WorkflowExecutionEnv extends NodeExecutionEnv {
         try {
             requireWorkflowRequester(app, id);
 
-            if (!app.handoffs.isReadOnly(id)) {
+            if (!app.handoffs.isReadOnly(id) && !app.handoffs.profileUnavailable(id)) {
                 requireWorkflowLocalWrite(app, id);
             }
         } catch (error) {
@@ -542,7 +548,7 @@ class WorkflowExecutionEnv extends NodeExecutionEnv {
             );
         }
 
-        const readOnly = app.handoffs.isReadOnly(id);
+        const readOnly = app.handoffs.isReadOnly(id) || app.handoffs.profileUnavailable(id);
         const text =
             typeof command === "string"
                 ? command

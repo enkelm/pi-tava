@@ -307,7 +307,7 @@ export function sessionUnread(session, state = store.state) {
  * Archived sessions are left out.
  */
 export function workspaceOrder(state = store.state) {
-    const active = workItemRows(state.sessions, (state.server?.handoffs ?? 0) >= 1).filter(
+    const active = workItemRows(state.sessions, handoffsAvailable()).filter(
         (session) => !session.archived,
     );
     const pins = [
@@ -338,9 +338,8 @@ export function workspaceOrder(state = store.state) {
 export const collab = () => (store.state.server?.collab ?? 0) >= 2;
 /** Project organization is unavailable until the server has restarted with this capability. */
 export const projectsAvailable = () => (store.state.server?.projects ?? 0) >= 1;
-export const handoffsAvailable = () => (store.state.server?.handoffs ?? 0) >= 1;
-/** Summary-first creation and lookup-only recovery require the restarted version-four backend. */
-export const handoffSummaryAvailable = () => (store.state.server?.handoffs ?? 0) >= 4;
+export const handoffsAvailable = () =>
+    store.state.server?.ui?.some((module) => module.module === "work-items") === true;
 /** Viewers read and chat; they never steer Pi. */
 export const canSteer = () => store.state.me?.role !== "viewer";
 
@@ -463,15 +462,6 @@ class ApiError extends Error {
     }
 }
 
-function requireHandoffSummary() {
-    if (!handoffSummaryAvailable()) {
-        throw new ApiError(
-            409,
-            "Restart the server to use the updated summary-first handoff flow.",
-        );
-    }
-}
-
 /** Call the server's API: a GET without `body`, a POST with one, or `options.method`; `options.signal` stops it. */
 export async function api(path, body, options = {}) {
     const init = {
@@ -507,209 +497,283 @@ export async function api(path, body, options = {}) {
     return data;
 }
 
-const HANDOFF_REQUEST_KEY = "pocket.handoffRequest";
-let pendingHandoff = readHandoffRequest();
-let handoffCompletion = null;
-const handoffRequests = new Map();
+// Accepted keys and uncertain input identities are per-tab. Recovery only reads receipts, never replays input.
+const HANDOFF_INPUTS_KEY = "pocket.handoffInputs";
+const SUBMIT_ATTEMPTS_KEY = "pocket.submitAttempts";
+let pendingHandoffInputs = readHandoffInputs();
+let submitAttempts = readSubmitAttempts();
+const submitLookups = new Map();
+const submitFlights = new Map();
+let handoffInputEpoch = 0;
+let handoffInputScope = [store.state.conversationId, store.state.me?.id, store.state.privateId];
+let handoffInputLookup = null;
 
-/** Only this tab's authenticated human choice may recover a handoff after a lost HTTP response. */
-function readHandoffRequest() {
+function readHandoffInputs() {
     try {
-        const saved = JSON.parse(sessionStorage.getItem(HANDOFF_REQUEST_KEY));
+        const saved = JSON.parse(sessionStorage.getItem(HANDOFF_INPUTS_KEY));
 
         if (
-            Number.isSafeInteger(saved?.sourceId) &&
-            saved.sourceId > 0 &&
-            typeof saved.userId === "string" &&
-            typeof saved.requestId === "string" &&
-            saved.requestId.length > 0 &&
-            (typeof saved.command === "string"
-                ? /^\/handoff\s+\S/.test(saved.command)
-                : typeof saved.targetType === "string" &&
-                  ["same-work", "new-work"].includes(saved.relationship))
+            saved?.version === 1 &&
+            Array.isArray(saved.requests) &&
+            saved.requests.every(
+                (request) =>
+                    Number.isSafeInteger(request?.sourceId) &&
+                    request.sourceId > 0 &&
+                    typeof request.userId === "string" &&
+                    typeof request.handoffRequestKey === "string" &&
+                    request.handoffRequestKey.length > 0,
+            )
         ) {
-            return saved;
+            return saved.requests;
         }
     } catch {
-        // Invalid or unavailable browser storage must not prevent the app from opening.
+        // An invalid or unavailable per-tab store must not block normal input.
     }
 
-    return null;
+    return [];
 }
 
-function saveHandoffRequest(request) {
-    pendingHandoff = request;
-    handoffCompletion = null;
+function saveHandoffInputs(requests) {
+    pendingHandoffInputs = requests;
 
     try {
-        if (request === null) {
-            sessionStorage.removeItem(HANDOFF_REQUEST_KEY);
+        if (requests.length === 0) {
+            sessionStorage.removeItem(HANDOFF_INPUTS_KEY);
         } else {
-            sessionStorage.setItem(HANDOFF_REQUEST_KEY, JSON.stringify(request));
+            sessionStorage.setItem(HANDOFF_INPUTS_KEY, JSON.stringify({ version: 1, requests }));
         }
     } catch {
-        if (request !== null) {
+        if (requests.length > 0) {
             notify(
                 "warning",
-                "This browser cannot save handoff recovery. Keep this page open until the handoff finishes.",
+                "This browser cannot save automatic handoff navigation after reload.",
             );
         }
     }
 }
 
-function forgetHandoffRequest(request = pendingHandoff) {
-    if (request === pendingHandoff) {
-        saveHandoffRequest(null);
-    }
-}
-
-function rememberHandoffRequest(sourceId, request) {
-    const userId = store.state.me?.id;
-
-    if (userId === undefined) {
-        throw new ApiError(401, "Sign in before starting a handoff");
-    }
+function checkHandoffInputScope() {
+    const { conversationId, me, privateId } = store.state;
 
     if (
-        pendingHandoff !== null &&
-        pendingHandoff.sourceId === sourceId &&
-        pendingHandoff.userId === userId
+        conversationId !== handoffInputScope[0] ||
+        privateId !== handoffInputScope[2] ||
+        (me !== undefined && me?.id !== handoffInputScope[1])
     ) {
+        handoffInputEpoch++;
+    }
+
+    handoffInputScope = [conversationId, me?.id, privateId];
+
+    const outsideScope = (request) =>
+        request.sourceId !== conversationId ||
+        privateId !== null ||
+        (me !== undefined && request.userId !== me?.id);
+
+    if (pendingHandoffInputs.some(outsideScope)) {
+        saveHandoffInputs([]);
+    }
+
+    if (submitAttempts.some(outsideScope)) {
+        saveSubmitAttempts([]);
+    }
+}
+
+store.subscribe(checkHandoffInputScope);
+checkHandoffInputScope();
+
+function readSubmitAttempts() {
+    try {
+        const saved = JSON.parse(sessionStorage.getItem(SUBMIT_ATTEMPTS_KEY));
+
         if (
-            pendingHandoff.requestId !== request.requestId ||
-            pendingHandoff.command !== request.command ||
-            pendingHandoff.targetType !== request.targetType ||
-            pendingHandoff.relationship !== request.relationship
+            saved?.version === 1 &&
+            Array.isArray(saved.requests) &&
+            saved.requests.every(
+                (request) =>
+                    Number.isSafeInteger(request?.sourceId) &&
+                    request.sourceId > 0 &&
+                    typeof request.userId === "string" &&
+                    typeof request.payload === "string" &&
+                    typeof request.requestId === "string" &&
+                    request.requestId.length > 0 &&
+                    (request.receipt === undefined ||
+                        typeof request.receipt.handoffRequestKey === "string"),
+            )
         ) {
-            throw new ApiError(
-                409,
-                "Your previous handoff is still pending. Its saved choice will be recovered without starting another handoff.",
-            );
+            return saved.requests;
         }
-
-        return { request: pendingHandoff, fresh: false };
+    } catch {
+        // Invalid or unavailable storage must not prevent ordinary input.
     }
 
-    const saved = { sourceId, userId, ...request };
-
-    saveHandoffRequest(saved);
-
-    return { request: saved, fresh: true };
+    return [];
 }
 
-/** Recovery only awaits existing work or receipts; only a fresh human action may retry a blocked summary. */
-function sendHandoffRequest(request, fresh = false, recoverOnly = !fresh) {
-    const key = JSON.stringify([request.userId, request.sourceId, request.requestId]);
-    const existing = handoffRequests.get(key);
+function saveSubmitAttempts(requests) {
+    submitAttempts = requests;
 
-    if (existing) {
-        return existing.promise;
-    }
-
-    const flight = { promise: null, recover: false, explicit: false };
-    let failed = false;
-
-    flight.promise = (async () => {
-        try {
-            const native = request.command !== undefined;
-            const result = await api(`c/${request.sourceId}/${native ? "submit" : "handoffs"}`, {
-                requestId: request.requestId,
-                ...(native
-                    ? { text: request.command, handoffRecoverOnly: recoverOnly }
-                    : {
-                          targetType: request.targetType,
-                          relationship: request.relationship,
-                          recoverOnly,
-                      }),
-            });
-            const destination = native ? result.handoffThreadId : result.id;
-            const follow =
-                pendingHandoff === request &&
-                store.state.me?.id === request.userId &&
-                store.state.conversationId === request.sourceId;
-
-            forgetHandoffRequest(request);
-
-            if (follow && Number.isSafeInteger(destination)) {
-                navigate(destination);
-            }
-
-            return result;
-        } catch (error) {
-            failed = true;
-
-            // A later rejection cannot disprove an earlier uncertain admission, including across reloads.
-            if (fresh && error.status >= 400 && error.status < 500) {
-                forgetHandoffRequest(request);
-            }
-
-            throw error;
-        } finally {
-            handoffRequests.delete(key);
-
-            // A reconnect/completion can arrive before the interrupted HTTP request reports its failure.
-            if (failed && flight.recover && pendingHandoff === request) {
-                recoverHandoffRequest(flight.explicit);
-            }
+    try {
+        if (requests.length === 0) {
+            sessionStorage.removeItem(SUBMIT_ATTEMPTS_KEY);
+        } else {
+            sessionStorage.setItem(SUBMIT_ATTEMPTS_KEY, JSON.stringify({ version: 1, requests }));
         }
-    })();
-    handoffRequests.set(key, flight);
-
-    return flight.promise;
+    } catch {
+        if (requests.length > 0) {
+            notify("warning", "This browser cannot save uncertain message recovery after reload.");
+        }
+    }
 }
 
-function recoverHandoffRequest(explicit = false) {
-    const request = pendingHandoff;
+function forgetSubmitAttempt(attempt) {
+    saveSubmitAttempts(submitAttempts.filter((request) => request !== attempt));
+}
 
-    if (request === null || store.state.me === undefined || store.state.me === null) {
-        return;
+function submitScopeMatches(sourceId, userId, epoch) {
+    return (
+        epoch === handoffInputEpoch &&
+        store.state.conversationId === sourceId &&
+        store.state.privateId === null &&
+        store.state.me?.id === userId
+    );
+}
+
+function acceptSubmitReceipt(sourceId, userId, epoch, result) {
+    if (
+        submitScopeMatches(sourceId, userId, epoch) &&
+        typeof result.handoffRequestKey === "string" &&
+        userId !== undefined
+    ) {
+        rememberHandoffInput(sourceId, userId, result.handoffRequestKey);
+        // Creation can publish retirement before either POST acceptance or receipt lookup returns.
+        handoffSessionsChanged(store.state.sessions);
     }
+}
 
-    if (store.state.me.id !== request.userId || store.state.conversationId !== request.sourceId) {
-        forgetHandoffRequest(request);
+/** Resolve uncertain acceptance without sending input. Keep the identity until the visible draft is sent again. */
+function recoverSubmitAttempts() {
+    checkHandoffInputScope();
 
-        return;
-    }
+    for (const attempt of submitAttempts) {
+        const { sourceId, userId, requestId } = attempt;
+        const epoch = handoffInputEpoch;
 
-    // Web files reload before server code. Keep the saved choice dormant until the new backend is live.
-    if (!handoffSummaryAvailable()) {
-        return;
-    }
-
-    const key = JSON.stringify([request.userId, request.sourceId, request.requestId]);
-    const flight = handoffRequests.get(key);
-
-    if (flight) {
-        flight.recover = true;
-        flight.explicit ||= explicit;
-
-        return;
-    }
-
-    sendHandoffRequest(request, false, !explicit).catch((error) => {
-        if (pendingHandoff === request) {
-            notify(
-                "error",
-                `${error.message} Your handoff choice is saved. Tap to retry the same request.`,
-                () => recoverHandoffRequest(true),
-            );
+        if (!submitScopeMatches(sourceId, userId, epoch)) {
+            continue;
         }
-    });
+
+        if (attempt.receipt) {
+            acceptSubmitReceipt(sourceId, userId, epoch, attempt.receipt);
+
+            continue;
+        }
+
+        if (submitLookups.has(attempt)) {
+            continue;
+        }
+
+        const lookup = api(`c/${sourceId}/submit?requestId=${encodeURIComponent(requestId)}`)
+            .then((receipt) => {
+                if (
+                    submitScopeMatches(sourceId, userId, epoch) &&
+                    submitAttempts.includes(attempt)
+                ) {
+                    attempt.receipt = receipt;
+                    saveSubmitAttempts([...submitAttempts]);
+                    acceptSubmitReceipt(sourceId, userId, epoch, receipt);
+                }
+            })
+            .catch((error) => {
+                // Absence is not rejection: the original POST might not have reached admission yet.
+                if (error.status !== 404 && submitScopeMatches(sourceId, userId, epoch)) {
+                    notify(
+                        "error",
+                        `Could not check message acceptance: ${error.message}`,
+                        recoverSubmitAttempts,
+                    );
+                }
+            })
+            .finally(() => submitLookups.delete(attempt));
+
+        submitLookups.set(attempt, lookup);
+    }
+}
+
+function rememberHandoffInput(sourceId, userId, handoffRequestKey) {
+    if (pendingHandoffInputs.some((request) => request.handoffRequestKey === handoffRequestKey)) {
+        return;
+    }
+
+    saveHandoffInputs([...pendingHandoffInputs, { sourceId, userId, handoffRequestKey }]);
+}
+
+/** A completed tool result may redirect only the initiating tab, signed-in user and source route. */
+function recoverHandoffInputs() {
+    checkHandoffInputScope();
+    const request = pendingHandoffInputs[0];
+
+    if (!request || store.state.me?.id !== request.userId) {
+        return;
+    }
+
+    if (handoffInputLookup !== null) {
+        handoffInputLookup.again = true;
+
+        return;
+    }
+
+    const flight = { again: false };
+    const epoch = handoffInputEpoch;
+    const keys = new Set(pendingHandoffInputs.map((input) => input.handoffRequestKey));
+
+    handoffInputLookup = flight;
+    api(`c/${request.sourceId}/transfers`)
+        .then((data) => {
+            if (
+                epoch !== handoffInputEpoch ||
+                store.state.conversationId !== request.sourceId ||
+                store.state.me?.id !== request.userId
+            ) {
+                return;
+            }
+
+            const completed = data.transfers?.find(
+                (record) =>
+                    record.sourceThreadId === request.sourceId &&
+                    keys.has(record.requestKey) &&
+                    Number.isSafeInteger(record.targetThreadId),
+            );
+
+            if (completed) {
+                saveHandoffInputs([]);
+                navigate(completed.targetThreadId);
+            }
+        })
+        .catch((error) => {
+            if (epoch === handoffInputEpoch && store.state.conversationId === request.sourceId) {
+                notify(
+                    "error",
+                    `Could not check handoff navigation: ${error.message}`,
+                    recoverHandoffInputs,
+                );
+            }
+        })
+        .finally(() => {
+            handoffInputLookup = null;
+
+            if (flight.again) {
+                recoverHandoffInputs();
+            }
+        });
 }
 
 function handoffSessionsChanged(sessions) {
-    const request = pendingHandoff;
-    const source = request && sessions.find((session) => session.id === request.sourceId);
+    const accepted = pendingHandoffInputs[0];
+    const acceptedSource = accepted && sessions.find((session) => session.id === accepted.sourceId);
 
-    if (!source?.workflow?.readOnly || source.workflow.preparing) {
-        return;
-    }
-
-    const key = JSON.stringify([request.userId, request.sourceId, request.requestId]);
-
-    if (handoffCompletion !== key) {
-        handoffCompletion = key;
-        recoverHandoffRequest();
+    if (acceptedSource?.workflow?.readOnly) {
+        recoverHandoffInputs();
     }
 }
 
@@ -893,7 +957,8 @@ const handlers = {
             // This connection's id, which peek lists name (`peeks.js`). `GET /api/me` answers without one.
             ...(data.connection === undefined ? {} : { streamId: data.connection }),
         });
-        recoverHandoffRequest();
+        recoverSubmitAttempts();
+        recoverHandoffInputs();
     },
     sessions: (sessions) => {
         store.set((state) => ({
@@ -1253,10 +1318,6 @@ export function closeSignIn(flowId) {
 }
 
 export function navigate(conversationId, { replace = false, sheet = null, privateId = null } = {}) {
-    if (pendingHandoff !== null && pendingHandoff.sourceId !== conversationId) {
-        forgetHandoffRequest();
-    }
-
     const path =
         privateId !== null
             ? `/private/${encodeURIComponent(privateId)}`
@@ -1315,10 +1376,6 @@ export function navigate(conversationId, { replace = false, sheet = null, privat
 onRoute(() => {
     const id = routeConversation();
     const privateId = routePrivate();
-
-    if (pendingHandoff !== null && pendingHandoff.sourceId !== id) {
-        forgetHandoffRequest();
-    }
 
     if (id !== store.state.conversationId || privateId !== store.state.privateId) {
         opened(id);
@@ -1382,51 +1439,81 @@ export const actions = {
         id = current(),
         requestId = uid(),
     ) => {
-        const nativeHandoff = /^\/handoff(?:\s|$)/.test(text.trim());
-        let result;
+        const userId = store.state.me?.id;
+        const epoch = handoffInputEpoch;
+        // Busy/steering mode may change after an uncertain response; it is not a new human message.
+        const payload = JSON.stringify([text, attachments ?? [], Boolean(inlineFiles)]);
+        const tracked = userId !== undefined && submitScopeMatches(id, userId, epoch);
+        let attempt = tracked
+            ? submitAttempts.find(
+                  (request) =>
+                      request.sourceId === id &&
+                      request.userId === userId &&
+                      request.payload === payload,
+              )
+            : undefined;
+        const fresh = attempt === undefined;
 
-        if (nativeHandoff) {
-            requireHandoffSummary();
+        if (tracked && fresh) {
+            attempt = { sourceId: id, userId, payload, requestId };
+            // Persist before dispatch, including the window where reload cannot know POST's outcome.
+            saveSubmitAttempts([...submitAttempts, attempt]);
         }
 
-        if (nativeHandoff && /^\/handoff\s+\S/.test(text.trim()) && !attachments?.length) {
-            const saved = rememberHandoffRequest(id, { requestId, command: text.trim() });
+        if (attempt?.receipt) {
+            const result = attempt.receipt;
 
-            result = await sendHandoffRequest(saved.request, saved.fresh, false);
-        } else {
-            result = await api(`c/${id}/submit`, {
-                text,
-                attachments,
-                mode,
-                requestId,
-                ...(inlineFiles ? { inlineFiles } : {}),
-            });
+            forgetSubmitAttempt(attempt);
+            acceptSubmitReceipt(id, userId, epoch, result);
+
+            return result;
         }
 
-        // Native handoffs do not submit model input. Do not steal navigation if the sender left meanwhile.
-        if (handoffSummaryAvailable() && store.state.conversationId === id) {
-            if (result.handoffThreadId !== undefined) {
-                navigate(result.handoffThreadId);
-            } else if (result.handoffPicker) {
-                openSheet({ type: "handoff", id });
+        if (attempt && submitFlights.has(attempt)) {
+            return submitFlights.get(attempt);
+        }
+
+        const send = (async () => {
+            try {
+                const result = await api(`c/${id}/submit`, {
+                    text,
+                    attachments,
+                    mode,
+                    requestId: attempt?.requestId ?? requestId,
+                    ...(inlineFiles ? { inlineFiles } : {}),
+                });
+
+                if (attempt) {
+                    forgetSubmitAttempt(attempt);
+                }
+
+                acceptSubmitReceipt(id, userId, epoch, result);
+
+                // Acceptance, not the eventual tool result, clears the composer's draft.
+                return result;
+            } catch (error) {
+                if (attempt && fresh && error.status >= 400 && error.status < 500) {
+                    forgetSubmitAttempt(attempt);
+                } else if (attempt && submitScopeMatches(id, userId, epoch)) {
+                    // A later rejection cannot disprove a previously uncertain admission.
+                    recoverSubmitAttempts();
+                }
+
+                throw error;
+            } finally {
+                if (attempt) {
+                    submitFlights.delete(attempt);
+                }
             }
+        })();
+
+        if (attempt) {
+            submitFlights.set(attempt, send);
         }
 
-        return result;
+        return send;
     },
-    handoffs: (id = current()) => api(`c/${id}/handoffs`),
-    createHandoff: async (id, request) => {
-        requireHandoffSummary();
-        const saved = rememberHandoffRequest(id, {
-            requestId: request.requestId,
-            targetType: request.targetType,
-            relationship: request.relationship,
-        });
-
-        return sendHandoffRequest(saved.request, saved.fresh, false);
-    },
-    acceptValidation: (id, request) => api(`c/${id}/handoffs/accept-validation`, request),
-    updateWorkItem: (id, patch) => api(`c/${id}/handoffs/work-item`, patch),
+    updateWorkItem: (id, patch) => api(`c/${id}/x/work-items/work-item`, patch),
     /** Run a command in the session's folder (`!`); `context: false` keeps it from Pi (`!!`). */
     shell: (command, context, requestId = uid()) =>
         api(`c/${current()}/shell`, { command, context, requestId }),
@@ -1720,9 +1807,15 @@ export function closeSheet() {
 }
 
 // Per-conversation composer drafts survive reloads, including the automatic ones after a live edit.
+const draftRevisions = new Map();
+
 export const drafts = {
     get: (id) => localStorage.getItem(`pocket.draft.${id ?? "home"}`) ?? "",
+    revision: (id) => draftRevisions.get(id) ?? 0,
     set: (id, text) => {
+        // Even edit/undo back to identical text is a newer draft than an in-flight submission.
+        draftRevisions.set(id, drafts.revision(id) + 1);
+
         if (text) {
             localStorage.setItem(`pocket.draft.${id ?? "home"}`, text);
         } else {

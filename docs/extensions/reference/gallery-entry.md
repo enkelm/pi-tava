@@ -267,12 +267,12 @@ Its routes, each as its method and path: `GET status`.
 ### `client`
 
 ```ts
-client: "owner" | "steer" | "view" | null;
+client: "owner" | "steer" | "view" | "conversation" | null;
 ```
 
 Since 0.14.0 · Stable
 
-The `access` of its browser module, or `null` when it has none.
+The `access` of its browser module, or `null` when it has none. Experimental `"conversation"` access loads static code for scoped invitees; it grants no app-wide route or event access.
 
 ### `access`
 
@@ -282,7 +282,7 @@ access: "owner" | "steer" | "view";
 
 Since 0.14.0 · Stable
 
-The widest access of its routes and its browser module. It is `"owner"` when the module adds nothing to the app. It cannot be narrower than `client`.
+The widest access of its routes and its browser module. It is `"owner"` when the module adds nothing to the app. It cannot be narrower than `client`; static `"conversation"` client access counts as `"view"` for this summary.
 
 ### `commands`
 

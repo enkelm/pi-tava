@@ -15,8 +15,7 @@ import { canMoveSessions, useSessionDrag } from "./session-moves.js";
 import { sessionResultUnread } from "./session-seen.js";
 import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
 import { ThreadTypeTag, threadTypeLabel } from "./thread-type.js";
-import { WORKFLOW_LABELS } from "./handoffs.js";
-import { organizationTargets, workItemRows } from "./work-items.js";
+import { organizationTargets, workItemRows, WORKFLOW_LABELS } from "./work-items.js";
 import {
     actions,
     attempt,

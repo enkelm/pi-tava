@@ -2,6 +2,7 @@
 import {
     cleanUp,
     context,
+    executeHandoff,
     lastText,
     modelTexts,
     openApp,
@@ -40,7 +41,7 @@ function git(cwd: string, ...args: string[]) {
     }).trim();
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, threadType: ThreadType = "pull") {
     const directory = join(root, `pull-${++serial}`);
     const cwd = join(directory, "checkout");
     const upstream = join(directory, "upstream");
@@ -151,7 +152,7 @@ process.exitCode=existsSync(${JSON.stringify(exit)})?Number(readFileSync(${JSON.
     const { id } = await app.commands.createSession(owner(app), {
         cwd,
         projectId: project.id,
-        threadType: "pull",
+        threadType,
     });
 
     await app.commands.configure(id, owner(app), {
@@ -303,11 +304,7 @@ test("live role and retirement prevent external reads, including resumed calls",
     await f.app.harness.commit(async (tx) => {
         (await tx.doc(SessionsDoc)).items[String(f.id)]!.threadType = "pull";
     }, context);
-    await f.app.handoffs.start(f.id, owner(f.app), {
-        targetType: "worker",
-        relationship: "same-work",
-        requestId: "retire-pull",
-    });
+    await executeHandoff(f.app, f.id, "worker");
     assert.match(await f.send("pull", { command: view }), /read-only/);
     assert.equal(f.calls().length, 0);
 });
@@ -456,16 +453,13 @@ test("fetch refuses an existing helper writer without aborting it; helper GitHub
 
 // The incoming delivery waits for this very run: it is not an independent background writer.
 test("a Pull successor can admit its first fetch while its own handoff brief is being delivered", async (t) => {
-    const f = await fixture(t);
+    const f = await fixture(t, "worker");
 
     renameSync(f.cwd, `${f.cwd}-moved`);
 
     try {
-        const next = await f.app.handoffs.start(f.id, owner(f.app), {
-            targetType: "pull",
-            relationship: "same-work",
-            brief: "FETCH_FROM_HANDOFF: fetch the configured origin.",
-            requestId: "incoming-pull-fetch",
+        const next = await executeHandoff(f.app, f.id, "pull", {
+            summary: "FETCH_FROM_HANDOFF: fetch the configured origin.",
         });
         const id = next.id as ConversationId;
 

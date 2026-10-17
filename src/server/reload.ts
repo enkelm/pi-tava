@@ -30,7 +30,7 @@ import { pathToFileURL } from "node:url";
 import type { Extension, Registry } from "@earendil-works/pi-durable";
 import { describe } from "./errors.ts";
 import { ExtensionWebs, POCKET_API } from "./extension-web.ts";
-import type { ExtensionModule, PocketHost, WebAccess } from "./host.ts";
+import type { ExtensionModule, PocketHost, WebAccess, WebClientAccess } from "./host.ts";
 
 /**
  * How long a module may take to load (its import, and an async default export) before its load fails. At the server's
@@ -43,6 +43,7 @@ let imports = 0;
 /** Built-in extension modules, in install order. Other `.ts` files in the directory load after them, by name. */
 const ORDER = [
     "prompt.ts",
+    "work-items.ts",
     "artifacts.ts",
     "browser.ts",
     "subagents.ts",
@@ -70,6 +71,7 @@ const REQUIRED = new Set(["prompt.ts"]);
 const OFF_BY_DEFAULT = new Set(["guard.ts", "agent-teams.ts"]);
 const TITLES: Record<string, string> = {
     "prompt.ts": "System prompt",
+    "work-items.ts": "Work Items and agent profiles",
     "artifacts.ts": "Artifacts",
     "browser.ts": "Browser",
     "subagents.ts": "Subagents",
@@ -152,7 +154,7 @@ export interface ExtensionInfo {
      * What it adds to the app: its routes (`GET status`), who loads its browser module, when it has one, the widest
      * access of the two, and its commands (`conversation /name`, `global /name`).
      */
-    web?: { routes: string[]; client?: WebAccess; access?: WebAccess; commands?: string[] };
+    web?: { routes: string[]; client?: WebClientAccess; access?: WebAccess; commands?: string[] };
     /** Core-backed modules whose requested selection takes effect only at startup. */
     restartOnly?: boolean;
     /** The module's running state, separate from a requested restart-only selection. */
@@ -613,7 +615,12 @@ export class ExtensionLoader {
 
         // What it adds to the app counts only once it installed; a version that fails leaves the one before in place,
         // and what it set up (its cleanups) goes. The new version starts before the old one's cleanups run.
-        const { part, web } = this.#webs.stage(file, module.directory, titleOf(file));
+        const { part, web } = this.#webs.stage(
+            file,
+            module.directory,
+            titleOf(file),
+            module.source === "built-in",
+        );
         let committed = false;
 
         try {

@@ -6,8 +6,8 @@ A module can add to the app what a tool cannot: a page that shows something with
 
 The second argument of the default export, `web`, registers these parts while the module loads:
 
-- **Routes** on the server, under `/api/x/<module>/`. The browser module calls them. Keys and other secrets stay on the server. See [Routes](routes.md).
-- **A browser module**: a `.js` file that the app loads in the tabs of the people that it is for. Through `pocket`, the app's API for extensions, it adds rail buttons, pages, sheets, menu rows, and launcher actions, and says how its tools' calls show. See [Browser modules](browser-modules.md).
+- **Routes** on the server: app-wide under `/api/x/<module>/`, or conversation-scoped under `/api/c/:id/x/<module>/` with `web.sessionRoute`. The browser calls only its module's routes; keys and other secrets stay on the server. Scoped routes recheck current source visibility and role, including after body arrival. See [Routes](routes.md).
+- **A browser module**: a `.js` file that the app loads in the tabs of the people that it is for. Through `pocket`, the app's API for extensions, it adds rail buttons, pages, sheets, menu rows, launcher actions, inline session controls and draft-only input hints, and says how its tools' calls show. See [Browser modules](browser-modules.md).
 - **Commands** for the message box (`/name`). They run on the server, and need no browser module. See [Slash commands](commands.md).
 
 ```typescript
@@ -24,6 +24,11 @@ export default function createUsage(_host: Host, web: Web) {
 ## The module's name
 
 What a module adds to the app goes by the name of its file. For example, `server-status.ts` has the name `server-status`. Its routes are at `/api/x/server-status/`, and its browser module at `/x/server-status/`.
+
+Browser assets may opt into `access: "conversation"` so scoped invitees can load static code. This
+grants no app-wide route access or access to other sessions. The bundled Work Items module uses
+this mode with public session controls, hints and scoped transfer-service routes; normal human
+submission and accepted-transfer recovery remain in core.
 
 File names are different across the drop-in folder and the built-in modules, so these addresses never collide. A module that adds to the app must have a name of letters, digits, `-`, and `_`, that starts with a letter or a digit, up to a [length](reference/limits.md#names).
 

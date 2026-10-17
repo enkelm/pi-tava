@@ -2,6 +2,7 @@
 import {
     type App,
     cleanUp,
+    executeHandoff,
     fakeTab,
     lastText,
     openApp,
@@ -202,13 +203,8 @@ test("the page that runs a reply's HTML is for people signed in, sandboxed, and 
         const artifact = `${base}/a/${id}/demo-page/latest`;
 
         assert.equal((await fetch(artifact, { headers: { authorization } })).status, 200);
-        // The human's native command awaits the source summary before returning its successor.
-        const transferred = await app.commands.submit(id, owner(), {
-            text: "/handoff researcher",
-            requestId: crypto.randomUUID(),
-        });
-
-        assert.ok(transferred.handoffThreadId, "the human command created a successor");
+        // A genuine placed human input and the registered tool retire the original writer.
+        await executeHandoff(app, id, "researcher");
         assert.equal((await fetch(url, { headers: { authorization } })).status, 403);
         const blocked = await fetch(artifact, { headers: { authorization } });
 

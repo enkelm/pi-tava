@@ -54,7 +54,7 @@ Ask these questions in this order. The first "yes" gives the answer.
 
 ### Linked sessions and Agent Teams
 
-- **Core: linked sessions** (`linked-sessions.ts`, `host.linkedSessions`). Core starts a linked session, carries messages, and lists the sessions. It acts with the rights of the person Pi works for. It refuses work in plan mode. It counts the cost of the team against the budget of the top session. It stops a team at its [limits](../reference/limits.md#linked-sessions) of sessions, and of messages with no message from a person. It uses keys, so a replay acts once. It gives sessions addresses, so no session ID goes into a transcript.
+- **Core: linked sessions** (`linked-sessions.ts`, `host.sessions.linked`). Core starts a linked session, carries messages, and lists the sessions. It acts with the rights of the person Pi works for. It refuses work in plan mode. It counts the cost of the team against the budget of the top session. It stops a team at its [limits](../reference/limits.md#linked-sessions) of sessions, and of messages with no message from a person. It uses keys, so a replay acts once. It gives sessions addresses, so no session ID goes into a transcript.
 - **Extension: Agent Teams** (`extensions/agent-teams.ts` and `agent-teams.js`). The `team` tool, its words to Pi, and how its calls show. It is off by default. At run time it uses only `host` and `web`, as a drop-in does.
 - **Why:** pull request #84 first put Agent Teams in core. In 0.14 the mechanism stayed in core, because it decides permissions, stored data, and spend (C1 to C3). The workflow became a built-in extension (C6, C7). Another team workflow can use the same linked sessions.
 
@@ -112,7 +112,7 @@ A maintainer answers with one of these:
 
 ### Rules for extension points
 
-- **C15. Each new extension point has a user when it ships:** a built-in extension, a gallery extension, or a tested example in [docs/examples/](../../examples/). `host.linkedSessions` and `pocket.toolCall` shipped with Agent Teams, and `web.command` with the clock example.\
+- **C15. Each new extension point has a user when it ships:** a built-in extension, a gallery extension, or a tested example in [docs/examples/](../../examples/). `host.sessions.linked` and `pocket.toolCall` serve Agent Teams, and `web.command` serves the clock example. Work Items consumes `web.workflow`, scoped routes and the public browser session controls/input hints.\
   _Reason:_ an interface with no user is a guess, and a wrong guess becomes a public API that Pi Pocket must keep.
 
 ## Pull requests

@@ -1,6 +1,6 @@
 # pocket
 
-`pocket` is the app's API for a browser module: the argument of the browser module's default export. With it, a browser module adds rail buttons, menu rows, launcher actions, pages, and sheets, and sets how the calls of its tools show. It also calls its module's routes and gets its module's events. [Browser modules](../browser-modules.md) tells you how to write one, and what happens when it fails.
+`pocket` is the app's API for a browser module: the argument of the browser module's default export. With it, a browser module adds rail buttons, menu rows, launcher actions, pages, sheets, inline session controls and input hints, and sets how the calls of its tools show. It also calls its module's routes and gets its module's events. [Browser modules](../browser-modules.md) tells you how to write one, and what happens when it fails.
 
 The types are `Pocket` and the types that it uses, in [types/pocket.d.ts](../../../types/pocket.d.ts). A browser module is JavaScript: [Types for your editor](types.md) tells you how to use the types in JSDoc.
 
@@ -216,6 +216,18 @@ Since 0.14.0 · Stable
 
 The app's on and off switch. See [`SwitchProps`](#switchprops).
 
+### `AgentProfileTag`
+
+```ts
+readonly AgentProfileTag: FunctionComponent<AgentProfileTagProps>;
+```
+
+Since 0.15.0 · Experimental
+
+A generic indicator for `profile`, a registered profile ID. It uses current profile metadata for its
+label and icon, falling back to the raw ID when unavailable. `iconOnly: true` keeps an accessible label
+without visible text. There is no browser-owned table of built-in role names or icons.
+
 ## Who and where
 
 ### `me`
@@ -238,6 +250,46 @@ Since 0.14.0 · Stable
 
 The id of the session that this tab shows, a number as in its address (`/s/12`), or `null` when it shows none.
 
+### `session`
+
+```ts
+session(): SessionSnapshot;
+```
+
+Since 0.15.0 · Experimental
+
+Deeply frozen metadata copies: `id`, `me`, `conversation`, the existing access-filtered `sessions`
+catalogue, `busy`, `canSteer` and public `profiles`. Catalogue/profile copies are cached per immutable
+input object; the core's store objects are neither exposed nor frozen. `me` is a separate copy.
+The conversation is `null` before its view loads, otherwise only `{ id, kind, title, threadType, cwd }`.
+No settings, prompts or raw view are included. UI flags never grant authorization.
+
+### `requestId`
+
+```ts
+requestId(): string;
+```
+
+Since 0.15.0 · Experimental
+
+A fresh identity from core's existing ID generator. It also works on plain-HTTP LAN origins where
+`crypto.randomUUID` is unavailable. Use it for submissions, draft revisions and sheet-opening tokens;
+it is not a credential or authorization. Reuse a submission identity for retries of unchanged input,
+not for edited input.
+
+### `onSessionChange`
+
+```ts
+onSessionChange(listener: (session: SessionSnapshot) => void): () => void;
+```
+
+Since 0.15.0 · Experimental
+
+Calls the listener on app-state changes, not only on navigation. Read `session()` for the initial
+snapshot. The returned cleanup stops the subscription; module disposal also stops it. Components may
+combine it with `useState`, and inline controls receive updated snapshots from their parent renderer.
+Keep asynchronous reads and caches scoped to the current user and source, rejecting stale results.
+
 ## Routes and events
 
 ### `api`
@@ -259,6 +311,43 @@ Calls one of the module's own routes, and gives the JSON that it returns.
 - `signal` stops the call.
 - When the server answers with an error, the promise rejects with an error that has the server's words and its `status`.
 - It rejects at once for a path out of the module's routes: a path with a `.` or `..` part, a leading `//`, or a scheme such as `https:`.
+
+### `sessionApi`
+
+```ts
+sessionApi<T = unknown>(
+    id: number,
+    path: string,
+    body?: object,
+    options?: { method?: WebMethod; signal?: AbortSignal },
+): Promise<T>;
+```
+
+Since 0.15.0 · Experimental
+
+Calls only this module's scoped routes at `/api/c/:id/x/<module>/<path>`, registered with
+[`web.sessionRoute`](web.md#sessionroute). GET/POST selection, errors, query strings, path validation
+and cancellation work as for `api`. Core rechecks current source visibility and the route's role
+access, including after body arrival. Static browser access does not authorize a request.
+
+### `submit`
+
+```ts
+submit(id: number, request: SessionSubmitRequest): Promise<SessionSubmitReceipt>;
+```
+
+Since 0.15.0 · Experimental
+
+Sends genuine normal human model input through the composer's authenticated submission journal.
+Supply `text` and a stable `requestId` from `pocket.requestId()`; optional fields are `attachments`, `mode` (`"steer"` or
+`"followUp"`) and `inlineFiles`. Reuse the identity for the same unresolved draft, not for edited input.
+Core retains steering, driving, spend and conversation checks.
+
+It resolves on durable acceptance with `{ submissionId, requestId, handoffRequestKey? }`, not when
+an agent answers or a successor exists. The receipt's request ID is the server-owned input identity;
+`handoffRequestKey` is an opaque correlation, not authority. Core owns passive acknowledgement and
+transfer lookup and initiating-tab navigation, even when Work Items is off. Do not add another
+send/recovery journal, transfer poller, automatic resubmission or handoff-version flag.
 
 ### `on`
 
@@ -326,6 +415,33 @@ Since 0.14.0 · Stable
 
 Adds a sheet, as the app's own sheets. See [`SheetSpec`](#sheetspec).
 
+### `sessionControl`
+
+```ts
+sessionControl(spec: SessionControlSpec): Added<SessionControlSpec>;
+```
+
+Since 0.15.0 · Experimental
+
+Adds a guarded component in `slot: "header" | "composer"` for the current session. The component
+receives `{ pocket, session }`; `session` is a `SessionSnapshot`. It shares the extension renderer's
+failure and disposal boundaries. Non-session conversations do not render these controls. The
+component must still respect current permissions and avoid retargeting delayed actions.
+
+### `inputCommand`
+
+```ts
+inputCommand(spec: InputCommandSpec): Added<InputCommandSpec>;
+```
+
+Since 0.15.0 · Experimental
+
+Contributes a normal-model-input command row and argument hints: `{ id, name, description, suggest }`.
+`suggest(text, caret)` returns hint rows or a promise of rows. A row may have `name`, `description`,
+`args`, `completion`, `completeOnEnter` and `disabled`. The app uses at most 512 rows. Picking a row
+only edits the ordinary draft; this API has no execution or submission handler. Sending remains the
+normal authenticated input path, unlike server-side `web.command`.
+
 ### `toolCall`
 
 ```ts
@@ -369,6 +485,18 @@ openSheet(id: string, props?: object): void;
 Since 0.14.0 · Stable
 
 Opens the module's sheet with this `id`. Its component gets the fields of `props`.
+
+### `navigate`
+
+```ts
+navigate(id: number): void;
+```
+
+Since 0.15.0 · Experimental
+
+Opens a visible conversation through normal app routing and history. It grants no access to an
+otherwise hidden conversation. Capture the intended ID before asynchronous work, rather than using
+whatever thread happens to be current when it settles.
 
 ### `closeSheet`
 
@@ -565,12 +693,29 @@ What the component of a page or sheet gets.
 ### `SheetProps`
 
 ```ts
-type SheetProps<P extends object = object> = P & PageProps;
+type SheetProps<P extends object = object> = P &
+    PageProps & {
+        isOpen(): boolean;
+    };
 ```
 
 Since 0.14.0 · Stable
 
-What a sheet's component gets: the fields of the `props` that `openSheet` gave, and `pocket` and `close`.
+What a sheet's component gets: the flat fields passed to `openSheet`, plus `pocket`, `close` and
+`isOpen`. Do not read a nested `props` property or create another outer sheet; the host supplies it.
+`close` pins this actual opening, so an old callback cannot close a later opening of the same sheet ID.
+
+#### `SheetProps.isOpen`
+
+```ts
+isOpen(): boolean;
+```
+
+Since 0.15.0 · Experimental
+
+True only while this actual opening is current. Closing animation retention, a replacement opening
+of the same ID, or a disposed module returns false. Use it before showing inline errors after an
+await; also check user/source identity and draft revision before clearing saved work.
 
 ### `ToolCallSpec`
 
@@ -622,12 +767,196 @@ interface Added<S> {
 
 Since 0.14.0 · Stable
 
-What `rail`, `menu`, `launcher`, `page`, and `sheet` return.
+What contribution registrations return, including `sessionControl` and `inputCommand`.
 
 - `update`: changes the fields in `patch`. An update that changes nothing draws nothing again. Values count as the same only when they are the very same value: a new array or function is a change.
 - `remove`: removes what was added.
 
+### `SessionSnapshot`
+
+```ts
+interface SessionSnapshot {
+    readonly id: number | null;
+    readonly me: Readonly<Person> | null;
+    readonly conversation: SessionConversation | null;
+    readonly sessions: readonly SessionMetadata[];
+    readonly busy: boolean;
+    readonly canSteer: boolean;
+    readonly profiles: readonly AgentProfileMetadata[];
+}
+```
+
+Since 0.15.0 · Experimental
+
+The snapshot contains deeply frozen metadata copies, not arbitrary server fields or raw prompt data.
+Its catalogue retains the current person's visibility filter.
+
+### `SessionConversation`
+
+```ts
+interface SessionConversation {
+    readonly id: number;
+    readonly kind: "session" | "conversation" | "subagent";
+    readonly title: string;
+    readonly cwd: string;
+    readonly threadType?: AgentProfile["id"];
+}
+```
+
+Since 0.15.0 · Experimental
+
+Only these five fields describe the open conversation. No workflow projection, placement, settings,
+transcript or raw view is exposed; use the filtered catalogue for supported session-row metadata.
+
+### `SessionMetadata`
+
+Since 0.15.0 · Experimental
+
+Supported display fields from the existing filtered session catalogue:
+
+- `id`, optional `title`, `cwd`, `createdAt`, `updatedAt` and optional `archived`.
+- `threadType` and optional `projectId`, `goalId`, `workItemId`, `workItemTitle`, `activeThreadId`,
+  `linkedFrom: { id }` and `linkedOrigin`. Group/link metadata retains core's visibility filtering.
+- `workflow`, `busy`, `waiting`, optional `failed` and optional `model`.
+
+Fields are read-only metadata, not execution or mutation authority.
+
+### `SessionWorkflowMetadata`
+
+Since 0.15.0 · Experimental
+
+Display-only `status` (`"active"`, `"review-complete"`, `"landed"`, `"published"` or `"needs-review"`),
+`readOnly`, `managed`, `preparing`, `profileAvailable`, optional `summary` and optional
+`readyForPublish`. Historical status values do not grant handoff, write or publication permission.
+
+### `AgentProfileMetadata`
+
+```ts
+type AgentProfileMetadata = Omit<AgentProfile, "prompt">;
+```
+
+Since 0.15.0 · Experimental
+
+Public profile labels, descriptions, starter choices and optional icons, never prompt text. See
+[`AgentProfile`](web.md#agentprofile).
+
+### `SessionControlSpec`
+
+```ts
+interface SessionControlSpec {
+    id: string;
+    slot: "header" | "composer";
+    component: ComponentType<SessionControlProps>;
+}
+```
+
+Since 0.15.0 · Experimental
+
+### `SessionControlProps`
+
+```ts
+interface SessionControlProps {
+    pocket: Pocket;
+    session: SessionSnapshot;
+}
+```
+
+Since 0.15.0 · Experimental
+
+### `InputCommandSpec`
+
+```ts
+interface InputCommandSpec {
+    id: string;
+    name: string;
+    description: string;
+    suggest(
+        text: string,
+        caret: number,
+    ): readonly InputCommandHint[] | Promise<readonly InputCommandHint[]>;
+}
+```
+
+Since 0.15.0 · Experimental
+
+Names are lowercase command names beginning with a letter, at most 64 letters/digits/underscores or
+hyphens.
+
+### `InputCommandHint`
+
+```ts
+interface InputCommandHint {
+    name: string;
+    description?: string;
+    args?: string;
+    completion?: string;
+    completeOnEnter?: boolean;
+    disabled?: boolean;
+}
+```
+
+Since 0.15.0 · Experimental
+
+Hint rows have no action callback. Return no hints inside prose or while editing earlier
+arguments unless your command explicitly supports it.
+
+### `SessionSubmitRequest`
+
+```ts
+interface SessionSubmitRequest {
+    text: string;
+    requestId: string;
+    attachments?: readonly SessionAttachment[];
+    mode?: "steer" | "followUp";
+    inlineFiles?: boolean;
+}
+```
+
+Since 0.15.0 · Experimental
+
+`inlineFiles` sends supported `@` mentions along with the input under the usual limits.
+
+### `SessionAttachment`
+
+```ts
+interface SessionAttachment {
+    path: string;
+    name: string;
+    mime: string;
+    size: number;
+}
+```
+
+Since 0.15.0 · Experimental
+
+Attachments refer to existing uploads in the addressed conversation, not arbitrary server files.
+
+### `SessionSubmitReceipt`
+
+```ts
+interface SessionSubmitReceipt {
+    readonly submissionId: number;
+    readonly requestId: string;
+    readonly handoffRequestKey?: string;
+}
+```
+
+Since 0.15.0 · Experimental
+
+The receipt acknowledges durable input acceptance only; it contains no response text or successor ID.
+
 ## The props of the pieces
+
+### `AgentProfileTagProps`
+
+```ts
+interface AgentProfileTagProps {
+    profile: AgentProfile["id"];
+    iconOnly?: boolean;
+}
+```
+
+Since 0.15.0 · Experimental
 
 ### `IconProps`
 

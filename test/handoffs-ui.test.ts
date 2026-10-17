@@ -1,6 +1,6 @@
-// Browser owner: explicit human choice, summary-in-flight rendering, stale chooser loads,
-// uncertain HTTP recovery, destination naming/navigation and indivisible Work Item controls.
-// Backend tests own state admission and durable summaries. No agent readiness/recommendation UI remains.
+// Browser owner: nonblocking two-step picker, optional slash completion, real input acceptance, clarification, tool-result
+// navigation/reload and indivisible Work Item controls. Backend tests own deterministic routing,
+// input provenance and durable creation. Transport faults never fabricate handoff receipts.
 // All Git repositories, app data and browser profiles are disposable. Run only where listeners,
 // Chromium and the workflow Git sandbox are available; no production test seams or live data.
 import { cleanUp, lastText, openApp, owner, root, scriptedModel, until, work } from "./helpers.ts";
@@ -11,7 +11,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import type { ConversationId } from "@earendil-works/pi-durable";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { Browsers } from "../src/server/browser.ts";
 import { findBrowser } from "../src/server/browser/discovery.ts";
 import type { BrowserPage } from "../src/server/browser/page.ts";
@@ -60,7 +60,9 @@ async function button(page: BrowserPage, scope: string, text: string) {
 async function fill(page: BrowserPage, selector: string, text: string) {
     await present(page, selector);
     await page.evaluate(`const field = document.querySelector(${JSON.stringify(selector)});
+        field.focus();
         field.value = ${JSON.stringify(text)};
+        field.setSelectionRange(field.value.length, field.value.length);
         field.dispatchEvent(new InputEvent('input', { bubbles: true }));`);
 }
 
@@ -77,8 +79,29 @@ async function shot(page: BrowserPage, name: string) {
     writeFileSync(join(directory, `${name}.jpg`), Buffer.from(captured.data, "base64"));
 }
 
-const dialog = '[role="dialog"][aria-label="Handoff"]';
+const composer = 'textarea[aria-label="Message Pi"]';
+const commandRows = '.composer .commands [role="option"]';
 const optionsSurface = ":is(.sidebar-options-menu, .sidebar-options-sheet)";
+const draft = (page: BrowserPage) =>
+    value<string>(page, `document.querySelector(${JSON.stringify(composer)}).value`);
+
+async function commandNames(page: BrowserPage) {
+    const names = `[...document.querySelectorAll(${JSON.stringify(`${commandRows}.command .command-name`)})].map(row => row.textContent.trim()).filter(name => name !== '/handoff')`;
+
+    await until(
+        () => value<boolean>(page, `(${names}).length > 0`),
+        "handoff argument completions load, not the loading or error status row",
+    );
+
+    return value<string[]>(page, names);
+}
+
+async function pickCommand(page: BrowserPage, text: string) {
+    const expression = `[...document.querySelectorAll(${JSON.stringify(commandRows)})].find(row => row.querySelector('.command-name')?.textContent.trim() === ${JSON.stringify(text)})`;
+
+    await until(() => value<boolean>(page, `Boolean(${expression})`), `completion ${text}`);
+    await page.evaluate(`(${expression}).click()`);
+}
 
 async function rowOptions(page: BrowserPage, row: string, viewport: "desktop" | "mobile") {
     if (viewport === "mobile") {
@@ -91,21 +114,18 @@ async function rowOptions(page: BrowserPage, row: string, viewport: "desktop" | 
     await present(page, optionsSurface);
 }
 
-async function choices(page: BrowserPage) {
-    await present(page, `${dialog} input[name="handoff-option"]`);
+function gate() {
+    let release = () => {};
 
-    return value<string[]>(
-        page,
-        `[...document.querySelectorAll('${dialog} input[name="handoff-option"]')].map(input => input.value).sort()`,
-    );
-}
+    const promise = new Promise<void>((resolve) => {
+        release = resolve;
+    });
 
-async function choose(page: BrowserPage, type: string, relationship = "same-work") {
-    await click(page, `${dialog} input[value="${type}:${relationship}"]`);
+    return { promise, release };
 }
 
 test(
-    "Handoffs UI: human choices, summary preparation, durable retry, named successors and whole Work Items",
+    "Handoffs UI: real slash/English input, clarification, tool-result reload and whole Work Items",
     { skip: findBrowser() === undefined ? "no Chromium installed" : false, timeout: 180_000 },
     async (t) => {
         for (const viewport of ["desktop", "mobile"] as const) {
@@ -128,11 +148,12 @@ test(
                     "fixture",
                 ]);
 
-                let releaseSummary = () => {};
-
-                let summaryGate: Promise<void> | undefined;
-                let summaries = 0;
+                let replyGate: ReturnType<typeof gate> | undefined;
+                let summaryGate: ReturnType<typeof gate> | undefined;
                 let titleRequests = 0;
+                const handoffInputs: string[] = [];
+                const userInputs: string[] = [];
+                const holdMessage = "Hold this reply while I inspect handoff choices.";
                 const receivedSummary =
                     "Original ask: repair durable retry delivery. Files: handoffs.ts. Tests: fixture lifecycle passed. Deferred: hardware browser checks. Limits: no commit, push or restart.";
                 const namedTitle = "Durable retry delivery";
@@ -141,32 +162,65 @@ test(
 
                     if (last.role === "user" && last.text.startsWith(TITLE_PROMPT)) {
                         titleRequests++;
-                        assert.ok(
-                            last.text.includes(receivedSummary),
-                            "destination naming sees the received source summary",
-                        );
+                        assert.ok(last.text.includes(receivedSummary));
 
                         return fauxAssistantMessage(namedTitle);
                     }
 
-                    if (
+                    if (last.role === "user") {
+                        userInputs.push(last.text);
+                    }
+
+                    const humanText = last.text.replace(/^\[from:[^\]]+\]\s*/, "");
+                    const handoff =
                         last.role === "user" &&
-                        /^(?:\[from:[^\]]+\]\s*)?The human has requested a /.test(last.text)
-                    ) {
-                        summaries++;
+                        (humanText.startsWith("/handoff reviewer") ||
+                            humanText.startsWith("/handoff researcher") ||
+                            humanText.startsWith("Please hand off to a new worker."));
 
-                        if (summaryGate !== undefined) {
-                            await Promise.race([
-                                summaryGate,
-                                new Promise<void>((resolve) =>
-                                    options?.signal?.addEventListener("abort", () => resolve(), {
-                                        once: true,
-                                    }),
-                                ),
-                            ]);
-                        }
+                    if (handoff) {
+                        handoffInputs.push(last.text);
+                    }
 
-                        return fauxAssistantMessage(receivedSummary);
+                    if (last.role === "user" && humanText.trim() === "/handoff") {
+                        return fauxAssistantMessage("Which role and scope should take over?");
+                    }
+
+                    const held = handoff
+                        ? summaryGate
+                        : last.text.includes(holdMessage)
+                          ? replyGate
+                          : undefined;
+
+                    if (held !== undefined) {
+                        await Promise.race([
+                            held.promise,
+                            new Promise<void>((resolve) =>
+                                options?.signal?.addEventListener("abort", () => resolve(), {
+                                    once: true,
+                                }),
+                            ),
+                        ]);
+                    }
+
+                    if (handoff) {
+                        return fauxAssistantMessage(
+                            [
+                                fauxToolCall("handoff", {
+                                    action: "start",
+                                    targetType: humanText.startsWith("/handoff reviewer")
+                                        ? "reviewer"
+                                        : humanText.startsWith("/handoff researcher")
+                                          ? "researcher"
+                                          : "worker",
+                                    relationship: humanText.startsWith("/handoff")
+                                        ? "same-work"
+                                        : "new-work",
+                                    summary: receivedSummary,
+                                }),
+                            ],
+                            { stopReason: "toolUse" },
+                        );
                     }
 
                     return fauxAssistantMessage(
@@ -223,228 +277,354 @@ test(
                         `${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`,
                     );
                     await click(page, `${scope} .session-row[data-id="${origin.id}"] .session`);
-                    await click(page, ".topbar .handoff-button");
-                    assert.deepEqual(
-                        await choices(page),
-                        [
-                            "pull:new-work",
-                            "pull:same-work",
-                            "researcher:new-work",
-                            "researcher:same-work",
-                            "worker:new-work",
-                        ],
-                        "unavailable stages are absent, not disabled milestone choices",
-                    );
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelectorAll('${dialog} input:checked').length`,
-                        ),
-                        0,
-                        "server ordering never silently selects a role for the human",
-                    );
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${dialog} button[type="submit"]').disabled`,
-                        ),
-                        true,
-                    );
-                    assert.equal(
-                        await value(
-                            page,
-                            `Boolean(document.querySelector('${dialog} .handoff-recommendation, ${dialog} section[aria-label="Review and validation"], ${dialog} fieldset[aria-label="Validation risk acceptance"], ${dialog} textarea'))`,
-                        ),
-                        false,
-                        "no agent recommendation, validation gate panel or authored-brief form",
-                    );
-                    assert.equal(summaries, 0, "opening the chooser never asks for a summary");
-                    const countBefore = app.sessions().length;
+                    await present(page, ".topbar .handoff-button");
+                    await present(page, '[role="dialog"][aria-label="Handoff"]', false);
 
-                    await button(page, dialog, "Cancel");
-                    await present(page, dialog, false);
-                    assert.equal(app.sessions().length, countBefore);
-                    writeFileSync(join(cwd, "fixture.txt"), "Actual changed file to review\n");
-                    await click(page, ".topbar .handoff-button");
-                    assert.ok(
-                        (await choices(page)).includes("reviewer:same-work"),
-                        "real Changes can offer review before any completed assistant report",
-                    );
-                    await choose(page, "reviewer");
-
-                    // Keep an old options response in flight across close/reopen. A stale opening must
-                    // not overwrite a fresh human selection, whether its response succeeds or fails.
-                    await page.evaluate(`const fetchBeforeReopen = window.fetch.bind(window);
-                        let delayed = false;
-                        window.reopenLoads = 0;
-                        window.fetch = async (url, options) => {
-                            const response = await fetchBeforeReopen(url, options);
-
-                            if (String(url).endsWith('/handoffs') && options?.method !== 'POST') {
-                                window.reopenLoads++;
-
-                                if (!delayed) {
-                                    delayed = true;
-                                    await new Promise(resolve => { window.releaseOldOptions = resolve; });
-                                }
-                            }
-
-                            return response;
-                        };
-                        [...document.querySelectorAll('${dialog} button')].find(button => button.textContent.trim() === 'Refresh options').click();`);
-                    await until(
-                        () =>
-                            value<boolean>(page, "typeof window.releaseOldOptions === 'function'"),
-                        "old options load is held",
-                    );
-                    await click(page, `${dialog} .sheet-head [aria-label="Close"]`);
-                    await click(page, ".topbar .handoff-button");
-                    await choices(page);
-                    await choose(page, "pull");
-                    await page.evaluate(
-                        "window.releaseOldOptions(); await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));",
-                    );
-                    await present(page, `${dialog} input[value="pull:same-work"]:checked`);
-                    await button(page, dialog, "Cancel");
-
-                    // Lose the real admitted POST response. A later denial cannot prove the first
-                    // request failed, so role/payload/request identity must remain frozen for recovery.
+                    // Intercept transport failures only. Model/tool execution and all receipts
+                    // still come from the real authenticated app, never a mocked handoff result.
                     await page.evaluate(`const fetchOriginal = window.fetch.bind(window);
                         window.handoffRequests = [];
-                        window.handoffRejectNext = true;
-                        window.handoffLoseNext = true;
+                        window.acceptedHandoffInputs = [];
+                        window.legacyHandoffPosts = 0;
+                        window.handoffRejectNext = false;
+                        window.handoffRejectLookup = false;
                         window.fetch = async (url, options) => {
-                            const match = /\\/api\\/c\\/\\d+\\/handoffs$/.test(String(url)) && options?.method === 'POST';
+                            const address = String(url);
+                            const submitted = /\\/api\\/c\\/\\d+\\/submit$/.test(address) && options?.method === 'POST';
+                            const body = submitted ? JSON.parse(options.body) : null;
+                            const handoff = body && /^\\/handoff(?:\\s|$)/.test(body.text);
+                            const lookup = /\\/api\\/c\\/\\d+\\/x\\/work-items\\/handoffs$/.test(address);
 
-                            if (match) {
-                                window.handoffRequests.push(JSON.parse(options.body));
+                            if (/\\/api\\/c\\/\\d+\\/handoffs$/.test(address) && options?.method === 'POST') {
+                                window.legacyHandoffPosts++;
+                            }
+
+                            if (lookup && options?.method !== 'POST' && window.handoffRejectLookup) {
+                                return new Response(JSON.stringify({ error: 'Fixture lookup disconnected' }), { status: 503 });
+                            }
+
+                            if (handoff) {
+                                window.handoffRequests.push(body);
 
                                 if (window.handoffRejectNext) {
                                     window.handoffRejectNext = false;
 
-                                    return new Response(JSON.stringify({ error: 'Fixture helper still busy' }), { status: 409 });
+                                    if (window.handoffHoldRejection) {
+                                        window.handoffHoldRejection = false;
+                                        await new Promise(resolve => { window.releaseHandoffRejection = resolve; });
+                                    }
+
+                                    return new Response(JSON.stringify({ error: 'Fixture input rejected' }), { status: 409 });
                                 }
                             }
 
                             const response = await fetchOriginal(url, options);
 
-                            if (match && response.ok && window.handoffLoseNext) {
-                                window.handoffLoseNext = false;
-                                window.handoffRejectNext = true;
-
-                                throw new Error('Fixture lost create response');
+                            if (handoff && response.ok) {
+                                window.acceptedHandoffInputs.push(await response.clone().json());
                             }
 
                             return response;
                         };`);
-                    await click(page, ".topbar .handoff-button");
-                    await choices(page);
-                    await choose(page, "reviewer");
-                    await button(page, dialog, "Start review");
-                    await present(page, `${dialog} .error`);
+                    await fill(page, composer, "/hand");
+                    await pickCommand(page, "/handoff");
+                    await until(
+                        () => draft(page).then((text) => text === "/handoff "),
+                        "command fills draft",
+                    );
+                    const choices = await commandNames(page);
+
+                    assert.ok(choices.includes("/handoff researcher"));
+                    assert.ok(choices.includes("/handoff worker --new"));
+                    await shot(page, `${viewport}-handoff-arguments`);
+                    await fill(page, composer, "/handoff resea");
+                    assert.deepEqual(await commandNames(page), [
+                        "/handoff researcher",
+                        "/handoff researcher --new",
+                    ]);
+
+                    if (viewport === "desktop") {
+                        await page.press("Enter");
+                    } else {
+                        await pickCommand(page, "/handoff researcher");
+                    }
+
+                    await until(
+                        () => draft(page).then((text) => text === "/handoff researcher "),
+                        "role completion leaves steering space",
+                    );
+
+                    if (viewport === "desktop") {
+                        await fill(page, composer, "/handoff researcher");
+                        await commandNames(page);
+                        await page.press("ArrowDown");
+                        await page.press("Enter");
+                        assert.equal(
+                            await draft(page),
+                            "/handoff researcher --new ",
+                            "an explicitly highlighted relationship completes instead of sending the exact role",
+                        );
+                    }
+
+                    await fill(page, composer, "/handoff worker --n");
+                    await commandNames(page);
+                    await page.press("Tab");
+                    assert.equal(await draft(page), "/handoff worker --new ");
+                    await fill(page, composer, "/handoff --new resea");
+                    await commandNames(page);
+                    await page.press("Tab");
+                    assert.equal(await draft(page), "/handoff --new researcher ");
+                    assert.equal(handoffInputs.length, 0);
                     assert.equal(
-                        await value(
-                            page,
-                            `[...document.querySelectorAll('${dialog} button')].find(button => button.textContent.trim() === 'Refresh options').disabled`,
-                        ),
+                        await value(page, "window.handoffRequests.length"),
+                        0,
+                        "clicks, Tab and desktop Enter only complete; none submit",
+                    );
+
+                    // A real in-flight model reply makes the server's options unavailable. The
+                    // autocomplete must display its reason and ignore both pointer and keyboard picks.
+                    writeFileSync(join(cwd, "fixture.txt"), "Actual changed file to review\n");
+                    replyGate = gate();
+                    await fill(page, composer, holdMessage);
+                    await click(page, ".composer .send");
+                    await until(() => app.isBusy(originId), "ordinary reply is held");
+                    await fill(page, composer, "/handoff ");
+                    await present(page, `${commandRows}[aria-disabled="true"]`);
+                    const unavailable = (await app.handoffs.list(originId, user)).options.find(
+                        (option) =>
+                            option.targetType === "researcher" &&
+                            option.relationship === "same-work",
+                    )!;
+
+                    assert.ok(unavailable.reason);
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                `[...document.querySelectorAll(${JSON.stringify(commandRows)})].some(row => row.getAttribute('aria-disabled') === 'true' && row.textContent.includes(${JSON.stringify(unavailable.reason)}))`,
+                            ),
+                        "disabled options display the server's reason after loading",
+                    );
+                    await pickCommand(page, "/handoff researcher");
+                    await page.press("Tab");
+                    assert.equal(await draft(page), "/handoff ");
+                    assert.equal(await value(page, "window.handoffRequests.length"), 0);
+                    replyGate.release();
+                    replyGate = undefined;
+                    await until(() => !app.isBusy(originId), "ordinary reply settles");
+
+                    await fill(page, composer, "/handoff rev");
+                    await present(page, `${commandRows}:not([aria-disabled="true"])`);
+                    await page.press("Tab");
+                    await until(
+                        () => draft(page).then((text) => text === "/handoff reviewer "),
+                        "reviewer role completes",
+                    );
+                    const rejected = "/handoff reviewer Keep this steering draft.\nDo not restart.";
+
+                    await fill(page, composer, rejected);
+                    await page.evaluate("window.handoffRejectNext = true");
+                    await click(page, ".composer .send");
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "document.querySelector('.notices')?.textContent.includes('Fixture input rejected')",
+                            ),
+                        "definite submit rejection is visible",
+                    );
+                    assert.equal(
+                        await draft(page),
+                        rejected,
+                        "a definite error preserves multiline steering for correction",
+                    );
+                    assert.equal(app.sessions().length, 1);
+                    // Bare commands are real inputs too. A clarification must not reserve or
+                    // create a provisional destination, and unmatched prose is not a usage error.
+                    await fill(page, composer, "/handoff please");
+                    await present(page, commandRows, false);
+                    await fill(page, composer, "/handoff");
+                    await click(page, ".composer .send");
+                    await until(() => !app.isBusy(originId), "clarification settles");
+                    await until(
+                        () => draft(page).then((text) => text === ""),
+                        "bare input accepted",
+                    );
+                    assert.equal(app.sessions().length, 1, "clarification creates no thread");
+                    assert.equal(
+                        (await app.handoffs.list(originId, user)).workflow.preparing,
                         false,
-                        "a definite initial rejection still allows eligibility refresh",
                     );
-                    assert.equal(app.sessions().length, countBefore);
-                    await button(page, dialog, "Refresh options");
-                    await choices(page);
-                    await choose(page, "reviewer");
-                    summaryGate = new Promise<void>((resolve) => {
-                        releaseSummary = resolve;
-                    });
-                    await button(page, dialog, "Start review");
-                    await until(() => summaries === 1, "human click requests source summary");
-                    await present(page, `${dialog} form[aria-busy="true"]`);
+                    const otherTab = await browsers.open(2);
+
+                    await otherTab.setViewport(VIEWPORTS[viewport]);
+                    await otherTab.navigate(
+                        `${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`,
+                    );
+                    await otherTab.navigate(`${base}/s/${origin.id}`);
+                    await present(otherTab, composer);
+                    const steering =
+                        "Keep the exact reproduction.\nDo not restart, commit or publish.";
+                    const dialog = '[role="dialog"][aria-label="Handoff"]';
+                    const directionField = `${dialog} textarea`;
+                    const popupRejected =
+                        "/handoff reviewer --same\nInstructions:\nKeep this popup draft.\n--do-not-restart";
+                    const command = `/handoff reviewer --same\nInstructions:\n${steering}`;
+
+                    await click(page, ".topbar .handoff-button");
+                    await present(page, `${dialog} input[value="reviewer:same-work"]`);
+                    await click(page, `${dialog} input[value="reviewer:same-work"]`);
+                    await button(page, dialog, "Next");
+                    await fill(page, directionField, "Keep this popup draft.\n--do-not-restart");
+                    await button(page, dialog, "Back");
+                    await present(page, `${dialog} input[value="reviewer:same-work"]:checked`);
+                    await button(page, dialog, "Next");
                     assert.equal(
                         await value(
                             page,
-                            `document.querySelector('${dialog} button[type="submit"]').textContent.trim()`,
+                            `document.querySelector(${JSON.stringify(directionField)}).value`,
                         ),
-                        "Preparing summary…",
+                        "Keep this popup draft.\n--do-not-restart",
+                        "Back preserves steering and destination without sending",
                     );
+                    assert.equal(await value(page, "window.handoffRequests.length"), 2);
+                    await page.evaluate(
+                        "window.handoffRejectNext = true; window.handoffHoldRejection = true",
+                    );
+                    await button(page, dialog, "Start thread");
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "typeof window.releaseHandoffRejection === 'function'",
+                            ),
+                        "input response is held while the popup remains dismissible",
+                    );
+                    await present(page, `${dialog} button[aria-label="Close"]:not(:disabled)`);
+                    await page.press("Escape");
+                    await present(page, dialog, false);
+                    await click(page, ".topbar .handoff-button");
+                    await present(page, `${dialog} input[value="reviewer:same-work"]:checked`);
+                    await button(page, dialog, "Next");
+                    await page.evaluate("window.releaseHandoffRejection()");
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "document.querySelector('.notices')?.textContent.includes('Reopen Handoff to retry your saved request')",
+                            ),
+                        "a late failure is reported outside the dismissed popup",
+                    );
+                    await present(page, dialog);
                     assert.equal(
                         await value(
                             page,
-                            `[...document.querySelectorAll('${dialog} input[name="handoff-option"]')].every(input => input.matches(':disabled'))`,
+                            `document.querySelector(${JSON.stringify(directionField)}).value`,
                         ),
-                        true,
+                        "Keep this popup draft.\n--do-not-restart",
+                        "late failure neither closes the new opening nor discards its saved draft",
+                    );
+                    await fill(page, directionField, steering);
+                    summaryGate = gate();
+                    await page.evaluate("window.handoffRejectLookup = true");
+                    await button(page, dialog, "Start thread");
+                    await present(page, dialog, false);
+                    await until(
+                        () => handoffInputs.length === 1,
+                        "model receives the real command",
+                    );
+                    assert.ok(handoffInputs[0]?.includes(steering));
+                    await until(
+                        () => draft(page).then((text) => text === ""),
+                        "the independent composer draft remains untouched by picker acceptance",
                     );
                     assert.equal(
                         app.sessions().length,
-                        countBefore,
-                        "summary is not a provisional successor",
+                        1,
+                        "held model creates no provisional thread",
                     );
                     assert.equal(
                         await value(page, "Number(location.pathname.split('/').at(-1))"),
                         origin.id,
                     );
-                    await shot(page, `${viewport}-preparing-summary`);
-                    releaseSummary();
+                    await shot(page, `${viewport}-accepted-summary-pending`);
+                    summaryGate.release();
                     summaryGate = undefined;
-                    await present(page, `${dialog} .error`);
+                    await until(() => app.sessions().length === 2, "tool creates the successor");
                     await until(
-                        () => app.sessions().length === countBefore + 1,
-                        "real admitted successor exists despite lost response",
+                        () =>
+                            value<boolean>(
+                                page,
+                                "document.querySelector('.notices')?.textContent.includes('Could not check handoff navigation')",
+                            ),
+                        "disconnected lookup retains accepted opaque keys",
                     );
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${dialog} input[value="pull:same-work"]').matches(':disabled')`,
-                        ),
-                        true,
-                    );
-                    assert.equal(
-                        await value(
-                            page,
-                            `[...document.querySelectorAll('${dialog} button')].find(button => button.textContent.trim() === 'Refresh options').disabled`,
-                        ),
-                        true,
-                    );
-                    await until(
-                        () => value<boolean>(page, "window.handoffRequests.length === 3"),
-                        "automatic recovery receives a refusal after the uncertain admission",
-                    );
-                    await present(page, `${dialog} .error`);
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${dialog} input[value="pull:same-work"]').matches(':disabled')`,
-                        ),
-                        true,
-                        "later refusal does not discard the original uncertain request",
-                    );
-                    await button(page, dialog, "Start review");
-                    await present(page, ".topbar .title-sub .thread-type.reviewer");
-                    await present(page, dialog, false);
-                    const ids = await value<string[]>(
+                    const requests = await value<Array<{ text: string; requestId: string }>>(
                         page,
-                        "window.handoffRequests.map(request => request.requestId)",
+                        "window.handoffRequests",
+                    );
+                    const accepted = await value<Array<{ handoffRequestKey: string }>>(
+                        page,
+                        "window.acceptedHandoffInputs",
+                    );
+                    const saved = await value<{
+                        version: number;
+                        requests: Array<{
+                            sourceId: number;
+                            userId: string;
+                            handoffRequestKey: string;
+                        }>;
+                    }>(page, "JSON.parse(sessionStorage.getItem('pocket.handoffInputs'))");
+
+                    assert.deepEqual(
+                        requests.map((request) => request.text),
+                        [rejected, "/handoff", popupRejected, command],
+                    );
+                    assert.ok(requests.every((request) => !("handoffVersion" in request)));
+                    assert.ok(requests.every((request) => !("handoffRecoverOnly" in request)));
+                    assert.equal(saved.version, 1);
+                    assert.ok(
+                        saved.requests.some(
+                            (request) =>
+                                request.handoffRequestKey === accepted.at(-1)?.handoffRequestKey,
+                        ),
+                    );
+                    assert.ok(
+                        saved.requests.every(
+                            (request) =>
+                                request.sourceId === origin.id && request.userId === user.id,
+                        ),
+                    );
+                    assert.equal(await value(page, "window.legacyHandoffPosts"), 0);
+                    assert.equal(
+                        await value(otherTab, "Number(location.pathname.split('/').at(-1))"),
+                        origin.id,
+                        "another tab is never redirected",
+                    );
+                    assert.equal(
+                        userInputs.filter(
+                            (text) => text.replace(/^\[from:[^\]]+\]\s*/, "") === command,
+                        ).length,
+                        1,
+                        "model sees the actual command once",
+                    );
+                    assert.equal(
+                        userInputs.some((text) => text.includes("The human has requested a")),
+                        false,
+                        "app injects no fabricated source-summary request",
                     );
 
-                    assert.equal(ids.length, 4);
-                    assert.notEqual(ids[0], ids[1]);
-                    assert.deepEqual(ids.slice(1), [ids[1], ids[1], ids[1]]);
-                    assert.deepEqual(
-                        await value(
-                            page,
-                            "window.handoffRequests.map(request => request.recoverOnly)",
-                        ),
-                        [false, false, true, false],
-                        "automatic recovery is read-only; only explicit human taps may restart a failed summary",
+                    // Reload looks up a matching tool record without resubmitting user input.
+                    await page.navigate(`${base}/s/${origin.id}`);
+                    await present(page, ".topbar .title-sub .thread-type.reviewer");
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "sessionStorage.getItem('pocket.handoffInputs') === null",
+                            ),
+                        "completed matching record clears saved navigation",
                     );
-                    assert.equal(
-                        await value(
-                            page,
-                            "window.handoffRequests.some(request => 'brief' in request)",
-                        ),
-                        false,
-                    );
-                    assert.equal(app.sessions().length, countBefore + 1);
                     await until(
                         () => app.sessions().every((session) => !session.busy),
                         "reviewer delivery settles",
@@ -456,23 +636,19 @@ test(
 
                     await until(
                         () => app.sessionMeta(reviewerId)?.title === namedTitle,
-                        "successor title generated from received summary",
+                        "successor is named from its received summary",
                     );
-                    assert.equal(summaries, 1);
+                    assert.equal(app.sessions().length, 2);
+                    assert.equal(handoffInputs.length, 1);
                     assert.equal(titleRequests, 1);
-                    assert.ok(
-                        (await app.handoffs.list(reviewerId, user)).handoffs.some((record) =>
-                            record.brief.includes(receivedSummary),
-                        ),
-                    );
+                    await present(page, '.composer [aria-label="Work Item context"]');
+                    await present(page, '.composer [aria-label="Previous thread"]');
                     await app.commands.updateSession(reviewerId, user, {
                         title: "独立 review matching member",
                     });
-                    await app.commands.updateSession(originId, user, {
-                        title: "Origin title follows its worker",
-                    });
                     await home(page);
                     const workItem = `${scope} [data-work-item-id="${reviewer.workItemId}"]`;
+                    const memberRow = `${workItem} .work-item-member[data-id="${origin.id}"]`;
 
                     await present(page, workItem);
                     assert.deepEqual(
@@ -503,7 +679,7 @@ test(
                             `document.querySelectorAll(${JSON.stringify(`${workItem} .work-item-member .session-meta .thread-type`)}).length`,
                         ),
                         0,
-                        "role indicators do not duplicate leading accessible stage icons",
+                        "accessible leading stage icons are not duplicated",
                     );
                     assert.equal(
                         await value(
@@ -512,8 +688,6 @@ test(
                         ),
                         0,
                     );
-                    const memberRow = `${workItem} .work-item-member[data-id="${origin.id}"]`;
-
                     assert.equal(
                         await value(
                             page,
@@ -548,17 +722,10 @@ test(
                     assert.equal(
                         await value(
                             page,
-                            `document.querySelectorAll(${JSON.stringify(`${scope} [data-work-item-id]`)}).length`,
-                        ),
-                        1,
-                    );
-                    assert.equal(
-                        await value(
-                            page,
                             `document.querySelectorAll(${JSON.stringify(`${workItem} .work-item-member`)}).length`,
                         ),
                         2,
-                        "member search does not orphan its parent or hide siblings",
+                        "search retains the matching member's parent and siblings",
                     );
                     await fill(page, `${scope} .search input`, "");
                     await button(page, `${scope} .session-tabs`, "Recent");
@@ -574,127 +741,60 @@ test(
                     await present(page, `${workItem} .work-item-member`);
                     await click(page, `${memberRow} .session`);
                     await present(page, '.composer [aria-label="Read-only workspace"]');
-                    await present(page, ".topbar .handoff-button", false);
-                    await present(page, 'textarea[aria-label="Message Pi"]');
+                    await present(page, composer);
                     await click(page, '.composer [aria-label="Open active thread"]');
-                    await click(page, ".topbar .handoff-button");
-                    assert.deepEqual(
-                        await choices(page),
-                        [
-                            "follow-up:same-work",
-                            "land:same-work",
-                            "pull:new-work",
-                            "pull:same-work",
-                            "researcher:new-work",
-                            "researcher:same-work",
-                            "worker:new-work",
-                            "worker:same-work",
-                        ],
-                        "review history offers Land without completion or validation forms",
-                    );
-                    await choose(page, "land");
-                    await button(page, dialog, "Start land");
-                    await present(page, ".topbar .title-sub .thread-type.land");
-                    await until(
-                        () => app.sessions().every((session) => !session.busy),
-                        "Land delivery settles without model milestone calls",
-                    );
-                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff");
+                    await present(page, ".topbar .title-sub .thread-type.reviewer");
+
+                    const newScope =
+                        "Start a separate accessibility task.\nDo not inherit the old review as approval.";
+
+                    summaryGate = gate();
+                    await fill(page, composer, `Please hand off to a new worker. ${newScope}`);
                     await click(page, ".composer .send");
-                    await present(page, dialog);
-                    await choices(page);
-                    await choose(page, "publish");
-                    assert.match(
-                        await value<string>(
+                    await until(
+                        () => handoffInputs.length === 2,
+                        "English input reaches the model",
+                    );
+                    assert.ok(handoffInputs[1]?.includes(newScope));
+                    await until(
+                        () => draft(page).then((text) => text === ""),
+                        "English input clears on acceptance",
+                    );
+                    assert.ok(
+                        await value<boolean>(
                             page,
-                            `document.querySelector('${dialog} .handoff-explanation').textContent`,
+                            "JSON.parse(sessionStorage.getItem('pocket.handoffInputs')).requests.some(request => typeof request.handoffRequestKey === 'string')",
                         ),
-                        /separate human approval/i,
+                        "ordinary English also saves a navigation key",
                     );
-                    await button(page, dialog, "Cancel");
-                    await home(page);
-                    await rowOptions(page, `${workItem} > .work-item-head`, viewport);
-                    await button(page, optionsSurface, "Move Work Item to project or goal…");
-                    await page.evaluate(
-                        `const field = document.querySelector('[role="dialog"] [aria-label="Project"]'); field.value = ''; field.dispatchEvent(new Event('change', { bubbles: true }));`,
+                    await click(page, '.composer [aria-label="Previous thread"]');
+                    await present(page, '.composer [aria-label="Read-only workspace"]');
+                    assert.equal(
+                        await value(page, "sessionStorage.getItem('pocket.handoffInputs')"),
+                        null,
+                        "leaving the source clears navigation intent immediately",
                     );
-                    await button(page, '[role="dialog"]', "Move");
+                    summaryGate.release();
+                    summaryGate = undefined;
                     await until(
-                        () => app.sessions().every((session) => session.projectId === undefined),
-                        "all members move together",
-                    );
-                    await present(page, '[role="dialog"]', false);
-                    await rowOptions(page, `${workItem} > .work-item-head`, viewport);
-                    await button(page, optionsSurface, "Archive Work Item");
-                    await until(
-                        () => app.sessions().every((session) => session.archived),
-                        "all members archive together",
-                    );
-                    await button(page, `${scope} .session-tabs`, "Archived");
-                    await present(page, workItem);
-                    await rowOptions(page, `${workItem} > .work-item-head`, viewport);
-                    await button(page, optionsSurface, "Restore Work Item");
-                    await until(
-                        () => app.sessions().every((session) => !session.archived),
-                        "all members restore together",
-                    );
-                    await button(page, `${scope} .session-tabs`, "Recent");
-                    await click(page, `${workItem} > .work-item-head .session`);
-                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff publish");
-                    await click(page, ".composer .send");
-                    await present(page, ".topbar .title-sub .thread-type.publish");
-                    await until(
-                        () => app.sessions().every((session) => !session.busy),
-                        "Publish delivery settles",
+                        () =>
+                            app.sessions().length === 3 &&
+                            app.sessions().every((session) => !session.busy),
+                        "new Work Item delivery settles after leaving the source",
                     );
                     assert.equal(
-                        (
-                            await app.handoffs.list(
-                                app.sessions().find((session) => session.threadType === "publish")!
-                                    .id as ConversationId,
-                                user,
-                            )
-                        ).workflow.status,
-                        "active",
-                        "Publish thread creation is not a publication receipt or completed external action",
+                        await value(page, "Number(location.pathname.split('/').at(-1))"),
+                        origin.id,
+                        "late handoff success does not steal navigation from another thread",
                     );
-                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff worker --new");
-                    await click(page, ".composer .send");
-                    await present(page, ".topbar .title-sub .thread-type.worker");
-                    await until(
-                        () => app.sessions().every((session) => !session.busy),
-                        "new Work Item delivery settles",
-                    );
-                    const newWorkerId = await value<number>(
-                        page,
-                        "Number(location.pathname.split('/').at(-1))",
-                    );
-                    const newWorker = app.sessions().find((session) => session.id === newWorkerId)!;
+                    const newWorker = app
+                        .sessions()
+                        .find(
+                            (session) =>
+                                session.threadType === "worker" && session.id !== origin.id,
+                        )!;
 
                     assert.notEqual(newWorker.workItemId, reviewer.workItemId);
-                    await click(page, ".topbar .handoff-button");
-                    const newChoices = await choices(page);
-
-                    assert.equal(
-                        newChoices.some((choice) =>
-                            ["land:same-work", "follow-up:same-work", "worker:same-work"].includes(
-                                choice,
-                            ),
-                        ),
-                        false,
-                        "new work cannot inherit review history or repeat its current same-work role",
-                    );
-                    await button(page, dialog, "Cancel");
-                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff researcher");
-                    await click(page, ".composer .send");
-                    await present(page, ".topbar .title-sub .thread-type.researcher");
-                    await until(
-                        () => app.sessions().every((session) => !session.busy),
-                        "research delivery settles",
-                    );
-                    await fill(page, 'textarea[aria-label="Message Pi"]', "/handoff pull");
-                    await click(page, ".composer .send");
-                    await present(page, ".topbar .title-sub .thread-type.pull");
                     await home(page);
                     const nextItem = `${scope} [data-work-item-id="${newWorker.workItemId}"]`;
 
@@ -706,21 +806,311 @@ test(
                         ),
                         2,
                     );
-                    assert.deepEqual(
-                        await value(
-                            page,
-                            `[...document.querySelectorAll(${JSON.stringify(`${nextItem} .work-item-member .session-state [role="img"]`)})].map(icon => icon.getAttribute('aria-label'))`,
-                        ),
-                        ["Worker", "Researcher", "Pull"],
+                    await click(page, `${nextItem} > .work-item-head .session`);
+                    await present(page, '.composer [aria-label="Previous Work Item"]');
+                    await present(page, ".topbar .handoff-button", false);
+                    await home(page);
+
+                    // Whole-item controls must update every member but not another Work Item in
+                    // the same project. No member menu or drag can split the original group.
+                    const members = () =>
+                        app
+                            .sessions()
+                            .filter((session) => session.workItemId === reviewer.workItemId);
+
+                    await rowOptions(page, `${workItem} > .work-item-head`, viewport);
+                    await button(page, optionsSurface, "Move Work Item to project or goal…");
+                    await page.evaluate(
+                        `const field = document.querySelector('[role="dialog"] [aria-label="Project"]'); field.value = ''; field.dispatchEvent(new Event('change', { bubbles: true }));`,
                     );
+                    await button(page, '[role="dialog"]', "Move");
+                    await until(
+                        () => members().every((session) => session.projectId === undefined),
+                        "all members move together",
+                    );
+                    assert.equal(
+                        app.sessionMeta(newWorker.id as ConversationId)?.projectId,
+                        project.id,
+                    );
+                    await present(page, '[role="dialog"]', false);
+                    await rowOptions(page, `${workItem} > .work-item-head`, viewport);
+                    await button(page, optionsSurface, "Archive Work Item");
+                    await until(
+                        () => members().every((session) => session.archived),
+                        "all members archive together",
+                    );
+                    assert.notEqual(
+                        app.sessionMeta(newWorker.id as ConversationId)?.archived,
+                        true,
+                    );
+                    await button(page, `${scope} .session-tabs`, "Archived");
+                    await present(page, workItem);
+                    await rowOptions(page, `${workItem} > .work-item-head`, viewport);
+                    await button(page, optionsSurface, "Restore Work Item");
+                    await until(
+                        () => members().every((session) => !session.archived),
+                        "all members restore together",
+                    );
+                    await button(page, `${scope} .session-tabs`, "Recent");
                     assert.equal(
                         await value(page, "document.documentElement.scrollWidth <= innerWidth"),
                         true,
-                        "mobile and desktop chooser/group layout does not overflow horizontally",
+                        "argument suggestions and Work Items fit mobile and desktop widths",
                     );
-                    await shot(page, `${viewport}-human-controlled-work-items`);
+                    await shot(page, `${viewport}-agent-handoff-work-items`);
+
+                    // The tool may publish retirement before /submit's acceptance reaches this
+                    // tab. Once the real response arrives, the saved key must inspect that already
+                    // received session state instead of waiting forever for another event.
+                    const fastSource = await app.commands.createSession(user, {
+                        cwd,
+                        threadType: "worker",
+                        title: "Fast handoff acceptance",
+                    });
+                    const fastSourceId = fastSource.id as ConversationId;
+
+                    await app.commands.configure(fastSourceId, user, {
+                        model: { provider: "faux", modelId: "faux-1" },
+                        thinkingLevel: "off",
+                    });
+                    await page.navigate(`${base}/s/${fastSource.id}`);
+                    await present(page, composer);
+                    await page.evaluate(`const fetchOriginal = window.fetch.bind(window);
+                        window.releaseAcceptedResponse = null;
+                        window.fetch = async (url, options) => {
+                            const response = await fetchOriginal(url, options);
+
+                            if (/\\/api\\/c\\/\\d+\\/submit$/.test(String(url)) && options?.method === 'POST' && response.ok) {
+                                await new Promise(resolve => { window.releaseAcceptedResponse = resolve; });
+                            }
+
+                            return response;
+                        };`);
+                    const acceptedDraft = "/handoff researcher Investigate the retry race.";
+
+                    await fill(page, composer, acceptedDraft);
+                    await click(page, ".composer .send");
+                    await until(
+                        () => app.sessions().length === 5,
+                        "tool completes before the held HTTP acceptance",
+                    );
+                    await present(page, '.composer [aria-label="Read-only workspace"]');
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "typeof window.releaseAcceptedResponse === 'function'",
+                            ),
+                        "real submit response is held at the transport",
+                    );
+                    assert.equal(
+                        await value(page, "Number(location.pathname.split('/').at(-1))"),
+                        fastSource.id,
+                    );
+                    // Edit then undo to the identical string: equality is not a draft-generation guard.
+                    const laterDraft = acceptedDraft;
+
+                    await fill(page, composer, "A temporary edit made after sending.");
+                    await fill(page, composer, laterDraft);
+                    await page.evaluate("window.releaseAcceptedResponse()");
+                    await present(page, ".topbar .title-sub .thread-type.researcher");
+                    assert.equal(
+                        app.sessions().filter((session) => session.threadType === "researcher")
+                            .length,
+                        1,
+                    );
+                    assert.equal(
+                        await value(page, "sessionStorage.getItem('pocket.handoffInputs')"),
+                        null,
+                    );
+                    await page.navigate(`${base}/s/${fastSource.id}`);
+                    await present(page, composer);
+                    assert.equal(
+                        await draft(page),
+                        laterDraft,
+                        "late acceptance never erases a newer edit/undo draft with identical text",
+                    );
+
+                    // Lost success is not rejection. Block passive receipt reads so an explicit
+                    // retry must reuse the persisted POST identity even if busy mode has changed.
+                    const retrySource = await app.commands.createSession(user, {
+                        cwd,
+                        threadType: "worker",
+                        title: "Uncertain input recovery",
+                    });
+                    const retryId = retrySource.id as ConversationId;
+
+                    await app.commands.configure(retryId, user, {
+                        model: { provider: "faux", modelId: "faux-1" },
+                        thinkingLevel: "off",
+                    });
+                    await page.navigate(`${base}/s/${retrySource.id}`);
+                    await present(page, composer);
+                    await page.evaluate(`const fetchOriginal = window.fetch.bind(window);
+                        window.retrySubmissions = [];
+                        window.loseAcceptedResponse = true;
+                        window.rejectReceiptLookups = true;
+                        window.fetch = async (url, options) => {
+                            const address = String(url);
+                            const submitted = /\\/api\\/c\\/\\d+\\/submit$/.test(address) && options?.method === 'POST';
+
+                            if (/\\/api\\/c\\/\\d+\\/submit\\?/.test(address) && window.rejectReceiptLookups) {
+                                return new Response(JSON.stringify({ error: 'Fixture receipt unavailable' }), { status: 503 });
+                            }
+
+                            if (submitted) {
+                                window.retrySubmissions.push(JSON.parse(options.body));
+                            }
+
+                            const response = await fetchOriginal(url, options);
+
+                            if (submitted && response.ok && window.loseAcceptedResponse) {
+                                window.loseAcceptedResponse = false;
+
+                                throw new TypeError('Fixture accepted response lost');
+                            }
+
+                            return response;
+                        };`);
+                    const lostDraft = "Keep this uncertain input identity.";
+
+                    await fill(page, composer, lostDraft);
+                    await click(page, ".composer .send");
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "document.querySelector('.notices')?.textContent.includes('Fixture accepted response lost')",
+                            ),
+                        "accepted response is lost at the transport",
+                    );
+                    assert.equal(await draft(page), lostDraft);
+                    await until(() => !app.isBusy(retryId), "accepted original input settles");
+                    const uncertain = await value<{ requests: Array<{ requestId: string }> }>(
+                        page,
+                        "JSON.parse(sessionStorage.getItem('pocket.submitAttempts'))",
+                    );
+
+                    assert.equal(uncertain.requests.length, 1);
+                    replyGate = gate();
+                    await app.commands.submit(retryId, user, {
+                        text: holdMessage,
+                        requestId: `hold-retry-${viewport}`,
+                    });
+                    await until(() => app.isBusy(retryId), "another reply changes the retry mode");
+                    await present(page, ".composer .send");
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "document.querySelector('.composer .send')?.getAttribute('title')?.includes('Steer') || document.querySelector('.composer textarea')?.placeholder.includes('Steer')",
+                            ),
+                        "composer receives the busy state before retry",
+                    );
+                    await click(page, ".composer .send");
+                    await until(
+                        () => draft(page).then((text) => text === ""),
+                        "explicit retry accepts",
+                    );
+                    const retried = await value<Array<{ requestId: string; mode: string }>>(
+                        page,
+                        "window.retrySubmissions",
+                    );
+
+                    assert.equal(retried.length, 2);
+                    assert.equal(retried[0]!.requestId, uncertain.requests[0]!.requestId);
+                    assert.equal(retried[1]!.requestId, retried[0]!.requestId);
+                    assert.notEqual(retried[0]!.mode, retried[1]!.mode);
+                    replyGate.release();
+                    replyGate = undefined;
+                    await until(() => !app.isBusy(retryId), "held reply settles");
+                    assert.equal(
+                        userInputs.filter(
+                            (text) => text.replace(/^\[from:[^\]]+\]\s*/, "") === lostDraft,
+                        ).length,
+                        1,
+                        "explicit retry places the real input only once",
+                    );
+
+                    // Different drafts get independent identities, retaining the earlier uncertainty.
+                    // Reload then resolves both real server receipts without replaying either POST.
+                    const reloadDrafts = ["An older uncertain input.", "A newer uncertain input."];
+
+                    for (const text of reloadDrafts) {
+                        await page.evaluate("window.loseAcceptedResponse = true");
+                        await fill(page, composer, text);
+                        await click(page, ".composer .send");
+                        await until(
+                            () =>
+                                value<boolean>(
+                                    page,
+                                    "window.loseAcceptedResponse === false && !document.querySelector('.composer .send')?.disabled",
+                                ),
+                            "lost acceptance preserves its editable draft",
+                        );
+                        await until(() => !app.isBusy(retryId), "uncertain input settles");
+                    }
+
+                    const pending = await value<{ requests: Array<{ requestId: string }> }>(
+                        page,
+                        "JSON.parse(sessionStorage.getItem('pocket.submitAttempts'))",
+                    );
+
+                    assert.equal(pending.requests.length, 2);
+                    assert.notEqual(pending.requests[0]!.requestId, pending.requests[1]!.requestId);
+                    await page.navigate(`${base}/s/${retrySource.id}`);
+                    await present(page, composer);
+                    await until(
+                        () =>
+                            value<boolean>(
+                                page,
+                                "JSON.parse(sessionStorage.getItem('pocket.submitAttempts'))?.requests.every(request => request.receipt?.handoffRequestKey)",
+                            ),
+                        "passive recovery finds both accepted receipts after reload",
+                    );
+                    await page.evaluate(`const fetchOriginal = window.fetch.bind(window);
+                        window.recoveryPosts = 0;
+                        window.fetch = (url, options) => {
+                            if (/\\/api\\/c\\/\\d+\\/submit$/.test(String(url)) && options?.method === 'POST') {
+                                window.recoveryPosts++;
+                            }
+
+                            return fetchOriginal(url, options);
+                        };`);
+                    assert.equal(await draft(page), reloadDrafts[1]);
+                    await click(page, ".composer .send");
+                    await until(
+                        () => draft(page).then((text) => text === ""),
+                        "saved acceptance clears the still-visible draft",
+                    );
+                    await fill(page, composer, reloadDrafts[0]!);
+                    await click(page, ".composer .send");
+                    await until(
+                        () => draft(page).then((text) => text === ""),
+                        "older saved acceptance also remains idempotent",
+                    );
+                    assert.equal(
+                        await value(page, "window.recoveryPosts"),
+                        0,
+                        "receipt recovery never replays POST",
+                    );
+                    assert.equal(
+                        await value(page, "sessionStorage.getItem('pocket.submitAttempts')"),
+                        null,
+                    );
+
+                    for (const text of reloadDrafts) {
+                        assert.equal(
+                            userInputs.filter(
+                                (input) => input.replace(/^\[from:[^\]]+\]\s*/, "") === text,
+                            ).length,
+                            1,
+                            "reload and explicit send never duplicate accepted human input",
+                        );
+                    }
                 } finally {
-                    releaseSummary();
+                    replyGate?.release();
+                    summaryGate?.release();
                     await browsers.closeAll({ final: true });
                     await app.close();
                     server.closeAllConnections();

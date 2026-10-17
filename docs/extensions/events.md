@@ -9,6 +9,8 @@ On the server, `web.send(event, data, { to })` sends `data` as JSON. The name of
 - without `to`, to the tabs of each person that the browser module's `access` lets in;
 - with `to`, only to the tabs of the person whose id is `to`.
 
+Static `"conversation"` client access does not authorize these app-wide events: it uses the `"view"` event filter, which excludes scoped invitees even when `to` names them. Their data comes from authorized `sessionRoute` requests.
+
 In the browser, `pocket.on(event, run)` gets it. It returns a function that stops it.
 
 ```typescript

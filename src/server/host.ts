@@ -9,6 +9,7 @@ import type {
     ModelRef,
     TaskId,
     Tx,
+    ToolExecutionApi,
 } from "@earendil-works/pi-durable";
 import type { Browsers } from "./browser.ts";
 import type { Gallery } from "./gallery.ts";
@@ -19,10 +20,11 @@ import type { Memory } from "./memory.ts";
 import type { Pip } from "./pip.ts";
 import type { PipCompaction } from "./pip-compact.ts";
 import type { Schedules } from "./schedules.ts";
+import type { SessionWorkflow } from "./session-workflows.ts";
 import type { RepoWatches } from "./repo-watches.ts";
 import type { Watches } from "./watches.ts";
 
-/** A session linked to another, as `host.linkedSessions.list` gives it to the session that asks. */
+/** A session linked to another, as `host.sessions.linked.list` gives it to the session that asks. */
 export interface LinkedSession {
     /** What the asking session calls it: an address of its own, never the session's id. */
     address: string;
@@ -56,6 +58,28 @@ export interface LinkedSessionsApi {
     ): Promise<void>;
     /** The sessions linked to `source`, at any distance, that the person Pi works for there sees. */
     list(source: ConversationId): Promise<LinkedSession[]>;
+}
+
+/** Independent-session operations shared by workflow extensions.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionServices {
+    /** Linked peers retain their existing permissions, model limits, receipts and nonhuman relay provenance. */
+    readonly linked: LinkedSessionsApi;
+    /** Core derives authority from actual placed human input in this invocation; declarations grant none. */
+    handoff(
+        request:
+            | { action: "status" }
+            | {
+                  action: "start";
+                  targetType: string;
+                  relationship?: "same-work" | "new-work";
+                  summary: string;
+              },
+        api: ToolExecutionApi,
+        context: Context,
+    ): Promise<unknown>;
 }
 
 export interface ApprovalRequest {
@@ -228,13 +252,11 @@ export interface PocketHost {
     heldBack(conversationId: ConversationId): string | undefined;
     /** Call `listener` whenever the owner changes a spend limit; returns how to stop. */
     onLimitsChanged(listener: () => void): () => void;
-    /**
-     * Sessions that a session starts and messages (`linked-sessions.ts`): each one is an ordinary session, linked to the
-     * one that started it. The checks of the person Pi works for apply, and a call repeated with its key acts once.
-     *
-     * @experimental In 0.14: it can change in a minor release (docs/extensions/policies/api-stability.md).
+    /** Shared session operations; workflow declarations cannot widen core permissions.
+     * @since 0.15.0
+     * @experimental
      */
-    readonly linkedSessions: LinkedSessionsApi;
+    readonly sessions: SessionServices;
     /** Messages to Pi for later: the schedule tool sets up Pi's own. */
     readonly schedules: Pick<Schedules, "add" | "cancel" | "list" | "task">;
     /** Sessions' goals: the goals extension runs their checks and counts them. */
@@ -307,6 +329,22 @@ export interface PocketHost {
  * invited to one session never may: a web part belongs to the whole app.
  */
 export type WebAccess = "owner" | "steer" | "view";
+/** Static browser code may opt into conversation-scoped use, including scoped invitees. */
+export type WebClientAccess = WebAccess | "conversation";
+
+/** Core operations bound to the authenticated route's person and visible conversation. */
+export interface SessionRequestServices {
+    readonly transfers: {
+        status(): Promise<unknown>;
+        updateGroup(patch: Readonly<Record<string, unknown>>): Promise<void>;
+    };
+}
+
+export interface SessionWebRequest extends WebRequest {
+    readonly conversationId: ConversationId;
+    readonly session: SessionRequestServices;
+}
+export type SessionWebHandler = (request: SessionWebRequest) => unknown;
 
 export type WebMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -352,7 +390,17 @@ export interface ExtensionWeb {
      * The browser module that adds to the app: a `.js` file beside this module, or a folder with an `index.js` and the
      * files it imports. Browsers of the people `access` lets in load it.
      */
-    client(entry: string, options?: { access?: WebAccess }): void;
+    client(entry: string, options?: { access?: WebClientAccess }): void;
+    /** A route under /api/c/:id/x/:module/, after core visibility and the declared role check.
+     * @since 0.15.0
+     * @experimental
+     */
+    sessionRoute(
+        method: WebMethod,
+        path: string,
+        handle: SessionWebHandler,
+        options?: { access?: WebAccess },
+    ): void;
     /**
      * Send the browser module an event (`pocket.on(event, …)` there): to everyone it loads for, or to one person. Never
      * throws: an event it cannot send (not JSON, too large) goes to the server's log instead.
@@ -370,6 +418,13 @@ export interface ExtensionWeb {
      * module, as routes do. `scope: "conversation"` is for whoever may drive the session; `"global"` is the owner's.
      */
     command(name: string, command: ExtensionCommand): void;
+    /**
+     * Register declarative profiles and transitions while the module loads. They go with this version of the module.
+     * Profile and workflow IDs are namespaced to this module; the data grants no execution capabilities.
+     * @since 0.15.0
+     * @experimental
+     */
+    workflow(definition: SessionWorkflow): void;
 }
 
 /** The shape of every module in `src/server/extensions/`: a default export building one or more extensions. */

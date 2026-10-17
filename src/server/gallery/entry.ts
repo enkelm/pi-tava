@@ -40,6 +40,8 @@ export const LIMITS = {
 
 /** Who may use what a module adds to the app (`WebAccess`). */
 export type Access = "owner" | "steer" | "view";
+/** Static conversation-aware clients also load for scoped invitees; routes retain their own access. */
+export type ClientAccess = Access | "conversation";
 
 const ACCESS: readonly Access[] = ["owner", "steer", "view"];
 
@@ -59,7 +61,7 @@ export interface Declares {
     /** Routes it adds to the app: `GET status`. */
     routes: string[];
     /** Who loads its browser module, or null for none. */
-    client: Access | null;
+    client: ClientAccess | null;
     /** The widest access of its routes and browser module: `owner` when it adds nothing to the app. */
     access: Access;
     /**
@@ -371,7 +373,12 @@ function declares(value: unknown, where: string): Declares {
         sections: names(shape.sections, `${where}.sections`, KEY),
         wraps: names(shape.wraps, `${where}.wraps`, WRAP),
         routes: names(shape.routes, `${where}.routes`, ROUTE),
-        client: shape.client === null ? null : access(shape.client, `${where}.client`),
+        client:
+            shape.client === null
+                ? null
+                : shape.client === "conversation"
+                  ? "conversation"
+                  : access(shape.client, `${where}.client`),
         access: access(shape.access, `${where}.access`),
         ...(shape.commands === undefined
             ? {}
@@ -392,7 +399,10 @@ function declares(value: unknown, where: string): Declares {
 
     const widest = (each: Access) => ACCESS.indexOf(each);
 
-    if (result.client !== null && widest(result.client) > widest(result.access)) {
+    if (
+        result.client !== null &&
+        widest(result.client === "conversation" ? "view" : result.client) > widest(result.access)
+    ) {
         throw new EntryError(`${where}.access is narrower than its browser module's`);
     }
 

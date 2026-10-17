@@ -110,6 +110,24 @@ test("an entry whose file would leave the extensions folder is not listed, and w
     assert.ok(!existsSync(join(dropIns, "escape.ts")));
 });
 
+test("conversation client metadata is accepted without admitting conversation access for app-wide routes", async () => {
+    const item = entry("contextual", { "contextual.ts": clock }, "3".repeat(40));
+    const invalid = entry("invalid-access", { "invalid-access.ts": clock }, "4".repeat(40));
+    const listing = await index(
+        { ...item, declares: { ...item.declares, client: "conversation", access: "view" } },
+        {
+            ...invalid,
+            declares: { ...invalid.declares, client: "conversation", access: "conversation" },
+        },
+    );
+
+    assert.deepEqual(
+        listing.entries.map((entry) => entry.name),
+        ["contextual"],
+    );
+    assert.match(listing.hidden.invalid[0]?.problem ?? "", /declares.access/);
+});
+
 test("a file that does not match its pinned SHA-256 installs nothing", async () => {
     const commit = "2".repeat(40);
 

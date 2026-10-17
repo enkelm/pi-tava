@@ -57,6 +57,7 @@ import {
     splitAttachments,
 } from "./entry-format.ts";
 import { WorkflowDoc } from "./workflow-docs.ts";
+import { handoffInputKey } from "./handoff-input.ts";
 import { describe, HttpError, optionalText } from "./errors.ts";
 import { homePath } from "./paths.ts";
 import { mentionedPaths, viewFile } from "./files.ts";
@@ -111,8 +112,6 @@ export interface SubmitRequest {
     requestId: string;
     /** Send the files the message mentions with `@` along with it, so Pi need not read them first. */
     inlineFiles?: boolean;
-    /** Automatic handoff reconnects observe a failed request without rerunning its source summary. */
-    handoffRecoverOnly?: boolean;
 }
 
 /** Attached images that also go to the model itself, when it takes images. */
@@ -867,6 +866,38 @@ export class Commands {
         }
     }
 
+    /** Passive recovery of this person's input acknowledgement; never submit or retry model work. */
+    async submissionReceipt(id: ConversationId, user: User, requestId: unknown) {
+        const app = this.#app;
+
+        app.requireSee(user, id);
+        app.requireSteer(user);
+
+        if (
+            typeof requestId !== "string" ||
+            requestId.length > 160 ||
+            !/[A-Za-z0-9_-]/.test(requestId)
+        ) {
+            throw new HttpError(400, "A valid input requestId is required");
+        }
+
+        const ownedRequest = ownRequest(user.id, clientKey(requestId));
+        const submission = await app.harness.commit(
+            (tx) => tx.submissionByRequest(id, ownedRequest),
+            context,
+        );
+
+        if (submission?.type !== "input") {
+            return undefined;
+        }
+
+        return {
+            submissionId: submission.id,
+            requestId: ownedRequest,
+            handoffRequestKey: handoffInputKey(user.id, id, ownedRequest),
+        };
+    }
+
     /**
      * Send a message to Pi as `user`. With `via`, an assistant (PiP) sends it for them: it is marked as sent through it,
      * and is theirs to pay for and steer, but not their own words (`requestFor`). Only server code passes `via`.
@@ -879,8 +910,7 @@ export class Commands {
     ): Promise<{
         submissionId: SubmissionId;
         requestId: string;
-        handoffThreadId?: number;
-        handoffPicker?: true;
+        handoffRequestKey?: string;
     }> {
         const app = this.#app;
 
@@ -896,65 +926,6 @@ export class Commands {
         const conversation = await app.conversation(id);
         const typed = request.text.trim();
 
-        // Only a person's own command activates this native route, never an assistant's relayed text.
-        // It wins over templates. Its receipt stays passive; Handoffs owns any requested summary.
-        if (via === undefined && /^\/handoff(?:\s|$)/.test(typed)) {
-            if ((request.attachments?.length ?? 0) > 0) {
-                throw new HttpError(400, "Handoff commands do not accept attachments");
-            }
-
-            const words = typed.split(/\s+/).slice(1);
-            let destination: number | undefined;
-
-            if (words.length > 0) {
-                const [kind, flag] = words;
-
-                if (
-                    words.length > 2 ||
-                    (flag !== undefined && flag !== "--same" && flag !== "--new")
-                ) {
-                    throw new HttpError(400, "Use /handoff <kind> [--same|--new]");
-                }
-
-                const started = await app.handoffs.start(id, user, {
-                    targetType: kind === "review" ? "reviewer" : kind,
-                    relationship: flag === "--new" ? "new-work" : "same-work",
-                    requestId: request.requestId,
-                    recoverOnly: request.handoffRecoverOnly,
-                });
-
-                destination = started.id;
-            }
-
-            const requestId = ownRequest(
-                user.id,
-                `handoff-command:${clientKey(request.requestId)}`,
-            );
-            const receipt = await conversation.submit(
-                {
-                    type: "write",
-                    entry: {
-                        kind: "pocket.handoff-command",
-                        data: {
-                            by: user.id,
-                            text: typed,
-                            ...(destination === undefined ? {} : { handoffThreadId: destination }),
-                        },
-                    },
-                    requestId,
-                },
-                context,
-            );
-
-            return {
-                submissionId: receipt.id,
-                requestId,
-                ...(destination === undefined
-                    ? { handoffPicker: true as const }
-                    : { handoffThreadId: destination }),
-            };
-        }
-
         if (app.handoffs.isPreparing(id)) {
             throw new HttpError(
                 409,
@@ -963,11 +934,13 @@ export class Commands {
         }
 
         // `/skill:name request` sends the skill with the request; `/name arguments`, Pi's prompt template of that name.
-        const text = typed.startsWith("/skill:")
-            ? (expandSkillCommand(typed, app.skillCommands(id)) ?? typed)
-            : typed.startsWith("/")
-              ? (expandPromptTemplate(typed, app.promptTemplates(id)) ?? typed)
-              : typed;
+        const text = /^\/handoff(?:\s|$)/i.test(typed)
+            ? typed
+            : typed.startsWith("/skill:")
+              ? (expandSkillCommand(typed, app.skillCommands(id)) ?? typed)
+              : typed.startsWith("/")
+                ? (expandPromptTemplate(typed, app.promptTemplates(id)) ?? typed)
+                : typed;
         const attachments = request.attachments ?? [];
 
         if (text === "" && attachments.length === 0) {
@@ -1050,7 +1023,13 @@ export class Commands {
             await this.#followFailure(id, user, failure, requestId);
         }
 
-        return { submissionId: submission.id, requestId };
+        return {
+            submissionId: submission.id,
+            requestId,
+            ...(via === undefined
+                ? { handoffRequestKey: handoffInputKey(user.id, id, requestId) }
+                : {}),
+        };
     }
 
     /** When a subagent (`id`, its conversation) failed, if it is failed now (not stopped); undefined otherwise. */

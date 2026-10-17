@@ -1,4 +1,21 @@
-/* Workflow additions inherit the managed-session palette, typography and disclosure behavior. */
+.thread-type.chat {
+    color: var(--o-green);
+    background: color-mix(in srgb, var(--o-green) 8%, transparent);
+}
+
+.thread-type.worker {
+    color: var(--o-blue);
+    background: color-mix(in srgb, var(--o-blue) 8%, transparent);
+}
+
+:root[data-mode="light"] .thread-type.chat {
+    color: color-mix(in srgb, var(--o-green) 50%, var(--o-fg));
+}
+
+:root[data-mode="light"] .thread-type.worker {
+    color: color-mix(in srgb, var(--o-blue) 50%, var(--o-fg));
+}
+
 .thread-type.reviewer {
     color: var(--o-magenta);
     background: color-mix(in srgb, var(--o-magenta) 8%, transparent);
@@ -48,24 +65,49 @@
     background: none;
 }
 
+/* Work Items inherit the app palette; profile tags are the host's generic public component. */
+.handoff-icon-button {
+    width: 40px;
+    height: 40px;
+    display: inline-grid;
+    place-items: center;
+    border-radius: var(--r-control);
+    color: var(--muted);
+    position: relative;
+    flex: none;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    transition:
+        background-color var(--t-hover) var(--ease-out),
+        color var(--t-hover) var(--ease-out),
+        transform 90ms var(--ease-out);
+}
+
 .handoff-button {
     color: var(--accent);
     flex-shrink: 0;
 }
 
-.handoff-button .thread-type {
-    color: inherit;
-    padding: 0;
-}
-
 @media (hover: hover) and (pointer: fine) {
-    .handoff-button:hover:not(:disabled) {
+    .handoff-icon-button:hover:not(:disabled) {
         background: var(--hover);
+        color: var(--text);
+    }
+
+    .handoff-button:hover:not(:disabled) {
+        color: var(--accent);
     }
 }
 
-.handoff-button:active:not(:disabled) {
+.handoff-icon-button:active:not(:disabled) {
     background: var(--pressed);
+    transform: scale(0.94);
+}
+
+.handoff-icon-button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
 }
 
 .workflow-tools {
@@ -104,11 +146,11 @@
     min-width: 0;
 }
 
-.handoff-validation-history > summary {
-    min-height: 44px;
-    padding-block: 0.65rem;
-    cursor: pointer;
-    touch-action: manipulation;
+.handoff-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    margin: 4px 2px 6px;
 }
 
 .handoff-options {
@@ -134,7 +176,8 @@
     accent-color: var(--accent);
 }
 
-.handoff-option > .thread-type {
+.handoff-option-profile {
+    display: inline-flex;
     flex-shrink: 0;
 }
 
@@ -154,146 +197,50 @@
     color: var(--muted);
 }
 
-.handoff-recommendation {
-    color: var(--accent);
-}
-
-.handoff-explanation {
-    margin: 0.75rem 0 1rem;
-    line-height: 1.5;
+.handoff-destination,
+.handoff-form-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
 }
 
 .handoff-form-actions {
-    display: flex;
     justify-content: flex-end;
-    flex-wrap: wrap;
-    gap: 0.5rem;
 }
 
 .handoff-form-actions .button {
     min-height: 44px;
 }
 
-.work-item .session {
-    min-height: 44px;
-    padding-block: 0.4rem;
-}
-
-.work-item-head > .session {
-    grid-template-columns: minmax(0, 1fr) auto;
-    padding-left: 36px;
-}
-
-.work-item-head .session-main {
-    min-width: 0;
+.handoff-field {
     display: flex;
     flex-direction: column;
-}
-
-.work-item-head .session-main > .session-title {
+    gap: 6px;
     min-width: 0;
-    flex-shrink: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
 
-.work-item-head .session-people {
-    grid-column: 1 / span 2;
+.handoff-field > .handoff-label {
+    margin: 0;
+    font-size: 12.5px;
 }
 
-.work-item-disclosure {
-    position: absolute;
-    z-index: 1;
-    left: calc(var(--linked-depth, 0) * 14px);
-    top: 0;
-    width: 32px;
-    height: 100%;
-    min-height: 44px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 2px;
-    padding: calc(0.7rem + 1px) 0 0;
-}
-
-.work-item-member .session {
-    padding-left: 1.35rem;
-}
-
-.work-item-member {
-    animation: none;
-}
-
-.work-item.closed .work-item-body {
-    grid-template-rows: 0fr;
-    opacity: 0;
-}
-
-.work-item .session-meta {
+.handoff-field textarea {
+    width: 100%;
     min-width: 0;
-    flex-wrap: nowrap;
-    gap: 0.6rem;
+    resize: vertical;
+    font-size: 14.5px;
+    border-radius: calc(var(--r-control) + 1px);
 }
 
-.work-item .session-meta > span {
-    min-width: 0;
-    white-space: nowrap;
+.handoff-error {
+    color: var(--err);
 }
 
-.work-item-head .session-meta > .mono {
-    flex: 1 1 0;
-}
-
-.work-item-head .work-item-status {
-    flex: 0 1 auto;
-    max-width: 60%;
-}
-
-.work-item-head .session-meta span + span::before {
-    content: none;
-}
-
-.work-item-head .session-actions {
-    max-width: calc(100% - 42px);
-}
-
-@media (hover: none), (pointer: coarse) {
-    .workflow-state {
-        width: 40px;
-        height: 40px;
-    }
-
-    .work-item-disclosure {
-        width: 40px;
-    }
-
-    .work-item-head > .session {
-        padding-left: 44px;
-    }
-
-    .work-item-head .session-actions {
-        display: flex;
-        right: 0;
-        margin-top: -20px;
-    }
-
-    .work-item-head .session-actions .session-act {
-        display: none;
-    }
-
-    .work-item-head .session-actions .work-item-options {
-        display: grid;
-        width: 40px;
-        height: 40px;
-        opacity: 1;
-        transform: none;
-        border: 0;
-        background: transparent;
-    }
-
-    .work-item-head .session {
-        padding-right: 44px;
+@media (pointer: coarse) {
+    /* iOS must not zoom the sheet when its instructions field receives focus. */
+    .handoff-field textarea {
+        font-size: 16px;
     }
 }
 
@@ -302,5 +249,19 @@
         min-width: 44px;
         height: 44px;
         padding: 0;
+    }
+}
+
+/* Sidebar grouping remains a projection of the access-filtered session catalogue. */
+@media (hover: none), (pointer: coarse) {
+    .workflow-state {
+        width: 40px;
+        height: 40px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .handoff-icon-button {
+        transition: none;
     }
 }

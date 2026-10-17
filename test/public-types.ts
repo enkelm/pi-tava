@@ -9,15 +9,30 @@ import type {
     ExtensionWeb,
     LinkedSession as RealLinkedSession,
     PocketHost,
+    SessionServices as RealSessionServices,
+    SessionRequestServices as RealSessionRequestServices,
+    SessionWebRequest as RealSessionWebRequest,
     WebRequest as RealWebRequest,
 } from "../src/server/host.ts";
 import type {
+    AgentProfile as RealAgentProfile,
+    SessionWorkflow as RealSessionWorkflow,
+    SessionWorkflowTransition as RealSessionWorkflowTransition,
+} from "../src/server/session-workflows.ts";
+import type {
+    AgentProfile,
     Command,
     CommandContext,
     CommandResult,
     Host,
     LinkedSession,
     Module,
+    Pocket,
+    SessionServices,
+    SessionRequestServices,
+    SessionWebRequest,
+    SessionWorkflow,
+    SessionWorkflowTransition,
     Web,
     WebRequest,
 } from "../types/pocket.d.ts";
@@ -66,6 +81,66 @@ export const result = (real: RealCommandResult): CommandResult => real;
 export const resultBack = (types: CommandResult): RealCommandResult => types;
 export const linked = (real: RealLinkedSession): LinkedSession => real;
 export const linkedBack = (types: LinkedSession): RealLinkedSession => types;
+export const sessions = (real: RealSessionServices): SessionServices => real;
+export const sessionsBack = (types: SessionServices): RealSessionServices => types;
+export const sessionRequest = (real: RealSessionWebRequest): SessionWebRequest => real;
+export const sessionRequestBack = (types: SessionWebRequest): RealSessionWebRequest => types;
+export const sessionServices = (real: RealSessionRequestServices): SessionRequestServices => real;
+export const sessionServicesBack = (types: SessionRequestServices): RealSessionRequestServices =>
+    types;
+export const profile = (real: RealAgentProfile): AgentProfile => real;
+export const profileBack = (types: AgentProfile): RealAgentProfile => types;
+export const workflow = (real: RealSessionWorkflow): SessionWorkflow => real;
+export const workflowBack = (types: SessionWorkflow): RealSessionWorkflow => types;
+export const transition = (real: RealSessionWorkflowTransition): SessionWorkflowTransition => real;
+export const transitionBack = (types: SessionWorkflowTransition): RealSessionWorkflowTransition =>
+    types;
+
+/** Browser authors use current scoped services and the normal durable input path; hints cannot intercept sends. */
+export function browser(pocket: Pocket): void {
+    pocket.sessionControl({
+        id: "profile",
+        slot: "header",
+        component: ({ pocket, session }) =>
+            pocket.h(pocket.AgentProfileTag, {
+                profile: session.conversation?.threadType ?? "chat",
+            }),
+    });
+    pocket.inputCommand({
+        id: "choice",
+        name: "choice",
+        description: "Complete a normal input",
+        suggest: async () => [{ name: "choice", completion: "/choice ", completeOnEnter: true }],
+    });
+    pocket.sheet<{ id: number; opening: string }>({
+        id: "choice",
+        title: "Choice",
+        component: ({ isOpen, close }) => {
+            if (isOpen()) {
+                close();
+            }
+
+            return null;
+        },
+    });
+    const stop = pocket.onSessionChange((session) => {
+        if (session.id !== null) {
+            void pocket.sessionApi(session.id, "status");
+        }
+    });
+    const session = pocket.session();
+
+    if (session.id !== null) {
+        void pocket.submit(session.id, {
+            text: "Human input",
+            requestId: pocket.requestId(),
+            mode: "followUp",
+        });
+        pocket.navigate(session.id);
+    }
+
+    stop();
+}
 
 /** A module written against the public types is one the loader takes. */
 export const module = (types: Module): ExtensionModule => types;

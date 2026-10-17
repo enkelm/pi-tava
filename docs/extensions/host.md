@@ -13,17 +13,15 @@ Text from a web page, an issue, or a file that a person did not write can try to
 - `host.text.quoted(text, max)` gives one line in quotes that the text cannot close. It removes invisible characters and tags, and cuts the line to `max` characters, or to a [default length](reference/limits.md#host).
 - `host.text.defang(text)` keeps the lines, but leaves no closing tag in them. Use it for text that you put between tags of your own.
 
-## Check for new members
+## Keep source versions aligned
 
-Pi Pocket loads a module again while the server runs, but the host changes only when the server restarts. So a module can run on a server whose host does not have a member yet.
+Pi Pocket reloads extension modules while the server runs, but host changes need a restart. Server
+and browser source target the same current public API. After changing host code, finish the change
+and ask the owner to restart; do not add compatibility aliases or older-host fallback branches.
 
-A module that uses a new member must work without it until the restart:
-
-```typescript
-const held = typeof host.heldBack === "function" ? host.heldBack(conversationId) : undefined;
-```
-
-A module that calls a member that is not there fails when it first uses it, in each session.
+Independent sessions use `host.sessions`: `sessions.linked` starts/messages linked peers, while
+`sessions.handoff` derives handoff authority from the actual tool invocation and placed human input.
+There is no top-level linked-peer alias. See [the session reference](reference/host.md#sessions).
 
 ## Types
 

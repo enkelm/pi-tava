@@ -4,16 +4,14 @@ import { store } from "./store.js";
 import { html } from "./ui.js";
 
 function previewRuntime(conversationId) {
-    const { view, sessions, server, privateId, me } = store.state;
-    const scoped = (server?.handoffs ?? 0) >= 1;
+    const { view, sessions, privateId, me } = store.state;
     const privateContext = `private:${privateId}`;
 
     if (privateId !== null && (conversationId === undefined || conversationId === privateContext)) {
         return {
             id: privateContext,
-            scoped,
             allowed: me?.role === "owner",
-            src: scoped ? "/a/frame/private" : "/a/frame",
+            src: "/a/frame/private",
         };
     }
 
@@ -25,7 +23,7 @@ function previewRuntime(conversationId) {
         (each) =>
             each?.isManaged ||
             each?.workItemId ||
-            (scoped && ["worker", "reviewer", "land", "publish"].includes(each?.threadType)) ||
+            (each?.threadType && each.threadType !== "chat") ||
             each?.workflow?.managed ||
             each?.workflow?.readOnly ||
             each?.workflow?.proposal ||
@@ -34,9 +32,8 @@ function previewRuntime(conversationId) {
 
     return {
         id,
-        scoped,
         allowed: Number.isSafeInteger(id) && id > 0 && Boolean(conversation) && !managed,
-        src: scoped ? `/a/frame/${id}` : "/a/frame",
+        src: `/a/frame/${id}`,
     };
 }
 
@@ -49,11 +46,7 @@ export function usePreviewRuntime(conversationId) {
             const next = previewRuntime(conversationId);
 
             setRuntime((before) =>
-                before.id === next.id &&
-                before.allowed === next.allowed &&
-                before.scoped === next.scoped
-                    ? before
-                    : next,
+                before.id === next.id && before.allowed === next.allowed ? before : next,
             );
         };
 
@@ -133,7 +126,6 @@ export function RunFrame({ source, title = "Preview", conversationId }) {
             if (
                 !current.allowed ||
                 current.id !== runtime.id ||
-                current.scoped !== runtime.scoped ||
                 !frame ||
                 event.source !== frame.contentWindow ||
                 typeof data !== "object"
@@ -157,7 +149,7 @@ export function RunFrame({ source, title = "Preview", conversationId }) {
         addEventListener("message", onMessage);
 
         return () => removeEventListener("message", onMessage);
-    }, [source, conversationId, runtime.id, runtime.allowed, runtime.scoped]);
+    }, [source, conversationId, runtime.id, runtime.allowed]);
 
     if (!runtime.allowed) {
         return html`<p class="muted small rich-note">Interactive Run is unavailable for this conversation.</p>`;
@@ -166,7 +158,7 @@ export function RunFrame({ source, title = "Preview", conversationId }) {
     return html`<iframe
         class="run-frame"
         ref=${ref}
-        key=${`${runtime.id}:${runtime.scoped}:${source}`}
+        key=${`${runtime.id}:${source}`}
         src=${runtime.src}
         sandbox=${SANDBOX}
         allow="fullscreen; clipboard-write"

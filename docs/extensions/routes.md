@@ -23,6 +23,27 @@ web.route("GET", "items/:id", ({ params }) => {
 - Each other part has letters, digits, and `.`, `_`, `~`, and `-`, but is not `.` or `..` alone.
 - When two paths match, the more specific one answers, in any order of registration: a fixed part wins over a `:name` part, from the left. So `items/new` wins over `items/:id`.
 
+## Conversation-scoped routes
+
+Experimental since 0.15.0, `web.sessionRoute(method, path, handle, { access })` registers a separate
+route at `/api/c/:id/x/<module>/<path>`. Call it with `pocket.sessionApi(id, path, body?, options?)`.
+App-wide `web.route` access is unchanged and still excludes scoped invitees.
+
+A scoped request includes the common fields below plus `conversationId` and request-bound `session`
+services. `session.transfers.status()` reads access-filtered state/choices;
+`session.transfers.updateGroup(patch)` applies group metadata with core permission checks. Handlers
+cannot substitute another person or conversation. Current source visibility and declared role access
+are rechecked after asynchronous body reading and on each bound service call.
+
+For scoped routes, `"owner"` remains owner-only, `"steer"` permits owners/guests who see this source,
+and `"view"` also permits its viewers, including session invitees. Core mutation services retain
+steering/driving checks. Static browser code can separately opt into conversation access with
+`web.client(entry, { access: "conversation" })`; loading assets grants no data or mutation rights.
+
+Work Items registers scoped `GET handoffs` and `POST work-item`. Core `GET /api/c/:id/transfers` is
+not an extension route: it passively finds only the current person's accepted outgoing receipts from
+that exact source, even when Work Items is disabled. It cannot start or retry model work.
+
 ## The request
 
 `handle(request)` gets `{ method, params, query, body, user, signal }`:
@@ -57,7 +78,7 @@ A route has no time limit. A handler that waits keeps its request open until it 
 
 ## Who may use it
 
-Routes and the browser module are for the owner alone, unless their `access` says more:
+App-wide routes and browser modules are for the owner alone, unless their `access` says more:
 
 | `access`            | Who                                                  |
 | ------------------- | ---------------------------------------------------- |
@@ -65,7 +86,7 @@ Routes and the browser module are for the owner alone, unless their `access` say
 | `"steer"`           | The owner, and guests who can steer every session    |
 | `"view"`            | The owner, guests, and viewers who see every session |
 
-- A person invited to one session never may use them: these parts belong to the whole app.
+- A person invited to one session cannot use these app-wide parts. Conversation-scoped routes and the static browser opt-in above are separate.
 - Each route checks its own `access`. So a browser module for everyone can have a route for the owner alone.
 - `access` is the same for each method. A `POST` route open to `"view"` lets viewers change something through it, though they cannot steer a session. Give a route that changes things `"owner"` or `"steer"`.
 - A browser module runs with the rights of the person whose tab loads it. So it can do nothing in a guest's tab that the guest cannot do.

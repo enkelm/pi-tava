@@ -1,5 +1,13 @@
 // The profile switch's HTTP permissions and its real persistent-browser behavior.
-import { cleanUp, newSession, openApp, owner, root, scriptedModel, until } from "./helpers.ts";
+import {
+    cleanUp,
+    executeHandoff,
+    newSession,
+    openApp,
+    root,
+    scriptedModel,
+    until,
+} from "./helpers.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { createServer } from "node:http";
@@ -221,11 +229,8 @@ test(
                 undefined,
                 "the imported Chat uses the shared default context",
             );
-            await app.handoffs.start(chat, owner(app), {
-                targetType: "researcher",
-                relationship: "same-work",
-                requestId: crypto.randomUUID(),
-                brief: "Investigate a pointed question without importing browser accounts.",
+            await executeHandoff(app, chat, "researcher", {
+                summary: "Investigate a pointed question without importing browser accounts.",
             });
             assert.equal(
                 unrestricted.closed,
