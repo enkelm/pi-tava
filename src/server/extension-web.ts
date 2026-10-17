@@ -18,11 +18,14 @@ import {
 import { extname, join } from "node:path";
 import type { User } from "./config.ts";
 import { describe } from "./errors.ts";
+import { validateWorkflow, workflowOptions } from "./session-workflows.ts";
+import type { AgentProfile, SessionWorkflow } from "./session-workflows.ts";
 import type {
     CommandInfo,
     ExtensionCommand,
     ExtensionWeb,
     WebAccess,
+    WebClientAccess,
     WebHandler,
     WebMethod,
 } from "./host.ts";
@@ -120,6 +123,20 @@ export function exposedError(error: unknown): { status: number; message: string 
         : undefined;
 }
 
+/** Construct the same public error used by web.error and authenticated bound session operations. */
+export function webError(status: number, message: string): Error {
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+        throw new Error(`web.error: a status is from 400 to 599, not ${status}`);
+    }
+
+    const words =
+        typeof message === "string" || typeof message === "number"
+            ? String(message)
+            : "The extension failed.";
+
+    return Object.assign(new Error(words), { status, [EXPOSED]: true });
+}
+
 /** The files a browser module's folder serves, by type. Never `.ts`: server code can hold secrets. */
 const WEB_FILE_TYPES: Readonly<Record<string, string>> = {
     ".js": "text/javascript; charset=utf-8",
@@ -135,7 +152,7 @@ const WEB_FILE_TYPES: Readonly<Record<string, string>> = {
     ".woff2": "font/woff2",
 };
 
-/** Whether someone may use a web part open to `access`. The owner always may; people invited to one session never. */
+/** App-wide routes and events exclude scoped invitees. Static client opt-in never widens those data channels. */
 export function mayUse(user: Pick<User, "role" | "sessions">, access: WebAccess): boolean {
     if (user.role === "owner") {
         return true;
@@ -148,12 +165,21 @@ export function mayUse(user: Pick<User, "role" | "sessions">, access: WebAccess)
     return access === "view" || (access === "steer" && user.role === "guest");
 }
 
+/** Static code may opt into scoped tabs; every session data request still needs its own authorization. */
+export function mayUseClient(
+    user: Pick<User, "role" | "sessions">,
+    access: WebClientAccess,
+): boolean {
+    return access === "conversation" || mayUse(user, access);
+}
+
 /** A module's name, from its file: `server-status.ts` is `server-status`. */
 function moduleName(file: string): string {
     return file.replace(/\.ts$/, "");
 }
 
 interface Route {
+    scope: "app" | "session";
     method: WebMethod;
     /** The path as registered, for the Extensions sheet. */
     path: string;
@@ -163,7 +189,7 @@ interface Route {
 }
 
 interface Client {
-    access: WebAccess;
+    access: WebClientAccess;
     /** The entry file's or the folder's name, right beside the module. */
     name: string;
     /** The entry file, or the folder everything is served from. */
@@ -184,6 +210,7 @@ export class WebPart {
     readonly routes: Route[] = [];
     client: Client | undefined;
     readonly commands: RegisteredCommand[] = [];
+    readonly workflows: Readonly<SessionWorkflow>[] = [];
     /** The tools the module installed with this version: its browser module may describe only their calls. */
     tools: readonly string[] = [];
     readonly disposers: (() => void)[] = [];
@@ -206,7 +233,12 @@ export class WebPart {
 
     /** Whether it added nothing to the app: no routes, browser module, or commands (cleanups do not count). */
     get empty(): boolean {
-        return this.routes.length === 0 && this.client === undefined && this.commands.length === 0;
+        return (
+            this.routes.length === 0 &&
+            this.client === undefined &&
+            this.commands.length === 0 &&
+            this.workflows.length === 0
+        );
     }
 }
 
@@ -216,7 +248,7 @@ export type RouteMatch =
 
 interface Options {
     /** Browser modules for the people `access` lets in changed: their tabs must hear which to load. */
-    changed?: (access: WebAccess[]) => void;
+    changed?: (access: WebClientAccess[]) => void;
     /** Send a browser module's event to the tabs it loads in (`to`: one person's). */
     deliver?: (part: WebPart, access: WebAccess, event: string, data: unknown, to?: string) => void;
     log?: (message: string) => void;
@@ -243,7 +275,12 @@ export class ExtensionWebs {
     }
 
     /** What a module registers while `file` (in `directory`) loads, and the `web` its default export gets. */
-    stage(file: string, directory: string, title: string): { part: WebPart; web: ExtensionWeb } {
+    stage(
+        file: string,
+        directory: string,
+        title: string,
+        builtIn = false,
+    ): { part: WebPart; web: ExtensionWeb } {
         const part = new WebPart(file, directory, title);
 
         this.#staged.add(part);
@@ -273,6 +310,12 @@ export class ExtensionWebs {
                 open("route");
                 part.routes.push(checkRoute(part, method, path, handle, options?.access));
             },
+            sessionRoute: (method, path, handle, options) => {
+                open("sessionRoute");
+                part.routes.push(
+                    checkRoute(part, method, path, handle, options?.access, "session"),
+                );
+            },
             client: (entry, options) => {
                 open("client");
 
@@ -295,21 +338,14 @@ export class ExtensionWebs {
                     }
                 }
             },
-            error: (status, message) => {
-                if (!Number.isInteger(status) || status < 400 || status > 599) {
-                    throw new Error(`web.error: a status is from 400 to 599, not ${status}`);
-                }
-
-                const words =
-                    typeof message === "string" || typeof message === "number"
-                        ? String(message)
-                        : "The extension failed.";
-
-                return Object.assign(new Error(words), { status, [EXPOSED]: true });
-            },
+            error: webError,
             command: (name, command) => {
                 sealed("command");
                 part.commands.push(this.#checkCommand(part, name, command));
+            },
+            workflow: (definition) => {
+                open("workflow");
+                part.workflows.push(validateWorkflow(part.module, definition, builtIn));
             },
             onDispose: (dispose) => {
                 if (typeof dispose !== "function") {
@@ -396,7 +432,13 @@ export class ExtensionWebs {
 
         part.sending.events++;
         part.sending.bytes += bytes;
-        this.#options.deliver?.(part, part.client.access, event, JSON.parse(json), to);
+        this.#options.deliver?.(
+            part,
+            part.client.access === "conversation" ? "view" : part.client.access,
+            event,
+            JSON.parse(json),
+            to,
+        );
     }
 
     /** A command as registered, checked: its name must not take a built-in command's, or another module's. */
@@ -477,6 +519,51 @@ export class ExtensionWebs {
         for (const command of part.commands) {
             this.#clash(part, command.name);
         }
+
+        const workflows = [...this.#parts.values()]
+            .filter((other) => other.module !== part.module)
+            .flatMap((other) => other.workflows);
+        const ids = new Set(workflows.map((workflow) => workflow.id));
+        const profiles = new Set(
+            workflows.flatMap((workflow) => workflow.profiles.map((profile) => profile.id)),
+        );
+
+        for (const workflow of part.workflows) {
+            if (ids.has(workflow.id)) {
+                throw new Error(`web.workflow: duplicate workflow ${workflow.id}`);
+            }
+
+            ids.add(workflow.id);
+
+            for (const profile of workflow.profiles) {
+                if (profiles.has(profile.id)) {
+                    throw new Error(`web.workflow: duplicate profile ${profile.id}`);
+                }
+
+                profiles.add(profile.id);
+            }
+        }
+    }
+
+    /** Active profile contributions only. Stored identities and safety state outlive these declarations. */
+    profiles(): AgentProfile[] {
+        return [...this.#parts.values()].flatMap((part) =>
+            part.workflows.flatMap((workflow) => workflow.profiles),
+        );
+    }
+
+    profile(id: string): AgentProfile | undefined {
+        return this.profiles().find((profile) => profile.id === id);
+    }
+
+    workflowFor(profile: string): Readonly<SessionWorkflow> | undefined {
+        return [...this.#parts.values()]
+            .flatMap((part) => part.workflows)
+            .find((workflow) => workflow.profiles.some((each) => each.id === profile));
+    }
+
+    workflowOptions(current: string, history: readonly string[]) {
+        return workflowOptions(this.workflowFor(current), current, history);
     }
 
     /** Every installed module's commands, without their handlers. */
@@ -536,7 +623,12 @@ export class ExtensionWebs {
             this.#changed(previous, part);
         }
 
-        if ((previous?.commands.length ?? 0) > 0 || part.commands.length > 0) {
+        if (
+            (previous?.commands.length ?? 0) > 0 ||
+            part.commands.length > 0 ||
+            (previous?.workflows.length ?? 0) > 0 ||
+            part.workflows.length > 0
+        ) {
             this.#options.commandsChanged?.();
         }
     }
@@ -563,7 +655,7 @@ export class ExtensionWebs {
             this.#changed(part);
         }
 
-        if (part.commands.length > 0) {
+        if (part.commands.length > 0 || part.workflows.length > 0) {
             this.#options.commandsChanged?.();
         }
     }
@@ -578,6 +670,7 @@ export class ExtensionWebs {
         method: string,
         path: readonly string[],
         user: Pick<User, "role" | "sessions">,
+        scope: "app" | "session" = "app",
     ): RouteMatch | undefined {
         const part = this.#parts.get(module);
 
@@ -586,7 +679,14 @@ export class ExtensionWebs {
         }
 
         const found = part.routes.flatMap((route) => {
-            const params = mayUse(user, route.access) ? matchPath(route.segments, path) : undefined;
+            const allowed =
+                scope === "session"
+                    ? route.access === "view" ||
+                      user.role === "owner" ||
+                      (route.access === "steer" && user.role === "guest")
+                    : mayUse(user, route.access);
+            const params =
+                route.scope === scope && allowed ? matchPath(route.segments, path) : undefined;
 
             return params === undefined ? [] : [{ route, params }];
         });
@@ -609,7 +709,7 @@ export class ExtensionWebs {
         user: Pick<User, "role" | "sessions">,
     ): { module: string; title: string; url: string }[] {
         return [...this.#parts.values()]
-            .filter((part) => part.client !== undefined && mayUse(user, part.client.access))
+            .filter((part) => part.client !== undefined && mayUseClient(user, part.client.access))
             .map((part) => ({
                 module: part.module,
                 title: part.title,
@@ -634,7 +734,7 @@ export class ExtensionWebs {
         if (
             part === undefined ||
             client === undefined ||
-            !mayUse(user, client.access) ||
+            !mayUseClient(user, client.access) ||
             path.length === 0
         ) {
             return undefined;
@@ -683,7 +783,9 @@ export class ExtensionWebs {
     /** What a module's web part has, for the Extensions sheet. */
     describe(
         file: string,
-    ): { routes: string[]; client?: WebAccess; access: WebAccess; commands: string[] } | undefined {
+    ):
+        | { routes: string[]; client?: WebClientAccess; access: WebAccess; commands: string[] }
+        | undefined {
         const part = this.#parts.get(moduleName(file));
 
         if (part === undefined || part.file !== file || part.empty) {
@@ -691,11 +793,13 @@ export class ExtensionWebs {
         }
 
         // The widest of its routes' and its browser module's: who can reach any of it.
-        const reach: WebAccess[] = [
+        const reach: WebClientAccess[] = [
             ...part.routes.map((route) => route.access),
             ...(part.client === undefined ? [] : [part.client.access]),
         ];
-        const access = (["view", "steer"] as const).find((each) => reach.includes(each)) ?? "owner";
+        const access = reach.includes("conversation")
+            ? "view"
+            : ((["view", "steer"] as const).find((each) => reach.includes(each)) ?? "owner");
 
         return {
             routes: part.routes.map((route) => `${route.method} ${route.path}`),
@@ -905,6 +1009,7 @@ function checkRoute(
     path: unknown,
     handle: unknown,
     access: unknown = "owner",
+    scope: "app" | "session" = "app",
 ): Route {
     const verb = typeof method === "string" ? method.toUpperCase() : "";
 
@@ -954,13 +1059,17 @@ function checkRoute(
 
     if (
         part.routes.some(
-            (route) => route.method === verb && shape(route.segments) === shape(segments),
+            (route) =>
+                route.scope === scope &&
+                route.method === verb &&
+                shape(route.segments) === shape(segments),
         )
     ) {
         throw new Error(`web.route: ${verb} ${path} is registered twice`);
     }
 
     return {
+        scope,
         method: verb as WebMethod,
         path: segments.join("/"),
         segments,
@@ -978,8 +1087,10 @@ function checkClient(part: WebPart, entry: unknown, access: unknown = "owner"): 
         );
     }
 
-    if (typeof access !== "string" || !ACCESS.has(access)) {
-        throw new Error(`web.client: access is "owner", "steer", or "view", not ${String(access)}`);
+    if (typeof access !== "string" || !(ACCESS.has(access) || access === "conversation")) {
+        throw new Error(
+            `web.client: access is "owner", "steer", "view", or "conversation", not ${String(access)}`,
+        );
     }
 
     const root = join(part.directory, entry);
@@ -1022,7 +1133,7 @@ function checkClient(part: WebPart, entry: unknown, access: unknown = "owner"): 
     }
 
     return {
-        access: access as WebAccess,
+        access: access as WebClientAccess,
         name: entry,
         root,
         folder,

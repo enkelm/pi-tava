@@ -44,17 +44,19 @@ These members are public:
 - `requesterOf(conversationId)`
 - `skillPaths()`, `skills(cwd)`
 - `heldBack(conversationId)`, `onLimitsChanged(listener)`
-- `linkedSessions`: `start`, `send`, `list` (experimental in 0.14, see [Experimental](#experimental))
+- `sessions`: `linked` (`start`, `send`, `list`) and `handoff` (experimental since 0.15.0); there is no top-level linked-peer alias
 - `text`: `quoted`, `defang`
 - `thinkingLevels`
 
 These members are on `host` for Pi Pocket's own built-in extensions: `guard`, `approvals`, `schedules`, `goals`, `browsers`, `memory`, `watches`, `repoWatches`, `gallery`, `pip`, and `pipCompaction`. They are **internal**. A drop-in can read them, but their shapes can change in any release. One of them becomes public only through a request for an extension point ([core-or-extension.md](core-or-extension.md#ask-for-a-new-extension-point)).
 
-The host's members do not change while modules reload. A new member comes only after a restart, so a module that uses a new member must check that it is there ([Using the host](../host.md)).
+The host's members do not change while modules reload. Host changes need a restart; server and browser source target the same current API, without older-host fallback branches ([Using the host](../host.md)).
 
 ### 4. `web`
 
 - `api`, `module`, `route`, `client`, `command`, `send`, `error`, and `onDispose`.
+- `workflow` and its `AgentProfile` (including optional `icon`), `SessionWorkflowTransition`, `SessionWorkflow` declaration types (experimental since 0.15.0).
+- `sessionRoute`, `SessionWebRequest`, request-bound `SessionRequestServices` and static-only `WebClientAccess: "conversation"` (experimental since 0.15.0). Scoped routes recheck current source visibility and role; app-wide routes still exclude scoped invitees.
 - What a route handler gets (`WebRequest`: `method`, `params`, `query`, `body`, `user`, `signal`), and what its answer does.
 - The route paths, the methods, the `access` values (`owner`, `steer`, `view`), and the `X-Pocket` header that every call to a route must have.
 
@@ -70,7 +72,8 @@ The host's members do not change while modules reload. A new member comes only a
 - `h`, `html`, `Fragment`, and the hooks: `useState`, `useEffect`, `useLayoutEffect`, `useRef`, `useMemo`, `useCallback`, and `useReducer`.
 - The pieces `Icon`, `Loader`, `Spinner`, `Markdown`, and `Switch`, with the props that [pocket](../reference/pocket.md) gives.
 - `api`, `on`, `rail`, `menu`, `launcher`, `page`, `sheet`, `toolCall`, `openPage`, `closePage`, `openSheet`, `closeSheet`, `notify`, `me`, `conversationId`, `style`, and `onDispose`.
-- What a page's or a sheet's component gets: `pocket`, `close`, and a sheet's `props`.
+- Experimental since 0.15.0: `AgentProfileTag`, `session`, `requestId`, `onSessionChange`, `sessionApi`, `submit`, `navigate`, `sessionControl` and `inputCommand`, with the narrow metadata/spec/receipt types in the reference.
+- What a page's or a sheet's component gets: `pocket`, `close`, and a sheet's flat props. Experimental `SheetProps.isOpen()` pins the actual logical opening, as its close callback does.
 - The icon names that [pocket](../reference/pocket.md) lists. Other icon names can go. An unknown name shows `grid`, so a module does not fail.
 - Safe mode: `?noext=1` and `?noext=0` on the app's address.
 
@@ -102,7 +105,7 @@ The host's members do not change while modules reload. A new member comes only a
 ## What is internal
 
 - All files under `src/` and `web/`, and what they export, `src/server/host.ts` too. The public types are in `types/pocket.d.ts` ([The module](#1-the-module)).
-- The app's HTTP API, other than a module's own routes under `/api/x/<module>/`.
+- The app's HTTP API, other than a module's own routes under `/api/x/<module>/` and `/api/c/:id/x/<module>/`. Public `pocket.submit` exposes normal human input, not arbitrary HTTP access.
 - The events between the server and its tabs, and the `pocket.*` keys in browser storage.
 - Pi Pocket's document kinds (`pocket.*`), and the shapes of its documents, entries, and tasks. A module can read them with `api.snapshot`, but their fields can change.
 - `config.json`, `pocket.sqlite`, and the rest of the data folder, except `extensions/`.
@@ -138,7 +141,10 @@ All public interfaces are stable, unless the docs mark them experimental or depr
 - **A6. A gallery entry that uses an experimental member should say so in its description.**\
   _Reason:_ the owner then knows that an update of Pi Pocket can break it.
 
-In 0.14, only `host.linkedSessions` is experimental. It changed a lot in the betas, and Agent Teams is its only user. It becomes stable in 0.15 if it does not have to change. All other public members of 0.14 are stable.
+The session/workflow additions for 0.15 are experimental, including request-bound scoped routes,
+conversation browser access, session snapshots, controls, input hints, submission/navigation and
+logical-opening sheet checks. `host.sessions.linked` is the sole linked-peer path; no old alias or
+older-host fallback is kept. These additions do not change the status of unrelated stable members.
 
 ### Deprecated
 
@@ -159,8 +165,8 @@ See [Deprecation](#deprecation).
 
 ### `minPocket` and additions
 
-- **A10. A module that uses an addition checks for it at run time,** as `typeof web.command === "function"`. In the gallery, it also sets `minPocket` to the release that added it.\
-  _Reason:_ the server's part changes only after a restart, so a running server can have an older `host` and `web` than its files.
+- **A10. A module targets the current API of its server and browser source.** In the gallery it sets `minPocket` to the release it needs. Host changes require an owner-controlled restart, not compatibility aliases or runtime fallback branches.\
+  _Reason:_ one source-level contract avoids duplicate behavior and misleading partial support.
 - **A11. `minPocket` names a release, such as `0.15.0`, not a pre-release.** Pi Pocket counts `0.15.0-beta.2` as `0.15.0`.\
   _Reason:_ a beta can change before the release, and an entry for a beta can break on the release.
 

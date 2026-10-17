@@ -1,8 +1,8 @@
 /** Durable handoff grouping and per-thread workflow state; no executable context reset or task ownership. */
 import { defineDoc } from "@earendil-works/pi-durable";
 
-export type ThreadType =
-    "chat" | "researcher" | "worker" | "reviewer" | "follow-up" | "pull" | "land" | "publish";
+/** Stable stored profile identity. Missing contributions never change it or imply Chat capabilities. */
+export type ThreadType = string;
 export type Relationship = "same-work" | "new-work";
 export type WorkflowStatus = "active" | "review-complete" | "landed" | "published" | "needs-review";
 export type Recommendation = {
@@ -87,6 +87,10 @@ export type Handoff = {
     relationship: Relationship;
     workItemId: string;
     brief: string;
+    /** Human direction is copied separately from the model's summary so it cannot be summarized away. */
+    instructions?: string;
+    /** Opaque correlation for the initiating tab; never a raw human request/submission identifier. */
+    requestKey?: string;
     sourceEntryId?: number;
     codeCheckpoint?: CodeFingerprint;
     requestedBy: string;
@@ -95,6 +99,8 @@ export type Handoff = {
     deliveryReason?: string;
     deliveryAttempt?: number;
     titleNamed?: boolean;
+    /** The extension's initial title at creation, retained across reload/removal for guarded naming. */
+    initialTitle?: string;
 };
 /** Immutable human intent; only its summary and settlement are produced by background work. */
 export type HandoffRequest = {
@@ -104,6 +110,9 @@ export type HandoffRequest = {
     requestedBy: string;
     input: string;
     brief?: string;
+    instructions?: string;
+    /** Presentation pinned at durable acceptance; the transfer can settle without its extension. */
+    targetTitle?: string;
     taskId: number;
     attempt: number;
     status: "pending" | "blocked" | "completed";

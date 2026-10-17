@@ -69,12 +69,12 @@ import {
 } from "./docs.ts";
 import { describe, HttpError } from "./errors.ts";
 import { ExtensionCommands } from "./extension-commands.ts";
-import { ExtensionWebs, mayUse } from "./extension-web.ts";
+import { ExtensionWebs, mayUse, mayUseClient } from "./extension-web.ts";
 import { defang, quoted } from "./fence.ts";
 import { FolderFavorites } from "./folder-favorites.ts";
 import { Gallery } from "./gallery.ts";
 import { Goals } from "./goals.ts";
-import { type ApprovalRequest, Approvals, type PocketHost, type WebAccess } from "./host.ts";
+import { type ApprovalRequest, Approvals, type PocketHost, type WebClientAccess } from "./host.ts";
 import { Imports } from "./imports.ts";
 import { PrivateSessions } from "./private-sessions.ts";
 import { PrivateTerminals } from "./private-terminals.ts";
@@ -118,6 +118,7 @@ import { Reviews } from "./reviews.ts";
 import { Projects } from "./projects.ts";
 import { GoalNames } from "./goal-names.ts";
 import { Handoffs } from "./handoffs.ts";
+import type { AgentProfile } from "./session-workflows.ts";
 import { HandoffsDoc, WorkflowDoc } from "./workflow-docs.ts";
 import { createWorkflowEnv, createWorkflowHooks } from "./workflow-policy.ts";
 import { createPublicationTool } from "./workflow-publication.ts";
@@ -127,6 +128,17 @@ import { PI_PROVIDERS_FILE, ProviderPackages } from "./provider-packages.ts";
 import { ProviderExtensions } from "./provider-extensions.ts";
 
 const context = BACKGROUND_CONTEXT;
+// Ordinary Chat predates optional workflows. Only this explicit stored identity retains its core
+// capabilities without a contribution; an unknown or missing managed profile never falls back to it.
+const ORDINARY_CHAT: AgentProfile = Object.freeze({
+    id: "chat",
+    icon: "chat",
+    name: "Chat",
+    description: "Questions, exploration and bounded tasks.",
+    title: "Chat",
+    starter: true,
+    prompt: "You are the Chat agent for this thread. Help with the person's requested question or bounded task. Match validation to its risk, respect explicit limits, report the result and wait for the human. Ordinary Chat capabilities remain unchanged.",
+});
 
 /** How other devices reach this server, as reported by the launcher (`bin/pi-coop.js`). */
 export type AccessInfo = {
@@ -287,6 +299,23 @@ export class PocketApp {
     readonly projects = new Projects(this);
     readonly goalNames = new GoalNames(this);
     readonly handoffs = new Handoffs(this);
+
+    agentProfile(id: string): AgentProfile | undefined {
+        return this.webs.profile(id) ?? (id === "chat" ? ORDINARY_CHAT : undefined);
+    }
+
+    defaultStarter(): string | undefined {
+        return this.agentProfiles().find((profile) => profile.starter && profile.id !== "chat")?.id;
+    }
+
+    agentProfiles(): AgentProfile[] {
+        const profiles = this.webs.profiles();
+
+        return profiles.some((profile) => profile.id === "chat")
+            ? profiles
+            : [ORDINARY_CHAT, ...profiles];
+    }
+
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
     readonly schedules = new Schedules(this);
@@ -326,7 +355,7 @@ export class PocketApp {
     readonly webs: ExtensionWebs;
     #websTimer: NodeJS.Timeout | undefined;
     /** Whose tabs the next `hello` for browser modules goes to: those who may use any of these. */
-    readonly #websFor = new Set<WebAccess>();
+    readonly #websFor = new Set<WebClientAccess>();
     /** Whether everyone's tabs must hear `hello` again, for a change to the modules' commands. */
     #websAll = false;
     readonly #clients = new Set<Client>();
@@ -452,7 +481,7 @@ export class PocketApp {
      * Browser modules came, went, or changed: the tabs of the people they are for hear which to load, once for changes
      * that come together.
      */
-    #websChanged(access: readonly WebAccess[] | "all"): void {
+    #websChanged(access: readonly WebClientAccess[] | "all"): void {
         if (this.#closing !== undefined) {
             return;
         }
@@ -476,7 +505,9 @@ export class PocketApp {
             this.#websTimer = undefined;
             this.#websFor.clear();
             this.#websAll = false;
-            void this.#refreshClients((user) => all || changed.some((each) => mayUse(user, each)));
+            void this.#refreshClients(
+                (user) => all || changed.some((each) => mayUseClient(user, each)),
+            );
         }, 50);
     }
 
@@ -542,7 +573,6 @@ export class PocketApp {
             defineExtension({
                 name: "pocket-core",
                 tools: [
-                    this.handoffs.tool,
                     createPublicationTool(this),
                     createPullTool(this),
                     createResearchTool(this),
@@ -580,7 +610,10 @@ export class PocketApp {
             notice: (level, message, conversationId) => this.notice(level, message, conversationId),
             heldBack: (conversationId) => this.spend.heldBack(conversationId),
             onLimitsChanged: (listener) => this.spend.onLimitsChanged(listener),
-            linkedSessions: this.linkedSessions,
+            sessions: Object.freeze<PocketHost["sessions"]>({
+                linked: this.linkedSessions,
+                handoff: (request, api, ctx) => this.handoffs.invoke(request, api, ctx),
+            }),
             schedules: this.schedules,
             goals: this.goals,
             browsers: this.browsers,
@@ -1875,7 +1908,16 @@ export class PocketApp {
                 localReviews: 2,
                 // Durable project/goal organization and independently typed threads.
                 projects: 1,
-                handoffs: 4,
+                agentProfiles: this.agentProfiles().map(
+                    ({ id, name, description, title, starter, icon }) => ({
+                        id,
+                        name,
+                        description,
+                        title,
+                        starter: starter === true,
+                        ...(icon === undefined ? {} : { icon }),
+                    }),
+                ),
                 // Owner-editable system instructions for the built-in thread agents.
                 agentSettings: 1,
                 // Owner-managed, restart-only Pi provider package compatibility.
@@ -2580,7 +2622,7 @@ export class PocketApp {
                       }
                     : {
                           ...module,
-                          ...(web?.client === undefined || !mayUse(user, web.client)
+                          ...(web?.client === undefined || !mayUseClient(user, web.client)
                               ? {}
                               : { web: { routes: [], client: web.client } }),
                           ...(error === undefined ? {} : { error: "It failed to load." }),

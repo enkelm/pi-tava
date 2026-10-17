@@ -5,7 +5,7 @@
 // - a heading at level 2 to 4 that is only the name in code (### `resolveModel`), then the signature, then the line
 //   "Since 0.14.0 · Stable" (or Experimental, or Deprecated);
 // - the members of Host, Web, Pocket, Command, CommandContext, Module, and BrowserModule have headings with their
-//   names alone; the nested ones are written `text.quoted` and `linkedSessions.start`;
+//   names alone; the nested ones are written `text.quoted` and `sessions.linked.start`;
 // - every other exported type has a heading of its own name, with its fields as bullets.
 //
 // Each heading the types file expects must be on its page with the same Since line, and each heading with a Since
@@ -27,13 +27,28 @@ const HEADED = new Map([
     ["Module", ""],
     ["BrowserModule", ""],
     ["SafeText", "text."],
-    ["LinkedSessions", "linkedSessions."],
+    ["SessionServices", "sessions."],
+    ["LinkedSessions", "sessions.linked."],
 ]);
+const NESTED = new Map([["SheetProps", "SheetProps."]]);
 
 /** Which types each page describes. */
 export const PAGES = {
-    "host.md": ["Host", "SafeText", "LinkedSessions", "LinkedSession"],
-    "web.md": ["Web", "WebHandler", "WebRequest", "WebMethod", "WebAccess"],
+    "host.md": ["Host", "SafeText", "SessionServices", "LinkedSessions", "LinkedSession"],
+    "web.md": [
+        "Web",
+        "WebHandler",
+        "WebRequest",
+        "WebMethod",
+        "WebAccess",
+        "WebClientAccess",
+        "AgentProfile",
+        "SessionWorkflowTransition",
+        "SessionWorkflow",
+        "SessionWebRequest",
+        "SessionRequestServices",
+        "SessionWebHandler",
+    ],
     "pocket.md": [
         "Pocket",
         "BrowserModule",
@@ -52,6 +67,19 @@ export const PAGES = {
         "LoaderProps",
         "MarkdownProps",
         "SwitchProps",
+        "SessionSnapshot",
+        "SessionConversation",
+        "SessionMetadata",
+        "SessionWorkflowMetadata",
+        "AgentProfileMetadata",
+        "SessionControlSpec",
+        "SessionControlProps",
+        "InputCommandSpec",
+        "InputCommandHint",
+        "SessionSubmitRequest",
+        "SessionAttachment",
+        "SessionSubmitReceipt",
+        "AgentProfileTagProps",
     ],
     "command-context.md": ["Command", "CommandContext", "CommandResult"],
     "types.md": ["Module", "Person", "Role", "NoticeLevel"],
@@ -88,9 +116,17 @@ function expected(source) {
             headings.set(name, meta(statement));
         }
 
-        if (ts.isInterfaceDeclaration(statement) && HEADED.has(name)) {
-            for (const member of statement.members) {
-                const key = `${HEADED.get(name)}${member.name?.getText(file)}`;
+        if (HEADED.has(name) || NESTED.has(name)) {
+            const members = ts.isInterfaceDeclaration(statement)
+                ? statement.members
+                : ts.isIntersectionTypeNode(statement.type)
+                  ? statement.type.types
+                        .filter(ts.isTypeLiteralNode)
+                        .flatMap((type) => [...type.members])
+                  : [];
+
+            for (const member of members) {
+                const key = `${HEADED.get(name) ?? NESTED.get(name)}${member.name?.getText(file)}`;
 
                 if (!headings.has(key)) {
                     headings.set(key, meta(member));

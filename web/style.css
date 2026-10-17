@@ -3111,6 +3111,35 @@ pre.diff .del {
     text-overflow: ellipsis;
 }
 
+/* Handoff arguments need readable availability reasons, including on a phone. */
+.input-argument {
+    flex-wrap: wrap;
+    gap: 0.2rem 0.6rem;
+    min-height: 44px;
+}
+
+.input-argument .command-name,
+.input-argument .command-args {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    flex-shrink: 1;
+}
+
+.input-argument .command-description {
+    flex-basis: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.input-argument:disabled {
+    opacity: 1;
+    cursor: default;
+}
+
+.input-argument:disabled .command-name {
+    color: var(--muted);
+}
+
 /* File mentions: an icon, the name with what matched marked, then its folder. */
 .file-option {
     align-items: center;
@@ -5165,28 +5194,10 @@ button.chip:active:not(:disabled):not(.on) {
     white-space: nowrap;
 }
 
-.thread-type.chat {
-    color: var(--o-green);
-    background: color-mix(in srgb, var(--o-green) 8%, transparent);
-}
-
-.thread-type.worker {
-    color: var(--o-blue);
-    background: color-mix(in srgb, var(--o-blue) 8%, transparent);
-}
-
 .thread-type.icon-only {
     padding: 0;
     border: 0;
     background: none;
-}
-
-:root[data-mode="light"] .thread-type.chat {
-    color: color-mix(in srgb, var(--o-green) 50%, var(--o-fg));
-}
-
-:root[data-mode="light"] .thread-type.worker {
-    color: color-mix(in srgb, var(--o-blue) 50%, var(--o-fg));
 }
 
 .session-meta span + span::before {
@@ -17831,5 +17842,124 @@ pre.gallery-code {
 
     .private-pane-row {
         min-height: 44px;
+    }
+}
+
+/* Native catalogue groups remain styled in extension safe mode and while clients reload. */
+.work-item .session {
+    min-height: 44px;
+    padding-block: 0.4rem;
+}
+
+.work-item-head > .session {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding-left: 36px;
+}
+
+.work-item-head .session-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.work-item-head .session-main > .session-title {
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.work-item-head .session-people {
+    grid-column: 1 / span 2;
+}
+
+.work-item-disclosure {
+    position: absolute;
+    z-index: 1;
+    left: calc(var(--linked-depth, 0) * 14px);
+    top: 0;
+    width: 32px;
+    height: 100%;
+    min-height: 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 2px;
+    padding: calc(0.7rem + 1px) 0 0;
+}
+
+.work-item-member .session {
+    padding-left: 1.35rem;
+}
+
+.work-item-member {
+    animation: none;
+}
+
+.work-item.closed .work-item-body {
+    grid-template-rows: 0fr;
+    opacity: 0;
+}
+
+.work-item .session-meta {
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 0.6rem;
+}
+
+.work-item .session-meta > span {
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.work-item-head .session-meta > .mono {
+    flex: 1 1 0;
+}
+
+.work-item-head .work-item-status {
+    flex: 0 1 auto;
+    max-width: 60%;
+}
+
+.work-item-head .session-meta span + span::before {
+    content: none;
+}
+
+.work-item-head .session-actions {
+    max-width: calc(100% - 42px);
+}
+
+@media (hover: none), (pointer: coarse) {
+    .work-item-disclosure {
+        width: 40px;
+    }
+
+    .work-item-head > .session {
+        padding-left: 44px;
+    }
+
+    .work-item-head .session-actions {
+        display: flex;
+        right: 0;
+        margin-top: -20px;
+    }
+
+    .work-item-head .session-actions .session-act {
+        display: none;
+    }
+
+    .work-item-head .session-actions .work-item-options {
+        display: grid;
+        width: 40px;
+        height: 40px;
+        opacity: 1;
+        transform: none;
+        border: 0;
+        background: transparent;
+    }
+
+    .work-item-head .session {
+        padding-right: 44px;
     }
 }

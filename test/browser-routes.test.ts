@@ -4,6 +4,7 @@ import {
     type App,
     cleanUp,
     context,
+    executeHandoff,
     newSession,
     openApp,
     owner,
@@ -154,21 +155,11 @@ async function assertExclusiveBlocked(id: ConversationId) {
         ),
     );
     await assert.rejects(
-        app.handoffs.start(id, owner(app), {
-            targetType: "researcher",
-            relationship: "same-work",
-            requestId: crypto.randomUUID(),
-            brief: "Transfer only after the panel settles.",
+        executeHandoff(app, id, "researcher", {
+            summary: "Transfer only after the panel settles.",
         }),
         /Local workflow writes are still executing/,
     );
-    const accepted = await request(id, "handoffs/accept-validation").end({
-        checkpoint: "a".repeat(64),
-        assessment: "b".repeat(64),
-    });
-
-    assert.equal(accepted.status, 409);
-    assert.match(accepted.output, /Local workflow writes are still executing/);
     assert.deepEqual((await app.handoffs.list(id, owner(app))).handoffs, []);
 }
 
@@ -191,9 +182,9 @@ test("Browser-panel delayed bodies cannot act after source retirement", async (t
     }
 });
 
-// Authoring gate: authority transfer and human acceptance must observe a body/action already admitted by HTTP,
-// not just Durable tasks. The real admission paths must reject before checkpoint inspection or persistence.
-test("Browser-panel reservations exclude handoff and acceptance through body and action settlement", async (t) => {
+// Authoring gate: authority transfer must observe a body/action already admitted by HTTP,
+// not just Durable tasks. The real admission path must reject before persistence.
+test("Browser-panel reservations exclude handoff through body and action settlement", async (t) => {
     const { page, effects } = pageAdapter(t);
     const id = await newSession(app);
     const entered = Promise.withResolvers<void>();

@@ -13,7 +13,7 @@ Before you start, read [map.md](map.md) to find the code that you need, and the 
 | Any other file in `src/server/`      | Nothing, until the server restarts.                                                                                                         |
 | `docs/`, `test/`                     | Nothing runs it, except `npm test`.                                                                                                         |
 
-So a change to an extension module and to other server code goes live in two parts. The module goes live at once, on the server as it started. A module that calls something that the rest of the change adds (a new member of the host, a new function in `src/server/`) breaks until the restart. Make it check that the new part is there, and do as before when it is not ([extensions/host.md](extensions/host.md)).
+So a change to an extension module and to other server code goes live in two parts. The module goes live at once, on the server as it started. A module that calls something that the rest of the change adds (a new member of the host, a new function in `src/server/`) breaks until the restart. Keep server and browser source on the same current API; finish the host change and ask the owner to restart rather than adding older-host aliases or fallback branches ([extensions/host.md](extensions/host.md)).
 
 ## After each save
 

@@ -1,14 +1,14 @@
-// Slash commands in the message box ("/compact", "/model sonnet", …). They run here in the app and are never sent to Pi.
+// Native commands run through the app. Extensions may also suggest commands that remain normal model input.
 import { browserAvailable, openInBrowser, toggleBrowser } from "./browser.js";
 import { filesAvailable, toggleFiles } from "./files-panel.js";
 import { branchAvailable } from "./sheets/branch.js";
 import { memoryAvailable, remember } from "./sheets/memory.js";
+import { extensionInputCommands } from "./extension-ui.js";
 import { togglePeeks } from "./peeks.js";
 import { askPip, openPip, pipAvailable } from "./pip.js";
 import {
     actions,
     collab,
-    handoffSummaryAvailable,
     navigate,
     notify,
     openSheet,
@@ -368,13 +368,6 @@ const COMMANDS = [
         available: watchAvailable,
         run: (arg) => watchPr(arg),
     },
-    {
-        name: "handoff",
-        args: "[worker|researcher|reviewer|follow-up|pull|land|publish] [--same|--new]",
-        description: "Choose the next role; --new starts a Worker, Researcher or Pull Work Item",
-        available: () => handoffSummaryAvailable() && isSession(),
-        native: true,
-    },
     { name: "stop", description: "Stop the current run", run: () => actions.abort() },
     { name: "copy", description: "Copy Pi’s last reply", run: copyLast },
     {
@@ -538,6 +531,7 @@ function extensionCommands() {
 const available = () => [
     ...COMMANDS.filter((command) => command.available?.() ?? true),
     ...extensionCommands(),
+    ...extensionInputCommands().map((command) => ({ ...command, modelInput: true })),
 ];
 
 /** The command a message runs, or null for a message to Pi (such as one starting with a path like /etc/hosts). */
@@ -564,8 +558,12 @@ export function parseTemplate(text) {
     return templates().find((template) => template.name === match[1]) ?? null;
 }
 
-/** Commands to offer while someone types a command name: "/" lists them all, then Pi's prompt templates and skills. */
-export function suggestCommands(text) {
+/** Native and extension command names. Argument hints come from the registered input command. */
+export function suggestCommands(text, caret = text.length) {
+    if (caret !== text.length) {
+        return [];
+    }
+
     const match = /^\/([\w:-]*)$/.exec(text);
 
     if (!match) {

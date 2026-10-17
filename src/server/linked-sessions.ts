@@ -1,7 +1,7 @@
 /** Sessions started by another session: lasting links, independent agents, and messages between them that go once. */
 import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
 import type { LinkedSession, LinkedSessionsApi } from "./host.ts";
@@ -16,6 +16,7 @@ import { HttpError } from "./errors.ts";
 import { defang, INVISIBLE_CLASS } from "./fence.ts";
 import { isThinkingLevel, levelAtMost, resolveModel, THINKING_LEVELS } from "./models.ts";
 import { requestFor } from "./requests.ts";
+import { createSessionRoot } from "./session-roots.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -381,27 +382,26 @@ export class LinkedSessions implements LinkedSessionsApi {
             }
 
             this.#requireUnmanaged(source);
-            const child = await tx.createConversation({ ownership: { kind: "ownerless" } });
-
-            Object.assign(await tx.doc(AgentDoc, child.id), agent, {
-                cwd,
-                model,
-                thinkingLevel: thinking,
+            const child = await createSessionRoot(tx, {
+                agent: { ...agent, cwd, model, thinkingLevel: thinking },
+                meta: {
+                    cwd,
+                    threadType: "chat",
+                    ...(sessions.items[String(source)]?.ownerOnly === true
+                        ? { ownerOnly: true }
+                        : {}),
+                    title,
+                    createdAt: now,
+                    updatedAt: now,
+                    createdBy: user.id,
+                    linkedFrom: { id: Number(source) },
+                },
             });
-            sessions.items[String(child.id)] = {
-                cwd,
-                threadType: "chat",
-                ...(sessions.items[String(source)]?.ownerOnly === true ? { ownerOnly: true } : {}),
-                title,
-                createdAt: now,
-                updatedAt: now,
-                createdBy: user.id,
-                linkedFrom: { id: Number(source) },
-            };
-            receipt.conversationId = Number(child.id);
+
+            receipt.conversationId = Number(child);
             receipt.by = user.id;
 
-            return child.id;
+            return child;
         }, context);
     }
 

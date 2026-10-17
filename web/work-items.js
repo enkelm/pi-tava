@@ -1,5 +1,14 @@
 // Work Items are built only from the server's access-filtered catalogue. They never reveal hidden members.
 
+/** Historical catalogue statuses remain readable independently of optional workflow controls. */
+export const WORKFLOW_LABELS = {
+    active: "Active",
+    "review-complete": "Review complete",
+    landed: "Locally landed",
+    published: "Published",
+    "needs-review": "Needs review",
+};
+
 /** One visible sidebar entry per Work Item, driven by its active thread rather than a busy predecessor. */
 export function workItemRows(sessions, enabled = true) {
     if (!enabled) {

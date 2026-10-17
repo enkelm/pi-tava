@@ -4,15 +4,18 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PocketApp } from "../app.ts";
+import type { ConversationId } from "@earendil-works/pi-durable";
+import type { SessionWebHandler, SessionRequestServices } from "../host.ts";
 import type { User } from "../config.ts";
 import { describe, HttpError } from "../errors.ts";
-import { exposedError, MAX_FILE_BYTES } from "../extension-web.ts";
+import { exposedError, MAX_FILE_BYTES, webError } from "../extension-web.ts";
 import { type ApiRequest, json, readChecked, readJson, send, SVG_CSP } from "./io.ts";
 
 /** A request to a module's route: `parts` is the path after `/api/x/`. */
 export async function extensionRoute(
     { app, request, response, url, user }: ApiRequest,
     parts: string[],
+    conversationId?: ConversationId,
 ): Promise<void> {
     // First, on a GET too: the sign-in cookie goes along with a link from another site, and a module's GET may change
     // things. The app's own calls always send the header. Before the route is looked up, so such a request learns
@@ -24,7 +27,16 @@ export async function extensionRoute(
     const [module, ...path] = parts;
     const method = request.method ?? "GET";
     // Only routes this person may use: one they may not is not there for them (404), and its methods are not told.
-    const match = module === undefined ? undefined : app.webs.match(module, method, path, user);
+    const match =
+        module === undefined
+            ? undefined
+            : app.webs.match(
+                  module,
+                  method,
+                  path,
+                  user,
+                  conversationId === undefined ? "app" : "session",
+              );
 
     if (match === undefined) {
         throw new HttpError(404, "Unknown extension route");
@@ -65,14 +77,80 @@ export async function extensionRoute(
     let result: unknown;
 
     try {
-        result = await route.handle({
+        const common = {
             method: route.method,
             params,
             query: url.searchParams,
             body,
             user: { id: user.id, name: user.name, role: user.role },
             signal: stopped.signal,
-        });
+        };
+
+        if (conversationId === undefined) {
+            result = await route.handle(common);
+        } else {
+            const current = () => {
+                const person = app.config.userById(user.id);
+
+                if (person === undefined) {
+                    throw webError(401, "Your access was removed");
+                }
+
+                if (!app.canSee(person, conversationId)) {
+                    throw webError(404, "No such conversation");
+                }
+
+                const active = app.webs.match(part.module, method, path, person, "session");
+
+                if (
+                    active === undefined ||
+                    !("route" in active) ||
+                    active.part !== part ||
+                    active.route !== route
+                ) {
+                    throw webError(404, "Unknown extension route");
+                }
+
+                return person;
+            };
+
+            // Bind core operations to this authenticated request, never an extension-supplied identity.
+            const operation = async <T>(run: (person: User) => Promise<T>): Promise<T> => {
+                try {
+                    const value = await run(current());
+
+                    current();
+
+                    return value;
+                } catch (error) {
+                    if (error instanceof HttpError) {
+                        throw webError(error.status, error.message);
+                    }
+
+                    throw error;
+                }
+            };
+
+            const session: SessionRequestServices = Object.freeze({
+                transfers: Object.freeze({
+                    status: () => operation((person) => app.handoffs.list(conversationId, person)),
+                    updateGroup: (patch: Readonly<Record<string, unknown>>) =>
+                        operation((person) =>
+                            app.handoffs.updateWorkItem(conversationId, person, patch),
+                        ),
+                }),
+            });
+
+            const person = current();
+
+            result = await (route.handle as SessionWebHandler)({
+                ...common,
+                user: { id: person.id, name: person.name, role: person.role },
+                conversationId,
+                session,
+            });
+            current();
+        }
     } catch (error) {
         // The browser went away: nobody waits for an answer, and the handler stopping is no failure.
         if (stopped.signal.aborted) {

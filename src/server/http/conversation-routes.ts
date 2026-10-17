@@ -8,14 +8,8 @@ import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
 import type { CommentReview, ResolveReview } from "../reviews.ts";
-import type {
-    AcceptValidation,
-    StartHandoff,
-    CompleteHandoff,
-    RecordExternalReview,
-    UpdateWorkItem,
-} from "../handoffs.ts";
 import { serveImage, TYPES } from "./assets.ts";
+import { extensionRoute } from "./extension-routes.ts";
 import { type ApiRequest, json, readJson, send } from "./io.ts";
 
 const MAX_UPLOAD = 50 * 1024 * 1024;
@@ -45,56 +39,12 @@ export async function conversationRoutes(
     const method = request.method ?? "GET";
     const [, , third, fourth] = parts;
 
-    if (third === "handoffs") {
-        if (parts.length > 4) {
-            throw new HttpError(404, "No such handoff route");
-        }
+    if (third === "x") {
+        return extensionRoute(api, parts.slice(3), id);
+    }
 
-        if (fourth === undefined && method === "GET") {
-            return json(response, 200, await app.handoffs.list(id, user));
-        }
-
-        if (fourth === undefined && method === "POST") {
-            return json(
-                response,
-                200,
-                await app.handoffs.start(id, user, await readJson<StartHandoff>(request)),
-            );
-        }
-
-        if (fourth === "accept-validation" && method === "POST") {
-            await app.handoffs.acceptValidation(
-                id,
-                user,
-                await readJson<AcceptValidation>(request),
-            );
-
-            return json(response, 200, { ok: true });
-        }
-
-        if (fourth === "complete" && method === "POST") {
-            await app.handoffs.complete(id, user, await readJson<CompleteHandoff>(request));
-
-            return json(response, 200, { ok: true });
-        }
-
-        if (fourth === "external-review" && method === "POST") {
-            await app.handoffs.recordExternalReview(
-                id,
-                user,
-                await readJson<RecordExternalReview>(request),
-            );
-
-            return json(response, 200, { ok: true });
-        }
-
-        if (fourth === "work-item" && method === "POST") {
-            await app.handoffs.updateWorkItem(id, user, await readJson<UpdateWorkItem>(request));
-
-            return json(response, 200, { ok: true });
-        }
-
-        throw new HttpError(404, "No such handoff route");
+    if (third === "transfers" && fourth === undefined && method === "GET") {
+        return json(response, 200, app.handoffs.receipts(id, user));
     }
 
     if (third === "reviews") {
@@ -139,6 +89,20 @@ export async function conversationRoutes(
         }
 
         throw new HttpError(404, "No such review route");
+    }
+
+    if (third === "submit" && method === "GET") {
+        const receipt = await app.commands.submissionReceipt(
+            id,
+            user,
+            url.searchParams.get("requestId"),
+        );
+
+        if (receipt === undefined) {
+            throw new HttpError(404, "No accepted input exists for this request");
+        }
+
+        return json(response, 200, receipt);
     }
 
     if (third === "submit" && method === "POST") {

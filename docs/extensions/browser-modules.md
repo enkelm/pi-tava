@@ -4,7 +4,7 @@ A browser module is JavaScript that the app loads in the tabs of the people that
 
 ## Add a browser module
 
-On the server, `web.client(entry, { access })` gives the module a browser module. `access` says who loads it ([Who may use it](routes.md#who-may-use-it)).
+On the server, `web.client(entry, { access })` gives the module a browser module. `access` says who loads it ([Who may use it](routes.md#who-may-use-it)). Experimental `access: "conversation"` lets scoped invitees load static browser assets; it grants no app-wide route access. Each scoped data route still checks its addressed source and current role.
 
 `entry` is the name of a file or a folder beside the module, not a link. The name has letters, digits, `.`, `_`, and `-`, and starts with a letter, a digit, or `_`.
 
@@ -95,16 +95,39 @@ The buttons, rows, and actions of modules show in the order that the server list
 
 **`sheet({ id, title, component, wide })`** adds a sheet like the app's own.
 
-The components of pages and sheets get `pocket` and `close`. A sheet's component also gets the `props` that it was opened with (`pocket.openSheet(id, props)`).
+The components of pages and sheets get `pocket` and `close`. A sheet's component gets the fields
+passed to `pocket.openSheet(id, props)` as flat props, not a nested `props` object. The host supplies
+the outer sheet; return only its contents. Since 0.15.0 it also gets `isOpen()`, true only for this
+actual logical opening, not a retained closing component or a newer opening of the same sheet ID.
 
-- `close` closes only that page or sheet, of that version, while it shows. When you keep it for later, it closes nothing else. `pocket.closePage()` closes the module's page that shows.
+- `close` closes only that page or actual sheet opening, of that version, while it shows. A late callback cannot close a reopened sheet. Use `isOpen()` before displaying async inline results, and check user/source and draft revision before clearing saved work. `pocket.closePage()` closes the module's page that shows.
 - A page or sheet with an `id` that the module never added says that the module no longer has it.
+
+## Session controls and input hints
+
+Experimental since 0.15.0, `pocket.sessionControl({ id, slot, component })` adds guarded inline UI
+in a session's `"header"` or `"composer"`. The component receives `{ pocket, session }`. Read
+`pocket.session()` for the current snapshot and subscribe with `onSessionChange`. It returns deeply
+frozen copies of the existing access-filtered catalogue and public profile metadata. Its conversation
+is only `{ id, kind, title, threadType, cwd }`, never settings, prompts or the raw view.
+Use `AgentProfileTag({ profile, iconOnly? })` instead of copying profile labels/icons.
+
+`pocket.inputCommand({ id, name, description, suggest })` contributes normal-model-input command
+rows and optional async argument hints. Picking a row only fills the draft; the API never intercepts
+or submits it. This differs from server-side `web.command`, which runs without the model.
+
+Use `sessionApi` for your own conversation-scoped routes and `submit` for genuine human model
+input. Generate IDs with `pocket.requestId()` instead of depending on secure-context-only browser
+crypto; reuse a submission ID for an unchanged retry. Submission resolves on durable acceptance. Core owns the sole input/recovery journal and
+passive transfer-receipt navigation; an extension must not create another sender or recovery loop.
+Keep local reads scoped by current user/source, share in-flight requests, and dispose subscriptions,
+timers and pending reads when the module version goes. See [the pocket reference](reference/pocket.md).
 
 ## Ids and updates
 
 - Each thing that a module adds has an `id` of its own: letters, digits, `.`, `_`, `:`, and `-`, that starts with a letter or a digit, up to a [length](reference/limits.md#names).
 - To add a thing with the same `id` again replaces it.
-- Each `rail`, `menu`, `launcher`, `page`, and `sheet` returns `{ update(patch), remove() }`. `update` takes an object.
+- Each contribution, including `sessionControl` and `inputCommand`, returns `{ update(patch), remove() }`. `update` takes an object.
 
 ## Redraws
 

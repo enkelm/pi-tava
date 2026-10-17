@@ -12,7 +12,7 @@
     "useTabs": false,
     "overrides": [
         {
-            "files": ["web/**/*.js", "site/**/*.js"],
+            "files": ["web/**/*.js", "site/**/*.js", "src/server/extensions/**/*.js"],
             "options": {
                 "embeddedLanguageFormatting": "off"
             }

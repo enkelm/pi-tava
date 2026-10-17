@@ -3,6 +3,7 @@
 import {
     cleanUp,
     context,
+    executeHandoff,
     lastText,
     modelTexts,
     openApp,
@@ -178,11 +179,8 @@ async function fixture(t: TestContext) {
         from: ConversationId,
         type: "researcher" | "follow-up" | "reviewer" | "pull",
     ) => {
-        const created = await app.handoffs.start(from, owner(app), {
-            targetType: type,
-            relationship: "same-work",
-            requestId: crypto.randomUUID(),
-            brief: "Investigate this topic and apply the evidence through a focused successor.",
+        const created = await executeHandoff(app, from, type, {
+            summary: "Investigate this topic and apply the evidence through a focused successor.",
         });
         const next = created.id as ConversationId;
 
@@ -370,7 +368,18 @@ test("Worker research reaches the model and isolated storage; Researcher/helpers
     ]?.conversationId;
 
     assert.ok(helper);
-    await until(() => !f.app.isBusy(helper) && !f.app.isBusy(f.id), "research helper idle");
+    await until(async () => {
+        const reports = await f.app.harness.snapshot(SubagentsDoc, f.id, context);
+
+        return (
+            !f.app.isBusy(helper) &&
+            !f.app.isBusy(f.id) &&
+            (reports?.outbox?.length ?? 0) === 0 &&
+            reports?.sending === undefined &&
+            reports?.agents["research-helper"]?.answeredAt !== undefined &&
+            (reports?.batches ?? 0) > 0
+        );
+    }, "research helper report delivered and parent idle");
     assert.match((await modelTexts(f.app, helper)).join("\n"), /Primary evidence/);
     const researcher = await f.handoff(f.id, "researcher");
 

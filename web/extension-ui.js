@@ -16,7 +16,19 @@ import {
 import { useBack } from "./back.js";
 import { describersChanged, setCallDescriber } from "./calls.js";
 import { leaveSafeMode, onSafeModeEnd, safeMode } from "./safe-mode.js";
-import { api, closeSheet, notify, onExtensionEvent, openSheet, store } from "./store.js";
+import {
+    actions,
+    api,
+    canSteer,
+    closeSheet,
+    navigate,
+    notify,
+    onExtensionEvent,
+    openSheet,
+    store,
+    uid,
+} from "./store.js";
+import { AgentProfileTag } from "./thread-type.js";
 import { setCallSummary } from "./turns.js";
 import { html, Icon, iconPath, Loader, Markdown, railState, Sheet, Spinner, Switch } from "./ui.js";
 
@@ -27,7 +39,7 @@ import { html, Icon, iconPath, Loader, Markdown, railState, Sheet, Spinner, Swit
 export const POCKET_API = 1;
 
 /** What a browser module can add, each kept by its id. */
-const KINDS = ["rail", "menu", "launcher", "page", "sheet"];
+const KINDS = ["rail", "menu", "launcher", "page", "sheet", "sessionControl", "inputCommand"];
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 const isId = (value) => typeof value === "string" && ID.test(value);
 const LEVELS = new Set(["info", "warning", "error"]);
@@ -528,6 +540,29 @@ function check(kind, spec) {
         throw new Error(`${name}: an id is up to 64 letters, digits, and . _ : -`);
     }
 
+    if (kind === "sessionControl") {
+        if (!["header", "composer"].includes(spec.slot) || typeof spec.component !== "function") {
+            throw new Error(`${name} ${spec.id}: give a header/composer slot and a component`);
+        }
+
+        return;
+    }
+
+    if (kind === "inputCommand") {
+        if (
+            typeof spec.name !== "string" ||
+            !/^[a-z][a-z0-9_-]{0,63}$/.test(spec.name) ||
+            typeof spec.description !== "string" ||
+            typeof spec.suggest !== "function"
+        ) {
+            throw new Error(
+                `${name} ${spec.id}: give a command name, description and suggestion function`,
+            );
+        }
+
+        return;
+    }
+
     const text = (field) => {
         if (typeof spec[field] !== "string" || spec[field].trim() === "") {
             throw new Error(`${name} ${spec.id}: give it a ${field}`);
@@ -719,6 +754,90 @@ function pocketFor(record) {
         Loader,
         Markdown,
         Switch,
+        AgentProfileTag,
+        /** Read only the current conversation's UI context; never another person's unfiltered catalogue. */
+        session() {
+            tick(record);
+
+            return sessionSnapshot();
+        },
+        requestId() {
+            tick(record);
+
+            return uid();
+        },
+        onSessionChange(listener) {
+            tick(record);
+
+            if (typeof listener !== "function") {
+                throw new Error("pocket.onSessionChange: give it a function");
+            }
+
+            if (!live()) {
+                return () => {};
+            }
+
+            const stop = store.subscribe(() => {
+                if (live()) {
+                    try {
+                        listener(sessionSnapshot());
+                    } catch (error) {
+                        fail(record, error, "failed");
+                    }
+                }
+            });
+
+            record.disposers.push(stop);
+
+            return stop;
+        },
+        sessionApi(id, path, body, options) {
+            tick(record);
+
+            if (!live() || !Number.isSafeInteger(id) || id <= 0) {
+                return Promise.reject(
+                    new Error("pocket.sessionApi: give it a visible conversation's id"),
+                );
+            }
+
+            return api(`c/${id}/${routeOf(record.module, path)}`, body, options);
+        },
+        submit(id, request) {
+            tick(record);
+
+            if (
+                !live() ||
+                !Number.isSafeInteger(id) ||
+                id <= 0 ||
+                typeof request?.text !== "string" ||
+                typeof request.requestId !== "string" ||
+                request.requestId === ""
+            ) {
+                return Promise.reject(
+                    new Error("pocket.submit: give a conversation id, text and requestId"),
+                );
+            }
+
+            return actions.submit(
+                request.text,
+                request.attachments,
+                request.mode,
+                request.inlineFiles,
+                id,
+                request.requestId,
+            );
+        },
+        navigate(id) {
+            tick(record);
+
+            if (!Number.isSafeInteger(id) || id <= 0) {
+                throw new Error("pocket.navigate: give it a visible conversation's id");
+            }
+
+            if (change()) {
+                navigate(id);
+            }
+        },
         /** Who uses this tab. */
         me: () => {
             tick(record);
@@ -774,6 +893,8 @@ function pocketFor(record) {
         launcher: (spec) => add("launcher", spec),
         page: (spec) => add("page", spec),
         sheet: (spec) => add("sheet", spec),
+        sessionControl: (spec) => add("sessionControl", spec),
+        inputCommand: (spec) => add("inputCommand", spec),
         /** How calls of one of its tools show: in a line in transcripts and peek tiles, and in a group's summary. */
         toolCall(spec) {
             tick(record);
@@ -1118,7 +1239,7 @@ function pageCloser(record, id) {
 }
 
 /** The `close` a sheet's component gets: it closes that sheet of that version while it shows, and no other sheet. */
-function sheetCloser(record, id) {
+function sheetCloser(record, opening) {
     return () => {
         const { sheet } = store.state;
 
@@ -1126,7 +1247,7 @@ function sheetCloser(record, id) {
             liveRecord(record) &&
             sheet?.type === "ext" &&
             sheet.module === record.module &&
-            sheet.sheetId === id
+            sheet === opening
         ) {
             closeSheet();
         }
@@ -1134,7 +1255,7 @@ function sheetCloser(record, id) {
 }
 
 function openExtensionSheet(module, id, props = {}) {
-    openSheet({ type: "ext", module, sheetId: id, id: `${module}:${id}`, props });
+    openSheet({ type: "ext", module, sheetId: id, id: `${module}:${id}`, opening: uid(), props });
 }
 
 /**
@@ -1258,6 +1379,102 @@ export function browserModuleState(module) {
     }
 
     return { status: record.status, error: record.error };
+}
+
+// Catalogue entries are immutable between store updates. Copies never freeze or expose the core's own objects.
+const metadataCopies = new WeakMap();
+
+function readonlyMetadata(value) {
+    if (value === null || typeof value !== "object") {
+        return value;
+    }
+
+    if (!metadataCopies.has(value)) {
+        const copy = Array.isArray(value)
+            ? value.map(readonlyMetadata)
+            : Object.fromEntries(
+                  Object.entries(value).map(([key, field]) => [key, readonlyMetadata(field)]),
+              );
+
+        metadataCopies.set(value, Object.freeze(copy));
+    }
+
+    return metadataCopies.get(value);
+}
+
+/** The same filtered metadata the native session controls use; no prompts, raw requests or server data. */
+function sessionSnapshot() {
+    const state = store.state;
+
+    return Object.freeze({
+        id: state.conversationId,
+        me: state.me
+            ? Object.freeze({ id: state.me.id, name: state.me.name, role: state.me.role })
+            : null,
+        conversation: state.view.conversation
+            ? Object.freeze({
+                  id: state.conversationId,
+                  kind: state.view.conversation.kind,
+                  title: state.view.conversation.title,
+                  threadType: state.view.conversation.threadType,
+                  cwd: state.view.conversation.cwd,
+              })
+            : null,
+        sessions: readonlyMetadata(state.sessions),
+        busy: Boolean(state.view.live?.busy),
+        canSteer: canSteer(),
+        profiles: readonlyMetadata(state.server?.agentProfiles ?? []),
+    });
+}
+
+/** Registered input commands are hints only: submission is always the normal authenticated input path. */
+export function extensionInputCommands() {
+    return added("inputCommand").map(({ spec }) => ({
+        name: spec.name,
+        description: spec.description,
+        input: true,
+    }));
+}
+
+export async function extensionInputSuggestions(text, caret) {
+    const name = /^\/([a-z][a-z0-9_-]*)(?:[ \t]|$)/i.exec(text)?.[1]?.toLowerCase();
+    const entry = added("inputCommand").find(({ spec }) => spec.name === name);
+
+    if (!entry) {
+        return [];
+    }
+
+    const { record, spec } = entry;
+
+    try {
+        const rows = await spec.suggest(text, caret);
+
+        return liveRecord(record) && Array.isArray(rows)
+            ? rows.slice(0, 512).filter((row) => row && typeof row.name === "string")
+            : [];
+    } catch (error) {
+        noticeFrom(record, "error", `${record.title}: ${reason(error)}`);
+
+        return [];
+    }
+}
+
+/** Inline extension controls use the same guarded renderer and lifecycle as extension pages/sheets. */
+export function ExtensionSessionControls({ slot }) {
+    const session = sessionSnapshot();
+
+    if (session.conversation?.kind !== "session") {
+        return null;
+    }
+
+    return added("sessionControl")
+        .filter(({ spec }) => spec.slot === slot)
+        .map(
+            ({ record, spec }) => html`
+        <${Body} key=${`${record.module}:${spec.id}:${session.id}:${session.me?.id}`}
+            record=${record} spec=${spec} title=${record.title} props=${{ session }} />
+    `,
+        );
 }
 
 // ─── Where they show ─────────────────────────────────────────────────────────
@@ -1675,14 +1892,15 @@ export function ExtensionSheet({ sheet }) {
     const record = modules.get(sheet.module);
     const spec = record?.adds.sheet.get(sheet.sheetId);
     const title = spec?.title ?? record?.title ?? "Extension";
-    const close = useMemo(() => sheetCloser(record, sheet.sheetId), [record, sheet.sheetId]);
+    const close = useMemo(() => sheetCloser(record, sheet), [record, sheet]);
 
     return html`<${Sheet} title=${title} onClose=${closeSheet} wide=${spec?.wide === true}>
         <${Body}
             record=${record}
             spec=${spec}
             title=${title}
-            props=${sheet.props ?? {}}
+            key=${sheet.opening}
+            props=${{ ...(sheet.props ?? {}), isOpen: () => liveRecord(record) && store.state.sheet === sheet }}
             close=${close}
         />
     <//>`;

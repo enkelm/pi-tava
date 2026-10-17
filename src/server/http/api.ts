@@ -25,7 +25,7 @@ import { HttpError } from "../errors.ts";
 import type { ImportRequest } from "../imports.ts";
 import type { PrivateRequest } from "../private-sessions.ts";
 import { runningNow } from "../running.ts";
-import { AGENT_ROLES, DEFAULT_AGENT_PROMPTS, MAX_AGENT_PROMPT_LENGTH } from "../thread-prompts.ts";
+import { MAX_AGENT_PROMPT_LENGTH } from "../thread-prompts.ts";
 import { browserProfileRoutes } from "./browser-profile-routes.ts";
 import { browserRoutes } from "./browser-routes.ts";
 import { conversationRoutes } from "./conversation-routes.ts";
@@ -753,18 +753,23 @@ export function createApi(options: HttpOptions, auth: Auth) {
         if (first === "agents" && third === undefined) {
             requireOwner(user);
             const prompts = app.config.agentPrompts;
-            const agent = AGENT_ROLES.find((each) => each.type === second);
-            const settings = (role: (typeof AGENT_ROLES)[number]) => ({
+            const roles = app.agentProfiles().map(({ id, name, description, prompt }) => ({
+                type: id,
+                name,
+                description,
+                defaultPrompt: prompt,
+            }));
+            const agent = roles.find((each) => each.type === second);
+            const settings = (role: (typeof roles)[number]) => ({
                 ...role,
-                prompt: prompts[role.type] ?? DEFAULT_AGENT_PROMPTS[role.type],
-                defaultPrompt: DEFAULT_AGENT_PROMPTS[role.type],
+                prompt: prompts[role.type] ?? role.defaultPrompt,
             });
 
             response.setHeader("Cache-Control", "no-store");
 
             if (second === undefined && method === "GET") {
                 return json(response, 200, {
-                    agents: AGENT_ROLES.map(settings),
+                    agents: roles.map(settings),
                     maxPromptLength: MAX_AGENT_PROMPT_LENGTH,
                 });
             }
@@ -789,17 +794,21 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 // Re-read after the body arrives: another owner's tab may have saved meanwhile.
                 const current = app.config.agentPrompts;
 
-                if (
-                    body.expectedPrompt !==
-                    (current[agent.type] ?? DEFAULT_AGENT_PROMPTS[agent.type])
-                ) {
+                if (body.expectedPrompt !== (current[agent.type] ?? agent.defaultPrompt)) {
                     throw new HttpError(
                         409,
                         "This agent's prompt changed elsewhere. Reopen Settings to load it; keep a copy of your draft first.",
                     );
                 }
 
-                if (body.prompt === DEFAULT_AGENT_PROMPTS[agent.type]) {
+                if (app.agentProfile(agent.type)?.prompt !== agent.defaultPrompt) {
+                    throw new HttpError(
+                        409,
+                        "This agent profile changed or became unavailable; reopen Settings",
+                    );
+                }
+
+                if (body.prompt === agent.defaultPrompt) {
                     delete current[agent.type];
                 } else {
                     current[agent.type] = body.prompt;
@@ -810,7 +819,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 return json(response, 200, {
                     ...agent,
                     prompt: body.prompt,
-                    defaultPrompt: DEFAULT_AGENT_PROMPTS[agent.type],
+                    defaultPrompt: agent.defaultPrompt,
                 });
             }
 

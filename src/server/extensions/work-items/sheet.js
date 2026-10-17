@@ -1,0 +1,319 @@
+// The host supplies the outer sheet and durable submission; this form owns only its editable draft.
+import { profileName } from "./state.js";
+
+const keyOf = (option) => `${option.targetType}:${option.relationship}`;
+const DIRECTION_PREFIX = "Instructions:\n";
+const MAX_DIRECTION = 8000 - DIRECTION_PREFIX.length;
+const GROUPS = [
+    { relationship: "same-work", label: "Same Work Item" },
+    { relationship: "new-work", label: "New Work Item" },
+];
+
+function readDraft(key, pocket) {
+    try {
+        const saved = JSON.parse(sessionStorage.getItem(key));
+
+        if (
+            typeof saved?.choice === "string" &&
+            typeof saved.instructions === "string" &&
+            typeof saved.revision === "string"
+        ) {
+            return saved;
+        }
+    } catch {
+        // An unavailable per-tab store must not prevent a handoff request.
+    }
+
+    return { choice: "", instructions: "", revision: pocket.requestId() };
+}
+
+export function createHandoffSheet(pocket, state) {
+    const { html, h, useEffect, useLayoutEffect, useRef, useState, Loader, AgentProfileTag } =
+        pocket;
+
+    function Picker({ id, opening, userId, session, close, isOpen }) {
+        const draftKey = `pocket.handoffDraft.${userId}.${id}`;
+        const [draft, setDraft] = useState(() => readDraft(draftKey, pocket));
+        const [direction, setDirection] = useState(false);
+        const [data, setData] = useState(null);
+        const [loading, setLoading] = useState(true);
+        const [busy, setBusy] = useState(false);
+        const [error, setError] = useState("");
+        const [retry, setRetry] = useState(0);
+        const mounted = useRef(false);
+        const submitting = useRef(false);
+        const field = useRef(null);
+        const next = useRef(null);
+
+        useLayoutEffect(() => {
+            mounted.current = true;
+
+            return () => {
+                mounted.current = false;
+            };
+        }, []);
+
+        useEffect(() => {
+            let stopped = false;
+
+            setLoading(true);
+            setError("");
+            state.refresh(id).then(
+                (value) => {
+                    if (!stopped && state.isCurrent(userId, id)) {
+                        setData(value);
+                        setLoading(false);
+                    }
+                },
+                (failure) => {
+                    if (!stopped && state.isCurrent(userId, id)) {
+                        setError(failure.message);
+                        setLoading(false);
+                    }
+                },
+            );
+
+            return () => {
+                stopped = true;
+            };
+        }, [id, opening, userId, retry]);
+
+        useEffect(() => {
+            if (direction) {
+                field.current?.focus();
+            } else if (!loading) {
+                next.current?.focus();
+            }
+        }, [direction, loading]);
+
+        const source = session.sessions.find((each) => each.id === id);
+        const options = data?.options ?? [];
+        const selected = options.find((each) => keyOf(each) === draft.choice);
+        const readOnly = source?.workflow?.readOnly || data?.workflow?.readOnly;
+        const valid =
+            session.canSteer &&
+            selected?.enabled &&
+            !readOnly &&
+            source?.workflow?.profileAvailable !== false &&
+            data?.workflow?.profileAvailable !== false &&
+            !loading;
+
+        const update = (change) => {
+            const value = { ...draft, ...change, revision: pocket.requestId() };
+
+            setDraft(value);
+
+            try {
+                sessionStorage.setItem(draftKey, JSON.stringify(value));
+            } catch {
+                // Keep the open form usable when browser storage is unavailable.
+            }
+        };
+
+        const save = async (event) => {
+            event.preventDefault();
+
+            if (
+                submitting.current ||
+                !valid ||
+                !state.isCurrent(userId, id) ||
+                !pocket.session().canSteer
+            ) {
+                return;
+            }
+
+            if (!direction) {
+                setDirection(true);
+
+                return;
+            }
+
+            const saved = JSON.stringify(draft);
+            const flag = selected.relationship === "new-work" ? "--new" : "--same";
+            // The label makes arbitrary instructions, including leading --flags, literal prose.
+            const instructions = draft.instructions
+                ? `\n${DIRECTION_PREFIX}${draft.instructions}`
+                : "";
+            const text = `/handoff ${selected.targetType} ${flag}${instructions}`;
+
+            submitting.current = true;
+            setBusy(true);
+            setError("");
+
+            try {
+                // Resolve on durable input acceptance, never on summary or successor creation.
+                // An unchanged reopened draft keeps the request identity after a late acceptance.
+                await pocket.submit(id, { text, requestId: draft.revision, mode: "followUp" });
+
+                try {
+                    if (sessionStorage.getItem(draftKey) === saved) {
+                        sessionStorage.removeItem(draftKey);
+                    }
+                } catch {
+                    // Storage failure cannot undo durable acceptance.
+                }
+
+                if (state.isCurrent(userId, id)) {
+                    // The host's close callback is guarded by this logical sheet opening.
+                    close();
+                }
+            } catch (failure) {
+                if (pocket.session().me?.id !== userId) {
+                    return;
+                }
+
+                if (mounted.current && isOpen() && state.isCurrent(userId, id)) {
+                    setError(
+                        `${failure.message} Your selection and instructions are kept for retry.`,
+                    );
+                } else {
+                    pocket.notify(
+                        "error",
+                        `${failure.message} Reopen Handoff to retry your saved request.`,
+                    );
+                }
+            } finally {
+                submitting.current = false;
+
+                if (mounted.current) {
+                    setBusy(false);
+                }
+            }
+        };
+
+        // Escape, scrim, drag and browser Back stay available even during a slow submit.
+        return html`<div class="handoff-picker">
+            ${loading && html`<${Loader} label="Loading handoff options" />`}
+            ${
+                !loading &&
+                !data &&
+                html`
+                <p class="handoff-error" role="alert">${error}</p>
+                <button class="button" onClick=${() => setRetry((each) => each + 1)}>Retry</button>
+            `
+            }
+            ${
+                !loading &&
+                data &&
+                html`<form class="handoff-form" onSubmit=${save}>
+                ${
+                    !direction
+                        ? html`
+                    <p class="muted small">Choose the next role, then add any instructions before sending.</p>
+                    ${GROUPS.map((group) => {
+                        const choices = options.filter(
+                            (each) => each.relationship === group.relationship,
+                        );
+
+                        if (choices.length === 0) {
+                            return null;
+                        }
+
+                        return html`<fieldset aria-label=${group.label}>
+                            <legend class="handoff-label">${group.label}</legend>
+                            ${
+                                group.relationship === "new-work" &&
+                                html`
+                                <p class="muted small">Start separate work linked to this Work Item.</p>
+                            `
+                            }
+                            <div class="handoff-options">
+                                ${choices.map((each) => {
+                                    const disabled = !each.enabled || readOnly;
+
+                                    return html`<label class=${`handoff-option ${disabled ? "disabled" : ""}`}>
+                                        <input
+                                            type="radio"
+                                            name="handoff-option"
+                                            value=${keyOf(each)}
+                                            checked=${draft.choice === keyOf(each)}
+                                            disabled=${disabled}
+                                            onChange=${() => update({ choice: keyOf(each) })}
+                                        />
+                                        <span class="handoff-option-profile">
+                                            <${AgentProfileTag} profile=${each.targetType} iconOnly=${true} />
+                                        </span>
+                                        <span class="handoff-option-copy">
+                                            <strong>Start ${profileName(session.profiles, each.targetType)}</strong>
+                                            ${each.reason && html`<span class="small muted">${each.reason}</span>`}
+                                        </span>
+                                    </label>`;
+                                })}
+                            </div>
+                        </fieldset>`;
+                    })}
+                    ${
+                        options.length === 0 &&
+                        html`
+                        <p class="muted small">No handoff options are available. Open the active thread to continue.</p>
+                    `
+                    }
+                `
+                        : html`
+                    <div class="handoff-destination">
+                        ${selected && html`<${AgentProfileTag} profile=${selected.targetType} />`}
+                        <span class="small muted">${selected?.relationship === "new-work" ? "New Work Item" : "Same Work Item"}</span>
+                    </div>
+                    <div class="handoff-field">
+                        <label class="handoff-label" for="handoff-direction">What should the next agent focus on? (optional)</label>
+                        <textarea
+                            id="handoff-direction"
+                            ref=${field}
+                            rows="5"
+                            maxlength=${MAX_DIRECTION}
+                            value=${draft.instructions}
+                            disabled=${busy}
+                            aria-describedby="handoff-send-hint"
+                            onInput=${(event) => update({ instructions: event.currentTarget.value })}
+                        ></textarea>
+                    </div>
+                    <p id="handoff-send-hint" class="muted small" role="status">
+                        ${
+                            busy
+                                ? "Sending request… You can close this popup; sending continues."
+                                : "The popup closes when your request is accepted. You can keep browsing while the agent prepares the handoff."
+                        }
+                    </p>
+                `
+                }
+                ${error && html`<p class="handoff-error" role="alert">${error}</p>`}
+                <div class="handoff-form-actions">
+                    <button
+                        class="button"
+                        type="button"
+                        disabled=${busy}
+                        onClick=${() => (direction ? setDirection(false) : setRetry((each) => each + 1))}
+                    >${direction ? "Back" : "Refresh options"}</button>
+                    <button class="button" type="button" onClick=${close}>${busy ? "Close" : "Cancel"}</button>
+                    <button
+                        ref=${next}
+                        class="button primary"
+                        type="submit"
+                        disabled=${busy || !valid}
+                    >${busy ? "Sending…" : direction ? "Start thread" : "Next"}</button>
+                </div>
+            </form>`
+            }
+        </div>`;
+    }
+
+    function HandoffSheet({ close, isOpen, id, opening }) {
+        const { session } = state.useContext();
+
+        if (!session.me || !session.canSteer || session.id !== id) {
+            return null;
+        }
+
+        return h(Picker, {
+            key: JSON.stringify([session.me.id, id, opening]),
+            id,
+            opening,
+            userId: session.me.id,
+            session,
+            close,
+            isOpen,
+        });
+    }
+
+    return HandoffSheet;
+}

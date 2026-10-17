@@ -2,7 +2,7 @@
 
 The host is the first argument of a module's default export. A module uses it to read from Pi Pocket and to report to it. To add to the app, a module uses [`web`](web.md), the second argument.
 
-The host does not change when a module reloads. It changes only when the server restarts. Thus a module that uses a member newer than the running server must check that the member is there. [Using the host](../host.md) tells you how.
+The host does not change when a module reloads. It changes only when the server restarts. Server and browser source target the same current API; restart after changing host code rather than adding older-host aliases or fallback branches. See [Using the host](../host.md).
 
 The types are `Host` and the types that it uses, in [types/pocket.d.ts](../../../types/pocket.d.ts). [Types for your editor](types.md) tells you how to import them.
 
@@ -171,21 +171,67 @@ Since 0.14.0 · Stable
 
 Keeps the lines of the text, but leaves no closing tag in it. Use it for text that you put between tags of your own.
 
-## Linked sessions
+## Independent sessions
 
-### `linkedSessions`
+### `sessions`
 
 ```ts
-readonly linkedSessions: LinkedSessions;
+readonly sessions: SessionServices;
 ```
 
-Since 0.14.0 · Experimental
+Since 0.15.0 · Experimental
+
+Shared session machinery for workflow extensions. `sessions.linked` is the sole linked-peer entry
+point. Agent Teams and Work Items are sibling consumers, not dependencies of each other.
+
+#### `sessions.handoff`
+
+```ts
+handoff(
+    request:
+        | { action: "status" }
+        | {
+              action: "start";
+              targetType: string;
+              relationship?: "same-work" | "new-work";
+              summary: string;
+          },
+    api: ToolExecutionApi,
+    context: Context,
+): Promise<unknown>;
+```
+
+Since 0.15.0 · Experimental
+
+Accepts a request from a tool's actual `ToolExecutionApi` and Chord context. It returns a filtered state/options projection or the durable successor receipt.
+`relationship` defaults to `"same-work"`; `summary` is nonempty and at most 12,000 characters.
+
+Core derives the requester from the invocation and verifies an actually placed written human input
+in its owning main run. A caller cannot supply a human identity or authority flag. Explicit slash
+routes must match; schedules, helpers, synthetic summaries and incoming agent couriers do not confer
+handoff authority. Missing or unavailable transitions reject, never substitute another destination.
+
+The operation retains access, driving, spend, idleness, writer reservations and atomic transfer
+checks. A committed receipt can be recovered after source retirement. Core retains summary and delivery
+tasks solely to recover already-accepted data, including when Work Items is disabled; there is no
+public summary-first admission or retry API. See [Handoffs](../../handoffs.md) and
+[`web.workflow`](web.md#workflow).
+
+## Linked sessions
+
+### `sessions.linked`
+
+```ts
+readonly linked: LinkedSessions;
+```
+
+Since 0.15.0 · Experimental
 
 Lets a tool start sessions from the session that it runs in, and send messages between them, as Agent Teams does. A linked session is an ordinary session. [Starting and messaging sessions](../linked-sessions.md) tells you how they work, what they cannot do, and how to call them.
 
 Each call acts as the person that Pi works for in `source`, and that person's checks apply. Give each call a `key` that stays the same when the call runs again, such as `${api.taskId}:${api.callId}`. A second call with the same `key` does nothing again: it returns what the first call returned.
 
-#### `linkedSessions.start`
+#### `sessions.linked.start`
 
 ```ts
 start(
@@ -205,7 +251,7 @@ Makes a session linked to `source` and sends it `message` as its first message. 
 - `thinking` defaults to the level of `source`. A requested level above the source's is capped there, then fitted to the highest supported level at or below that cap. If the model has no such level, the start is refused.
 - When Pi cannot use the model now, `start` makes nothing and throws an error.
 
-#### `linkedSessions.send`
+#### `sessions.linked.send`
 
 ```ts
 send(
@@ -221,7 +267,7 @@ Sends `message` to the linked session at the address `to`. Without `steer`, the 
 
 The session that gets the message reads it between tags. Words before it say that the agent of another session wrote it, and that it is a request, not a person's order. They also give the address to reply to.
 
-#### `linkedSessions.list`
+#### `sessions.linked.list`
 
 ```ts
 list(source: ConversationId): Promise<LinkedSession[]>;

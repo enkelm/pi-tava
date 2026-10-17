@@ -3,6 +3,7 @@ import {
     type App,
     cleanUp,
     context,
+    executeHandoff,
     lastText,
     modelTexts,
     openApp,
@@ -30,7 +31,7 @@ import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { ArtifactsDoc, SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
-import { HandoffsDoc, WorkflowDoc, type ThreadType } from "../src/server/workflow-docs.ts";
+import { HandoffsDoc, type ThreadType } from "../src/server/workflow-docs.ts";
 import { PublicationsDoc } from "../src/server/workflow-publication.ts";
 import { workflowGitPath } from "../src/server/workflow-policy.ts";
 import { createHandler } from "../src/server/http.ts";
@@ -159,11 +160,8 @@ export default function(){return defineExtension({name:'workflow-test-extension'
         }
 
         try {
-            const created = await liveApp.handoffs.start(id, owner(liveApp), {
-                targetType,
-                relationship: "same-work",
-                brief: "Inspect this disposable checkout.",
-                requestId: crypto.randomUUID(),
+            const created = await executeHandoff(liveApp, id, targetType, {
+                summary: "Inspect this disposable checkout.",
             });
             const target = created.id as unknown as ConversationId;
 
@@ -858,17 +856,8 @@ test(
             (await modelTexts(f.app, reviewer)).join("\n"),
             /Only the current active Publish/,
         );
-        await f.app.handoffs.complete(reviewer, owner(f.app), {
-            status: "review-complete",
-            summary: "Reviewed.",
-        });
         const land = await f.handoff(reviewer, "land");
 
-        await f.app.handoffs.complete(land, owner(f.app), {
-            status: "landed",
-            readyForPublish: true,
-            summary: "Integrated.",
-        });
         const publisher = await f.handoff(land, "publish");
         const invalid = [
             ["sh", "-c", "git push origin HEAD"],
@@ -1013,7 +1002,7 @@ test(
 
         const commands: (string | readonly string[])[] = [
             ["git", "stash", "push", "--message", "local changes"],
-            `git --no-pager -C '${f.cwd}' -ccore.fsmonitor=false stash push --message options`,
+            `git --no-pager -C '${f.cwd}' -c core.fsmonitor=false stash push --message options`,
             ["/bin/bash", "-c", "git stash push --message nested"],
             "env GIT_TERMINAL_PROMPT=0 git stash push --message wrapped",
             "git status --short && git stash push --message compound",
@@ -1263,10 +1252,10 @@ test(
             "A duplicate attempt cannot even ask until uncertainty is reconciled",
         );
         assert.equal(readFileSync(trace, "utf8"), "attempt\n");
-        await assert.rejects(f.handoff(publisher, "pull"), {
-            status: 409,
-            message: /Reconcile uncertain publication actions/,
-        });
+        await assert.rejects(
+            f.handoff(publisher, "pull"),
+            /Reconcile uncertain publication actions/,
+        );
         assert.equal(
             (
                 await f.app
@@ -1395,18 +1384,10 @@ test(
             /earlier publication may have executed/,
         );
         writeFileSync(join(f.cwd, "code.txt"), "hook repair needs fresh review\n");
-        await reopened.handoffs.complete(publisher, owner(reopened), {
-            status: "needs-review",
-            summary: "The interrupted operation and subsequent hook repair require fresh review.",
-        });
-        const needsReview = await reopened.harness.snapshot(WorkflowDoc, publisher, context);
-
-        assert.equal(needsReview?.status, "needs-review");
-        assert.equal(needsReview?.readyForPublish, false);
-        await assert.rejects(f.handoff(publisher, "pull", reopened), {
-            status: 409,
-            message: /Reconcile uncertain publication actions/,
-        });
+        await assert.rejects(
+            f.handoff(publisher, "pull", reopened),
+            /Reconcile uncertain publication actions/,
+        );
         assert.equal(reopened.handoffs.isReadOnly(publisher), false);
         assert.equal(readFileSync(trace, "utf8"), "attempt\n");
         const resolving = f.send(
@@ -1447,17 +1428,8 @@ test(
         const nextReviewer = await f.handoff(repair, "reviewer", reopened);
 
         git(f.cwd, "commit", "-qam", "Locally reviewed hook repair");
-        await reopened.handoffs.complete(nextReviewer, owner(reopened), {
-            status: "review-complete",
-            summary: "Reviewed after human reconciliation.",
-        });
         const nextLand = await f.handoff(nextReviewer, "land", reopened);
 
-        await reopened.handoffs.complete(nextLand, owner(reopened), {
-            status: "landed",
-            readyForPublish: true,
-            summary: "Ready after human reconciliation.",
-        });
         const nextPublisher = await f.handoff(nextLand, "publish", reopened);
 
         await f.send(nextPublisher, "publication", { action: "status" }, owner(reopened), reopened);

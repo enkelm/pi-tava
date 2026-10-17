@@ -5,11 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
+import {
+    fauxAssistantMessage,
+    fauxProvider,
+    fauxText,
+    fauxToolCall,
+} from "@earendil-works/pi-ai/providers/faux";
 import { type ConversationId, UsageDoc } from "@earendil-works/pi-durable";
 import type { Attachment } from "../src/server/commands.ts";
 import type { User } from "../src/server/config.ts";
 import type { Client } from "../src/server/room.ts";
+import type { HandoffResult } from "../src/server/handoffs.ts";
+import type { Relationship } from "../src/server/workflow-docs.ts";
 
 export const context = BACKGROUND_CONTEXT;
 
@@ -26,6 +33,7 @@ export const home = join(root, "home");
 mkdirSync(home);
 
 const { PocketApp } = await import("../src/server/app.ts");
+const { HandoffsDoc } = await import("../src/server/workflow-docs.ts");
 
 export type App = Awaited<ReturnType<typeof PocketApp.open>>;
 
@@ -50,6 +58,9 @@ export function lastText(context: { messages: readonly { role: string; content: 
 export const echo: FauxResponseStep = (context) =>
     fauxAssistantMessage([fauxText(`echo: ${lastText(context as never).text}`)]);
 
+const handoffScripts = new Map<string, ReturnType<typeof fauxToolCall>>();
+const stripAuthor = (text: string) => text.replace(/^\[from:[^\]]+\]\s*/, "");
+
 /** A scripted provider, "faux", that answers every request with `route`. */
 export function scriptedModel(route: FauxResponseStep = echo) {
     const faux = fauxProvider({
@@ -61,8 +72,28 @@ export function scriptedModel(route: FauxResponseStep = echo) {
         ],
     });
 
+    // Setup handoffs still cross Commands.submit and the real registered tool. Only model decisions
+    // are scripted; the production authority, admission, creation and receipt paths stay intact.
+    const wrapped: FauxResponseStep = (input, options, state, model) => {
+        const user = input.messages.findLast((message) => message.role === "user");
+        const script =
+            user === undefined
+                ? undefined
+                : handoffScripts.get(stripAuthor(lastText({ messages: [user] }).text));
+
+        if (script !== undefined) {
+            const last = lastText(input);
+
+            if (last.role === "user") {
+                return fauxAssistantMessage([script], { stopReason: "toolUse" });
+            }
+        }
+
+        return typeof route === "function" ? route(input, options, state, model) : route;
+    };
+
     // Plenty: a test file of many subagents (each of whose turns takes one) used 200 up.
-    faux.setResponses(Array.from({ length: 1000 }, () => route));
+    faux.setResponses(Array.from({ length: 1000 }, () => wrapped));
 
     return faux;
 }
@@ -149,6 +180,86 @@ export async function say(
     });
 
     await (await app.harness.submission(submissionId, context))!.wait(context);
+}
+
+/** Real human input and the registered handoff tool create setup transfers, never direct admission. */
+export async function executeHandoff(
+    app: App,
+    id: ConversationId,
+    targetType: string,
+    options: {
+        relationship?: Relationship;
+        summary?: string;
+        instructions?: string;
+        user?: User;
+    } = {},
+): Promise<HandoffResult> {
+    const relationship = options.relationship ?? "same-work";
+    const body = [
+        `/handoff ${targetType} ${relationship === "new-work" ? "--new" : "--same"}`,
+        `Instructions: ${options.instructions ?? "Continue this bounded fixture task."}`,
+        `Fixture request: ${crypto.randomUUID()}`,
+    ].join("\n");
+    const call = fauxToolCall("handoff", {
+        action: "start",
+        targetType,
+        relationship,
+        summary: options.summary ?? "Inspect this disposable fixture independently.",
+    });
+
+    handoffScripts.set(body, call);
+
+    try {
+        const submitted = await app.commands.submit(id, options.user ?? owner(app), {
+            text: body,
+            requestId: crypto.randomUUID(),
+        });
+        const submission = await app.harness.submission(submitted.submissionId, context);
+
+        if (submission === undefined) {
+            throw new Error("The handoff input was not persisted");
+        }
+
+        await submission.wait(context);
+        await until(() => !app.isBusy(id), "the handoff tool response settles");
+
+        const records = (await app.harness.snapshot(HandoffsDoc, context))?.handoffs ?? {};
+        const record = Object.values(records).find(
+            (entry) =>
+                entry.sourceThreadId === Number(id) &&
+                entry.requestKey === submitted.handoffRequestKey,
+        );
+
+        if (record === undefined) {
+            const entries = await (
+                await app.conversation(id)
+            ).entries({ order: "ascending" }, 200, undefined, context);
+            const result = entries.items
+                .flatMap((entry) => entry.model ?? [])
+                .findLast(
+                    (message) => message.role === "toolResult" && message.toolCallId === call.id,
+                );
+
+            if (result?.role === "toolResult" && result.isError) {
+                throw new Error(
+                    result.content
+                        .filter((part) => part.type === "text")
+                        .map((part) => part.text)
+                        .join("\\n"),
+                );
+            }
+
+            throw new Error("The handoff tool did not persist its transfer receipt");
+        }
+
+        return {
+            id: record.targetThreadId,
+            handoffId: record.id,
+            workItemId: record.workItemId,
+        };
+    } finally {
+        handoffScripts.delete(body);
+    }
 }
 
 /** The texts of a conversation's entries as the model sees them, oldest first. */

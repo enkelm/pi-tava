@@ -52,7 +52,7 @@ Plain text that a command puts in a session's transcript, for all the people who
 
 ### linked session
 
-A session that another session started with `host.linkedSessions`. It is an ordinary session, and it shows under the session that started it.
+A session that another session started with `host.sessions.linked`. It is an ordinary session, and it shows under the session that started it.
 
 ### source
 
@@ -150,7 +150,7 @@ A function that checks or changes Pi's tool calls and answers.
 
 ### route
 
-An address on the server that a module adds, under `/api/x/<module>/`. A **handler** answers its requests.
+An address on the server that a module adds: app-wide under `/api/x/<module>/`, or scoped to a visible session under `/api/c/:id/x/<module>/`. A **handler** answers its requests.
 
 ### browser module
 
@@ -163,6 +163,12 @@ Data that a module sends from the server to its browser module, with `web.send`.
 ### command
 
 A command that a person types in the message box, as `/name`. It runs on the server, and it does not ask Pi. Also called a slash command.
+
+### input command
+
+A normal-model-input command row and argument hints contributed by a browser module. Selecting a
+hint edits the draft only; sending uses ordinary human input. Unlike a server command, it has no
+execution handler.
 
 ### cleanup
 
@@ -200,7 +206,7 @@ A short message at the edge of the app. Code: `host.notice`, `pocket.notify`, an
 
 ### piece
 
-One of the app's components that `pocket` gives: `Icon`, `Loader`, `Spinner`, `Markdown`, and `Switch`.
+One of the app's components that `pocket` gives: `Icon`, `Loader`, `Spinner`, `Markdown`, `Switch`, and `AgentProfileTag`.
 
 ### spec
 

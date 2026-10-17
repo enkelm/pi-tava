@@ -1,12 +1,13 @@
 // Authoring gate: actual provider requests own role selection, scope and shared-context composition.
 // A generic/wrong role, lost role after restart, or child/source adopting the active successor's role must fail here.
 // Handoff/security tests own runtime flow and write enforcement; these assertions own delivered prompt content only.
-// Saved legacy prompts losing the common human-control override is a distinct request-composition regression.
+// Saved legacy prompts losing the common execution/clarification override is a distinct composition regression.
 // No prompt renderer or test-only production export is used.
 import {
     type App,
     cleanUp,
     context,
+    executeHandoff,
     lastText,
     openApp,
     owner,
@@ -160,11 +161,9 @@ async function handoff(
     source: ConversationId,
     type: "worker" | "researcher" | "reviewer" | "land" | "publish" | "follow-up" | "pull",
 ) {
-    const created = await app.handoffs.start(source, owner(app), {
-        targetType: type,
-        relationship: "same-work",
-        requestId: `role-${type}`,
-        brief: "Inspect this fixture independently; the brief is orientation, not role instructions.",
+    const created = await executeHandoff(app, source, type, {
+        summary:
+            "Inspect this fixture independently; the brief is orientation, not role instructions.",
     });
     const id = created.id as ConversationId;
 
@@ -381,17 +380,29 @@ test("changing app-wide instructions affects the next request without replacing 
     await app.commands.setInstructions(chat, owner(app), "SESSION_RULE_STAYS_SEPARATE");
     app.config.agentPrompts = {
         ...app.config.agentPrompts,
-        chat: "Custom Chat instructions: clarify the request. FIRST_GLOBAL_PROMPT. Prepare a handoff, recommend Land and record readiness to unlock it.",
+        chat: "Custom Chat instructions: clarify the request. FIRST_GLOBAL_PROMPT. Handoffs are status-only. Record readiness to unlock Land.",
     };
     const first = await probe(chat);
 
     assert.match(first.thread_role!, /Custom Chat instructions/);
     assert.match(first.thread_role!, /FIRST_GLOBAL_PROMPT/);
     assert.match(first.thread_role!, /Scope: act as this role/);
-    assert.match(first.thread_role!, /Humans alone control flow/i);
-    assert.match(first.thread_role!, /The handoff tool reports status only/i);
-    assert.match(first.thread_role!, /These common rules override any legacy role instruction/i);
-    assert.match(first.thread_role!, /Write the requested summary without tools or further work/i);
+    assert.match(
+        first.thread_role!,
+        /Execute handoffs when a human asks, in ordinary English or with \/handoff/i,
+    );
+    assert.match(first.thread_role!, /infer the intended thread type from the human's request/i);
+    assert.match(
+        first.thread_role!,
+        /ambiguous, confusing or unavailable.*ask a focused follow-up/i,
+    );
+    assert.match(first.thread_role!, /Use handoff status.*then handoff start/i);
+    assert.match(first.thread_role!, /These common rules override saved legacy prompts/i);
+    assert.match(
+        first.thread_role!,
+        /legacy app-issued summary-only request remains summary-only/i,
+    );
+    assert.doesNotMatch(first.workflow!, /handoff tool reports status only/i);
     assert.ok(
         first.thread_role!.indexOf("These common rules override") >
             first.thread_role!.indexOf("FIRST_GLOBAL_PROMPT"),

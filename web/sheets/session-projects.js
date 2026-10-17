@@ -21,7 +21,9 @@ export function ProjectSessionPanel({
     const [goalId, setGoalId] = useState(initialGoalId ?? null);
     const [newGoal, setNewGoal] = useState(initialNewGoal);
     const [chat, setChat] = useState(false);
-    const [threadType, setThreadType] = useState("worker");
+    const starters = (server?.agentProfiles ?? []).filter((profile) => profile.starter);
+    const defaultStarter = starters.find((profile) => profile.id !== "chat")?.id;
+    const [threadType, setThreadType] = useState(defaultStarter ?? "chat");
     const [creating, setCreating] = useState(false);
     const [override, setOverride] = useState(initialCwd ?? null);
     const [browse, setBrowse] = useState(false);
@@ -33,13 +35,13 @@ export function ProjectSessionPanel({
     const goal = projectGoals.find((each) => each.id === goalId && each.projectId === projectId);
     const cwd = override ?? (!chat ? project?.cwd : null) ?? server?.defaultCwd ?? "~";
     const noProjects = projectsLoaded && projects.length === 0;
-    const pullAvailable = (server?.handoffs ?? 0) >= 2;
-    const researcherAvailable = (server?.handoffs ?? 0) >= 4;
     const typeLabel = threadTypeLabel({ threadType });
+    const profiles = starters.filter((profile) => chat || profile.id !== "chat");
+    const profileAvailable = profiles.some((profile) => profile.id === threadType);
 
     const leaveChat = () => {
         setChat(false);
-        setThreadType("worker");
+        setThreadType(defaultStarter ?? "chat");
         requestId.current = uid();
     };
 
@@ -83,7 +85,7 @@ export function ProjectSessionPanel({
     };
 
     const start = async () => {
-        if (busy || (!chat && !project)) {
+        if (busy || !profileAvailable || (!chat && !project)) {
             return;
         }
 
@@ -226,9 +228,7 @@ export function ProjectSessionPanel({
         ${
             (chat || project) &&
             html`<div class="session-destination">
-                ${
-                    pullAvailable &&
-                    html`<label>
+                ${html`<label>
                         <span class="label">Thread type</span>
                         <select
                             aria-label="Thread type"
@@ -240,14 +240,11 @@ export function ProjectSessionPanel({
                                 requestId.current = uid();
                             }}
                         >
-                            <option value=${chat ? "chat" : "worker"}>${chat ? "Chat" : "Worker"}</option>
-                            ${researcherAvailable && html`<option value="researcher">Researcher</option>`}
-                            <option value="pull">Pull</option>
+                            ${!profileAvailable && html`<option value=${threadType} disabled>${typeLabel} (unavailable)</option>`}
+                            ${profiles.map((profile) => html`<option value=${profile.id}>${profile.name}</option>`)}
                         </select>
-                    </label>`
-                }
-                ${threadType === "researcher" && html`<p class="muted small">Investigate a pointed question and return findings for the next stage.</p>`}
-                ${threadType === "pull" && html`<p class="muted small">Read tickets and PRs, agree on direction with a human or collect a handoff, and update worktrees.</p>`}
+                    </label>`}
+                ${profiles.find((profile) => profile.id === threadType)?.description && html`<p class="muted small">${profiles.find((profile) => profile.id === threadType).description}</p>`}
                 ${
                     !chat &&
                     html`<p class="small">
@@ -300,7 +297,8 @@ export function ProjectSessionPanel({
                         }}
                     /> In a git worktree of its own: a branch, apart from this folder
                 </label>
-                <button class="button primary wide" disabled=${busy} onClick=${start}>
+                ${!profileAvailable && html`<p class="error" role="status">This agent profile is unavailable. Enable its workflow extension or select another available starter.</p>`}
+                <button class="button primary wide" disabled=${busy || !profileAvailable} onClick=${start}>
                     <${ThreadTypeTag} session=${{ threadType }} iconOnly=${true} /> ${busy ? "Starting…" : `Start ${typeLabel}`}
                 </button>
             </div>`

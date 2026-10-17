@@ -22,6 +22,7 @@ import type {
     Extension,
     ModelRef,
     Tx,
+    ToolExecutionApi,
 } from "@earendil-works/pi-durable";
 import type { ComponentType, Fragment, FunctionComponent, h, VNode } from "preact";
 import type {
@@ -92,6 +93,36 @@ export interface Module {
     pocketApi?: number;
 }
 
+/** Independent-session operations shared by workflow extensions.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionServices {
+    /**
+     * Linked peers retain their existing permissions, model limits, receipts and nonhuman relay provenance.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly linked: LinkedSessions;
+    /**
+     * Core derives authority from actual placed human input in this invocation; declarations grant none.
+     * @since 0.15.0
+     * @experimental
+     */
+    handoff(
+        request:
+            | { action: "status" }
+            | {
+                  action: "start";
+                  targetType: string;
+                  relationship?: "same-work" | "new-work";
+                  summary: string;
+              },
+        api: ToolExecutionApi,
+        context: Context,
+    ): Promise<unknown>;
+}
+
 // ─── The host ────────────────────────────────────────────────────────────────
 
 /**
@@ -160,12 +191,11 @@ export interface Host {
      * @since 0.12.0
      */
     onLimitsChanged(listener: () => void): () => void;
-    /**
-     * Sessions that a session starts and sends messages to, as Agent Teams does.
-     * @since 0.14.0
+    /** Shared session operations; workflow declarations cannot widen core permissions.
+     * @since 0.15.0
      * @experimental
      */
-    readonly linkedSessions: LinkedSessions;
+    readonly sessions: SessionServices;
     /**
      * Makes text from other places safe for Pi to read.
      * @since 0.14.0
@@ -274,11 +304,19 @@ export interface LinkedSession {
 // ─── web: the module's part of the app ───────────────────────────────────────
 
 /**
- * Who can use a route or a browser module: the owner alone, people who can steer every session, or people who can see
- * every session. People invited to one session never can.
+ * Role access for routes and browser modules. App-wide parts exclude session invitees;
+ * conversation-scoped routes also require current source visibility and permit scoped invitees.
  * @since 0.14.0
  */
 export type WebAccess = "owner" | "steer" | "view";
+
+/**
+ * Static browser assets may opt into conversation-scoped use, including session invitees.
+ * This grants no app-wide route access.
+ * @since 0.15.0
+ * @experimental
+ */
+export type WebClientAccess = WebAccess | "conversation";
 
 /**
  * The HTTP methods of routes.
@@ -330,8 +368,154 @@ export interface WebRequest {
 export type WebHandler = (request: WebRequest) => unknown;
 
 /**
- * What a module adds to the app: the second argument of its default export. Register routes, the browser module, and
- * commands while the module loads. They go when this version of the module goes.
+ * Core operations bound to the authenticated route's current person and visible conversation.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionRequestServices {
+    readonly transfers: {
+        /** Access-filtered state and choices; does not start or retry a transfer. */
+        status(): Promise<unknown>;
+        /** Update the visible group under core's access, driving and membership checks. */
+        updateGroup(patch: Readonly<Record<string, unknown>>): Promise<void>;
+    };
+}
+
+/**
+ * A conversation-scoped extension request. Services cannot be rebound to another user or source.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionWebRequest extends WebRequest {
+    readonly conversationId: ConversationId;
+    readonly session: SessionRequestServices;
+}
+
+/**
+ * Answers a conversation-scoped extension route with JSON, as WebHandler does.
+ * @since 0.15.0
+ * @experimental
+ */
+export type SessionWebHandler = (request: SessionWebRequest) => unknown;
+
+/**
+ * A named agent playbook. Profiles are descriptive data, never execution capabilities or mutation permission.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface AgentProfile {
+    /**
+     * Stable identity, prefixed with the registering module's name and `:`. Keep it once sessions use it.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly id: string;
+    /**
+     * The display name.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly name: string;
+    /**
+     * A short description of the agent's responsibility.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly description: string;
+    /**
+     * Role-specific system instructions. Core's shared safety and workflow rules remain in effect.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly prompt: string;
+    /**
+     * The default title for a session with this profile.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly title: string;
+    /**
+     * The name of an app icon, used by generic profile indicators.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly icon?: string;
+    /**
+     * Whether people may choose this profile when starting independent work; defaults to false.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly starter?: boolean;
+}
+
+/**
+ * A declarative handoff choice between profiles within one workflow. Core still checks permission and live state.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionWorkflowTransition {
+    /**
+     * The source profile's stable identity.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly from: string;
+    /**
+     * The destination profile's stable identity.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly to: string;
+    /**
+     * Whether the successor continues the Work Item or begins new work.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly relationship: "same-work" | "new-work";
+    /**
+     * When supplied, at least one of these profile identities must occur in the Work Item's thread history.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly historyAny?: readonly string[];
+    /**
+     * When supplied, core requires the current checkout to have this dirty (true) or clean (false) state.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly currentDiff?: boolean;
+}
+
+/**
+ * Profiles and handoff choices installed atomically with one extension module. Disabling it removes availability,
+ * never stored identities or core's safety checks. Definitions are validated, cloned and deeply frozen.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionWorkflow {
+    /**
+     * Stable identity, prefixed with the registering module's name and `:`. Keep it once sessions use it.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly id: string;
+    /**
+     * The workflow's profiles, with unique stable identities.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly profiles: readonly AgentProfile[];
+    /**
+     * Handoff choices. Each from/to/relationship tuple is unique and references profiles in this workflow only.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly transitions: readonly SessionWorkflowTransition[];
+}
+
+/**
+ * What a module adds to the app: the second argument of its default export. Register routes, the browser module,
+ * commands and workflows while the module loads. They go when this version of the module goes.
  * @since 0.14.0
  */
 export interface Web {
@@ -359,12 +543,32 @@ export interface Web {
      * Sets the browser module: a `.js` file beside the module, or a folder with an `index.js`.
      * @since 0.14.0
      */
-    client(entry: string, options?: { access?: WebAccess }): void;
+    client(entry: string, options?: { access?: WebClientAccess }): void;
+    /**
+     * Adds a route at `/api/c/:id/x/<module>/<path>`, after current visibility and role checks.
+     * Scoped invitees may use it; services are bound to the authenticated person and conversation.
+     * @since 0.15.0
+     * @experimental
+     */
+    sessionRoute(
+        method: WebMethod,
+        path: string,
+        handle: SessionWebHandler,
+        options?: { access?: WebAccess },
+    ): void;
     /**
      * Adds the command `/name` to the message box.
      * @since 0.14.0
      */
     command(name: string, command: Command): void;
+    /**
+     * Registers declarative profiles and handoff choices while the module loads. They go with this module version.
+     * IDs use `<module>:<local-id>`; only the built-in work-items module may register the reserved legacy identities.
+     * Definitions grant no capabilities and cannot relax core's access, ownership, spend or execution checks.
+     * @since 0.15.0
+     * @experimental
+     */
+    workflow(definition: SessionWorkflow): void;
     /**
      * Sends an event to the browser module: to everyone it loads for, or to the person `to`. It never throws.
      * @since 0.14.0
@@ -597,10 +801,19 @@ export interface PageProps {
 }
 
 /**
- * What a sheet's component gets: the props that `openSheet` gave, and `pocket` and `close`.
+ * What a sheet's component gets: the flat props that `openSheet` gave, plus the host's callbacks.
  * @since 0.14.0
  */
-export type SheetProps<P extends object = object> = P & PageProps;
+export type SheetProps<P extends object = object> = P &
+    PageProps & {
+        /**
+         * Whether this actual opening is still current, not merely retained for its closing animation.
+         * A newer opening of the same sheet ID does not match.
+         * @since 0.15.0
+         * @experimental
+         */
+        isOpen(): boolean;
+    };
 
 /**
  * A page in the place of the session.
@@ -722,7 +935,7 @@ export interface ToolCallSpec<A = Record<string, unknown>> {
 }
 
 /**
- * What `rail`, `menu`, `launcher`, `page`, and `sheet` return.
+ * What browser contribution registrations return, including `sessionControl` and `inputCommand`.
  * @since 0.14.0
  */
 export interface Added<S> {
@@ -809,6 +1022,179 @@ export interface SwitchProps {
      * @since 0.14.0
      */
     disabled?: boolean;
+}
+
+/**
+ * Public profile metadata, without role prompts or owner settings.
+ * @since 0.15.0
+ * @experimental
+ */
+export type AgentProfileMetadata = Omit<AgentProfile, "prompt">;
+
+/**
+ * Display-only workflow metadata. It grants no execution or transfer authority.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionWorkflowMetadata {
+    readonly status: "active" | "review-complete" | "landed" | "published" | "needs-review";
+    readonly readOnly: boolean;
+    readonly managed: boolean;
+    readonly preparing: boolean;
+    readonly profileAvailable: boolean;
+    readonly summary?: string;
+    readonly readyForPublish?: boolean;
+}
+
+/**
+ * Supported metadata from the existing access-filtered session catalogue, not a server/store handle.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionMetadata {
+    readonly id: number;
+    readonly title?: string;
+    readonly cwd: string;
+    readonly createdAt: number;
+    readonly updatedAt: number;
+    readonly archived?: boolean;
+    readonly threadType: AgentProfile["id"];
+    readonly projectId?: string;
+    readonly goalId?: string;
+    readonly workItemId?: string;
+    readonly workItemTitle?: string;
+    readonly activeThreadId?: number;
+    readonly linkedFrom?: { readonly id: number };
+    readonly linkedOrigin?: boolean;
+    readonly workflow: SessionWorkflowMetadata;
+    readonly busy: boolean;
+    readonly waiting: boolean;
+    readonly failed?: boolean;
+    readonly model?: string;
+}
+
+/**
+ * The five-field metadata copy for the conversation open in this tab. No raw view, settings or prompts.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionConversation {
+    readonly id: number;
+    readonly kind: "session" | "conversation" | "subagent";
+    readonly title: string;
+    readonly cwd: string;
+    readonly threadType?: AgentProfile["id"];
+}
+
+/**
+ * Deeply frozen metadata copies for the current tab, retaining the person's catalogue visibility filter.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionSnapshot {
+    readonly id: number | null;
+    readonly me: Readonly<Person> | null;
+    readonly conversation: SessionConversation | null;
+    readonly sessions: readonly SessionMetadata[];
+    readonly busy: boolean;
+    readonly canSteer: boolean;
+    readonly profiles: readonly AgentProfileMetadata[];
+}
+
+/**
+ * A generic profile indicator, using current registered metadata or the raw ID when unavailable.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface AgentProfileTagProps {
+    profile: AgentProfile["id"];
+    iconOnly?: boolean;
+}
+
+/**
+ * Props for a guarded inline session control.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionControlProps {
+    pocket: Pocket;
+    session: SessionSnapshot;
+}
+
+/**
+ * A contribution inside the current session's header or composer.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionControlSpec {
+    id: string;
+    slot: "header" | "composer";
+    component: ComponentType<SessionControlProps>;
+}
+
+/**
+ * A draft-only input hint. No action handler or alternative submission path.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface InputCommandHint {
+    name: string;
+    description?: string;
+    args?: string;
+    completion?: string;
+    completeOnEnter?: boolean;
+    disabled?: boolean;
+}
+
+/**
+ * A normal-model-input command row and optional asynchronous argument hints, never an executor.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface InputCommandSpec {
+    id: string;
+    name: string;
+    description: string;
+    suggest(
+        text: string,
+        caret: number,
+    ): readonly InputCommandHint[] | Promise<readonly InputCommandHint[]>;
+}
+
+/**
+ * An existing upload in this conversation, not a local File or an arbitrary server-file capability.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionAttachment {
+    path: string;
+    name: string;
+    mime: string;
+    size: number;
+}
+
+/**
+ * Genuine human input, submitted through the same journal and checks as the composer.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionSubmitRequest {
+    text: string;
+    requestId: string;
+    attachments?: readonly SessionAttachment[];
+    mode?: "steer" | "followUp";
+    inlineFiles?: boolean;
+}
+
+/**
+ * Durable input acceptance, not an agent response or a successor receipt.
+ * @since 0.15.0
+ * @experimental
+ */
+export interface SessionSubmitReceipt {
+    readonly submissionId: number;
+    readonly requestId: string;
+    readonly handoffRequestKey?: string;
 }
 
 /**
@@ -907,6 +1293,31 @@ export interface Pocket {
      */
     readonly Switch: FunctionComponent<SwitchProps>;
     /**
+     * A generic indicator for a registered agent profile, falling back to its raw ID.
+     * @since 0.15.0
+     * @experimental
+     */
+    readonly AgentProfileTag: FunctionComponent<AgentProfileTagProps>;
+    /**
+     * Deeply frozen copies of current-tab context, filtered session catalogue and public profile metadata.
+     * @since 0.15.0
+     * @experimental
+     */
+    session(): SessionSnapshot;
+    /**
+     * A fresh core-generated request identity, also available on plain-HTTP LAN origins.
+     * Reuse an identity for retries of unchanged input; it is not a credential or authority.
+     * @since 0.15.0
+     * @experimental
+     */
+    requestId(): string;
+    /**
+     * Calls the listener on app-state changes. The returned cleanup is also run on module disposal.
+     * @since 0.15.0
+     * @experimental
+     */
+    onSessionChange(listener: (session: SessionSnapshot) => void): () => void;
+    /**
      * The person who uses this tab, or null before sign-in.
      * @since 0.14.0
      */
@@ -930,6 +1341,30 @@ export interface Pocket {
      * @since 0.14.0
      */
     on<T = unknown>(event: string, run: (data: T) => void): () => void;
+    /**
+     * Calls only this module's conversation-scoped routes; core rechecks visibility and role.
+     * @since 0.15.0
+     * @experimental
+     */
+    sessionApi<T = unknown>(
+        id: number,
+        path: string,
+        body?: object,
+        options?: { method?: WebMethod; signal?: AbortSignal },
+    ): Promise<T>;
+    /**
+     * Submits normal human model input. Resolves on durable acceptance, not successor creation.
+     * Core owns uncertain-input recovery, accepted transfer lookup and initiating-tab navigation.
+     * @since 0.15.0
+     * @experimental
+     */
+    submit(id: number, request: SessionSubmitRequest): Promise<SessionSubmitReceipt>;
+    /**
+     * Navigates to a visible conversation through the app's normal routing.
+     * @since 0.15.0
+     * @experimental
+     */
+    navigate(id: number): void;
     /**
      * Shows a notice, as the app's own.
      * @since 0.14.0
@@ -960,6 +1395,18 @@ export interface Pocket {
      * @since 0.14.0
      */
     sheet<P extends object = object>(spec: SheetSpec<P>): Added<SheetSpec<P>>;
+    /**
+     * Adds a guarded inline component to the current session's header or composer.
+     * @since 0.15.0
+     * @experimental
+     */
+    sessionControl(spec: SessionControlSpec): Added<SessionControlSpec>;
+    /**
+     * Adds command and argument hints only. Picking a row edits the normal input draft, never submits it.
+     * @since 0.15.0
+     * @experimental
+     */
+    inputCommand(spec: InputCommandSpec): Added<InputCommandSpec>;
     /**
      * Sets how the calls of one of the module's tools show.
      * @since 0.14.0
