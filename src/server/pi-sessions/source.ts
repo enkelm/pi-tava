@@ -1,9 +1,9 @@
-/** Strict, read-only import of one branch of an ordinary Pi v3 session. No tools or extensions are loaded. */
+/** Bounded, read-only copies of ordinary Pi v3 journals. No source tools, extensions or work are resumed. */
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, realpath, stat } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import type { Message } from "@earendil-works/pi-ai";
+import type { Message, ToolResultMessage } from "@earendil-works/pi-ai";
 import {
     buildSessionProjection,
     convertToLlm,
@@ -19,6 +19,8 @@ import { expandHome } from "../paths.ts";
 
 export const MAX_IMPORT_BYTES = 16 * 1024 * 1024;
 const MAX_ENTRIES = 20_000;
+const SNAPSHOT_RESULT_TEXT =
+    "Result unavailable at snapshot time. The original Pi session may still be running; this tool may have run or may still run there. Nothing is resumed or executed here.";
 // Pi ends failed generations before dispatching their tool calls. Durable excludes these attempts from context.
 const FAILED_ASSISTANT_STOPS = new Set(["error", "aborted"]);
 const identifier = (value: unknown): value is string =>
@@ -200,10 +202,20 @@ function validateEntry(entry: Record<string, unknown>): void {
 }
 
 export type PiImport = ReturnType<typeof parsePiSession>;
-/** Live is only for a verified running Pi's preview/preflight, never for publishing history. */
-export type PiSessionMode = "strict" | "live" | "aborted";
+/** Strict saved-file validation remains the default; snapshot copies a saved prefix without controlling Pi. */
+export type PiSessionMode = "strict" | "live" | "aborted" | "snapshot";
 
-/** Parse all envelopes strictly, then validate and project only the selected branch. The original bytes stay untouched. */
+/** V8 reports the first invalid position. Only an error at EOF can be a cut-off JSON object, not malformed text. */
+function cutOffRecord(line: string, error: unknown): boolean {
+    return (
+        line.trimStart().startsWith("{") &&
+        error instanceof SyntaxError &&
+        (error.message === "Unexpected end of JSON input" ||
+            Number(error.message.match(/at position (\d+)/)?.[1]) === line.length)
+    );
+}
+
+/** Parse every envelope strictly, validate complete snapshot records, and project one branch without changing the archive. */
 export function parsePiSession(
     archive: string,
     selectedLeaf?: string,
@@ -213,23 +225,29 @@ export function parsePiSession(
         Buffer.byteLength(archive) <= MAX_IMPORT_BYTES,
         "Session exceeds the 16 MiB import limit",
     );
-    const lines = archive.split("\n").filter((line) => line.trim() !== "");
+    const lines = archive.split("\n");
+    const values: unknown[] = [];
+    let cutOffTail = false;
 
-    requireValue(
-        lines.length > 1 && lines.length <= MAX_ENTRIES + 1,
-        "Expected a session with 1 to 20,000 entries",
-    );
-    let values: unknown[];
+    for (const [index, line] of lines.entries()) {
+        if (!line.trim()) {
+            continue;
+        }
 
-    try {
-        values = lines.map((line) => JSON.parse(line));
-    } catch {
-        throw new HttpError(
-            400,
-            "Malformed JSONL; no lines were skipped. Finish saving the session before importing.",
-        );
+        requireValue(values.length <= MAX_ENTRIES, "Expected a session with 1 to 20,000 entries");
+
+        try {
+            values.push(JSON.parse(line));
+        } catch (error) {
+            requireValue(
+                mode === "snapshot" && index === lines.length - 1 && cutOffRecord(line, error),
+                "Malformed JSONL; no complete lines were skipped. Preview again after Pi saves the session.",
+            );
+            cutOffTail = true;
+        }
     }
 
+    requireValue(values.length > 1, "Expected a session with 1 to 20,000 entries");
     const header = values[0];
 
     requireValue(
@@ -261,6 +279,10 @@ export function parsePiSession(
         byId.set(value.id, value as unknown as SessionEntry);
     }
 
+    if (mode === "snapshot") {
+        validateSnapshotRecords(byId);
+    }
+
     const leafId = selectedLeaf ?? [...byId.keys()].at(-1)!;
 
     requireValue(byId.has(leafId), "The selected entry is not in this session");
@@ -278,37 +300,7 @@ export function parsePiSession(
     const ancestors = new Map<string, SessionEntry>();
 
     for (const entry of branch) {
-        validateEntry(entry as unknown as Record<string, unknown>);
-
-        if (entry.type === "compaction") {
-            requireValue(
-                entry.firstKeptEntryId === entry.id || ancestors.has(entry.firstKeptEntryId),
-                "Compaction target is outside the selected branch",
-            );
-        }
-
-        if (entry.type === "context_edit") {
-            const target = ancestors.get(entry.targetId);
-
-            requireValue(
-                target !== undefined &&
-                    (target.type === "custom_message" ||
-                        (target.type === "message" &&
-                            ["user", "assistant", "toolResult", "custom"].includes(
-                                target.message.role,
-                            ))),
-                "Context edit target is not an earlier editable message on this branch",
-            );
-
-            if (entry.replacement !== null) {
-                for (const message of sessionEntryToContextMessages(target)) {
-                    if ("content" in message) {
-                        validateMessage(replaceContent(message, entry.replacement.content));
-                    }
-                }
-            }
-        }
-
+        validateBranchEntry(entry, ancestors);
         ancestors.set(entry.id, entry);
     }
 
@@ -316,9 +308,41 @@ export function parsePiSession(
     const projected = modelMessages(projection.messages);
 
     // Validate raw ordering before filtering failed attempts, so they cannot hide an unfinished real tool round.
-    checkToolHistory(modelMessages(branch.flatMap(sessionEntryToContextMessages)), mode === "live");
-    checkToolHistory(projected, mode === "live");
-    const messages = projected.filter((message) => !failedAssistant(message));
+    const rawPending = checkToolHistory(
+        modelMessages(branch.flatMap(sessionEntryToContextMessages)),
+        mode === "live" || mode === "snapshot",
+    );
+    const pending = checkToolHistory(projected, mode === "live" || mode === "snapshot");
+
+    if (mode === "snapshot") {
+        const actualPending = new Map(rawPending.map((call) => [call.id, call]));
+
+        requireValue(
+            pending.every((call) => {
+                const raw = actualPending.get(call.id);
+
+                return raw?.name === call.name && raw.timestamp === call.timestamp;
+            }),
+            "Context edits leave a missing tool result outside the pending snapshot tail",
+        );
+    }
+
+    const snapshotResults: ToolResultMessage[] =
+        mode === "snapshot"
+            ? pending.map((call) => ({
+                  role: "toolResult",
+                  toolCallId: call.id,
+                  toolName: call.name,
+                  content: [{ type: "text", text: SNAPSHOT_RESULT_TEXT }],
+                  isError: true,
+                  details: { reason: "snapshot_result_unavailable" },
+                  timestamp: call.timestamp,
+              }))
+            : [];
+    const messages = [
+        ...projected.filter((message) => !failedAssistant(message)),
+        ...snapshotResults,
+    ];
     const lastConversationMessage = branch.findLast(
         (entry) =>
             entry.type === "message" &&
@@ -344,6 +368,24 @@ export function parsePiSession(
         "The destination uses its own tools, instructions and extensions. Ordinary Pi extensions and live work do not migrate.",
         "Historical usage is not charged again. Original authors are labeled Imported user, not assigned to your account.",
     ];
+
+    if (mode === "snapshot") {
+        warnings.push(
+            "This is a copy of the selected saved snapshot. The original Pi session is untouched and may still be running. No pending request or tool is resumed here.",
+        );
+    }
+
+    if (cutOffTail) {
+        warnings.push(
+            "The final cut-off JSONL record is retained exactly in the archive but is not part of this snapshot's history.",
+        );
+    }
+
+    if (snapshotResults.length) {
+        warnings.push(
+            "Pending tool results were unavailable at snapshot time. Error results mark that uncertainty in the copied model context, not whether the tools ran in the original Pi.",
+        );
+    }
 
     if (
         branch.some(
@@ -371,6 +413,8 @@ export function parsePiSession(
     return {
         header: header as unknown as SessionHeader,
         archive,
+        mode,
+        snapshotResults,
         branch,
         leafId,
         title: title.slice(0, 200),
@@ -386,6 +430,85 @@ export function parsePiSession(
         warnings,
         leaves: [...byId.keys()].filter((id) => !parentIds.has(id)),
     };
+}
+
+function validateBranchEntry(
+    entry: SessionEntry,
+    ancestors: ReadonlyMap<string, SessionEntry>,
+): void {
+    validateEntry(entry as unknown as Record<string, unknown>);
+
+    if (entry.type === "compaction") {
+        requireValue(
+            entry.firstKeptEntryId === entry.id || ancestors.has(entry.firstKeptEntryId),
+            "Compaction target is outside the selected branch",
+        );
+    }
+
+    if (entry.type === "context_edit") {
+        const target = ancestors.get(entry.targetId);
+
+        requireValue(
+            target !== undefined &&
+                (target.type === "custom_message" ||
+                    (target.type === "message" &&
+                        ["user", "assistant", "toolResult", "custom"].includes(
+                            target.message.role,
+                        ))),
+            "Context edit target is not an earlier editable message on this branch",
+        );
+
+        if (entry.replacement !== null) {
+            for (const message of sessionEntryToContextMessages(target)) {
+                if ("content" in message) {
+                    validateMessage(replaceContent(message, entry.replacement.content));
+                }
+            }
+        }
+    }
+}
+
+/** Validate the entire complete-record tree in linear traversal, not once per leaf or by recursive walks. */
+function validateSnapshotRecords(entries: ReadonlyMap<string, SessionEntry>): void {
+    const children = new Map<string | null, SessionEntry[]>();
+
+    for (const entry of entries.values()) {
+        const siblings = children.get(entry.parentId) ?? [];
+
+        siblings.push(entry);
+        children.set(entry.parentId, siblings);
+    }
+
+    const ancestors = new Map<string, SessionEntry>();
+    const empty: ToolRound = { calls: [], next: 0 };
+    const stack = (children.get(null) ?? []).map((entry) => ({
+        entry,
+        leave: false,
+        round: empty,
+    }));
+
+    while (stack.length) {
+        const frame = stack.pop()!;
+        const { entry } = frame;
+
+        if (frame.leave) {
+            ancestors.delete(entry.id);
+            continue;
+        }
+
+        validateBranchEntry(entry, ancestors);
+        const round = toolRoundAfter(
+            modelMessages(sessionEntryToContextMessages(entry)),
+            frame.round,
+        );
+
+        ancestors.set(entry.id, entry);
+        stack.push({ ...frame, leave: true });
+
+        for (const child of children.get(entry.id) ?? []) {
+            stack.push({ entry: child, leave: false, round });
+        }
+    }
 }
 
 function modelMessages(messages: Parameters<typeof convertToLlm>[0]): Message[] {
@@ -409,40 +532,55 @@ function replaceContent<T extends { role: string; content: unknown }>(
     };
 }
 
-/** Reject missing, unmatched or reordered tool results instead of letting Durable synthesize or reorder them. */
-function checkToolHistory(messages: Message[], allowPendingTail = false): void {
-    let pending: { id: string; name: string }[] = [];
+type PendingCall = { id: string; name: string; timestamp: number };
+type ToolRound = { calls: PendingCall[]; next: number };
+
+/** Round states are immutable so siblings can share their parent's pending calls without copying whole branches. */
+function toolRoundAfter(messages: Message[], initial: ToolRound): ToolRound {
+    let round = initial;
 
     for (const message of messages) {
         if (message.role === "toolResult") {
-            const call = pending.shift();
+            const call = round.calls[round.next];
 
             requireValue(
                 call?.id === message.toolCallId && call.name === message.toolName,
                 "Unmatched or out-of-order tool result; this history is not supported yet",
             );
+            round = { calls: round.calls, next: round.next + 1 };
         } else {
             requireValue(
-                pending.length === 0,
+                round.next === round.calls.length,
                 "Incomplete or interleaved tool round; finish the original session before importing",
             );
 
             if (message.role === "assistant" && !failedAssistant(message)) {
-                pending = message.content
+                const calls = message.content
                     .filter((part) => part.type === "toolCall")
-                    .map(({ id, name }) => ({ id, name }));
+                    .map(({ id, name }) => ({ id, name, timestamp: message.timestamp }));
+
                 requireValue(
-                    new Set(pending.map((call) => call.id)).size === pending.length,
+                    new Set(calls.map((call) => call.id)).size === calls.length,
                     "Duplicate tool call IDs",
                 );
+                round = { calls, next: 0 };
             }
         }
     }
 
+    return round;
+}
+
+/** Reject missing, unmatched or reordered tool results instead of letting Durable synthesize or reorder them. */
+function checkToolHistory(messages: Message[], allowPendingTail = false): PendingCall[] {
+    const round = toolRoundAfter(messages, { calls: [], next: 0 });
+
     requireValue(
-        allowPendingTail || pending.length === 0,
+        allowPendingTail || round.next === round.calls.length,
         "Incomplete tool round; finish the original session before importing",
     );
+
+    return round.calls.slice(round.next);
 }
 
 /** A bounded stable read, never SessionManager.open(). The fourth argument is a trusted I/O cap, not HTTP input. */
@@ -468,7 +606,14 @@ export async function readPiSession(
     let file;
 
     try {
-        const resolved = await realpath(expandHome(path));
+        const requested = expandHome(path);
+        const original = await lstat(requested);
+
+        requireValue(
+            original.isFile() && !original.isSymbolicLink(),
+            "Choose a regular session file, not a symbolic link",
+        );
+        const resolved = await realpath(requested);
 
         file = await open(
             resolved,
@@ -499,10 +644,22 @@ export async function readPiSession(
         }
 
         const after = await file.stat();
-        const current = await stat(resolved);
+        const current = await lstat(resolved);
+        const requestedAfter = await lstat(requested);
 
         requireValue(
-            size <= MAX_IMPORT_BYTES &&
+            current.isFile() &&
+                !current.isSymbolicLink() &&
+                requestedAfter.isFile() &&
+                !requestedAfter.isSymbolicLink() &&
+                original.dev === before.dev &&
+                original.ino === before.ino &&
+                original.size === before.size &&
+                original.mtimeMs === before.mtimeMs &&
+                original.ctimeMs === before.ctimeMs &&
+                requestedAfter.dev === after.dev &&
+                requestedAfter.ino === after.ino &&
+                size <= MAX_IMPORT_BYTES &&
                 size === before.size &&
                 before.size === after.size &&
                 before.mtimeMs === after.mtimeMs &&
@@ -512,7 +669,7 @@ export async function readPiSession(
                 current.mtimeMs === after.mtimeMs &&
                 current.ctimeMs === after.ctimeMs &&
                 current.size === after.size,
-            "The source changed while reading; stop Pi and preview again",
+            "The source changed while reading; preview the latest saved snapshot again",
         );
         let archive: string;
 
@@ -625,6 +782,14 @@ export async function appendPiHistory(
             entry.id,
             (await tx.appendEntry(id, { ...draft, ...(edits === undefined ? {} : { edits }) })).id,
         );
+    }
+
+    for (const message of source.snapshotResults) {
+        await tx.appendEntry(id, {
+            kind: "pi.tool-result",
+            model: [message],
+            data: { imported: true, synthetic: true, reason: "snapshot_result_unavailable" },
+        });
     }
 
     return Object.fromEntries(ids);

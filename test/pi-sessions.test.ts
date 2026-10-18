@@ -14,7 +14,6 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep, Message } from "@earendil-works/pi-ai";
@@ -27,8 +26,7 @@ import {
     SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import type { ConversationId } from "@earendil-works/pi-durable";
-import { createHandler } from "../src/server/http.ts";
-import { PiSessionError, readPiSession } from "../src/server/pi-sessions.ts";
+import { parsePiSession } from "../src/server/pi-sessions/source.ts";
 
 /** The messages of the newest request to the model. */
 let requested: Message[] = [];
@@ -183,47 +181,63 @@ async function shown(id: ConversationId) {
     return [...page.items].reverse();
 }
 
-test("Pi gets the context Pi builds from the file; people get the whole conversation", async () => {
+async function continueSession(path: string) {
+    const preview = await app.piSessions.preview(owner(app), { path });
+
+    return app.piSessions.create(owner(app), {
+        path,
+        sha256: preview.sha256,
+        leafId: preview.leafId,
+        acknowledged: true,
+        model: preview.hasImages
+            ? "faux/faux-vision"
+            : preview.sourceModel
+              ? `${preview.sourceModel.provider}/${preview.sourceModel.modelId}`
+              : "faux/faux-1",
+        thinkingLevel: "off",
+    });
+}
+
+test("Pi gets canonical context, people get original history, and provenance survives restart", async () => {
     const path = save(rich());
-    const { id } = await app.commands.continuePiSession(owner(app), path);
+    const { id } = await continueSession(path);
     const expected = piContext(path);
 
-    assert.ok(expected.length > 4, "the session has something to compare");
+    assert.ok(expected.length > 4);
     assert.deepEqual(await pocketContext(id), expected);
-
     const entries = await shown(id);
     const texts = JSON.stringify(entries.map((entry) => entry.model ?? []));
 
-    // Before the compaction, for people only; Pi's system messages and the `!!` command for nobody.
     assert.match(texts, /The total is off by a cent/);
     assert.match(texts, /Tried doubles/);
-    assert.match(texts, /Changing th/, "a stopped reply shows, as it does in Pi");
+    assert.match(texts, /Changing th/);
     assert.doesNotMatch(texts, /Pi's own prompt/);
     assert.doesNotMatch(texts, /git status/);
     assert.ok(entries.some((entry) => entry.kind === "pi.compaction"));
+    assert.ok(entries.some((entry) => entry.kind === "pocket.from-pi"));
     assert.equal(app.sessionMeta(id)?.title, "Fix the checkout total");
-
-    // The same after a restart.
+    assert.equal(app.sessionMeta(id)?.threadType, "chat");
+    assert.equal(app.sessionMeta(id)?.ownerOnly, true);
+    assert.equal(await app.piSessions.archive(owner(app), id), readFileSync(path, "utf8"));
     await app.close();
     app = await openApp(scriptedModel(route), join(root, "pi-sessions-data"));
     assert.deepEqual(await pocketContext(id), expected);
+    assert.equal((await continueSession(path)).id, id);
 });
 
-test("it continues with the session's model and folder, and Pi answers with the history", async () => {
-    const path = save(rich(), "continued");
-    const { id } = await app.commands.continuePiSession(owner(app), path);
+test("a copied session answers with its selected model, folder, compactions and context edits", async () => {
+    const { id } = await continueSession(save(rich(), "continued"));
     const agent = await (await app.harness.conversation(id, context))!.agent(context);
 
     assert.deepEqual(agent.model, { provider: "faux", modelId: "faux-2" });
     assert.equal(agent.cwd, work);
     await say(app, id, "Carry on");
     assert.match(JSON.stringify(requested), /Round half to even/);
-    assert.match(JSON.stringify(requested), /A short answer/, "with Pi's context edit");
+    assert.match(JSON.stringify(requested), /A short answer/);
     assert.doesNotMatch(JSON.stringify(requested), /A long answer/);
-    assert.match(lastText({ messages: requested } as never).text, /Carry on/);
 });
 
-test("a tool call that never finished does not run: it gets a result saying so", async () => {
+test("unfinished tools get an unavailable-result note, never resume or claim the original did not execute", async () => {
     const marker = join(work, "must-not-exist");
     const manager = SessionManager.inMemory(work);
 
@@ -231,169 +245,122 @@ test("a tool call that never finished does not run: it gets a result saying so",
     manager.appendMessage(
         fauxAssistantMessage(
             [fauxToolCall("bash", { command: `touch ${marker}` }, { id: "open" })],
-            {
-                stopReason: "toolUse",
-            },
+            { stopReason: "toolUse" },
         ),
     );
-    const { id } = await app.commands.continuePiSession(owner(app), save(manager, "open"));
+    const { id } = await continueSession(save(manager, "open"));
     const results = (await pocketContext(id)).filter((message) => message.role === "toolResult");
 
     assert.equal(results.length, 1);
     assert.equal(results[0]!.isError, true);
-    assert.match(JSON.stringify(results[0]!.content), /Not run: the Pi session ended/);
+    assert.match(JSON.stringify(results[0]!.content), /snapshot|copied/i);
+    assert.doesNotMatch(JSON.stringify(results[0]!.content), /not run:|session ended/i);
     await say(app, id, "What happened?");
     assert.equal(existsSync(marker), false);
 });
 
-test("Pi's files are only read: one cut off mid-line stays as it is", async () => {
+test("a final cut-off record stays byte-identical in the archive and source", async () => {
     const path = save(rich(), "cut");
-    const whole = readFileSync(path, "utf8");
-    const cut = whole + '{"type":"message","id":"half';
+    const cut = readFileSync(path, "utf8") + '{"type":"message","id":"half';
 
     writeFileSync(path, cut);
-    await app.piSessions.list(owner(app));
-    await app.piSessions.preview(owner(app), path);
-    const { id } = await app.commands.continuePiSession(owner(app), path);
+    const { id } = await continueSession(path);
 
     assert.equal(readFileSync(path, "utf8"), cut);
+    assert.equal(await app.piSessions.archive(owner(app), id), cut);
     assert.deepEqual(await pocketContext(id), piContext(path));
 });
 
-test("only files Pi lists, from a Pi this one knows, in a folder that is there", async () => {
-    const outside = join(root, "elsewhere.jsonl");
-
-    writeFileSync(outside, readFileSync(save(rich(), "copy"), "utf8"));
-    await assert.rejects(app.commands.continuePiSession(owner(app), outside), /no such session/);
-    await assert.rejects(app.piSessions.preview(owner(app), "/etc/passwd"), /no such session/);
-
+test("unsupported versions and missing working folders cannot create copies", async () => {
     const newer = save(rich(), "newer");
     const lines = readFileSync(newer, "utf8").split("\n");
 
     lines[0] = JSON.stringify({ ...JSON.parse(lines[0]!), version: 99 });
     writeFileSync(newer, lines.join("\n"));
-    await assert.rejects(app.commands.continuePiSession(owner(app), newer), /newer Pi/);
-
-    const gone = save(rich(join(root, "deleted-project")), "gone");
-
-    assert.equal((await app.piSessions.preview(owner(app), gone)).cwdExists, false);
-    await assert.rejects(app.commands.continuePiSession(owner(app), gone), /is not there/);
-});
-
-test("only the owner can list, look at, or continue Pi's sessions", async () => {
-    const path = save(rich(), "owners");
-    const server = createServer(
-        createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
+    await assert.rejects(continueSession(newer), /format v3|supported/);
+    await assert.rejects(
+        continueSession(save(rich(join(root, "deleted-project")), "gone")),
+        /not there|directory|folder/i,
     );
-
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const port = (server.address() as { port: number }).port;
-    const guest = app.config.addUser("Guest", "guest");
-    const call = (token: string, route: string, body?: unknown) =>
-        fetch(`http://127.0.0.1:${port}/api/pi-sessions${route}`, {
-            method: body === undefined ? "GET" : "POST",
-            headers: {
-                authorization: `Bearer ${token}`,
-                "x-pocket": "1",
-                "content-type": "application/json",
-            },
-            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        });
-    const preview = `/preview?path=${encodeURIComponent(path)}`;
-
-    try {
-        assert.equal((await call(guest.token, "")).status, 403);
-        assert.equal((await call(guest.token, preview)).status, 403);
-        assert.equal((await call(guest.token, "/continue", { path })).status, 403);
-        assert.equal((await call(app.config.ownerToken, "/continue", {})).status, 400);
-        assert.equal((await call(app.config.ownerToken, "")).status, 200);
-        assert.equal((await call(app.config.ownerToken, preview)).status, 200);
-        const made = await call(app.config.ownerToken, "/continue", { path });
-
-        assert.equal(made.status, 200);
-        const { id } = (await made.json()) as { id: ConversationId };
-
-        assert.equal(app.sessionMeta(id)?.title, "Fix the checkout total");
-    } finally {
-        server.closeAllConnections();
-        server.close();
-        app.config.removeUser(guest.user.id);
-    }
 });
 
-test("two compactions, the second keeping messages from before the first: Pi's context still", async () => {
+test("owner-only discovery and preview refuse ordinary guests before reading local content", async () => {
+    const guest = app.config.addUser("Guest", "guest").user;
+
+    await assert.rejects(app.piSessions.list(guest), { status: 403 });
+    await assert.rejects(app.piSessions.preview(guest, { path: "/etc/passwd" }), { status: 403 });
+    await assert.rejects(app.piSessions.create(guest, { path: "/etc/passwd" }), { status: 403 });
+});
+
+test("two compactions keep Pi's canonical context, including a user-only saved tail", async () => {
     const manager = SessionManager.inMemory(work);
 
     manager.appendMessage({ role: "user", content: "one", timestamp: 1 });
     manager.appendMessage(fauxAssistantMessage([fauxText("reply one")]));
-    const keptByBoth = manager.appendMessage({ role: "user", content: "two", timestamp: 2 });
+    const kept = manager.appendMessage({ role: "user", content: "two", timestamp: 2 });
 
     manager.appendMessage(fauxAssistantMessage([fauxText("reply two")]));
-    manager.appendCompaction("First summary.", keptByBoth, 1000);
+    manager.appendCompaction("First summary.", kept, 1000);
     manager.appendMessage({ role: "user", content: "three", timestamp: 3 });
-    const keptBySecond = manager.appendMessage(fauxAssistantMessage([fauxText("reply three")]));
+    const second = manager.appendMessage(fauxAssistantMessage([fauxText("reply three")]));
 
-    manager.appendCompaction("Second summary.", keptBySecond, 2000);
+    manager.appendCompaction("Second summary.", second, 2000);
     manager.appendMessage({ role: "user", content: "four", timestamp: 4 });
     const path = save(manager, "two-compactions");
-    const { id } = await app.commands.continuePiSession(owner(app), path);
+    const { id } = await continueSession(path);
 
     assert.deepEqual(await pocketContext(id), piContext(path));
     assert.match(JSON.stringify(await pocketContext(id)), /Second summary/);
     assert.doesNotMatch(JSON.stringify(await pocketContext(id)), /First summary/);
 });
 
-test("a file whose entries lead in a circle says it is damaged, at once", () => {
+test("cyclic trees, damaged complete records and orphan tool results are rejected, not repaired", () => {
     const manager = SessionManager.inMemory(work);
 
     manager.appendMessage({ role: "user", content: "one", timestamp: 1 });
-    manager.appendMessage(fauxAssistantMessage([fauxText("reply one")]));
+    manager.appendMessage(fauxAssistantMessage([fauxText("reply")]));
     const [header, first, second] = [manager.getHeader(), ...manager.getEntries()];
-    // The first entry's parent made the second, as a damaged or hand-edited file might have it.
-    const circle = [header, { ...first, parentId: second!.id }, second].map((entry) =>
-        JSON.stringify(entry),
+    const circle = [header, { ...first, parentId: second!.id }, second];
+
+    assert.throws(
+        () =>
+            parsePiSession(
+                circle.map((entry) => JSON.stringify(entry)).join("\n"),
+                undefined,
+                "snapshot",
+            ),
+        /parent|entry/i,
     );
+    const damaged = [
+        header,
+        { ...first, message: { role: "user", content: null, timestamp: 1 } },
+        second,
+    ];
 
-    assert.throws(() => readPiSession(circle.join("\n")), PiSessionError);
-});
-
-test("a message without content, as old or edited files have, reads; its session is named by what it can", async () => {
-    const manager = SessionManager.inMemory(work);
-
-    manager.appendMessage({ role: "user", content: "the first words", timestamp: 1 });
-    manager.appendMessage(fauxAssistantMessage([fauxText("answer")]));
-    const lines = [manager.getHeader(), ...manager.getEntries()].map((entry) =>
-        JSON.stringify(entry),
+    assert.throws(
+        () =>
+            parsePiSession(
+                damaged.map((entry) => JSON.stringify(entry)).join("\n"),
+                undefined,
+                "snapshot",
+            ),
+        /content/i,
     );
-    // Content taken out of both, as a file edited by hand might be.
-    const broken = lines.map((line) =>
-        line
-            .replace('"content":"the first words"', '"content":null')
-            .replace(/"content":\[[^\]]*\]/, '"content":null'),
-    );
-
-    const read = readPiSession(broken.join("\n"));
-
-    assert.equal(read.entries.length, 2);
-});
-
-test("a tool result without its call: Pi would send it, providers refuse it, Pi Pocket leaves it out", async () => {
-    const manager = SessionManager.inMemory(work);
-
-    manager.appendMessage({ role: "user", content: "look", timestamp: 1 });
     manager.appendMessage({
         role: "toolResult",
-        toolCallId: "nowhere",
+        toolCallId: "missing",
         toolName: "read",
-        content: [{ type: "text", text: "a stray result" }],
+        content: [{ type: "text", text: "stray" }],
         isError: false,
         timestamp: 2,
     });
-    manager.appendMessage(fauxAssistantMessage([fauxText("done")]));
-    const path = save(manager, "stray");
-    const { id } = await app.commands.continuePiSession(owner(app), path);
-    const without = piContext(path).filter((message) => message.role !== "toolResult");
-
-    assert.ok(piContext(path).some((message) => message.role === "toolResult"));
-    assert.deepEqual(await pocketContext(id), without);
+    assert.throws(
+        () =>
+            parsePiSession(
+                [header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n"),
+                undefined,
+                "snapshot",
+            ),
+        /tool result/i,
+    );
 });

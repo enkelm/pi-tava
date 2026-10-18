@@ -27,7 +27,7 @@ test(
         const model = scriptedModel();
         const app = await openApp(model);
         const guest = app.config.addUser("Collaborator", "guest");
-        const { local, state, shell } = fakeHerdr(app, source.path);
+        const { local, state, shell, pi } = fakeHerdr(app, source.path);
         const original = local.request;
         const prompts: unknown[] = [];
 
@@ -142,6 +142,7 @@ test(
             );
             await page.evaluate(`document.querySelector('.private-composer').requestSubmit()`);
             await until(() => prompts.length === 1, "one Herdr agent prompt");
+            state.status = "working";
             await page.evaluate(`(await import('/store.js')).store.set({drawer:true})`);
             await until(
                 () =>
@@ -153,13 +154,33 @@ test(
             );
             await page.evaluate(`document.querySelector('.drawer .private-import').click()`);
             await until(
-                () => value(page, `!!document.querySelector('#import-share-consent')`),
+                () => value(page, `!!document.querySelector('#import-consent')`),
                 "explicit sharing consent",
             );
-            assert.deepEqual(state.signals, [], "preview never stops Pi");
+            assert.deepEqual(state.signals, [], "preview never signals Pi");
+            assert.deepEqual(state.escapes, [], "preview sends no Escape");
             assert.equal(app.sessions(guest.user).length, 0, "preview never publishes");
+            assert.deepEqual(
+                await value(
+                    page,
+                    `({
+                disabled: document.querySelector('.import-form button[type=submit]').disabled,
+                label: document.querySelector('.import-form button[type=submit]').textContent.trim(),
+                checkboxes: document.querySelectorAll('.import-form input[type=checkbox]').length,
+                consent: document.querySelector('#import-consent').checked,
+            })`,
+                ),
+                { disabled: true, label: "Move", checkboxes: 1, consent: false },
+            );
+            assert.match(
+                await value<string>(
+                    page,
+                    `document.querySelector('.import-form label.check').textContent`,
+                ),
+                /Share this copied conversation[\s\S]*archive stays owner-only/,
+            );
             await page.evaluate(
-                `const model = document.querySelector('#import-model'); model.value='faux/faux-vision'; model.dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('#import-share-consent').click();`,
+                `const model = document.querySelector('#import-model'); model.value='faux/faux-vision'; model.dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('#import-consent').click();`,
             );
             await until(
                 () =>
@@ -183,18 +204,20 @@ test(
             assert.ok(session);
             assert.equal(app.canSee(guest.user, session.id as ConversationId), true);
             assert.equal(app.sessions().length, 1);
-            assert.equal(state.signals.length, 1);
-            assert.deepEqual(state.table, [shell]);
+            assert.deepEqual(state.signals, [], "Move never signals the original Pi");
+            assert.deepEqual(state.escapes, [], "Move never sends Escape");
+            assert.deepEqual(state.table, [shell, pi], "the original Pi process remains running");
+            assert.equal(state.status, "working");
             assert.equal(model.state.callCount, 0);
             assert.equal((await app.harness.inspect(context)).tasks.length, 0);
             assert.equal(
-                await app.imports.archive(owner(app), session.id as ConversationId),
+                await app.piSessions.archive(owner(app), session.id as ConversationId),
                 source.archive,
             );
             assert.equal(readFileSync(source.path, "utf8"), source.archive);
             assert.equal(
                 (
-                    await fetch(`${base}/api/imports/${session.id}/archive`, {
+                    await fetch(`${base}/api/pi-sessions/${session.id}/archive`, {
                         headers: { authorization: `Bearer ${guest.token}` },
                     })
                 ).status,

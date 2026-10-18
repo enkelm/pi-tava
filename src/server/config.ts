@@ -26,6 +26,8 @@ export interface User {
     lastSeen?: number;
     /** Conversation ids of the only sessions this person may open; absent means every session. */
     sessions?: string[];
+    /** Owner-granted access to local Pi history; effective only for unrestricted steering guests. */
+    continuePiSessions?: true;
     /**
      * The Cloudflare quick tunnel host (`abc-def.trycloudflare.com`) this person's device signed in through. Its sign-in
      * cookie works only there, and each tunnel gets a new address, so they are removed once that tunnel is gone.
@@ -35,12 +37,22 @@ export interface User {
     budget?: number;
 }
 
+/** Local Pi history is private unless the owner explicitly grants an unrestricted steering guest access. */
+export function canContinuePiSessions(user: User): boolean {
+    return (
+        user.role === "owner" ||
+        (user.role === "guest" && user.sessions === undefined && user.continuePiSessions === true)
+    );
+}
+
 /** An invite not yet used, kept by its code's sha256 (the code itself is only shown to whoever made it). */
 export interface StoredInvite {
     codeHash: string;
     role: Role;
     /** The one session it is for; absent means every session. Never set for an owner invite. */
     session?: string;
+    /** Owner-granted access to local Pi history; never for viewers or a single session. */
+    continuePiSessions?: true;
     expiresAt: number;
     /** Who made it: it works only while they may still invite. */
     createdBy: string;
@@ -353,7 +365,12 @@ export class ConfigStore {
         return this.#config.users.find((user) => user.id === id);
     }
 
-    addUser(name: string, role: Role, sessions?: string[]): { user: User; token: string } {
+    addUser(
+        name: string,
+        role: Role,
+        sessions?: string[],
+        continuePiSessions?: true,
+    ): { user: User; token: string } {
         const token = newToken();
         const user: User = {
             id: randomUUID(),
@@ -362,6 +379,9 @@ export class ConfigStore {
             tokenHash: hashToken(token),
             createdAt: Date.now(),
             ...(sessions === undefined ? {} : { sessions: [...sessions] }),
+            ...(role === "guest" && sessions === undefined && continuePiSessions === true
+                ? { continuePiSessions: true as const }
+                : {}),
         };
 
         this.#config.users.push(user);
@@ -372,7 +392,18 @@ export class ConfigStore {
 
     updateUser(
         id: string,
-        patch: Partial<Pick<User, "name" | "lastSeen" | "role" | "sessions" | "tunnel" | "budget">>,
+        patch: Partial<
+            Pick<
+                User,
+                | "name"
+                | "lastSeen"
+                | "role"
+                | "sessions"
+                | "tunnel"
+                | "budget"
+                | "continuePiSessions"
+            >
+        >,
     ): void {
         const user = this.userById(id);
 
@@ -401,6 +432,14 @@ export class ConfigStore {
 
         if (user.budget === undefined) {
             delete user.budget;
+        }
+
+        if (
+            user.role !== "guest" ||
+            user.sessions !== undefined ||
+            user.continuePiSessions !== true
+        ) {
+            delete user.continuePiSessions;
         }
 
         this.save();

@@ -15,6 +15,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { dirname, isAbsolute, join } from "node:path";
 import { after, test } from "node:test";
 import { createHandler } from "../src/server/http.ts";
+import { PrivateControlDoc } from "../src/server/docs.ts";
 import { projectJournal, readJournal } from "../src/server/private-sessions/journal.ts";
 import { PrivateSessions } from "../src/server/private-sessions.ts";
 import { fakeHerdr } from "./active-import-fixture.ts";
@@ -372,7 +373,6 @@ test("private pane polling uses visible snapshots, never interactive application
             f.calls.some((call) => call.method === "agent.prompt"),
             false,
         );
-        assert.deepEqual(f.state.signals, []);
     } finally {
         await f.app.close();
     }
@@ -559,7 +559,6 @@ test("private HTTP uploads stream concurrent bytes into scoped tokens and delive
             false,
         );
         assert.deepEqual(f.app.sessions(), []);
-        assert.deepEqual(f.state.signals, []);
         assert.equal(readFileSync(f.source.path, "utf8"), f.source.archive);
     } finally {
         await f.close();
@@ -928,7 +927,6 @@ test("Chat delivers slash commands but refuses shell, multiline and controls bef
             f.calls.some((call) => call.method.startsWith("pane.send")),
             false,
         );
-        assert.deepEqual(f.state.signals, []);
         assert.deepEqual(f.app.sessions(), []);
         assert.equal(f.model.state.callCount, 0);
     } finally {
@@ -1004,7 +1002,6 @@ test("terminalTarget authorizes before I/O and resolves shells/all agents after 
             f.calls.some((call) => call.method === "agent.prompt"),
             false,
         );
-        assert.deepEqual(f.state.signals, []);
     } finally {
         await f.app.close();
     }
@@ -1047,7 +1044,6 @@ test("private tree mirrors instances, empty workspaces/tabs, Pi, other agents an
         assert.deepEqual(f.app.sessions(), []);
         assert.equal((await f.app.harness.inspect(context)).tasks.length, 0);
         assert.equal(f.model.state.callCount, 0);
-        assert.deepEqual(f.state.signals, []);
         assert.equal(readFileSync(f.source.path, "utf8"), f.source.archive);
     } finally {
         await f.app.close();
@@ -1153,7 +1149,6 @@ test("private prompts recheck process/session identity, deduplicate, and use onl
             /changed/,
         );
         assert.equal(f.calls.filter((call) => call.method === "agent.prompt").length, 1);
-        assert.deepEqual(f.state.signals, []);
     } finally {
         await f.app.close();
     }
@@ -1211,41 +1206,60 @@ test("busy/blocked Pi keeps Chat read-only but permits import preview; replaceme
     }
 });
 
-test("uncertain input is never automatically retried; pane input and import cannot overlap", async () => {
+test("private input stays serialized and uncertain delivery is never retried, while snapshot copying stays available", async () => {
     const f = await fixture("coordination");
+    const processes = structuredClone(f.state.table);
+
+    let release = () => {};
+
+    let sending: ReturnType<typeof f.app.privateSessions.prompt> | undefined;
 
     try {
         const view = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
-        const preview = await f.app.privateSessions.importPreview(owner(f.app), f.pane.id, {
-            revision: view.revision,
-        });
-        let release!: () => void;
 
         f.options.promptGate = new Promise<void>((resolve) => {
             release = resolve;
         });
         const request = { revision: view.revision, requestId: "delayed", text: "Hello" };
-        const sending = f.app.privateSessions.prompt(owner(f.app), f.pane.id, request);
 
+        sending = f.app.privateSessions.prompt(owner(f.app), f.pane.id, request);
         await until(
             () => f.calls.some((call) => call.method === "agent.prompt"),
             "prompt in flight",
         );
         await assert.rejects(
-            f.app.imports.active.move(owner(f.app), {
-                id: preview.activeId,
-                sha256: preview.sha256,
-                leafId: preview.leafId,
-                model: "faux/faux-vision",
-                thinkingLevel: "off",
-                acknowledged: true,
-                visibility: "shared",
+            f.local.withTerminalInput("/synthetic/herdr.sock", "pane", async () => {
+                assert.fail("native input crossed an active Chat admission");
             }),
-            /operation in progress|delivery is uncertain/,
+            /input in progress/,
         );
+        const preview = await f.app.privateSessions.importPreview(owner(f.app), f.pane.id, {
+            revision: view.revision,
+        });
+        const copy = {
+            id: preview.activeId,
+            sha256: preview.sha256,
+            leafId: preview.leafId,
+            model: "faux/faux-vision",
+            thinkingLevel: "off",
+            acknowledged: true,
+            visibility: "shared",
+        };
+        const imported = await f.app.piSessions.active.move(owner(f.app), copy);
+
+        assert.equal(await f.app.piSessions.archive(owner(f.app), imported.id), f.source.archive);
+        assert.deepEqual(f.state.table, processes);
+        assert.equal(f.calls.filter((call) => call.method === "agent.prompt").length, 1);
         release();
         await sending;
-        assert.deepEqual(f.state.signals, []);
+        assert.equal(
+            await f.local.withTerminalInput(
+                "/synthetic/herdr.sock",
+                "pane",
+                async () => "available",
+            ),
+            "available",
+        );
         f.options.failPrompt = true;
         const uncertain = { ...request, requestId: "uncertain" };
 
@@ -1257,25 +1271,39 @@ test("uncertain input is never automatically retried; pane input and import cann
             f.app.privateSessions.prompt(owner(f.app), f.pane.id, uncertain),
             /did not confirm delivery/,
         );
-        assert.equal(f.calls.filter((call) => call.method === "agent.prompt").length, 2);
         const quarantined = await f.app.privateSessions.pane(owner(f.app), f.pane.id);
 
         assert.equal(quarantined.canPrompt, false);
-        assert.equal(quarantined.canImport, false);
+        assert.equal(quarantined.canImport, true);
+        assert.equal(quarantined.importReason, undefined);
+        const receipt = await f.app.harness.snapshot(PrivateControlDoc, context);
+        const next = await f.app.privateSessions.importPreview(owner(f.app), f.pane.id, {
+            revision: quarantined.revision,
+        });
+        const repeat = await f.app.piSessions.active.move(owner(f.app), {
+            ...copy,
+            id: next.activeId,
+            sha256: next.sha256,
+            leafId: next.leafId,
+        });
+
+        assert.deepEqual(repeat, { id: imported.id, existing: true });
+        assert.deepEqual(await f.app.harness.snapshot(PrivateControlDoc, context), receipt);
         await assert.rejects(
-            f.app.imports.active.move(owner(f.app), {
-                id: preview.activeId,
-                sha256: preview.sha256,
-                leafId: preview.leafId,
-                model: "faux/faux-vision",
-                thinkingLevel: "off",
-                acknowledged: true,
-                visibility: "shared",
+            f.app.privateSessions.prompt(owner(f.app), f.pane.id, {
+                ...uncertain,
+                requestId: "new-request-cannot-bypass-uncertainty",
             }),
             /delivery is uncertain/,
         );
-        assert.deepEqual(f.state.signals, []);
+        assert.equal(f.calls.filter((call) => call.method === "agent.prompt").length, 2);
+        assert.deepEqual(f.state.table, processes);
+        assert.equal(readFileSync(f.source.path, "utf8"), f.source.archive);
+        assert.equal((await f.app.harness.inspect(context)).tasks.length, 0);
+        assert.equal(f.model.state.callCount, 0);
     } finally {
+        release();
+        await sending;
         await f.app.close();
     }
 });

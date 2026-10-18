@@ -22,7 +22,7 @@ const host = process.argv[3] ?? "127.0.0.2";
 const app = await openApp(scriptedModel());
 
 // A throwaway app must not discover or control the owner's real Herdr sessions.
-app.imports.active.local.sockets = async () => [];
+app.piSessions.active.local.sockets = async () => [];
 const server = createServer(createHandler({ app, listen: { host, port }, restart: () => {} }));
 
 server.on("upgrade", app.privateTerminals.upgrade);

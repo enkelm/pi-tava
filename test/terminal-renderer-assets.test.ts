@@ -18,7 +18,7 @@ import type { createHandler } from "../src/server/http.ts";
 const revision = "0123456789abcdef";
 const base = `/herdr-renderer/${revision}`;
 const immutable = "public, max-age=31536000, immutable";
-const inlineScript = '{"imports":{}}';
+const inlineScript = '{"pi-sessions":{}}';
 const wasm = Buffer.concat([Buffer.from("\0asm\x01\0\0\0"), Buffer.alloc(512 * 1024, 42)]);
 const fixtures = new Map<string, Buffer>([
     [

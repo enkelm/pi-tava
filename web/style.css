@@ -6957,6 +6957,21 @@ button.chip:active:not(:disabled):not(.on) {
     margin-block: 1rem;
 }
 
+.import-search-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.import-search-row input {
+    flex: 1;
+    min-width: 0;
+}
+
+.import-search-row .button {
+    flex: none;
+}
+
 .import-session + .import-session {
     margin-top: 0.75rem;
 }
@@ -14627,11 +14642,7 @@ textarea.notes {
     }
 }
 
-/*
- * Pi's sessions from the terminal. The list: a card per folder, a row per session (its title over how long and how
- * recent, a tag when it continues here). One of them: what it worked with, then its last messages as a conversation,
- * then Continue, kept in sight at the foot of the sheet.
- */
+/* Pi session sources: one compact bordered list per working directory, shared by Live and History. */
 .pi-folder {
     display: flex;
     flex-direction: column;
@@ -14704,14 +14715,23 @@ textarea.notes {
     border-top: 0;
 }
 
+.pi-session:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.pi-session:focus-visible {
+    outline-offset: -3px;
+}
+
 @media (hover: hover) and (pointer: fine) {
-    .pi-session:hover {
+    .pi-session:hover:not(:disabled) {
         background: var(--card-2);
     }
 }
 
 @media (hover: hover) and (pointer: fine) {
-    .pi-session:hover .pi-session-title {
+    .pi-session:hover:not(:disabled) .pi-session-title {
         color: var(--accent);
     }
 }

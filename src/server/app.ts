@@ -49,7 +49,7 @@ import type { BrowserState } from "./browser/page.ts";
 import { Collab, REACTIONS } from "./collab.ts";
 import { Commands } from "./commands.ts";
 import { LinkedSessions } from "./linked-sessions.ts";
-import { APP_ROOT, ConfigStore, type User } from "./config.ts";
+import { APP_ROOT, canContinuePiSessions, ConfigStore, type User } from "./config.ts";
 import {
     ArtifactBodyDoc,
     type ArtifactMeta,
@@ -76,7 +76,6 @@ import { FolderFavorites } from "./folder-favorites.ts";
 import { Gallery } from "./gallery.ts";
 import { Goals } from "./goals.ts";
 import { type ApprovalRequest, Approvals, type PocketHost, type WebClientAccess } from "./host.ts";
-import { Imports } from "./imports.ts";
 import { PrivateSessions } from "./private-sessions.ts";
 import { PrivateTerminals } from "./private-terminals.ts";
 import { type GuardStatus, LancetGuard } from "./lancet.ts";
@@ -291,7 +290,8 @@ export class PocketApp {
     readonly commands = new Commands(this);
     readonly extensionCommands = new ExtensionCommands(this);
     readonly linkedSessions = new LinkedSessions(this);
-    readonly imports = new Imports(this);
+    /** Local Pi history, available only to the owner and explicitly permitted collaborators. */
+    readonly piSessions = new PiSessions(this);
     readonly privateSessions = new PrivateSessions(this);
     readonly privateTerminals = new PrivateTerminals(this);
     readonly collab = new Collab(this);
@@ -328,8 +328,6 @@ export class PocketApp {
     readonly languages = new LanguageServices(this);
     /** The conversation's stored history, as people read it. */
     readonly transcripts = new Transcripts(this);
-    /** Pi's sessions from the terminal, which the owner can continue here. */
-    readonly piSessions = new PiSessions(this);
     /** PiP, the owner's assistant: its conversation, what its tools do, and the follows that report to it. */
     readonly pip = new Pip(this);
     /** PiP's context kept small: compacted sooner than a session's, with summaries of its own (`pip-compact.ts`). */
@@ -1555,6 +1553,9 @@ export class PocketApp {
                 name: each.name,
                 role: each.role,
                 online: this.#online(each.id),
+                ...(viewer.role === "owner" && canContinuePiSessions(each)
+                    ? { continuePiSessions: true as const }
+                    : {}),
                 ...(each.lastSeen === undefined ? {} : { lastSeen: each.lastSeen }),
                 ...(each.sessions === undefined || scope !== undefined
                     ? {}
@@ -1876,6 +1877,7 @@ export class PocketApp {
                 id: user.id,
                 name: user.name,
                 role: user.role,
+                ...(canContinuePiSessions(user) ? { continuePiSessions: true as const } : {}),
                 ...(user.sessions === undefined ? {} : { sessions: user.sessions.map(Number) }),
             },
             users: this.people(user),
@@ -2068,7 +2070,9 @@ export class PocketApp {
                     ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
                     ...(meta.workItemId === undefined ? {} : { workItemId: meta.workItemId }),
                     ...(meta.ownerOnly === undefined ? {} : { ownerOnly: meta.ownerOnly }),
-                    ...(meta.imported === undefined ? {} : { imported: meta.imported }),
+                    ...(meta.imported === true || meta.fromPi !== undefined
+                        ? { imported: true }
+                        : {}),
                     ...(meta.forkedFrom === undefined ? {} : { forkedFrom: meta.forkedFrom }),
                     ...(meta.budget === undefined ? {} : { budget: meta.budget }),
                     ...(meta.worktree === undefined ? {} : { worktree: meta.worktree }),
@@ -2155,7 +2159,7 @@ export class PocketApp {
                       threadType: meta.threadType ?? "worker",
                       ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
                   }),
-            ...(meta?.imported === true ? { imported: true } : {}),
+            ...(meta?.imported === true || meta?.fromPi !== undefined ? { imported: true } : {}),
             ...(meta?.ownerOnly === true ? { ownerOnly: true } : {}),
             ...(room.parent === undefined ? {} : { parent: room.parent }),
             ...(room.subagentName === undefined ? {} : { subagentName: room.subagentName }),
@@ -2293,8 +2297,12 @@ export class PocketApp {
         return true;
     }
 
-    /** The owner changes what someone may do: their role, or which session they may open. */
-    setAccess(owner: User, userId: string, patch: { role?: unknown; sessions?: unknown }): void {
+    /** The owner changes someone's role, session scope, or explicit access to local Pi history. */
+    setAccess(
+        owner: User,
+        userId: string,
+        patch: { role?: unknown; sessions?: unknown; continuePiSessions?: unknown },
+    ): void {
         if (owner.role !== "owner") {
             throw new HttpError(403, "Only the owner can do that");
         }
@@ -2309,7 +2317,11 @@ export class PocketApp {
             throw new HttpError(400, "The owner can do everything");
         }
 
-        const change: { role?: "guest" | "viewer"; sessions?: string[] | undefined } = {};
+        const change: {
+            role?: "guest" | "viewer";
+            sessions?: string[] | undefined;
+            continuePiSessions?: true | undefined;
+        } = {};
 
         if (patch.role !== undefined) {
             if (patch.role !== "guest" && patch.role !== "viewer") {
@@ -2330,6 +2342,24 @@ export class PocketApp {
             } else {
                 throw new HttpError(400, "sessions must be null or a list of session ids");
             }
+        }
+
+        if (patch.continuePiSessions !== undefined) {
+            if (typeof patch.continuePiSessions !== "boolean") {
+                throw new HttpError(400, "continuePiSessions must be a boolean");
+            }
+
+            const role = change.role ?? target.role;
+            const sessions = "sessions" in change ? change.sessions : target.sessions;
+
+            if (patch.continuePiSessions && (role !== "guest" || sessions !== undefined)) {
+                throw new HttpError(
+                    400,
+                    "Only unrestricted steering guests can continue Pi sessions",
+                );
+            }
+
+            change.continuePiSessions = patch.continuePiSessions ? true : undefined;
         }
 
         this.config.updateUser(userId, change);

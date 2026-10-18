@@ -148,6 +148,7 @@ function Topbar() {
             <span class="title-main" data-part="topbar-title" aria-hidden="true">${title}</span>
             <span class="title-sub" data-part="topbar-sub">
                 ${projectsAvailable() && conversation?.kind === "session" && html`<${ThreadTypeTag} session=${conversation} />`}
+                ${conversation?.imported && html`<span class="muted" title="Copied from a saved Pi session; the original Pi was not stopped">Imported from Pi</span>`}
                 ${
                     folder &&
                     html`<span

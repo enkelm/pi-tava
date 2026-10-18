@@ -1,12 +1,19 @@
 // New Session and import flows in real browser views, with isolated contexts and a scripted model.
 // Chooser adaptation protects retained drafts/Back and non-owner creation, not project storage.
-// Regression: new Chat/browse layers lose drafts or accidentally expose owner-only Import controls.
+// Regression: new Chat/browse layers lose drafts or expose Import without the explicit continuation capability.
 // Real rendered controls only; no new production seams or duplicate project/migration coverage.
 import { cleanUp, openApp, root, scriptedModel, until, work } from "./helpers.ts";
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+    copyFileSync,
+    mkdirSync,
+    readFileSync,
+    realpathSync,
+    utimesSync,
+    writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Browsers } from "../src/server/browser.ts";
@@ -74,10 +81,10 @@ async function chatFolder(page: BrowserPage) {
 async function savedFileMode(page: BrowserPage) {
     await present(page, "#import-tab-history");
     await page.evaluate(`document.querySelector('#import-tab-history').click()`);
-    await present(page, "#import-file-mode");
+    await present(page, ".import-manual");
     await page.evaluate(`
         document.querySelector('.import-manual').open = true;
-        document.querySelector('#import-file-mode').click();
+        document.querySelector('.import-manual button').click();
     `);
     await present(page, "#import-path");
 }
@@ -95,7 +102,7 @@ async function noLegacyImport(page: BrowserPage) {
             `document.querySelector('[role="dialog"], #session-tab-import, #session-panel-import, .import-form') === null`,
         ),
         true,
-        "the legacy Import entry cannot reveal private import UI to a non-owner",
+        "the legacy Import entry cannot reveal import UI without the continuation capability",
     );
     await page.evaluate(`(await import('/store.js')).closeSheet()`);
 }
@@ -228,7 +235,7 @@ test(
         });
         const app = await openApp(model);
 
-        app.imports.active.local.sockets = async () => [];
+        app.piSessions.active.local.sockets = async () => [];
         const server = createServer(
             createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
         );
@@ -386,7 +393,7 @@ test(
             const field = document.querySelector("#import-model");
             field.value = "faux/faux-vision";
             field.dispatchEvent(new Event("change", { bubbles: true }));
-            for (const input of document.querySelectorAll(".import-form input[type=checkbox]")) input.click();
+            document.querySelector('#import-consent').click();
         `);
             await until(
                 () =>
@@ -448,7 +455,7 @@ test(
                 "answer after reconnect",
             );
             await first.evaluate(`document.querySelector('[aria-label="Menu"]').click()`);
-            await present(first, `a[href^="/api/imports/"]`);
+            await present(first, `a[href^="/api/pi-sessions/"]`);
             await first.evaluate(`
                 [...document.querySelectorAll('.sheet .list-item')]
                     .find((item) => item.querySelector('span')?.textContent === 'Import Pi session').click();
@@ -472,7 +479,7 @@ test(
                 () =>
                     value(
                         first,
-                        `document.querySelector('[role="dialog"][aria-label="New Session"]') === null && document.querySelector('a[href^="/api/imports/"]') !== null && location.pathname === ${JSON.stringify(sessionPath)}`,
+                        `document.querySelector('[role="dialog"][aria-label="New Session"]') === null && document.querySelector('a[href^="/api/pi-sessions/"]') !== null && location.pathname === ${JSON.stringify(sessionPath)}`,
                     ),
                 "one Back returns to the menu after a legacy Import tab switch",
             );
@@ -482,7 +489,7 @@ test(
                 .filter((entry) => entry.level === "error");
 
             const expectedFailure = (entry: (typeof errors)[number]) =>
-                entry.source === `${base}/api/imports/preview` &&
+                entry.source === `${base}/api/pi-sessions/preview` &&
                 entry.text.includes("status of 400");
 
             assert.equal(
@@ -505,7 +512,7 @@ test(
 );
 
 test(
-    "guests can start sessions without import access; viewers cannot open New Session",
+    "ordinary guests can start sessions, only explicitly granted guests see Import, and viewers cannot open New Session",
     {
         skip: chromium === undefined ? "no Chromium browser installed" : false,
         timeout: 60_000,
@@ -518,10 +525,11 @@ test(
         const app = await openApp(model, join(root, "data-session-permissions-ui"));
         const guest = app.config.addUser("Session guest", "guest");
         const viewer = app.config.addUser("Session viewer", "viewer");
+        const granted = app.config.addUser("Granted session guest", "guest", undefined, true);
         let discoveries = 0;
 
         // Even a permission regression must never contact the machine's actual Herdr instances.
-        app.imports.active.local.sockets = async () => {
+        app.piSessions.active.local.sockets = async () => {
             discoveries++;
 
             return [];
@@ -535,7 +543,7 @@ test(
         server.on("request", (request) => {
             const path = request.url?.split("?")[0] ?? "";
 
-            if (/^\/api\/(imports|private)(\/|$)/.test(path)) {
+            if (/^\/api\/(pi-sessions|private)(\/|$)/.test(path)) {
                 privateRequests.push(`${request.method} ${path}`);
             }
         });
@@ -562,10 +570,10 @@ test(
             assert.equal(
                 await value(
                     guestPage,
-                    `document.querySelector('#session-tab-import, #session-panel-import, #import-file-mode, .import-form') === null`,
+                    `document.querySelector('#session-tab-import, #session-panel-import, .import-manual, .import-form') === null`,
                 ),
                 true,
-                "a guest's New Session dialog exposes no import controls",
+                "an ordinary guest's New Session dialog exposes no import controls",
             );
             await typeField(
                 guestPage,
@@ -684,16 +692,57 @@ test(
 
             await noLegacyImport(viewerPage);
 
-            assert.deepEqual(
-                privateRequests,
-                [],
+            assert.equal(
+                privateRequests.length,
+                0,
                 "guest and viewer UI sends no private/import requests",
             );
             assert.equal(app.sessions().length, 1, "view-only actions create no session");
             assert.equal(model.state.callCount, 0, "session creation submits no model work");
-            assert.equal(discoveries, 0, "non-owner views do not discover running Pi sessions");
+            assert.equal(
+                discoveries,
+                0,
+                "ungranted guest and viewer views do not discover Pi sessions",
+            );
+            const grantedPage = await browsers.open(3);
+
+            await grantedPage.setViewport(VIEWPORTS.mobile);
+            await grantedPage.navigate(`${base}/login?token=${encodeURIComponent(granted.token)}`);
+            await present(grantedPage, '.new-button[aria-label="New session"]');
+            await grantedPage.evaluate(
+                `document.querySelector('.new-button[aria-label="New session"]').click()`,
+            );
+            await sessionTab(grantedPage, "import");
+            await present(grantedPage, "#import-tab-live");
+            await until(() => discoveries > 0, "explicitly granted guest can discover Pi sessions");
+            await until(
+                () =>
+                    value(
+                        grantedPage,
+                        `document.querySelector('[aria-label="Pi sessions"]')?.getAttribute('aria-busy') === 'false'`,
+                    ),
+                "granted guest's live listing finishes",
+            );
+            assert.ok(privateRequests.includes("GET /api/pi-sessions/active"));
+            assert.equal(
+                privateRequests.some((request) => request.includes("/api/private")),
+                false,
+            );
+            await grantedPage.evaluate(`document.querySelector('#import-tab-history').click()`);
+            await present(grantedPage, "#import-history-search");
+            assert.equal(
+                await value(grantedPage, `document.querySelector('.import-manual') === null`),
+                true,
+                "the continuation grant does not expose the owner's arbitrary-file controls",
+            );
+            assert.equal(
+                app.sessions().length,
+                1,
+                "granted source selection also creates no conversation",
+            );
+            assert.equal(model.state.callCount, 0);
             assert.deepEqual(
-                [guestPage, viewerPage]
+                [guestPage, viewerPage, grantedPage]
                     .flatMap((page) => page.logs())
                     .filter((entry) => entry.level === "error"),
                 [],
@@ -708,7 +757,7 @@ test(
 );
 
 test(
-    "running-session picker moves Pi without a path on mobile and desktop",
+    "running-session picker copies a saved snapshot with one Move consent while Pi keeps running on mobile and desktop",
     {
         skip: chromium === undefined ? "no Chromium browser installed" : false,
         timeout: 60_000,
@@ -729,7 +778,8 @@ test(
             records.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
         );
         const app = await openApp(scriptedModel(), join(root, "data-active-ui"));
-        const { state, shell } = fakeHerdr(app, fixture.path);
+        const { state, shell, pi } = fakeHerdr(app, fixture.path);
+        const original = readFileSync(fixture.path, "utf8");
 
         state.omitArgv = true;
         const server = createServer(
@@ -755,11 +805,33 @@ test(
                 `document.querySelector('.new-button[aria-label="New session"]').click()`,
             );
             await sessionTab(page, "import");
-            await present(page, ".import-session button");
+            await present(page, ".import-list .pi-session");
+            assert.deepEqual(
+                await value(
+                    page,
+                    `(() => {
+                        const folder = document.querySelector('.import-list .pi-session').closest('.pi-folder');
+
+                        return {
+                            cwd: folder.dataset.cwd,
+                            title: folder.querySelector('.pi-folder-head').title,
+                            name: folder.querySelector('.pi-folder-name').textContent,
+                            parent: folder.querySelector('.pi-folder-parent').textContent,
+                        };
+                    })()`,
+                ),
+                {
+                    cwd: "/example/project",
+                    title: "/example/project",
+                    name: "project",
+                    parent: "/example",
+                },
+                "Live groups the selected session under its working folder heading",
+            );
             assert.equal(
-                await value(page, `document.querySelector(".import-session button").disabled`),
+                await value(page, `document.querySelector(".import-list .pi-session").disabled`),
                 false,
-                "working Pi opens a warning instead of an unusable disabled row",
+                "working Pi can be selected without stopping its work",
             );
             assert.equal(
                 await value(page, `document.querySelector("#import-path") === null`),
@@ -768,39 +840,41 @@ test(
             await shot(page, "running-mobile");
             await page.setViewport(VIEWPORTS.desktop);
             await shot(page, "running-desktop");
-            await page.evaluate(`document.querySelector(".import-session button").click()`);
+            await page.evaluate(`document.querySelector(".import-list .pi-session").click()`);
             await present(page, "#import-model");
-            assert.deepEqual(state.signals, [], "preview does not stop Pi");
+            assert.deepEqual(state.signals, [], "preview does not signal Pi");
+            assert.deepEqual(state.escapes, [], "preview sends no Escape");
             await page.setViewport(VIEWPORTS.mobile);
             await page.evaluate(
                 `const field = document.querySelector("#import-model"); field.value = "faux/faux-vision"; field.dispatchEvent(new Event("change", { bubbles: true }));`,
             );
-            await present(page, "#import-abort-consent");
-            assert.equal(
+            await present(page, "#import-consent");
+            assert.deepEqual(
                 await value(
                     page,
-                    `document.querySelector('.import-form button[type=submit]').disabled`,
+                    `({
+                    disabled: document.querySelector('.import-form button[type=submit]').disabled,
+                    label: document.querySelector('.import-form button[type=submit]').textContent.trim(),
+                    checkboxes: document.querySelectorAll('.import-form input[type=checkbox]').length,
+                    originalUnchanged: document.querySelector('#import-preview').textContent.includes('Pi keeps running'),
+                })`,
                 ),
-                true,
-                "running operations cannot be aborted without explicit consent",
-            );
-            assert.equal(
-                await value(
-                    page,
-                    `document.querySelector('[role=alert]').textContent.includes('Running operations will be aborted')`,
-                ),
-                true,
+                { disabled: true, label: "Move", checkboxes: 1, originalUnchanged: true },
+                "one snapshot confirmation, not stopped-process or abort consent",
             );
             await page.evaluate(`document.querySelector('.import-form').requestSubmit()`);
-            assert.deepEqual(state.signals, [], "unconfirmed submission must not stop Pi");
-            await page.evaluate(`document.querySelector('#import-abort-consent').click()`);
+            assert.equal(app.sessions().length, 0, "unconfirmed submission cannot copy history");
+            assert.deepEqual(state.table, [shell, pi]);
+            assert.deepEqual(state.signals, []);
+            assert.deepEqual(state.escapes, []);
+            await page.evaluate(`document.querySelector('#import-consent').click()`);
             await until(
                 () =>
                     value(
                         page,
                         `!document.querySelector(".import-form button[type=submit]").disabled`,
                     ),
-                "confirmed abort and move action",
+                "confirmed snapshot Move action",
             );
             await shot(page, "move-mobile");
             await page.setViewport(VIEWPORTS.desktop);
@@ -814,12 +888,15 @@ test(
                     ),
                 "moved conversation",
             );
-            assert.equal(state.signals.length, 1);
+            assert.deepEqual(state.signals, [], "Move never signals the original Pi");
+            assert.deepEqual(state.escapes, [], "Move never sends Escape");
+            assert.equal(state.status, "working");
+            assert.equal(readFileSync(fixture.path, "utf8"), original);
             assert.equal(
                 await value(page, `document.body.textContent.includes("Earlier provider failure")`),
                 true,
             );
-            assert.deepEqual(state.table, [shell]);
+            assert.deepEqual(state.table, [shell, pi], "the original Pi remains running");
             assert.equal(app.sessions().length, 1);
             assert.deepEqual(
                 page.logs().filter((entry) => entry.level === "error"),
@@ -835,7 +912,7 @@ test(
 );
 
 test(
-    "saved history has source tabs, searchable titles and paths, and a lazy inline branch preview",
+    "saved history groups exact working folders in recent order, keeps searches and opens the shared Move confirmation",
     { skip: chromium === undefined ? "no Chromium browser installed" : false, timeout: 60_000 },
     async () => {
         const fixture = importFixture(work, "historic-browser");
@@ -849,6 +926,46 @@ test(
         copyFileSync(fixture.path, savedPath);
         const canonicalPath = realpathSync(savedPath);
         const original = readFileSync(savedPath, "utf8");
+        const otherCwd = join(root, "a-other", "work");
+        const olderPath = join(directory, "2026-10-08_earlier-rollout.jsonl");
+        const otherPath = join(directory, "2026-10-09_incident.jsonl");
+        const olderTitle = "Earlier rollout investigation";
+        const otherTitle = "Unrelated incident review";
+        const modified = new Date("2026-10-10T12:00:00Z");
+
+        mkdirSync(otherCwd, { recursive: true });
+        utimesSync(savedPath, modified, modified);
+
+        // Interleave two exact cwds in recency order; their shared basename must not merge them.
+        for (const { path, cwd, name, timestamp } of [
+            { path: olderPath, cwd: work, name: olderTitle, timestamp: "2026-10-08T12:00:00Z" },
+            { path: otherPath, cwd: otherCwd, name: otherTitle, timestamp: "2026-10-09T12:00:00Z" },
+        ]) {
+            const archive = original
+                .trimEnd()
+                .split("\n")
+                .map((line) => {
+                    const entry = JSON.parse(line);
+
+                    if (entry.type === "session") {
+                        entry.cwd = cwd;
+                    }
+
+                    if (entry.type === "session_info") {
+                        entry.name = name;
+                    }
+
+                    return JSON.stringify(entry);
+                })
+                .join("\n");
+            const date = new Date(timestamp);
+
+            writeFileSync(path, archive + "\n");
+            utimesSync(path, date, date);
+        }
+
+        const canonicalOlderPath = realpathSync(olderPath);
+        const canonicalOtherPath = realpathSync(otherPath);
         const model = scriptedModel();
         const app = await openApp(model, join(root, "history-ui-app"));
 
@@ -857,7 +974,7 @@ test(
             0,
             "history preview starts with its own empty app data",
         );
-        app.imports.active.local.sockets = async () => [];
+        app.piSessions.active.local.sockets = async () => [];
         const server = createServer(
             createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
         );
@@ -913,88 +1030,189 @@ test(
                     ),
                 "discovered saved history",
             );
+            const folders = () =>
+                value(
+                    page,
+                    `[...document.querySelectorAll('.import-history-list .pi-folder')].map(folder => {
+                        const head = folder.querySelector('.pi-folder-head');
+                        const list = folder.querySelector('.pi-folder-list');
+                        const style = getComputedStyle(list);
+
+                        return {
+                            cwd: folder.dataset.cwd,
+                            title: head.title,
+                            name: head.querySelector('.pi-folder-name').textContent,
+                            parent: head.querySelector('.pi-folder-parent').textContent,
+                            icon: !!head.querySelector('svg'),
+                            lists: folder.querySelectorAll('.pi-folder-list').length,
+                            bordered: ['Top', 'Right', 'Bottom', 'Left'].every(side => parseFloat(style['border' + side + 'Width']) >= 1),
+                            rows: [...list.querySelectorAll('.pi-session[data-path]')].map(row => ({
+                                path: row.dataset.path,
+                                title: row.querySelector('.pi-session-title').textContent,
+                            })),
+                        };
+                    })`,
+                );
+            const expectedFolders = [
+                {
+                    cwd: work,
+                    title: work,
+                    name: basename(work),
+                    parent: dirname(work),
+                    icon: true,
+                    lists: 1,
+                    bordered: true,
+                    rows: [
+                        { path: canonicalPath, title },
+                        { path: canonicalOlderPath, title: olderTitle },
+                    ],
+                },
+                {
+                    cwd: otherCwd,
+                    title: otherCwd,
+                    name: basename(otherCwd),
+                    parent: dirname(otherCwd),
+                    icon: true,
+                    lists: 1,
+                    bordered: true,
+                    rows: [{ path: canonicalOtherPath, title: otherTitle }],
+                },
+            ];
+
+            assert.deepEqual(
+                await folders(),
+                expectedFolders,
+                "same-named folders stay separate, newest folder first and newest rows first in one bordered list",
+            );
+            await typeField(page, "#import-history-search", otherCwd);
+            assert.deepEqual(
+                await folders(),
+                expectedFolders.slice(1),
+                "folder-path filtering removes groups with no matching sessions",
+            );
+            await typeField(page, "#import-history-search", basename(savedPath));
+            assert.deepEqual(
+                await folders(),
+                [{ ...expectedFolders[0], rows: [{ path: canonicalPath, title }] }],
+                "source-file search keeps only its matching row, not unrelated siblings or empty folders",
+            );
             await typeField(page, "#import-history-search", "rollout");
-            const row = `.import-history-session[data-path=${JSON.stringify(canonicalPath)}]`;
+            assert.deepEqual(await folders(), expectedFolders.slice(0, 1));
+            const row = `.import-history-list .pi-session[data-path=${JSON.stringify(canonicalPath)}]`;
 
             await present(page, row);
             assert.equal(
                 await value(
                     page,
-                    `document.querySelector(${JSON.stringify(row)}).textContent.includes(${JSON.stringify(canonicalPath)})`,
+                    `document.querySelector(${JSON.stringify(row)}).getAttribute('title')`,
                 ),
-                true,
-                "the row shows the actual source path, not a manual path prompt",
+                canonicalPath,
+                "the saved row exposes its source file path as a tooltip",
             );
             assert.equal(
-                await value(page, `document.querySelector('.import-history-preview') === null`),
+                await value(page, `document.querySelector('#import-model') === null`),
                 true,
+            );
+            await page.evaluate(`document.querySelector(${JSON.stringify(row)}).click()`);
+            await present(page, "#import-model");
+            await present(page, "#import-consent");
+            assert.deepEqual(
+                await value(
+                    page,
+                    `({
+                    title: document.querySelector('#import-preview h3').textContent,
+                    disabled: document.querySelector('.import-form button[type=submit]').disabled,
+                    label: document.querySelector('.import-form button[type=submit]').textContent.trim(),
+                    consent: document.querySelector('#import-consent').checked,
+                    checkboxes: document.querySelectorAll('.import-form input[type=checkbox]').length,
+                    historyCollapsed: !document.querySelector('#import-preview .import-history-preview').open,
+                })`,
+                ),
+                {
+                    title,
+                    disabled: true,
+                    label: "Move",
+                    consent: false,
+                    checkboxes: 1,
+                    historyCollapsed: true,
+                },
+                "a history row directly opens the same model/consent confirmation as Live",
             );
             await page.evaluate(
-                `document.querySelector(${JSON.stringify(row)} + ' > button').click()`,
+                `document.querySelector('#import-preview .import-history-preview').open = true`,
             );
-            await present(page, ".import-history-preview");
-            await until(
-                () =>
-                    value(
-                        page,
-                        `document.querySelector('.import-history-preview')?.textContent.includes('Ready to continue')`,
-                    ),
-                "saved branch excerpt",
+            await present(page, "#import-preview .import-history-message");
+            const excerpts = await value<string[]>(
+                page,
+                `[...document.querySelectorAll('#import-preview .import-history-message p')].map(entry => entry.textContent)`,
             );
-            assert.equal(
-                await value(
-                    page,
-                    `document.querySelector(${JSON.stringify(row)} + ' > button').getAttribute('aria-expanded')`,
-                ),
-                "true",
+
+            assert.equal(excerpts.length, 6);
+            assert.ok(excerpts.every((text) => text.length <= 400));
+            assert.ok(excerpts.includes("Ready to continue"));
+            assert.doesNotMatch(
+                excerpts.join("\n"),
+                /ABANDONED_BRANCH|OPAQUE_ARCHIVE_ONLY|HISTORICAL_TOOL_RESULT/,
+                "the bounded preview excludes unselected branches, extension state and tool payloads",
             );
-            assert.equal(
-                await value(
-                    page,
-                    `document.querySelector('.import-history-preview').textContent.includes('ABANDONED_BRANCH')`,
-                ),
-                false,
-                "unselected branches do not leak into the short history preview",
-            );
-            assert.equal(app.sessions().length, 0, "expanding is read-only, not importing");
+            assert.equal(app.sessions().length, 0, "selecting a row is read-only, not importing");
             assert.equal(model.state.callCount, 0, "preview never resumes historical work");
             assert.equal(readFileSync(savedPath, "utf8"), original);
             assert.equal(
                 await value(page, `document.documentElement.scrollWidth <= innerWidth`),
                 true,
             );
-            await shot(page, "mobile-history-expanded");
+            await shot(page, "mobile-history-confirmation");
             await page.setViewport(VIEWPORTS.desktop);
             assert.equal(
                 await value(page, `document.documentElement.scrollWidth <= innerWidth`),
                 true,
             );
             await sourceToggle(page);
-            await shot(page, "desktop-history-expanded");
+            await shot(page, "desktop-history-confirmation");
             await sessionTab(page, "new");
             await sessionTab(page, "import");
             assert.equal(
-                await value(page, `document.querySelector('#import-history-search').value`),
-                "rollout",
+                await value(page, `document.querySelector('#import-consent').checked`),
+                false,
+                "switching New Session tabs never grants import consent",
+            );
+            await page.evaluate(`
+                [...document.querySelectorAll('#import-panel-history > button')]
+                    .find(button => button.textContent.trim() === 'Back to History').click();
+            `);
+            await until(
+                () =>
+                    value(
+                        page,
+                        `document.querySelector('#import-preview') === null && document.querySelector('#import-history-search')?.getClientRects().length > 0`,
+                    ),
+                "Back shows the History picker again",
             );
             assert.equal(
-                await value(
-                    page,
-                    `document.querySelector(${JSON.stringify(row)} + ' > button').getAttribute('aria-expanded')`,
-                ),
-                "true",
+                await value(page, `document.querySelector('#import-history-search').value`),
+                "rollout",
+                "returning to History preserves the search draft",
             );
-            await page.evaluate(
-                `document.querySelector('.import-history-preview .button').click()`,
+            assert.deepEqual(
+                await folders(),
+                expectedFolders.slice(0, 1),
+                "Back restores the filtered groups and their row order",
             );
-            await present(page, "#import-model");
+            await page.evaluate(`document.querySelector(${JSON.stringify(row)}).click()`);
+            await present(page, "#import-consent");
+            assert.equal(
+                await value(page, `document.querySelector('#import-consent').checked`),
+                false,
+                "reselecting the source requires fresh consent",
+            );
             assert.equal(
                 await value(
                     page,
                     `document.querySelector('.import-form button[type=submit]').disabled`,
                 ),
                 true,
-                "continuing still requires stopped-process and import-limit confirmations",
+                "history selection never bypasses destination model and snapshot consent",
             );
             assert.equal(app.sessions().length, 0);
             assert.equal(readFileSync(savedPath, "utf8"), original);

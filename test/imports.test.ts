@@ -21,7 +21,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { type Tx, UsageDoc } from "@earendil-works/pi-durable";
 import { ImportedSessionDoc, ImportsDoc } from "../src/server/docs.ts";
 import { createHandler } from "../src/server/http.ts";
-import { MAX_IMPORT_BYTES, parsePiSession } from "../src/server/imports/pi-session.ts";
+import { MAX_IMPORT_BYTES, parsePiSession } from "../src/server/pi-sessions/source.ts";
 import { importFixture } from "./import-fixtures.ts";
 
 const folder = (name: string) => {
@@ -33,7 +33,7 @@ const folder = (name: string) => {
 };
 
 const confirm = (
-    preview: Awaited<ReturnType<Awaited<ReturnType<typeof openApp>>["imports"]["preview"]>>,
+    preview: Awaited<ReturnType<Awaited<ReturnType<typeof openApp>>["piSessions"]["preview"]>>,
 ) => ({
     path: preview.path,
     sha256: preview.sha256,
@@ -53,11 +53,11 @@ for (const mode of ["plain", "compacted", "empty-kept", "repeated"]) {
         const app = await openApp(model, join(root, `data-${mode}`));
 
         try {
-            const preview = await app.imports.preview(owner(app), { path: fixture.path });
+            const preview = await app.piSessions.preview(owner(app), { path: fixture.path });
             const request = confirm(preview);
             const [first, retry] = await Promise.all([
-                app.imports.create(owner(app), request),
-                app.imports.create(owner(app), request),
+                app.piSessions.create(owner(app), request),
+                app.piSessions.create(owner(app), request),
             ]);
 
             assert.equal(first.id, retry.id);
@@ -77,7 +77,7 @@ for (const mode of ["plain", "compacted", "empty-kept", "repeated"]) {
             });
             assert.equal((await app.harness.inspect(context)).tasks.length, 0);
             assert.equal(model.state.callCount, 0);
-            assert.equal(await app.imports.archive(owner(app), first.id), fixture.archive);
+            assert.equal(await app.piSessions.archive(owner(app), first.id), fixture.archive);
             assert.equal(readFileSync(fixture.path, "utf8"), fixture.archive);
             const provenance = await app.harness.snapshot(ImportedSessionDoc, first.id, context);
 
@@ -108,15 +108,15 @@ test("an explicitly selected alternate branch has its own import identity and co
     const app = await openApp(scriptedModel(), join(root, "data-alternate"));
 
     try {
-        const current = await app.imports.create(
+        const current = await app.piSessions.create(
             owner(app),
-            confirm(await app.imports.preview(owner(app), { path: fixture.path })),
+            confirm(await app.piSessions.preview(owner(app), { path: fixture.path })),
         );
-        const selected = await app.imports.preview(owner(app), {
+        const selected = await app.piSessions.preview(owner(app), {
             path: fixture.path,
             leafId: alternate.id,
         });
-        const imported = await app.imports.create(owner(app), confirm(selected));
+        const imported = await app.piSessions.create(owner(app), confirm(selected));
 
         assert.notEqual(imported.id, current.id);
         const messages = JSON.stringify(
@@ -125,7 +125,7 @@ test("an explicitly selected alternate branch has its own import identity and co
 
         assert.match(messages, /ABANDONED_BRANCH/);
         assert.doesNotMatch(messages, /EDITED_CONTEXT|KEPT_HISTORY/);
-        assert.equal(await app.imports.archive(owner(app), imported.id), fixture.archive);
+        assert.equal(await app.piSessions.archive(owner(app), imported.id), fixture.archive);
     } finally {
         await app.close();
     }
@@ -149,8 +149,8 @@ test("two views, disconnected execution, restart, import retry and prompt retry 
     let app = await openApp(model, data);
 
     try {
-        const request = confirm(await app.imports.preview(owner(app), { path: fixture.path }));
-        const { id } = await app.imports.create(owner(app), request);
+        const request = confirm(await app.piSessions.preview(owner(app), { path: fixture.path }));
+        const { id } = await app.piSessions.create(owner(app), request);
         const first = fakeTab(id, owner(app));
         const second = fakeTab(id, owner(app));
 
@@ -189,7 +189,7 @@ test("two views, disconnected execution, restart, import retry and prompt retry 
         assert.equal(model.state.callCount, 1);
         await app.close();
         app = await openApp(model, data);
-        assert.deepEqual(await app.imports.create(owner(app), request), { id, existing: true });
+        assert.deepEqual(await app.piSessions.create(owner(app), request), { id, existing: true });
         assert.equal(
             (await app.commands.submit(id, owner(app), prompt)).submissionId,
             sent.submissionId,
@@ -200,7 +200,7 @@ test("two views, disconnected execution, restart, import retry and prompt retry 
             JSON.stringify((await (await app.conversation(id)).context(context)).messages),
             /CONTINUED_IN_DURABLE/,
         );
-        assert.equal(await app.imports.archive(owner(app), id), fixture.archive);
+        assert.equal(await app.piSessions.archive(owner(app), id), fixture.archive);
     } finally {
         await app.close();
     }
@@ -211,26 +211,26 @@ test("invalid input, missing confirmation, stale preview and unavailable configu
     const app = await openApp(scriptedModel(), join(root, "data-reject"));
 
     try {
-        const request = confirm(await app.imports.preview(owner(app), { path: fixture.path }));
+        const request = confirm(await app.piSessions.preview(owner(app), { path: fixture.path }));
 
         for (const change of [
-            { stopped: false },
+            { abortRunning: true },
             { acknowledged: false },
             { model: "missing/model" },
             { thinkingLevel: "nonsense" },
             { sha256: undefined },
         ]) {
-            await assert.rejects(app.imports.create(owner(app), { ...request, ...change }), {
+            await assert.rejects(app.piSessions.create(owner(app), { ...request, ...change }), {
                 status: 400,
             });
         }
 
-        await assert.rejects(app.imports.preview(owner(app), { path: "relative.jsonl" }), {
+        await assert.rejects(app.piSessions.preview(owner(app), { path: "relative.jsonl" }), {
             status: 400,
         });
-        await assert.rejects(app.imports.preview(owner(app), { path: work }), { status: 400 });
+        await assert.rejects(app.piSessions.preview(owner(app), { path: work }), { status: 400 });
         writeFileSync(fixture.path, fixture.archive + "\n");
-        await assert.rejects(app.imports.create(owner(app), request), { status: 409 });
+        await assert.rejects(app.piSessions.create(owner(app), request), { status: 409 });
         assert.equal(app.sessions().length, 0);
     } finally {
         await app.close();
@@ -241,7 +241,7 @@ test("a failed creation transaction publishes no archive, index, entries or sess
     const fixture = importFixture(folder("rollback"));
     const data = join(root, "data-rollback");
     let app = await openApp(scriptedModel(), data);
-    const request = confirm(await app.imports.preview(owner(app), { path: fixture.path }));
+    const request = confirm(await app.piSessions.preview(owner(app), { path: fixture.path }));
     const commit = app.harness.commit.bind(app.harness);
     const fault = mock.method(
         app.harness,
@@ -255,7 +255,7 @@ test("a failed creation transaction publishes no archive, index, entries or sess
     );
 
     try {
-        await assert.rejects(app.imports.create(owner(app), request), /injected failure/);
+        await assert.rejects(app.piSessions.create(owner(app), request), /injected failure/);
         fault.mock.restore();
         assert.equal(app.sessions().length, 0);
         assert.equal(await app.harness.snapshot(ImportsDoc, context), undefined);
@@ -266,10 +266,10 @@ test("a failed creation transaction publishes no archive, index, entries or sess
         await app.close();
         app = await openApp(scriptedModel(), data);
         assert.equal(app.sessions().length, 0);
-        const imported = await app.imports.create(owner(app), request);
+        const imported = await app.piSessions.create(owner(app), request);
 
         assert.equal(imported.existing, false);
-        assert.equal(await app.imports.archive(owner(app), imported.id), fixture.archive);
+        assert.equal(await app.piSessions.archive(owner(app), imported.id), fixture.archive);
     } finally {
         fault.mock.restore();
         await app.close();
@@ -284,15 +284,15 @@ test("bounded file reads preserve a missing final newline and reject invalid UTF
         const noNewline = fixture.archive.trimEnd();
 
         writeFileSync(fixture.path, noNewline);
-        const request = confirm(await app.imports.preview(owner(app), { path: fixture.path }));
-        const { id } = await app.imports.create(owner(app), request);
+        const request = confirm(await app.piSessions.preview(owner(app), { path: fixture.path }));
+        const { id } = await app.piSessions.create(owner(app), request);
 
         assert.equal(readFileSync(fixture.path, "utf8"), noNewline);
-        assert.equal(await app.imports.archive(owner(app), id), noNewline);
+        assert.equal(await app.piSessions.archive(owner(app), id), noNewline);
         writeFileSync(fixture.path, Buffer.from([0xff]));
-        await assert.rejects(app.imports.preview(owner(app), { path: fixture.path }), /UTF-8/);
+        await assert.rejects(app.piSessions.preview(owner(app), { path: fixture.path }), /UTF-8/);
         truncateSync(fixture.path, MAX_IMPORT_BYTES + 1);
-        await assert.rejects(app.imports.preview(owner(app), { path: fixture.path }), /16 MiB/);
+        await assert.rejects(app.piSessions.preview(owner(app), { path: fixture.path }), /16 MiB/);
     } finally {
         await app.close();
     }
@@ -309,10 +309,10 @@ test("an image-containing context requires an image-capable destination", async 
     const app = await openApp(model, join(root, "data-text-only"));
 
     try {
-        const preview = await app.imports.preview(owner(app), { path: fixture.path });
+        const preview = await app.piSessions.preview(owner(app), { path: fixture.path });
 
         assert.equal(preview.hasImages, true);
-        await assert.rejects(app.imports.create(owner(app), confirm(preview)), /accepts images/);
+        await assert.rejects(app.piSessions.create(owner(app), confirm(preview)), /accepts images/);
         assert.equal(app.sessions().length, 0);
     } finally {
         await app.close();
@@ -397,25 +397,31 @@ test("HTTP import/archive and imported conversations are owner-only, including l
     try {
         await app.attach(guestTab.client);
         assert.equal(
-            (await post("imports/preview", { path: fixture.path }, guest.token)).status,
+            (await post("pi-sessions/preview", { path: fixture.path }, guest.token)).status,
             403,
         );
         assert.equal(
-            (await post("imports/preview", { path: fixture.path }, "invalid")).status,
+            (await post("pi-sessions/preview", { path: fixture.path }, "invalid")).status,
             401,
         );
         assert.equal(
-            (await post("imports/preview", { path: fixture.path }, app.config.ownerToken, false))
-                .status,
+            (
+                await post(
+                    "pi-sessions/preview",
+                    { path: fixture.path },
+                    app.config.ownerToken,
+                    false,
+                )
+            ).status,
             403,
         );
-        const previewResponse = await post("imports/preview", { path: fixture.path });
+        const previewResponse = await post("pi-sessions/preview", { path: fixture.path });
 
         assert.equal(previewResponse.status, 200);
         const request = confirm(await previewResponse.json());
 
-        assert.equal((await post("imports", request, guest.token)).status, 403);
-        const response = await post("imports", request);
+        assert.equal((await post("pi-sessions", request, guest.token)).status, 403);
+        const response = await post("pi-sessions", request);
 
         assert.equal(response.status, 200);
         const { id } = await response.json();
@@ -435,13 +441,13 @@ test("HTTP import/archive and imported conversations are owner-only, including l
         );
         assert.equal(
             (
-                await fetch(`${base}imports/${id}/archive`, {
+                await fetch(`${base}pi-sessions/${id}/archive`, {
                     headers: { authorization: `Bearer ${guest.token}` },
                 })
             ).status,
             403,
         );
-        const archive = await fetch(`${base}imports/${id}/archive`, {
+        const archive = await fetch(`${base}pi-sessions/${id}/archive`, {
             headers: { authorization: `Bearer ${app.config.ownerToken}` },
         });
 

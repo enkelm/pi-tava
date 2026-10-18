@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ConfigStore, Role, User } from "./config.ts";
+import { HttpError } from "./errors.ts";
 
 export const COOKIE = "pocket_auth";
 
@@ -80,8 +81,9 @@ export function clearAuthCookie(response: ServerResponse): void {
  * What an invite grants: a role, and optionally a single session instead of all of them. An owner invite signs a device
  * in as the owner, with the owner's token: it is never for one session.
  */
-export type InviteGrant =
-    { role: Exclude<Role, "owner">; session?: string } | { role: "owner"; session?: never };
+export type InviteGrant = (
+    { role: Exclude<Role, "owner">; session?: string } | { role: "owner"; session?: never }
+) & { continuePiSessions?: boolean };
 
 /** Invites live in `config.json` (by their codes' hashes), so one that lasts a day or a week outlives a restart. */
 export class Auth {
@@ -111,12 +113,48 @@ export class Auth {
         return this.#config.userByToken(token);
     }
 
+    /** Rechecked at creation and redemption: a guest cannot pass on the owner's local-history grant. */
+    #mayGrant(
+        creator: User | undefined,
+        grant: { role: Role; session?: string; continuePiSessions?: boolean },
+    ): boolean {
+        return (
+            creator !== undefined &&
+            creator.role !== "viewer" &&
+            creator.sessions === undefined &&
+            (grant.role !== "owner" || creator.role === "owner") &&
+            (grant.continuePiSessions !== true ||
+                (creator.role === "owner" && grant.role === "guest" && grant.session === undefined))
+        );
+    }
+
     /** A new invite that lasts `minutes`; an owner invite always lasts 15, the least. */
     createInvite(
         by: User,
         grant: InviteGrant = { role: "guest" },
         minutes: InviteMinutes = 15,
     ): { code: string; expiresAt: number; minutes: InviteMinutes } {
+        if (
+            grant.continuePiSessions !== undefined &&
+            typeof grant.continuePiSessions !== "boolean"
+        ) {
+            throw new HttpError(400, "continuePiSessions must be a boolean");
+        }
+
+        if (
+            grant.continuePiSessions === true &&
+            (grant.role !== "guest" || grant.session !== undefined)
+        ) {
+            throw new HttpError(400, "Only unrestricted steering guests can continue Pi sessions");
+        }
+
+        if (!this.#mayGrant(this.#config.userById(by.id), grant)) {
+            throw new HttpError(
+                403,
+                "You may not create this invite. Only the owner may grant owner or local Pi session access.",
+            );
+        }
+
         // Unambiguous characters, easy to type on a phone.
         const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
         const bytes = randomBytes(10);
@@ -129,7 +167,15 @@ export class Auth {
         const lasts = grant.role === "owner" ? INVITE_MINUTES[0] : minutes;
         const expiresAt = Date.now() + lasts * 60_000;
 
-        this.#config.addInvite(code, { ...grant, expiresAt, createdBy: by.id });
+        this.#config.addInvite(code, {
+            role: grant.role,
+            ...(grant.role !== "owner" && grant.session !== undefined
+                ? { session: grant.session }
+                : {}),
+            ...(grant.continuePiSessions === true ? { continuePiSessions: true } : {}),
+            expiresAt,
+            createdBy: by.id,
+        });
 
         return { code, expiresAt, minutes: lasts };
     }
@@ -145,13 +191,20 @@ export class Auth {
     invite(code: string): InviteGrant | undefined {
         const invite = this.#config.invite(code);
 
-        if (invite === undefined) {
+        if (
+            invite === undefined ||
+            !this.#mayGrant(this.#config.userById(invite.createdBy), invite)
+        ) {
             return undefined;
         }
 
-        return invite.role === "owner" || invite.session === undefined
-            ? { role: invite.role }
-            : { role: invite.role, session: invite.session };
+        return invite.role === "owner"
+            ? { role: "owner" }
+            : {
+                  role: invite.role,
+                  ...(invite.session === undefined ? {} : { session: invite.session }),
+                  ...(invite.continuePiSessions === true ? { continuePiSessions: true } : {}),
+              };
     }
 
     inviteValid(code: string): boolean {
@@ -172,12 +225,12 @@ export class Auth {
         // The person who made it must still be allowed to: not removed, not view only, not limited to one session.
         const creator = this.#config.userById(invite.createdBy);
 
-        if (creator === undefined || creator.role === "viewer" || creator.sessions !== undefined) {
+        if (!this.#mayGrant(creator, invite)) {
             return undefined;
         }
 
         if (invite.role === "owner") {
-            return creator.role === "owner"
+            return creator?.role === "owner"
                 ? { user: creator, token: this.#config.ownerToken }
                 : undefined;
         }
@@ -188,6 +241,7 @@ export class Auth {
             clean,
             invite.role,
             invite.session === undefined ? undefined : [invite.session],
+            invite.continuePiSessions === true ? true : undefined,
         );
     }
 }

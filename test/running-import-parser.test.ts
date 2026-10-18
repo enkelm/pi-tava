@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { parsePiSession } from "../src/server/imports/pi-session.ts";
+import { parsePiSession } from "../src/server/pi-sessions/source.ts";
 import { importFixture } from "./import-fixtures.ts";
 
 after(cleanUp);

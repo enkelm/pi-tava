@@ -1,12 +1,10 @@
-/** Local Herdr discovery and a guarded stop of one Pi process, never its pane or shell. */
-import { AsyncLocalStorage } from "node:async_hooks";
+/** Read-only local Herdr discovery, with shared transport and input reservations for the private Pi bridge. */
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readdir, stat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { HttpError } from "../errors.ts";
 import type { ControlPurpose, PrivateControl } from "../private-sessions/control.ts";
@@ -191,26 +189,8 @@ export async function localProcesses(): Promise<LocalProcess[]> {
         return parseProcesses(stdout);
     } catch {
         // Do not log ps output: unrelated process arguments may contain credentials.
-        throw new HttpError(
-            503,
-            "Could not inspect local processes. Automatic takeover is unavailable.",
-        );
+        throw new HttpError(503, "Could not inspect local processes. Pi discovery is unavailable.");
     }
-}
-
-function sameProcess(a: ProcessIdentity, b: ProcessIdentity | undefined): boolean {
-    return (
-        b !== undefined &&
-        a.pid === b.pid &&
-        a.parent === b.parent &&
-        a.uid === b.uid &&
-        a.started === b.started &&
-        a.commandHash === b.commandHash
-    );
-}
-
-function sameLifetime(a: ProcessIdentity, b: ProcessIdentity | undefined): boolean {
-    return b !== undefined && a.pid === b.pid && a.uid === b.uid && a.started === b.started;
 }
 
 function beneath(table: LocalProcess[], pid: number, root: number | undefined): boolean {
@@ -279,7 +259,7 @@ async function sockets(): Promise<string[]> {
     return result;
 }
 
-/** The same foreground identity check is used for imports and the private Pi bridge. No stop-policy checks here. */
+/** Shared foreground identity check for source discovery and the private Pi bridge. */
 export function foregroundPi(table: LocalProcess[], info: ProcessInfo): LocalProcess | undefined {
     const matches = info.foreground_processes.filter((item) =>
         item.argv?.length
@@ -311,18 +291,18 @@ type InputOperation = {
     purpose: ControlPurpose | "terminal";
 };
 
-/** Kept as a small concrete class so tests can replace OS/socket methods without touching real sessions. */
+/** Concrete OS/socket methods are shared with the private bridge and replaceable by synthetic fixtures. */
 export class LocalPiSessions {
     processes = localProcesses;
     sockets = sockets;
     request = herdrRequest;
-    signal = (pid: number) => process.kill(pid, "SIGTERM");
-    stopTimeoutMs = 8000;
-    abortTimeoutMs = 8000;
     /** Installed by PrivateSessions without reading storage during app construction. */
     control?: PrivateControl;
     readonly #operations = new Set<InputOperation>();
-    readonly #operationContext = new AsyncLocalStorage<InputOperation>();
+
+    setControl(control: PrivateControl): void {
+        this.control = control;
+    }
 
     async inputReason(socket: string, pane: string): Promise<string | undefined> {
         return this.control?.reason(socket, pane);
@@ -348,10 +328,7 @@ export class LocalPiSessions {
                     (pane === undefined || item.pane === undefined || item.pane === pane),
             )
         ) {
-            throw new HttpError(
-                409,
-                "This pane or Herdr instance already has an input or import operation in progress.",
-            );
+            throw new HttpError(409, "This pane or Herdr instance already has input in progress.");
         }
 
         const reservation = { socket, pane, purpose };
@@ -361,9 +338,9 @@ export class LocalPiSessions {
         return reservation;
     }
 
-    /** Reserve before awaiting durable admission and writing to the native child. Undefined pane is instance-wide.
-     * Explicit terminal control ignores durable Chat uncertainty. It still cannot overlap an active Pocket
-     * prompt, stop or conflicting native write. Release means the callback ended, not that Herdr drained its PTY.
+    /** Reserve before durable admission and native writes. Undefined pane is instance-wide.
+     * Explicit terminal control ignores durable Chat uncertainty, but cannot overlap another input.
+     * Release means the callback ended, not that Herdr drained its PTY.
      */
     async withTerminalInput<T>(
         socket: string,
@@ -379,14 +356,12 @@ export class LocalPiSessions {
         }
     }
 
-    /** Serializes app bridge input with takeover and native writes, not the lifetime of an attached terminal.
-     * Known terminal use is not a takeover fence; uncertain Chat delivery still is.
-     */
+    /** Serialize bridge input and native writes, not read-only discovery or an attached terminal's lifetime. */
     async withPane<T>(
         socket: string,
         pane: string,
         operation: () => Promise<T>,
-        purpose: ControlPurpose = "takeover",
+        purpose: ControlPurpose = "prompt",
     ): Promise<T> {
         // Reserve synchronously, before durable I/O, so a conflicting native write cannot slip across it.
         const reservation = this.#reserve(socket, pane, purpose);
@@ -394,19 +369,26 @@ export class LocalPiSessions {
         try {
             await this.requireInputSafe(socket, pane);
 
-            return await this.#operationContext.run(reservation, operation);
+            return await operation();
         } finally {
             this.#operations.delete(reservation);
         }
+    }
+
+    withInput<T>(
+        socket: string,
+        pane: string,
+        operation: () => Promise<T>,
+        purpose: ControlPurpose = "prompt",
+    ): Promise<T> {
+        return this.withPane(socket, pane, operation, purpose);
     }
 
     async list(): Promise<{ sessions: ActivePi[]; warnings: string[] }> {
         if (process.platform !== "darwin" && process.platform !== "linux") {
             return {
                 sessions: [],
-                warnings: [
-                    "Automatic takeover currently supports local Herdr sessions on macOS and Linux.",
-                ],
+                warnings: ["Local Herdr Pi discovery currently supports macOS and Linux."],
             };
         }
 
@@ -414,19 +396,6 @@ export class LocalPiSessions {
         const deadline = Date.now() + 8000;
         const sessions: ActivePi[] = [];
         const warnings: string[] = [];
-        const protectedPids = new Set<number>([process.pid]);
-        let ancestor = table.find((item) => item.pid === process.pid);
-
-        while (ancestor) {
-            protectedPids.add(ancestor.pid);
-            const parent = table.find((item) => item.pid === ancestor!.parent);
-
-            if (!parent || protectedPids.has(parent.pid)) {
-                break;
-            }
-
-            ancestor = parent;
-        }
 
         for (const socket of await this.sockets()) {
             if (Date.now() >= deadline) {
@@ -469,6 +438,7 @@ export class LocalPiSessions {
                         reference?.agent !== "pi" ||
                         reference.source !== "herdr:pi" ||
                         reference.kind !== "path" ||
+                        typeof candidate.path !== "string" ||
                         !isAbsolute(candidate.path)
                     ) {
                         candidate.path = "";
@@ -482,7 +452,7 @@ export class LocalPiSessions {
 
                         if (!actual) {
                             candidate.reason =
-                                "Cannot identify a separate local Pi process safely. Its shell will not be stopped.";
+                                "Cannot identify a separate local Pi process safely.";
                         } else {
                             candidate.process = {
                                 pid: actual.pid,
@@ -493,34 +463,11 @@ export class LocalPiSessions {
                             };
                             const file = await stat(candidate.path).catch(() => undefined);
 
-                            if (protectedPids.has(actual.pid)) {
+                            if (!file?.isFile()) {
                                 candidate.reason =
-                                    "This Pi is an ancestor of the app or its inspection process. Start the app from a separate shell before moving it.";
-                            } else if (
-                                !file?.isFile() ||
-                                file.mtimeMs < Date.parse(actual.started) - 1000
-                            ) {
-                                candidate.reason =
-                                    "The session reference may be stale. Finish a turn in this Pi, then refresh.";
-                            } else if (
-                                !["idle", "done", "working", "blocked"].includes(candidate.state)
-                            ) {
-                                candidate.reason =
-                                    "Pi's status is unknown. Refresh before moving it.";
-                            } else if (
-                                ["idle", "done"].includes(candidate.state) &&
-                                table.some((item) => item.parent === actual.pid)
-                            ) {
-                                candidate.reason =
-                                    "Pi still has child processes. Finish or close its tools before moving it.";
+                                    "The reported Pi session file is unavailable. Refresh its session reference.";
                             }
                         }
-                    }
-
-                    const inputReason = await this.inputReason(socket, pane.pane_id);
-
-                    if (inputReason) {
-                        candidate.reason = inputReason;
                     }
 
                     sessions.push({ id: idFor(candidate), ...candidate });
@@ -533,9 +480,17 @@ export class LocalPiSessions {
         }
 
         for (const session of sessions) {
-            if (session.path && sessions.filter((item) => item.path === session.path).length > 1) {
+            if (
+                sessions.some(
+                    (item) =>
+                        item !== session &&
+                        ((session.path && item.path === session.path) ||
+                            (item.socket === session.socket && item.pane === session.pane) ||
+                            (session.process && item.process?.pid === session.process.pid)),
+                )
+            ) {
                 session.reason =
-                    "More than one Pi reports this session file. Stop the duplicate before moving it.";
+                    "More than one Pi reports the same source process, pane or session file. Resolve the duplicate and refresh.";
             }
         }
 
@@ -548,7 +503,7 @@ export class LocalPiSessions {
         if (result.warnings.length) {
             throw new HttpError(
                 409,
-                "Could not inspect every local Herdr session. Resolve the discovery warnings and refresh before moving Pi.",
+                "Could not inspect every local Herdr session. Resolve the discovery warnings and refresh before copying Pi.",
             );
         }
 
@@ -563,187 +518,5 @@ export class LocalPiSessions {
         }
 
         return session;
-    }
-
-    /** Standalone control also reserves the pane. Async ownership lets ActiveImports reuse its reservation,
-     * without allowing unrelated callers to bypass the input/import lock.
-     */
-    async #withTakeover<T>(expected: ActivePi, operation: () => Promise<T>): Promise<T> {
-        const owned = this.#operationContext.getStore();
-
-        if (
-            owned?.purpose === "takeover" &&
-            owned.socket === expected.socket &&
-            owned.pane === expected.pane &&
-            this.#operations.has(owned)
-        ) {
-            return operation();
-        }
-
-        return this.withPane(expected.socket, expected.pane, operation);
-    }
-
-    /** Explicit caller consent is checked by ActiveImports before this targeted Escape. Never retries input. */
-    async abort(expected: ActivePi): Promise<void> {
-        return this.#withTakeover(expected, () => this.#abort(expected));
-    }
-
-    async #abort(expected: ActivePi): Promise<void> {
-        const current = await this.find(expected.id);
-        const table = await this.processes();
-
-        if (
-            !expected.process ||
-            !sameProcess(expected.process, current.process) ||
-            !sameProcess(
-                expected.process,
-                table.find((item) => item.pid === expected.process!.pid),
-            )
-        ) {
-            throw new HttpError(
-                409,
-                "The Pi process changed before cancellation. Refresh before moving it.",
-            );
-        }
-
-        if (["idle", "done"].includes(current.state)) {
-            return;
-        }
-
-        await this.requireInputSafe(expected.socket, expected.pane);
-        let ack: { type?: string };
-
-        try {
-            ack = await this.request(expected.socket, "pane.send_keys", {
-                pane_id: expected.pane,
-                keys: ["esc"],
-            });
-        } catch {
-            throw new HttpError(
-                409,
-                "Herdr did not confirm the abort request. No stop was sent and input was not retried. Check Pi, then preview again.",
-            );
-        }
-
-        // pane.send_keys uses Herdr's generic Ok result, not the agent.prompt acknowledgement.
-        if (ack?.type !== "ok") {
-            throw new HttpError(
-                409,
-                "Herdr did not confirm Escape for the selected pane. No stop was sent. Check Pi, then preview again.",
-            );
-        }
-
-        const deadline = Date.now() + this.abortTimeoutMs;
-
-        // Delivery acknowledgement alone does not prove Pi consumed Escape or its tools finished.
-        while (Date.now() < deadline) {
-            await delay(100);
-            const current = await this.list();
-            const session = current.sessions.find((item) => item.id === expected.id);
-
-            if (current.warnings.length) {
-                throw new HttpError(
-                    409,
-                    "Could not verify Pi after cancellation. No stop was sent.",
-                );
-            }
-
-            if (!session) {
-                if (await this.exited(expected)) {
-                    return;
-                }
-
-                throw new HttpError(
-                    409,
-                    "The Pi session changed during cancellation. No stop was sent.",
-                );
-            }
-
-            if (
-                ["idle", "done"].includes(session.state) &&
-                !session.reason &&
-                !(await this.processes()).some((item) => item.parent === expected.process!.pid)
-            ) {
-                await this.requireInputSafe(expected.socket, expected.pane);
-
-                return;
-            }
-        }
-
-        throw new HttpError(
-            409,
-            "Pi or its tools did not finish after Escape. No stop was sent and Pi was not force-killed. Check its terminal, then preview and retry.",
-        );
-    }
-
-    async stop(expected: ActivePi): Promise<void> {
-        return this.#withTakeover(expected, () => this.#stop(expected));
-    }
-
-    /** Rechecks idle state and identity before SIGTERM; not an atomic OS process lease. No groups or SIGKILL. */
-    async #stop(expected: ActivePi): Promise<void> {
-        if (
-            !expected.process ||
-            !Number.isSafeInteger(expected.process.pid) ||
-            expected.process.pid <= 1
-        ) {
-            throw new HttpError(409, "No verified Pi process to stop");
-        }
-
-        const current = await this.find(expected.id);
-        const table = await this.processes();
-
-        if (
-            !sameProcess(expected.process, current.process) ||
-            !sameProcess(
-                expected.process,
-                table.find((item) => item.pid === expected.process!.pid),
-            ) ||
-            table.some((item) => item.parent === expected.process!.pid)
-        ) {
-            throw new HttpError(
-                409,
-                "The Pi process changed or started a tool. Refresh before moving it.",
-            );
-        }
-
-        if (!["idle", "done"].includes(current.state)) {
-            throw new HttpError(
-                409,
-                "Pi is still running. Confirm aborting its operations before moving it.",
-            );
-        }
-
-        await this.requireInputSafe(expected.socket, expected.pane);
-        this.signal(expected.process.pid);
-        const deadline = Date.now() + this.stopTimeoutMs;
-
-        while (Date.now() < deadline) {
-            const table = await this.processes();
-            const current = table.find((item) => item.pid === expected.process!.pid);
-
-            if (!sameLifetime(expected.process, current)) {
-                return;
-            }
-
-            await delay(100);
-        }
-
-        throw new HttpError(
-            409,
-            "Pi did not exit after the stop request. It was not force-killed. Check its terminal, then retry.",
-        );
-    }
-
-    async exited(expected: ActivePi): Promise<boolean> {
-        const table = await this.processes();
-
-        return (
-            expected.process !== undefined &&
-            !sameLifetime(
-                expected.process,
-                table.find((item) => item.pid === expected.process!.pid),
-            )
-        );
     }
 }

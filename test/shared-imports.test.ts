@@ -1,4 +1,4 @@
-// Generated sources, temporary SQLite and fake process controls only. No real Herdr or signals.
+// Generated sources, temporary SQLite and synthetic discovery only. No real Herdr or signals.
 import {
     type App,
     cleanUp,
@@ -12,15 +12,21 @@ import {
     work,
 } from "./helpers.ts";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, mock, test } from "node:test";
 import type { Context } from "@earendil-works/chord";
 import type { Tx } from "@earendil-works/pi-durable";
-import { ImportedSessionDoc, ImportsDoc, SessionsDoc, TakeoversDoc } from "../src/server/docs.ts";
+import {
+    ImportedSessionDoc,
+    ImportsDoc,
+    PrivateControlDoc,
+    SessionsDoc,
+    TakeoversDoc,
+} from "../src/server/docs.ts";
 import { createHandler } from "../src/server/http.ts";
-import type { ImportRequest } from "../src/server/imports.ts";
+import type { ImportRequest } from "../src/server/pi-sessions.ts";
 import { fakeHerdr } from "./active-import-fixture.ts";
 import { importFixture } from "./import-fixtures.ts";
 
@@ -35,12 +41,11 @@ async function fixture(name: string) {
     return { app, source, data, ...fakeHerdr(app, source.path) };
 }
 
-function confirm(preview: Awaited<ReturnType<App["imports"]["preview"]>>): ImportRequest {
+function confirm(preview: Awaited<ReturnType<App["piSessions"]["preview"]>>): ImportRequest {
     return {
         path: preview.path,
         sha256: preview.sha256,
         leafId: preview.leafId,
-        stopped: true,
         acknowledged: true,
         model: "faux/faux-vision",
         thinkingLevel: "off",
@@ -48,8 +53,8 @@ function confirm(preview: Awaited<ReturnType<App["imports"]["preview"]>>): Impor
 }
 
 async function moveRequest(app: App) {
-    const id = (await app.imports.active.list(owner(app))).sessions[0]!.id;
-    const preview = await app.imports.active.preview(owner(app), { id });
+    const id = (await app.piSessions.active.list(owner(app))).sessions[0]!.id;
+    const preview = await app.piSessions.active.preview(owner(app), { id });
 
     return { ...confirm(preview), id };
 }
@@ -67,7 +72,7 @@ const privateArchive = /ABANDONED_BRANCH|OPAQUE_ARCHIVE_ONLY|importedBy|entryIds
 
 after(cleanUp);
 
-test("shared imports reach signed-in unscoped initial/live lists and forks, never archives or anonymous readers", async () => {
+test("HTTP shared imports reach signed-in unscoped initial/live lists and forks, never archives or anonymous readers", async () => {
     const { app, source } = await fixture("access");
     const guest = app.config.addUser("Guest", "guest");
     const viewer = app.config.addUser("Viewer", "viewer");
@@ -99,12 +104,12 @@ test("shared imports reach signed-in unscoped initial/live lists and forks, neve
     try {
         await app.attach(live.client);
         await app.attach(scopedLive.client);
-        const preview = await app.imports.preview(owner(app), { path: source.path });
+        const preview = await app.piSessions.preview(owner(app), { path: source.path });
         const input = { ...confirm(preview), visibility: "shared" };
 
-        assert.equal((await post("imports", input, guest.token)).status, 403);
-        assert.equal((await post("imports", { ...input, acknowledged: false })).status, 400);
-        const response = await post("imports", input);
+        assert.equal((await post("pi-sessions", input, guest.token)).status, 403);
+        assert.equal((await post("pi-sessions", { ...input, acknowledged: false })).status, 400);
+        const response = await post("pi-sessions", input);
 
         assert.equal(response.status, 200);
         const { id } = await response.json();
@@ -142,7 +147,7 @@ test("shared imports reach signed-in unscoped initial/live lists and forks, neve
         );
         assert.deepEqual(scopedLive.last("sessions"), []);
 
-        for (const path of ["sessions", `c/${id}/history`, `imports/${id}/archive`]) {
+        for (const path of ["sessions", `c/${id}/history`, `pi-sessions/${id}/archive`]) {
             assert.equal((await get(path)).status, 401);
         }
 
@@ -153,12 +158,12 @@ test("shared imports reach signed-in unscoped initial/live lists and forks, neve
         assert.doesNotMatch(await history.text(), privateArchive);
 
         for (const token of [guest.token, viewer.token, scoped.token, invited.token]) {
-            assert.equal((await get(`imports/${id}/archive`, token)).status, 403);
+            assert.equal((await get(`pi-sessions/${id}/archive`, token)).status, 403);
         }
 
-        await assert.rejects(app.imports.archive(guest.user, id), { status: 403 });
+        await assert.rejects(app.piSessions.archive(guest.user, id), { status: 403 });
         assert.equal(
-            await (await get(`imports/${id}/archive`, app.config.ownerToken)).text(),
+            await (await get(`pi-sessions/${id}/archive`, app.config.ownerToken)).text(),
             source.archive,
         );
         const stored = (await app.harness.snapshot(ImportedSessionDoc, id, context))!;
@@ -178,7 +183,7 @@ test("shared imports reach signed-in unscoped initial/live lists and forks, neve
         );
         assert.doesNotMatch(JSON.stringify(forkView.events), privateArchive);
         assert.equal(await app.harness.snapshot(ImportedSessionDoc, fork.id, context), undefined);
-        assert.equal((await get(`imports/${fork.id}/archive`, guest.token)).status, 403);
+        assert.equal((await get(`pi-sessions/${fork.id}/archive`, guest.token)).status, 403);
         assert.equal((await app.harness.inspect(context)).tasks.length, 0);
         assert.equal(readFileSync(source.path, "utf8"), source.archive);
     } finally {
@@ -197,8 +202,8 @@ test("defaults stay private; preview cannot promote; confirmed retry promotes on
     const guest = app.config.addUser("Guest", "guest").user;
 
     try {
-        const request = confirm(await app.imports.preview(owner(app), { path: source.path }));
-        const original = await app.imports.create(owner(app), request);
+        const request = confirm(await app.piSessions.preview(owner(app), { path: source.path }));
+        const original = await app.piSessions.create(owner(app), request);
         const stored = (await app.harness.snapshot(ImportedSessionDoc, original.id, context))!;
         const fork = await app.commands.fork(original.id, owner(app), {
             entryId: stored.source!.entryIds[source.lastAnswer],
@@ -210,34 +215,40 @@ test("defaults stay private; preview cannot promote; confirmed retry promotes on
                     entry.type === "message" &&
                     JSON.stringify(entry.message).includes("Unselected answer"),
             )!;
-        const alternative = await app.imports.create(owner(app), {
+        const alternative = await app.piSessions.create(owner(app), {
             ...confirm(
-                await app.imports.preview(owner(app), { path: source.path, leafId: alternate.id }),
+                await app.piSessions.preview(owner(app), {
+                    path: source.path,
+                    leafId: alternate.id,
+                }),
             ),
             visibility: "owner",
         });
 
         assert.equal(app.sessionMeta(original.id)!.ownerOnly, true);
         assert.deepEqual(app.sessions(guest), []);
-        await app.imports.preview(owner(app), { path: source.path, visibility: "shared" });
-        await app.imports.prepare(owner(app), { ...request, visibility: "shared" });
+        await app.piSessions.preview(owner(app), { path: source.path, visibility: "shared" });
+        await app.piSessions.prepare(owner(app), { ...request, visibility: "shared" });
         assert.equal(app.canSee(guest, original.id), false);
         await assert.rejects(
-            app.imports.create(owner(app), {
+            app.piSessions.create(owner(app), {
                 ...request,
                 visibility: "shared",
                 acknowledged: false,
             }),
             { status: 400 },
         );
-        const promoted = await app.imports.create(owner(app), { ...request, visibility: "shared" });
+        const promoted = await app.piSessions.create(owner(app), {
+            ...request,
+            visibility: "shared",
+        });
 
         assert.deepEqual(promoted, { id: original.id, existing: true });
         assert.equal(app.sessionMeta(original.id)!.ownerOnly, false);
 
         for (const visibility of [undefined, "owner", "shared"]) {
             assert.deepEqual(
-                await app.imports.create(owner(app), { ...request, visibility }),
+                await app.piSessions.create(owner(app), { ...request, visibility }),
                 promoted,
             );
             assert.equal(app.canSee(guest, original.id), true);
@@ -253,7 +264,7 @@ test("defaults stay private; preview cannot promote; confirmed retry promotes on
             await app.harness.snapshot(ImportedSessionDoc, original.id, context),
             stored,
         );
-        assert.equal(await app.imports.archive(owner(app), original.id), source.archive);
+        assert.equal(await app.piSessions.archive(owner(app), original.id), source.archive);
     } finally {
         await app.close();
     }
@@ -263,43 +274,43 @@ test("saved-file and active previews disclose existing shared imports without pu
     const { app, source } = await fixture("preview-visibility");
 
     try {
-        const initial = await app.imports.preview(owner(app), { path: source.path });
+        const initial = await app.piSessions.preview(owner(app), { path: source.path });
 
         assert.equal(initial.visibility, "owner");
         assert.equal(
-            (await app.imports.preview(owner(app), { path: source.path, visibility: "shared" }))
+            (await app.piSessions.preview(owner(app), { path: source.path, visibility: "shared" }))
                 .visibility,
             "shared",
         );
         assert.deepEqual(app.sessions(), []);
         const request = confirm(initial);
-        const result = await app.imports.create(owner(app), request);
+        const result = await app.piSessions.create(owner(app), request);
         const privateSessions = await app.harness.snapshot(SessionsDoc, context);
 
         assert.equal(
-            (await app.imports.preview(owner(app), { path: source.path })).visibility,
+            (await app.piSessions.preview(owner(app), { path: source.path })).visibility,
             "owner",
         );
         assert.equal(
-            (await app.imports.preview(owner(app), { path: source.path, visibility: "shared" }))
+            (await app.piSessions.preview(owner(app), { path: source.path, visibility: "shared" }))
                 .visibility,
             "shared",
         );
         assert.deepEqual(await app.harness.snapshot(SessionsDoc, context), privateSessions);
-        await app.imports.create(owner(app), { ...request, visibility: "shared" });
+        await app.piSessions.create(owner(app), { ...request, visibility: "shared" });
         const sharedSessions = await app.harness.snapshot(SessionsDoc, context);
         const provenance = await app.harness.snapshot(ImportedSessionDoc, result.id, context);
         const index = await app.harness.snapshot(ImportsDoc, context);
-        const id = (await app.imports.active.list(owner(app))).sessions[0]!.id;
+        const id = (await app.piSessions.active.list(owner(app))).sessions[0]!.id;
 
         for (const visibility of [undefined, "owner", "shared"]) {
             assert.equal(
-                (await app.imports.preview(owner(app), { path: source.path, visibility }))
+                (await app.piSessions.preview(owner(app), { path: source.path, visibility }))
                     .visibility,
                 "shared",
             );
             assert.equal(
-                (await app.imports.active.preview(owner(app), { id, visibility })).visibility,
+                (await app.piSessions.active.preview(owner(app), { id, visibility })).visibility,
                 "shared",
             );
         }
@@ -313,7 +324,7 @@ test("saved-file and active previews disclose existing shared imports without pu
             )!;
 
         assert.equal(
-            (await app.imports.preview(owner(app), { path: source.path, leafId: alternate.id }))
+            (await app.piSessions.preview(owner(app), { path: source.path, leafId: alternate.id }))
                 .visibility,
             "owner",
         );
@@ -329,34 +340,36 @@ test("saved-file and active previews disclose existing shared imports without pu
     }
 });
 
-test("invalid visibility and absent consent fail before any fake signal or reservation", async () => {
-    const { app, state } = await fixture("validation");
+test("invalid visibility and absent consent cannot publish or change the source", async () => {
+    const { app, source, state } = await fixture("validation");
+    const processes = structuredClone(state.table);
 
     try {
         const request = await moveRequest(app);
 
         for (const visibility of [null, false, true, 0, "public", "SHARED", "", {}, []]) {
-            await assert.rejects(app.imports.prepare(owner(app), { ...request, visibility }), {
+            await assert.rejects(app.piSessions.prepare(owner(app), { ...request, visibility }), {
                 status: 400,
             });
             await assert.rejects(
-                async () => app.imports.active.move(owner(app), { ...request, visibility }),
+                async () => app.piSessions.active.move(owner(app), { ...request, visibility }),
                 { status: 400 },
             );
         }
 
         await assert.rejects(
             async () =>
-                app.imports.active.move(owner(app), {
+                app.piSessions.active.move(owner(app), {
                     ...request,
                     visibility: "shared",
                     acknowledged: false,
                 }),
             { status: 400 },
         );
-        assert.deepEqual(state.signals, []);
+        assert.deepEqual(state.table, processes);
+        assert.equal(readFileSync(source.path, "utf8"), source.archive);
         assert.deepEqual(app.sessions(), []);
-        assert.deepEqual((await app.harness.snapshot(TakeoversDoc, context))?.items ?? {}, {});
+        assert.deepEqual((await app.harness.snapshot(ImportsDoc, context))?.items ?? {}, {});
     } finally {
         await app.close();
     }
@@ -376,11 +389,11 @@ test("shared creation and private promotion roll back atomically with the import
         );
 
     try {
-        const request = confirm(await app.imports.preview(owner(app), { path: source.path }));
+        const request = confirm(await app.piSessions.preview(owner(app), { path: source.path }));
 
         fault = failCommit();
         await assert.rejects(
-            app.imports.create(owner(app), { ...request, visibility: "shared" }),
+            app.piSessions.create(owner(app), { ...request, visibility: "shared" }),
             /injected/,
         );
         fault.mock.restore();
@@ -390,11 +403,11 @@ test("shared creation and private promotion roll back atomically with the import
             (await app.harness.commit((tx) => tx.scanConversations({}, 100), context)).items,
             [],
         );
-        const original = await app.imports.create(owner(app), request);
+        const original = await app.piSessions.create(owner(app), request);
 
         fault = failCommit();
         await assert.rejects(
-            app.imports.create(owner(app), { ...request, visibility: "shared" }),
+            app.piSessions.create(owner(app), { ...request, visibility: "shared" }),
             /injected/,
         );
         fault.mock.restore();
@@ -404,7 +417,7 @@ test("shared creation and private promotion roll back atomically with the import
                 .ownerOnly,
             true,
         );
-        await app.imports.create(owner(app), { ...request, visibility: "shared" });
+        await app.piSessions.create(owner(app), { ...request, visibility: "shared" });
         assert.equal(app.sessionMeta(original.id)!.ownerOnly, false);
     } finally {
         fault?.mock.restore();
@@ -412,411 +425,165 @@ test("shared creation and private promotion roll back atomically with the import
     }
 });
 
-for (const firstVisibility of ["owner", "shared"] as const) {
-    test(`saved-file concurrent ${firstVisibility} imports deduplicate and reject conflicting visibility`, async () => {
-        const { app, source } = await fixture(`concurrent-file-${firstVisibility}`);
+for (const visibility of ["owner", "shared"] as const) {
+    test(`concurrent saved-file ${visibility} copies atomically reuse one conversation with the confirmed visibility`, async () => {
+        const { app, source } = await fixture(`concurrent-file-${visibility}`);
         const hold = gate();
-        const prepare = app.imports.prepare.bind(app.imports);
-        let waiting = false;
+        const prepare = app.piSessions.prepare.bind(app.piSessions);
+        let waiting = 0;
         const delayed = mock.method(
-            app.imports,
+            app.piSessions,
             "prepare",
             async (...args: Parameters<typeof prepare>) => {
-                waiting = true;
+                waiting++;
                 await hold.promise;
 
                 return prepare(...args);
             },
         );
+        let first: ReturnType<App["piSessions"]["create"]> | undefined;
+        let second: typeof first;
 
         try {
             const request = {
-                ...confirm(await app.imports.preview(owner(app), { path: source.path })),
-                visibility: firstVisibility,
+                ...confirm(await app.piSessions.preview(owner(app), { path: source.path })),
+                visibility,
             };
-            const first = app.imports.create(owner(app), request);
 
-            await until(() => waiting, "import waiting at preflight");
-            await assert.rejects(
-                app.imports.create(owner(app), {
-                    ...request,
-                    visibility: firstVisibility === "owner" ? "shared" : "owner",
-                }),
-                { status: 409 },
-            );
-            const matching = app.imports.create(owner(app), request);
-
+            first = app.piSessions.create(owner(app), request);
+            second = app.piSessions.create(owner(app), request);
+            await until(() => waiting === 2, "both copies waiting at preflight");
             hold.release();
-            const results = await Promise.all([first, matching]);
+            const results = await Promise.all([first, second]);
 
             assert.equal(results[0].id, results[1].id);
             assert.equal(Number(results[0].existing) + Number(results[1].existing), 1);
             assert.equal(app.sessions().length, 1);
-            assert.equal(app.sessionMeta(results[0].id)!.ownerOnly, firstVisibility === "owner");
+            assert.equal(app.sessionMeta(results[0].id)!.ownerOnly, visibility === "owner");
+            assert.equal(await app.piSessions.archive(owner(app), results[0].id), source.archive);
         } finally {
             hold.release();
+            await Promise.allSettled([first, second]);
             delayed.mock.restore();
             await app.close();
         }
     });
-
-    test(`active concurrent ${firstVisibility} requests keep the same promise and reject conflicting consent`, async () => {
-        const { app, local, state } = await fixture(`concurrent-active-${firstVisibility}`);
-        const hold = gate();
-        const stop = local.stop.bind(local);
-        let waiting = false;
-
-        local.stop = async (session) => {
-            waiting = true;
-            await hold.promise;
-            await stop(session);
-        };
-
-        try {
-            const request = { ...(await moveRequest(app)), visibility: firstVisibility };
-            const session = await local.find(request.id);
-            const first = app.imports.active.move(owner(app), request);
-
-            await until(() => waiting, "move waiting before fake stop");
-            assert.equal(app.imports.active.move(owner(app), request), first);
-            await assert.rejects(
-                async () =>
-                    app.imports.active.move(owner(app), {
-                        ...request,
-                        visibility: firstVisibility === "owner" ? "shared" : "owner",
-                    }),
-                { status: 409 },
-            );
-            await assert.rejects(
-                async () => app.imports.active.move(owner(app), { ...request, visibility: null }),
-                { status: 400 },
-            );
-            await assert.rejects(
-                async () =>
-                    app.imports.active.move(owner(app), { ...request, acknowledged: false }),
-                { status: 400 },
-            );
-            await assert.rejects(
-                local.withPane(session.socket, session.pane, async () => {
-                    assert.fail("pane operation entered during stop");
-                }),
-                { status: 409 },
-            );
-            assert.deepEqual(state.signals, []);
-            assert.equal(
-                (await app.imports.active.list(owner(app))).sessions.find(
-                    (item) => item.id === request.id,
-                )!.visibility,
-                firstVisibility,
-            );
-            assert.equal(
-                (await app.imports.active.preview(owner(app), { id: request.id })).visibility,
-                firstVisibility,
-            );
-            hold.release();
-            const result = await first;
-
-            assert.equal(state.signals.length, 1);
-            assert.equal(app.sessionMeta(result.id)!.ownerOnly, firstVisibility === "owner");
-            assert.equal(
-                (await app.harness.snapshot(TakeoversDoc, context))!.items[request.id]!.visibility,
-                firstVisibility,
-            );
-        } finally {
-            hold.release();
-            await app.close();
-        }
-    });
 }
 
-test("completed legacy takeovers promote after reopen without source/process access and never downgrade", async () => {
-    const initial = await fixture("completed");
-    let app = initial.app;
-
-    try {
-        const request = await moveRequest(app);
-        const result = await app.imports.active.move(owner(app), request);
-
-        await app.harness.commit(async (tx) => {
-            const stored = await tx.doc(TakeoversDoc);
-
-            delete stored.items[request.id]!.visibility;
-        }, context);
-        await app.close();
-        app = await openApp(scriptedModel(), initial.data);
-        unlinkSync(initial.source.path);
-
-        const unexpected = async (): Promise<never> => {
-            throw new Error("must not inspect a completed source");
-        };
-
-        app.imports.active.local.list = unexpected;
-        app.imports.active.local.exited = unexpected;
-        app.imports.active.local.stop = unexpected;
-        app.imports.active.local.withPane = unexpected;
-        assert.equal(app.sessionMeta(result.id)!.ownerOnly, true);
-        const minimal = { id: request.id, acknowledged: true };
-
-        await assert.rejects(
-            async () =>
-                app.imports.active.move(owner(app), {
-                    ...minimal,
-                    visibility: "shared",
-                    acknowledged: false,
-                }),
-            { status: 400 },
-        );
-        await assert.rejects(
-            async () => app.imports.active.move(owner(app), { ...minimal, visibility: "invalid" }),
-            { status: 400 },
-        );
-        assert.deepEqual(
-            await app.imports.active.move(owner(app), { ...minimal, visibility: "shared" }),
-            { id: result.id, existing: true },
-        );
-        assert.equal(app.sessionMeta(result.id)!.ownerOnly, false);
-
-        for (const visibility of [undefined, "owner", "shared"]) {
-            assert.deepEqual(
-                await app.imports.active.move(owner(app), { ...minimal, visibility }),
-                { id: result.id, existing: true },
-            );
-            assert.equal(app.sessionMeta(result.id)!.ownerOnly, false);
-        }
-
-        assert.equal(await app.imports.archive(owner(app), result.id), initial.source.archive);
-        assert.equal(initial.state.signals.length, 1);
-    } finally {
-        await app.close();
-    }
-});
-
-for (const originalVisibility of [undefined, "owner", "shared"]) {
-    test(`unfinished ${originalVisibility ?? "legacy"} takeover persists consent; preview never widens; explicit retry recovers`, async () => {
-        const initial = await fixture(`recovery-${originalVisibility ?? "legacy"}`);
-        let app = initial.app;
-        const signal = initial.local.signal;
-
-        initial.local.signal = (pid) => {
-            const result = signal(pid);
-
-            appendFileSync(initial.source.path, "\n");
-
-            return result;
-        };
-
-        try {
-            const request = await moveRequest(app);
-
-            await assert.rejects(
-                app.imports.active.move(owner(app), { ...request, visibility: originalVisibility }),
-                /Pi has stopped.*preview and retry/,
-            );
-            assert.equal(initial.state.signals.length, 1);
-
-            if (originalVisibility === undefined) {
-                await app.harness.commit(async (tx) => {
-                    const stored = await tx.doc(TakeoversDoc);
-
-                    delete stored.items[request.id]!.visibility;
-                }, context);
-            }
-
-            const before = await app.harness.snapshot(TakeoversDoc, context);
-
-            await app.close();
-            app = await openApp(scriptedModel(), initial.data);
-            const recovered = fakeHerdr(app, initial.source.path);
-
-            recovered.state.table = [recovered.shell];
-            recovered.state.agent = "";
-            const expectedVisibility = originalVisibility === "shared" ? "shared" : "owner";
-            const listing = await app.imports.active.list(owner(app));
-            const recovery = listing.sessions.find((session) => session.id === request.id)!;
-            const preview = await app.imports.active.preview(owner(app), { id: request.id });
-
-            assert.equal(recovery.recovery, true);
-            assert.equal(recovery.visibility, expectedVisibility);
-            assert.equal(preview.visibility, expectedVisibility);
-            assert.equal(
-                (
-                    await app.imports.active.preview(owner(app), {
-                        id: request.id,
-                        visibility: "shared",
-                    })
-                ).visibility,
-                "shared",
-            );
-
-            if (originalVisibility === "shared") {
-                await assert.rejects(
-                    app.imports.active.preview(owner(app), { id: request.id, visibility: "owner" }),
-                    { status: 409 },
-                );
-                await assert.rejects(
-                    app.imports.active.move(owner(app), {
-                        ...confirm(preview),
-                        id: request.id,
-                        visibility: "owner",
-                    }),
-                    { status: 409 },
-                );
-            }
-
-            assert.deepEqual(await app.harness.snapshot(TakeoversDoc, context), before);
-            assert.deepEqual(app.sessions(), []);
-            assert.deepEqual(recovered.state.signals, []);
-            // Upgrade a private reservation explicitly; a legacy retry must retain already-confirmed sharing.
-            const visibility = originalVisibility === "owner" ? "shared" : undefined;
-            const result = await app.imports.active.move(owner(app), {
-                ...confirm(preview),
-                id: request.id,
-                visibility,
-            });
-
-            assert.equal(app.sessionMeta(result.id)!.ownerOnly, originalVisibility === undefined);
-            assert.deepEqual(recovered.state.signals, []);
-            assert.equal(
-                (await app.harness.snapshot(TakeoversDoc, context))!.items[request.id]!.result,
-                result.id,
-            );
-
-            if (originalVisibility === "shared") {
-                assert.deepEqual(
-                    await app.imports.active.move(owner(app), {
-                        id: request.id,
-                        acknowledged: true,
-                        visibility: "owner",
-                    }),
-                    { id: result.id, existing: true },
-                );
-                assert.equal(app.sessionMeta(result.id)!.ownerOnly, false);
-            }
-        } finally {
-            await app.close();
-        }
-    });
-}
-
-test("an in-flight legacy recovery cannot accept explicit owner intent when it inherits shared consent", async () => {
-    const { app, local, state, shell } = await fixture("inherited-concurrent");
-    const hold = gate();
-    const prepare = app.imports.prepare.bind(app.imports);
-    let preparing = false;
-    const delayed = mock.method(
-        app.imports,
-        "prepare",
-        async (...args: Parameters<typeof prepare>) => {
-            preparing = true;
-            await hold.promise;
-
-            return prepare(...args);
-        },
-    );
-
-    try {
-        const request = await moveRequest(app);
-        const session = await local.find(request.id);
-
-        await app.harness.commit(async (tx) => {
-            const document = await tx.doc(TakeoversDoc);
-
-            document.items[request.id] = { session, startedAt: Date.now(), visibility: "shared" };
-        }, context);
-        state.table = [shell];
-        state.agent = "";
-        const first = app.imports.active.move(owner(app), request);
-
-        await until(() => preparing, "legacy recovery preflight");
-        assert.equal(app.imports.active.move(owner(app), request), first);
-        await assert.rejects(
-            app.imports.active.move(owner(app), { ...request, visibility: "owner" }),
-            { status: 409 },
-        );
-        assert.deepEqual(state.signals, []);
-        hold.release();
-        const result = await first;
-
-        assert.equal(app.sessionMeta(result.id)!.ownerOnly, false);
-        assert.deepEqual(state.signals, []);
-    } finally {
-        hold.release();
-        delayed.mock.restore();
-        await app.close();
-    }
-});
-
-test("the shared pane lock covers preflight through publication and refuses takeover during another pane operation", async () => {
-    const { app, local, state } = await fixture("pane-lock");
+test("live shared copying neither takes the pane input lock nor clears uncertain Chat delivery", async () => {
+    const { app, source, local, state } = await fixture("copy-input-independence");
+    const input = { ...(await moveRequest(app)), visibility: "shared" };
+    const session = await local.find(input.id);
     const preflight = gate();
-    const publication = gate();
-    const busy = gate();
-    const prepare = app.imports.prepare.bind(app.imports);
-    const create = app.imports.create.bind(app.imports);
-    let preparing = false;
-    let creating = false;
-    const prepareMock = mock.method(
-        app.imports,
+    const preparing = gate();
+    const nativeInput = gate();
+    const prepare = app.piSessions.prepare.bind(app.piSessions);
+    const processes = structuredClone(state.table);
+    const delayed = mock.method(
+        app.piSessions,
         "prepare",
         async (...args: Parameters<typeof prepare>) => {
-            preparing = true;
+            preparing.release();
             await preflight.promise;
 
             return prepare(...args);
         },
     );
-    const createMock = mock.method(
-        app.imports,
-        "create",
-        async (...args: Parameters<typeof create>) => {
-            creating = true;
-            await publication.promise;
-
-            return create(...args);
-        },
-    );
+    const occupied = local.withTerminalInput(session.socket, undefined, () => nativeInput.promise);
+    let moving: ReturnType<App["piSessions"]["active"]["move"]> | undefined;
 
     try {
-        const request = { ...(await moveRequest(app)), visibility: "shared" };
-        const session = await local.find(request.id);
-        const occupied = local.withPane(session.socket, session.pane, () => busy.promise);
+        await app.privateSessions.control.admitPrompt(session.socket, session.pane);
+        const receipt = await app.harness.snapshot(PrivateControlDoc, context);
 
-        await assert.rejects(app.imports.active.move(owner(app), request), { status: 409 });
-        assert.equal(preparing, false);
-        assert.deepEqual(state.signals, []);
-        assert.deepEqual((await app.harness.snapshot(TakeoversDoc, context))?.items ?? {}, {});
-        busy.release();
+        moving = app.piSessions.active.move(owner(app), input);
+        await Promise.race([preparing.promise, moving]);
+        // The copy reached preflight while native input still owns the entire instance.
+        nativeInput.release();
         await occupied;
-        const moving = app.imports.active.move(owner(app), request);
-        const refusesPaneOperation = () =>
-            assert.rejects(
-                local.withPane(session.socket, session.pane, async () => {
-                    assert.fail("pane operation entered during takeover");
-                }),
-                { status: 409 },
-            );
-
-        await until(() => preparing, "preflight under pane lock");
-        await refusesPaneOperation();
-        assert.deepEqual(state.signals, []);
+        assert.equal(
+            await local.withTerminalInput(
+                session.socket,
+                session.pane,
+                async () => "input remains available",
+            ),
+            "input remains available",
+        );
         preflight.release();
-        await until(() => creating, "publication under pane lock");
-        await refusesPaneOperation();
-        assert.equal(state.signals.length, 1);
-        publication.release();
         const result = await moving;
 
         assert.equal(app.sessionMeta(result.id)!.ownerOnly, false);
-        assert.equal(
-            await local.withPane(session.socket, session.pane, async () => "released"),
-            "released",
-        );
+        assert.equal(await app.piSessions.archive(owner(app), result.id), source.archive);
+        assert.equal(readFileSync(source.path, "utf8"), source.archive);
+        assert.deepEqual(state.table, processes);
+        assert.deepEqual(await app.harness.snapshot(PrivateControlDoc, context), receipt);
+        assert.match((await local.inputReason(session.socket, session.pane))!, /uncertain/);
+        assert.equal((await app.harness.inspect(context)).tasks.length, 0);
     } finally {
-        busy.release();
+        nativeInput.release();
         preflight.release();
-        publication.release();
-        prepareMock.mock.restore();
-        createMock.mock.restore();
+        await Promise.allSettled([occupied, moving]);
+        delayed.mock.restore();
+        await app.close();
+    }
+});
+
+test("historical takeover records survive reopen unchanged and cannot select, share or recover a source", async () => {
+    const initial = await fixture("historical-takeovers");
+    let app = initial.app;
+
+    try {
+        const active = (await initial.local.list()).sessions[0]!;
+        const original = await app.piSessions.create(
+            owner(app),
+            confirm(await app.piSessions.preview(owner(app), { path: initial.source.path })),
+        );
+        const missingId = "b".repeat(64);
+
+        await app.harness.commit(async (tx) => {
+            const historical = await tx.doc(TakeoversDoc);
+
+            historical.items[active.id] = {
+                session: active,
+                startedAt: 1,
+                visibility: "shared",
+            };
+            historical.items[missingId] = {
+                session: { ...active, id: missingId, path: initial.source.path + ".old" },
+                startedAt: 2,
+                result: original.id,
+                visibility: "shared",
+            };
+        }, context);
+        const historical = await app.harness.snapshot(TakeoversDoc, context);
+
+        await app.close();
+        app = await openApp(scriptedModel(), initial.data);
+        const recovered = fakeHerdr(app, initial.source.path);
+        const listing = await app.piSessions.active.list(owner(app));
+
+        assert.deepEqual(
+            listing.sessions.map((session) => session.id),
+            [active.id],
+        );
+        await assert.rejects(
+            app.piSessions.active.preview(owner(app), { id: missingId }),
+            /changed or exited/,
+        );
+        const preview = await app.piSessions.active.preview(owner(app), { id: active.id });
+
+        assert.equal(preview.visibility, "owner", "old takeover consent cannot publish a copy");
+        const result = await app.piSessions.active.move(owner(app), {
+            ...confirm(preview),
+            id: active.id,
+        });
+
+        assert.deepEqual(result, { id: original.id, existing: true });
+        assert.equal(app.sessionMeta(result.id)!.ownerOnly, true);
+        assert.deepEqual(await app.harness.snapshot(TakeoversDoc, context), historical);
+        assert.deepEqual(recovered.state.table, [recovered.shell, recovered.pi]);
+        assert.equal(readFileSync(initial.source.path, "utf8"), initial.source.archive);
+    } finally {
         await app.close();
     }
 });

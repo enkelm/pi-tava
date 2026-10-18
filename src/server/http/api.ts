@@ -22,7 +22,7 @@ import {
 import type { User } from "../config.ts";
 import type { CreateSessionRequest, SessionPatch } from "../commands.ts";
 import { HttpError } from "../errors.ts";
-import type { ImportRequest } from "../imports.ts";
+import type { ImportRequest } from "../pi-sessions.ts";
 import type { PrivateRequest } from "../private-sessions.ts";
 import { runningNow } from "../running.ts";
 import { MAX_AGENT_PROMPT_LENGTH } from "../thread-prompts.ts";
@@ -68,7 +68,28 @@ export function createApi(options: HttpOptions, auth: Auth) {
      * What an invite may grant: viewers and people invited to one session cannot invite anyone, and only the owner can
      * sign a device in as the owner (never for one session).
      */
-    const inviteGrant = (user: User, body: { role?: unknown; session?: unknown }): InviteGrant => {
+    const inviteGrant = (
+        user: User,
+        body: { role?: unknown; session?: unknown; continuePiSessions?: unknown },
+    ): InviteGrant => {
+        if (body.continuePiSessions !== undefined && typeof body.continuePiSessions !== "boolean") {
+            throw new HttpError(400, "continuePiSessions must be a boolean");
+        }
+
+        if (body.continuePiSessions === true) {
+            requireOwner(user);
+
+            if (
+                (body.role !== undefined && body.role !== "guest") ||
+                (body.session !== undefined && body.session !== null)
+            ) {
+                throw new HttpError(
+                    400,
+                    "Only unrestricted steering guests can continue Pi sessions",
+                );
+            }
+        }
+
         if (body.role === "owner") {
             requireOwner(user);
 
@@ -82,7 +103,10 @@ export function createApi(options: HttpOptions, auth: Auth) {
         const role = body.role === "viewer" ? "viewer" : "guest";
 
         if (body.session === undefined || body.session === null) {
-            return { role };
+            return {
+                role,
+                ...(body.continuePiSessions === true ? { continuePiSessions: true } : {}),
+            };
         }
 
         const session = conversationId(String(body.session));
@@ -516,27 +540,28 @@ export function createApi(options: HttpOptions, auth: Auth) {
         }
 
         if (
-            first === "imports" &&
+            first === "pi-sessions" &&
             second === "history" &&
             third === undefined &&
             method === "GET"
         ) {
             response.setHeader("cache-control", "no-store");
-            requireOwner(user);
 
-            return json(response, 200, await app.imports.history(user));
+            return json(response, 200, await app.piSessions.history(user));
         }
 
-        if (first === "imports" && second === "active") {
+        if (first === "pi-sessions" && second === "active") {
+            response.setHeader("cache-control", "no-store");
+
             if (third === undefined && method === "GET") {
-                return json(response, 200, await app.imports.active.list(user));
+                return json(response, 200, await app.piSessions.active.list(user));
             }
 
             if (third === "preview" && method === "POST") {
                 return json(
                     response,
                     200,
-                    await app.imports.active.preview(user, await readJson(request)),
+                    await app.piSessions.active.preview(user, await readJson(request)),
                 );
             }
 
@@ -544,34 +569,40 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 return json(
                     response,
                     200,
-                    await app.imports.active.move(user, await readJson(request)),
+                    await app.piSessions.active.move(user, await readJson(request)),
                 );
             }
         }
 
-        if (first === "imports" && second === "preview" && method === "POST") {
-            return json(
-                response,
-                200,
-                await app.imports.preview(user, await readJson<ImportRequest>(request)),
-            );
-        }
+        if (first === "pi-sessions" && second === "preview" && method === "POST") {
+            response.setHeader("cache-control", "no-store");
 
-        if (first === "imports" && second === undefined && method === "POST") {
             return json(
                 response,
                 200,
-                await app.imports.create(user, await readJson<ImportRequest>(request)),
+                await app.piSessions.preview(user, await readJson<ImportRequest>(request)),
             );
         }
 
         if (
-            first === "imports" &&
+            first === "pi-sessions" &&
+            (second === undefined || second === "continue") &&
+            method === "POST"
+        ) {
+            return json(
+                response,
+                200,
+                await app.piSessions.create(user, await readJson<ImportRequest>(request)),
+            );
+        }
+
+        if (
+            first === "pi-sessions" &&
             second !== undefined &&
             third === "archive" &&
             method === "GET"
         ) {
-            const archive = await app.imports.archive(user, conversationId(second));
+            const archive = await app.piSessions.archive(user, conversationId(second));
 
             response.writeHead(200, {
                 "content-type": "application/x-ndjson; charset=utf-8",
@@ -612,8 +643,10 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return json(response, 200, app.sessions(user));
         }
 
-        // Pi's sessions from the terminal, which the owner can continue here.
+        // All local Pi discovery remains behind the explicit continuation permission.
         if (first === "pi-sessions" && second === undefined && method === "GET") {
+            response.setHeader("cache-control", "no-store");
+
             return json(
                 response,
                 200,
@@ -622,21 +655,13 @@ export function createApi(options: HttpOptions, auth: Auth) {
         }
 
         if (first === "pi-sessions" && second === "preview" && method === "GET") {
+            response.setHeader("cache-control", "no-store");
+
             return json(
                 response,
                 200,
-                await app.piSessions.preview(user, url.searchParams.get("path") ?? ""),
+                await app.piSessions.preview(user, { path: url.searchParams.get("path") ?? "" }),
             );
-        }
-
-        if (first === "pi-sessions" && second === "continue" && method === "POST") {
-            const body = await readJson<{ path?: unknown }>(request);
-
-            if (typeof body.path !== "string") {
-                throw new HttpError(400, "path is required");
-            }
-
-            return json(response, 200, await app.commands.continuePiSession(user, body.path));
         }
 
         if (first === "sessions" && second === undefined && method === "POST") {
@@ -1013,6 +1038,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
             const body = (await readJson(request)) as {
                 role?: unknown;
                 session?: unknown;
+                continuePiSessions?: unknown;
                 minutes?: unknown;
             };
             const grant = inviteGrant(user, body);

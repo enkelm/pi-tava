@@ -118,9 +118,9 @@ function actionItems() {
         },
         piSessionsAvailable() && {
             label: "Continue a Pi session",
-            detail: "from Pi in the terminal",
+            detail: "copy saved history; Pi stays running",
             icon: "terminal",
-            run: () => openSheet({ type: "pi-sessions" }),
+            run: () => openSheet({ type: "new-session", tab: "import" }),
         },
         conversationId !== null && {
             label: "All sessions",

@@ -1183,12 +1183,17 @@ test("the owner signs another device in as the owner: owner only, once, no one n
         // It works once.
         assert.equal((await signIn(invite.code, "same-origin")).status, 410);
 
-        // An owner invite made by anyone else (past the API's check) signs no one in.
+        // Auth itself rejects escalation, and a malformed retained owner invite signs no one in.
         const auth = new Auth(app.config);
-        const forged = auth.createInvite(guest.user, { role: "owner" });
 
-        assert.equal(auth.redeem(forged.code, ""), undefined);
-        assert.equal(auth.invite(forged.code), undefined, "and it is spent");
+        assert.throws(() => auth.createInvite(guest.user, { role: "owner" }), /owner/);
+        app.config.addInvite("forged-owner", {
+            role: "owner",
+            createdBy: guest.user.id,
+            expiresAt: Date.now() + 60_000,
+        });
+        assert.equal(auth.redeem("forged-owner", ""), undefined);
+        assert.equal(auth.invite("forged-owner"), undefined, "and it is spent");
 
         // A new owner token signs the device out.
         app.config.rotateOwnerToken();

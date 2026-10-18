@@ -1,10 +1,24 @@
-# Import slice implementation and validation
+# Pi session copies and historical validation
 
-Implemented on 2026-10-09 as a fork of Pocket `d01f763b02f06ff6144d4366eb966a76dbb35577`. This document records the original owner-only import slice and its regressions, not the whole product MVP.
+`PiSessions` in `src/server/pi-sessions.ts`, exposed as `app.piSessions`, is the only service for local Pi discovery, preview, history copies and source archives. `pi-sessions/source.ts`, `history.ts`, `herdr.ts` and `active.ts` own parsing/conversion, saved-file discovery, Herdr discovery/identity and live-instance selection. The old `Imports` service and `imports/` directory are removed.
 
-Current addition: the user chose an owner-only live [Private Herdr mirror](private-sessions.md). **Import & share** now explicitly publishes the selected conversation using Pocket's authenticated/scoped access rules. The archive remains owner-only. Legacy import requests still default to owner-only; the private bridge and shared-import validation are documented separately.
+`web/sheets/pi-sessions.js` owns the shared Live/History picker and confirmation, used by New Session → Import, launcher continuation and private Import & share. `web/sheets/import.js` is removed. Both sources use one Move confirmation, which copies the selected saved branch while Pi keeps running, including when busy. It never aborts work, sends Escape or signals, stops Pi, closes panes or writes its journal. A changed process/session fingerprint requires refreshing the list; changed source bytes require a fresh preview before a new copy. A successful copy has a durable receipt: its confirmed retry opens the existing conversation even after the original changes or exits. There are no takeover reservations or recovery APIs. `TakeoversDoc` remains registered with its original stored identity only for inert legacy records.
 
-## Running-session takeover
+Local Pi history is owner-only by default. `canContinuePiSessions(user)` also admits a guest explicitly granted `continuePiSessions: true`, but only with unrestricted steering access. Only the owner grants/revokes it through invites or Account & access; guests cannot pass it on. Redemption rechecks creator authority, and role/scope restrictions clear the grant. The Import tab follows that capability. Guests select discovered sources and must explicitly acknowledge sharing their copy. Manual arbitrary file paths, full source archives and [private Herdr panes](private-sessions.md) remain owner-only. Owner copies default to private; private Import & share explicitly publishes under authenticated/scoped access rules, never anonymously.
+
+Every new copied conversation is explicitly a Chat. The header's Imported from Pi label records origin, not a new thread type. Nothing in historical input starts work; the first new human submission uses Coop's current instructions and tools.
+
+## Consolidation validation
+
+The focused socket-free batch passed **130 tests**, covering generated journals, canonical context, busy Pi copies, unchanged sources, no historical work/spend, atomic rollback, concurrent/reopened retries, sharing, permissions/revocation, private input fences, project placement and linked-session privacy. The real HTTP handler is exercised in memory for the canonical continuation routes and invite/access validation; no listener is needed for those cases. `npm run check`, `npm run lint`, `npm run format` and `npm run format:check` passed, along with edited browser-JS syntax and whitespace checks.
+
+Listener-dependent HTTP, Herdr transport, terminal and browser integration remain unvalidated here. An existing attachment-path fixture returned `listen EPERM` and was excluded from the final batch, as were the other known listener fixtures. No listener workaround or server restart was performed. Browser scenarios were updated and statically checked, not executed. This is focused implementation evidence, not a passing full `npm test` run or an independent review.
+
+The original slice began on 2026-10-09 from Pocket `d01f763b02f06ff6144d4366eb966a76dbb35577`. Sections marked historical below retain its earlier checks and retired stop-and-takeover behavior. Those logs and totals do not establish validation of the current copy-only implementation.
+
+## Previous stop-and-takeover implementation (historical)
+
+Everything in this section, including its routes, process controls and test totals, describes the previous implementation. Its stop operations and recovery flow no longer exist. For the current copy-only contract, use the sections above and the canonical service/conversion sections below.
 
 The **Import** tab in **New Session** has explicit **Live** and **History** source tabs. **Live** lists local Herdr Pi sessions. Select a session, review its model and choose **Move to Durable**. The server stops the verified Pi process, imports its last saved branch and opens the Durable conversation. **History** lists saved Pi journals; manual file/branch entry remains under **Advanced import**, not a source-switching text link.
 
@@ -62,55 +76,74 @@ Formatting, TypeScript, ESLint, edited browser-JS syntax and whitespace checks p
 
 ## Saved-history picker
 
-`GET /api/imports/history` is owner-only and returns `Cache-Control: no-store`. It discovers regular JSONL files in Pi's sessions root and its immediate project directories, honoring `PI_CODING_AGENT_DIR`. Rows show the saved branch's title (or first user text), source path, cwd, file modification time and active-message count. Known local Herdr session files are omitted in favor of Live. Listing never establishes that every writer has stopped.
+`GET /api/pi-sessions/history` requires the local Pi continuation capability and returns `Cache-Control: no-store`. It discovers regular JSONL files in Pi's configured sessions root and its immediate project directories, honoring `PI_CODING_AGENT_SESSION_DIR`, Pi settings and the normal `PI_CODING_AGENT_DIR` fallback. Rows show the saved branch's title (or first user text), source path, cwd, file modification time and active-message count. Known local Herdr files are omitted in favor of Live. Listing does not establish that every writer has stopped; history is copied without controlling those writers.
 
-Discovery refuses symbolic links and rechecks candidate identity. It scans at most 10,000 directory entries, retains the 100 most recently modified candidates, applies the existing 16 MiB file bound and reads at most 64 MiB sequentially per scan. Concurrent owner requests share only an in-flight scan. Omitted, unreadable or truncated results produce notes; unsupported histories remain subject to strict import validation. Source files are never repaired, migrated or written.
+Discovery refuses symbolic links and rechecks candidate identity. It scans at most 10,000 directory entries, retains the 100 most recently modified candidates, applies the existing 16 MiB file bound and reads at most 64 MiB sequentially per scan. Concurrent authorized requests share only an in-flight scan and recheck access afterward. Omitted, unreadable or truncated results produce notes; complete records remain subject to snapshot validation. Source files are never repaired, migrated or written.
 
-The browser filters title/cwd/path metadata locally. Clicking a row expands a read-only preview through the existing `POST /api/imports/preview`; its new `history` field contains at most six user/assistant text snippets of 400 characters each from the selected branch. No tool output, images, thinking or unselected branches are sent as snippets. Continue to import opens the existing destination-model and stopped-process/limitations confirmations. Search and expansion survive New Session's outer tab changes. The manual path and branch fields remain available for files outside the discovered folder.
+Both Live and History retain the upstream working-directory layout: a folder name and shortened parent path above one compact bordered list of sessions. Groups use the full working directory as their identity, so identically named folders under different parents remain separate. History preserves discovery recency order, both between folders and within them; filtering title/cwd/path metadata happens before grouping, so empty groups disappear. A saved row’s tooltip identifies its source file. Clicking a row opens the shared destination-model and copy/visibility confirmation through `POST /api/pi-sessions/preview`; its `history` field contains at most six user/assistant text snippets of 400 characters each from the selected branch, folded under saved history and import limits. No tool output, images, thinking or unselected branches are sent as snippets. There is no intermediate Continue screen or stopped-process acknowledgment. Search and confirmation state survive New Session's outer tab changes. Manual path and branch fields remain owner-only for files outside the discovered folder; a guest's submitted path must still be in current discovery results.
 
-Validation uses generated journals, synthetic Herdr replies and isolated app/browser data only. The browser regression failed on the old missing History tab, then passed with searchable paths, lazy selected-branch disclosure, preserved outer-tab state, responsive bounds and confirmation without premature import. All 60 history/import/parser/takeover regression tests passed. The legacy manual-file browser flow passed in isolation; the aggregate UI run still encountered the earlier navigation/guest-evaluate CDP flakes. Formatting, TypeScript, ESLint, edited-JS syntax and whitespace checks passed. Mobile and desktop were inspected in a throwaway app, then stopped. The design detector reported only inherited CSS outside the import changes. Logs: `/tmp/pi-historic-ui-red.log`, `/tmp/pi-historic-ui-final.log`, `/tmp/pi-historic-backend-regression.log`, `/tmp/pi-historic-manual-ui.log`, `/tmp/pi-historic-{format,check,lint}.log`, `/tmp/pi-historic-design.json`. A full run exposed reuse of the older browser test's app data in the new History case; that fixture now opens its own empty app directory. Review also found a concurrent-growth gap in the aggregate read budget. History now passes each charged candidate size as a trusted file-descriptor cap; the reader bounds allocation and actual reads, retaining its stability checks and unchanged default sentinel behavior. Real-FD before/after-stat growth regressions demonstrated red→green, and the safety review found no remaining concrete issues.
+### Previous History-picker validation (historical)
+
+These checks and totals predate the canonical `PiSessions` copy-only migration. They describe the earlier picker and importer, not a current validation run.
+
+Validation used generated journals, synthetic Herdr replies and isolated app/browser data only. The browser regression failed on the old missing History tab, then passed with searchable paths, lazy selected-branch disclosure, preserved outer-tab state, responsive bounds and confirmation without premature import. All 60 history/import/parser/takeover regression tests passed. The legacy manual-file browser flow passed in isolation; the aggregate UI run still encountered the earlier navigation/guest-evaluate CDP flakes. Formatting, TypeScript, ESLint, edited-JS syntax and whitespace checks passed. Mobile and desktop were inspected in a throwaway app, then stopped. The design detector reported only inherited CSS outside the import changes. Logs: `/tmp/pi-historic-ui-red.log`, `/tmp/pi-historic-ui-final.log`, `/tmp/pi-historic-backend-regression.log`, `/tmp/pi-historic-manual-ui.log`, `/tmp/pi-historic-{format,check,lint}.log`, `/tmp/pi-historic-design.json`. A full run exposed reuse of the older browser test's app data in the new History case; that fixture now opens its own empty app directory. Review also found a concurrent-growth gap in the aggregate read budget. History now passes each charged candidate size as a trusted file-descriptor cap; the reader bounds allocation and actual reads, retaining its stability checks and unchanged default sentinel behavior. Real-FD before/after-stat growth regressions demonstrated red→green, and the safety review found no remaining concrete issues.
 
 Final formatting, TypeScript, ESLint, edited-JS syntax and whitespace checks passed. All 107 focused backend regressions passed. The final full `npm test` run completed with 467 tests: 457 passed, nine failed, one Windows-only browser-profile case skipped, and none cancelled. All four import browser flows, saved-history discovery and both FD-growth regressions passed. The remaining failures were in branch paths, browser frames, default-branch expectations, model-attribution ordering, terminal prefix shortcuts, shell-stop output and editor suggestions; this is not a fresh untouched-baseline comparison. Logs: `/tmp/pi-historic-all-tests-final.log`, `/tmp/pi-historic-ui-isolated-app.log`, `/tmp/pi-import-history-fd-{red,green,regressions}.log`, `/tmp/pi-historic-{format,check,lint}-final.log`. The full suite is not green.
 
-## Initial import slice
+## Canonical Pi session service
 
-`app.imports` adds three authenticated HTTP operations:
+`app.piSessions` owns these authenticated operations under `/api/pi-sessions`:
 
-| Route                          | Purpose                                                                                                                               |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /api/imports/preview`    | Read and validate the source, resolve the selected branch, and return warnings and available destination models                       |
-| `POST /api/imports`            | Confirm the unchanged source hash, stopped-process acknowledgment and destination configuration; import or return the existing import |
-| `GET /api/imports/:id/archive` | Download the exact original UTF-8 JSONL, including unselected branches, as the owner                                                  |
+| Route                                  | Purpose                                                                                     |
+| -------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /api/pi-sessions`                 | Search capability-gated saved-session metadata; retain visible prior-copy markers           |
+| `GET /api/pi-sessions/history`         | Discover bounded saved-session metadata                                                     |
+| `GET /api/pi-sessions/active`          | Discover local Herdr Pi instances, including busy Pi                                        |
+| `POST /api/pi-sessions/active/preview` | Preview an opaque discovered instance ID without controlling it                             |
+| `POST /api/pi-sessions/active`         | Confirm and copy the unchanged saved branch; never abort or stop Pi                         |
+| `POST /api/pi-sessions/preview`        | Validate a saved source and return branch warnings and destination models                   |
+| `POST /api/pi-sessions/continue`       | Confirm the source hash, selected branch, copy acknowledgment and destination configuration |
+| `GET /api/pi-sessions/:id/archive`     | Owner-only download of the exact source UTF-8 JSONL, including other branches               |
 
-The existing `X-Pocket` request-header check protects writes. The import service checks ownership itself too, before opening any source file. The UI uses Pocket's existing sheet controls and command/event transport. It is available without creating a session first, through **New Session → Import** below sidebar search. The same dialog retains the fresh-session folder picker on its **Start new** tab.
+`POST /api/pi-sessions` uses the same creation method as `/continue`; `GET /api/pi-sessions/preview?path=…` uses the same preview method. These entry points are not separate continuation implementations. The old `/api/imports` routes are removed.
 
-The importer starts no second executor or JSONL writer. Live private terminal views now belong to the separate Private bridge. The existing Pocket rooms serve the imported Durable conversation to every signed-in owner device.
+The normal `X-Pocket` request-header check protects POSTs. The service rechecks current membership/capability before and after asynchronous reads and during the publication transaction. A revoked guest cannot retain access through a stale browser response. Guest source choices must resolve through live IDs or current History discovery; owner-only manual paths do not become an unrestricted guest file reader.
+
+The UI uses the existing sheet controls and command/event transport. New Session is available below sidebar search without creating a session first. Its Import tab is capability-gated; Start new retains project/folder selection. The importer starts no executor or JSONL writer. Private terminal control remains a separate owner-only bridge, while the copied conversation uses ordinary Durable rooms.
 
 ## Conversion contract
 
-The importer accepts ordinary Pi format v3, with an absolute, existing same-machine cwd. Files must be valid UTF-8, regular files, at most 16 MiB, and contain at most 20,000 entries plus the header. It validates every entry envelope and selected-branch record. Unknown selected-branch types, invalid references, malformed JSONL and unsupported messages fail without skipping lines.
+The importer accepts ordinary Pi format v3, with an absolute, existing same-machine cwd. Files must be valid UTF-8, regular files, at most 16 MiB, and contain at most 20,000 entries plus the header. It validates entry envelopes, complete snapshot records and the selected branch. Unknown selected-branch types, invalid references, complete malformed JSONL and unsupported messages fail without silently skipping records.
 
-A branch entry ID may be supplied explicitly. Otherwise the last persisted entry is used; this does not recover an unsaved TUI branch selection. The selected branch must end in a saved assistant response, including `error` or `aborted`, rather than a pending user prompt or tool round. Failed/cancelled attempts remain in history but do not contribute to model context or start work. Deferred provider requests and incomplete or interleaved tool histories are still rejected, even when earlier history has since been compacted.
+Copies use snapshot mode. Only a final cut-off JSON object may be left out of projected history, and those exact bytes stay in the archive. Earlier malformed records, malformed complete final records and invalid tool ordering still fail. A branch entry ID may be supplied explicitly; otherwise the last complete persisted entry is used. Unsaved TUI branch selection, editor drafts and streaming output are not recovered.
+
+A valid pending user/tool tail may be copied, but starts no tasks. Pending tool results become synthetic error results saying the result was unavailable at snapshot time and the tool may have run or may still run in the original Pi. This is an uncertainty marker, not a claim that the original tool never executed. Context edits cannot manufacture missing results outside that valid pending tail. Failed/cancelled assistant attempts remain in history and the archive but do not contribute to model context and are not restarted. Deferred provider requests and interleaved or otherwise invalid tool history remain unsupported.
+
+Strict parsing remains available through `parsePiSession`/`readPiSession` in `pi-sessions/source.ts`; it is their default mode, not the service's snapshot-copy mode. Strict mode requires complete tool history ending in a saved assistant response, including a failed or cancelled response, and rejects a cut-off JSONL record.
 
 The conversion uses the pinned Pi session projection and message helpers. It maps source IDs to Durable IDs for compaction heads and context edits, preserves model-visible messages and images, and archives source-only records. It excludes historical system instructions and tool declarations from active context. The destination builds its own current prompt and tools. Image-bearing context requires an image-capable destination model.
 
 The source is read through a bounded file descriptor and checked for changes during the read. It is never opened through `SessionManager.open`, which can repair or migrate its input. The import request rereads the source and checks the preview's SHA-256. A valid file without a final newline remains byte-identical.
 
-For the saved-file fallback, stopping the original process is an explicit owner responsibility. The app does not claim that acknowledgment proves no other Pi process can write that file. Future work stays in Durable, not the original file.
+No saved-file or live copy requires stopping the original process. Confirmation acknowledges the saved snapshot and destination visibility. The source can keep advancing after the checked read; the new Chat and original Pi are independent, not synchronized writers. No pending source request or tool is resumed in the copy.
 
 ## Atomic state and access
 
-One harness transaction creates the conversation, agent settings and app documents, appends historical entries, writes the session catalogue, stores the full original in `pocket.imported-session`, and adds the source-hash/leaf key to `pocket.imports`. No filesystem archive transaction is needed. An injected failure before commit leaves none of those changes visible, including after reopening SQLite.
+One harness transaction creates the conversation, agent settings and app documents, appends historical entries, writes an explicitly `chat`-typed catalogue entry, stores the full original in `pocket.imported-session`, and adds the source-hash/leaf key to `pocket.imports`. Imported from Pi is origin metadata displayed separately from that Chat type, including for older `fromPi` sessions. No filesystem archive transaction or takeover reservation is needed. A failed transaction publishes none of these changes.
 
-Import deduplication is distinct from prompt deduplication. Concurrent retries for the same source bytes and selected branch find the same conversation. A different selected branch has a different import key.
+Import deduplication is distinct from prompt deduplication. Concurrent retries for the same source bytes and selected branch reuse the same conversation, including after restart; a different branch has a different key. Guests have person-specific keys, separate from the owner's, so a shared guest copy cannot publish or reuse an existing owner-private import. Stored `TakeoversDoc` records remain inert; no recovery route or startup stop operation consumes them.
 
 Historical entry writes do not create model/tool tasks or update `pi.usage`. Imported human messages are labeled `Imported user`, not assigned to the owner. Imported notes are distinguished from human prompts. The first new submission establishes the requester through Pocket's existing attribution path.
 
-Imported sessions have `ownerOnly` in their catalogue metadata. `canSee` applies it to the root session and its subagents; app-created forks propagate it. Both initial and live session lists use that access check. The full source archive is not a room document and is downloadable only by the owner. It can contain branches that were not imported.
+Owner copies default to `ownerOnly` in their catalogue metadata. A shared copy requires explicit `visibility: "shared"`; guests must choose shared visibility and acknowledge the copy before creation. An explicit owner retry can promote a private import to shared, while owner-only retries do not downgrade a shared import. `canSee` applies it to the root session and its subagents; app-created forks propagate it. Both initial and live session lists use that access check. The full source archive is not a room document and is downloadable only by the owner. It can contain branches that were not imported.
 
-Other sessions still use Pocket's upstream access rules. General private-by-default membership, collaborator sharing controls and multi-server connections remain next. Shell-capable collaborators and the machine owner are not isolated by these app checks.
+Other sessions still use Pocket's existing access rules. General per-conversation membership editing and multi-server connections remain separate work. Shell-capable collaborators and the machine owner are not isolated by these app checks.
 
-## Initial slice verification
+Current behavior has focused fixtures in `test/pi-snapshot.test.ts`, `test/pi-sessions.test.ts`, `test/active-imports.test.ts`, the import/history/failure tests and `test/invite-{auth,permissions}.test.ts`. Browser flows live in `test/import-ui.test.ts` and the invite portion of `test/mobile-ui.test.ts`. This lists coverage owners, not current pass results. No test or browser run was performed for this documentation-only update.
+
+## Initial slice verification (historical)
+
+These results describe the original owner-only importer before the `PiSessions` copy-only and permission changes. They do not establish current parser, Move, browser or full-suite validation.
 
 Environment: Node `v24.19.0`, macOS, locked Pocket dependencies with Pi packages `1.0.2`. Test helpers isolate Pi configuration, storage and working directories. Providers are scripted; real Chromium uses temporary browser profiles.
 
@@ -156,9 +189,9 @@ The inherited mobile navigation and peek UI tests passed. These existing failure
 
 A documentation-link failure while this report was still being written was corrected by completing the document. A drop-in reload test timed out in one parallel run and passed on the final serial run. These transient results are separate from the six reproduced failures above.
 
-## Evidence
+## Historical evidence
 
-Temporary logs and screenshots from this implementation:
+Temporary logs and screenshots from the original implementation, not a current run:
 
 - `/tmp/pi-durable-import-final.log`: all 13 import tests passing.
 - `/tmp/pi-durable-check.log`, `/tmp/pi-durable-lint.log`: static checks.
@@ -175,11 +208,11 @@ The original Pocket, Collie and Herdr GPUI reference worktrees were not changed.
 
 ## Remaining work
 
-- General private/shared membership and invitations that can share imported conversations while keeping their full source archives owner-only.
+- General per-conversation membership editing beyond the explicit import visibility and local-history invitation capability.
 - Multi-server connection management.
-- More compatibility fixtures, especially deferred provider requests, interrupted tool rounds and provider-specific content.
-- Actual-provider smoke tests and process-crash fault injection. The current rollback test throws before commit; it is not a power-loss or mid-tool crash test.
-- Live-process discovery outside local Herdr, and cooperative handoff for sessions whose persistent helper processes remain after cancellation. Ordinary saved-file discovery is available through History.
+- More compatibility fixtures for deferred provider requests, provider-specific content and interrupted histories beyond the supported snapshot tail.
+- Actual-provider smoke tests and process-crash fault injection. Historical pre-commit rollback evidence is not a power-loss or mid-tool crash test.
+- Live-process discovery outside local Herdr. History already discovers ordinary saved files; stopping sources or cancelling their helper processes is not part of Move.
 - Upstream test stabilization, followed separately from import development.
 
-The browser, extensions and other features already present in Pocket were retained. This slice does not newly implement or certify all of them. Desktop, sandboxing and iOS remain deferred.
+The historical runs above retained Pocket's existing browser, extensions and other features; they did not certify the whole app. Current browser, Safari/iOS and actual-provider validation must be reported separately from those old results.

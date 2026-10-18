@@ -14,7 +14,7 @@ import {
 import { isPinned, togglePin } from "../theme.js";
 import { html, item, Sheet } from "../ui.js";
 import { FolderPicker } from "./folder.js";
-import { ImportPanel } from "./import.js";
+import { ImportPanel, piSessionsAvailable } from "./pi-sessions.js";
 import { ProjectSessionPanel } from "./session-projects.js";
 
 /**
@@ -76,8 +76,8 @@ export function NewSessionSheet({
     cwd,
     continuation,
 }) {
-    const owner = store.state.me?.role === "owner";
-    const active = owner && tab === "import" ? "import" : "new";
+    const importAllowed = piSessionsAvailable();
+    const active = importAllowed && tab === "import" ? "import" : "new";
     const [visited, setVisited] = useState(() => new Set([active]));
     const [busy, setBusy] = useState(false);
 
@@ -118,7 +118,7 @@ export function NewSessionSheet({
 
     return html`<${Sheet} title="New Session" class="new-session-sheet" onClose=${closeSheet}>
         ${
-            owner &&
+            importAllowed &&
             html`<div
                 class="session-tabs new-session-tabs"
                 role="tablist"
@@ -147,8 +147,8 @@ export function NewSessionSheet({
         <section
             id="session-panel-new"
             class="new-session-panel"
-            role=${owner ? "tabpanel" : undefined}
-            aria-labelledby=${owner ? "session-tab-new" : undefined}
+            role=${importAllowed ? "tabpanel" : undefined}
+            aria-labelledby=${importAllowed ? "session-tab-new" : undefined}
             hidden=${active !== "new"}
         >
             ${
@@ -165,7 +165,7 @@ export function NewSessionSheet({
             }
         </section>
         ${
-            owner &&
+            importAllowed &&
             html`<section
                 id="session-panel-import"
                 class="new-session-panel"

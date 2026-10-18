@@ -1635,6 +1635,113 @@ test(
     },
 );
 
+test(
+    "local Pi invite access starts off and delayed grants never appear under a cleared checkbox",
+    real,
+    async () => {
+        const { Auth } = await import("../src/server/auth.ts");
+        const auth = new Auth(app.config);
+        const checkbox = "#invite-pi-sessions-help";
+        const input = '.sheet input[aria-describedby="invite-pi-sessions-help"]';
+        const code = () =>
+            inPage<string | null>(
+                `return JSON.stringify(document.querySelector(".invite-code-value")?.textContent.replace(/\\s/g, "") ?? null)`,
+            );
+
+        await fresh();
+        await page.evaluate(`(await import("/store.js")).openSheet({ type: "invite" })`);
+        await until(async () => (await code()) !== null, "an ordinary invite");
+        const original = await code();
+
+        assert.equal(auth.invite(original!)!.continuePiSessions, undefined);
+        assert.equal(
+            await inPage<boolean>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(input)}).checked)`,
+            ),
+            false,
+        );
+        assert.match(
+            await inPage<string>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(checkbox)}).textContent)`,
+            ),
+            /read local Pi history/,
+        );
+        // Hold the actual server response, not an invented grant: a newer unchecked request must win.
+        await page.evaluate(`
+            window.inviteFetch = window.fetch;
+            window.delayedPiInvite = null;
+            window.fetch = async (...args) => {
+                const response = await window.inviteFetch(...args);
+
+                if (String(args[0]).endsWith('/api/invite') && JSON.parse(args[1]?.body ?? '{}').continuePiSessions === true) {
+                    window.delayedPiInvite = (await response.clone().json()).code;
+                    await new Promise((resolve) => { window.releasePiInvite = resolve; });
+                }
+
+                return response;
+            };
+        `);
+
+        try {
+            await tap(input);
+            await until(
+                async () =>
+                    await inPage<boolean>(`return JSON.stringify(!!window.delayedPiInvite)`),
+                "the granted response held in transit",
+            );
+            const delayed = await inPage<string>(`return JSON.stringify(window.delayedPiInvite)`);
+
+            assert.equal(auth.invite(delayed)!.continuePiSessions, true);
+            await tap(input);
+            await until(
+                async () => ![null, original].includes(await code()),
+                "the unchecked replacement",
+            );
+            const replacement = await code();
+
+            assert.equal(auth.invite(replacement!)!.continuePiSessions, undefined);
+            await page.evaluate(`window.releasePiInvite()`);
+            await until(
+                () => auth.invite(delayed) === undefined,
+                "the delayed granted invite cancelled",
+            );
+            assert.equal(await code(), replacement);
+            assert.equal(
+                auth.invite(original!),
+                undefined,
+                "changing the grant ends the original invite",
+            );
+        } finally {
+            await page.evaluate(`
+                window.fetch = window.inviteFetch;
+                window.releasePiInvite?.();
+            `);
+        }
+
+        await tap(input);
+        await until(async () => {
+            const shown = await code();
+
+            return shown !== null && auth.invite(shown)?.continuePiSessions === true;
+        }, "the explicit local Pi grant");
+        const granted = await code();
+
+        await page.evaluate(
+            `[...document.querySelectorAll(".sheet .segmented button")].find((each) => each.textContent.trim() === "View only").click()`,
+        );
+        await until(async () => ![null, granted].includes(await code()), "a viewer invite");
+        assert.equal(
+            await inPage<boolean>(
+                `return JSON.stringify(document.querySelector(${JSON.stringify(input)}) === null)`,
+            ),
+            true,
+            "viewers cannot receive local Pi access",
+        );
+        assert.equal(auth.invite(granted!), undefined);
+        assert.equal(auth.invite((await code())!)!.continuePiSessions, undefined);
+    },
+);
+
 /** PiP closed and forgotten in this tab, so the tests after start without it. */
 async function noPip(): Promise<void> {
     await page.evaluate(`

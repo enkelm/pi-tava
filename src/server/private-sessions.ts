@@ -8,7 +8,7 @@ import type { PocketApp } from "./app.ts";
 import { gitDirOf, headOf } from "./branches.ts";
 import type { User } from "./config.ts";
 import { HttpError } from "./errors.ts";
-import { foregroundPi, type ProcessIdentity, type ProcessInfo } from "./imports/herdr.ts";
+import { foregroundPi, type ProcessIdentity, type ProcessInfo } from "./pi-sessions/herdr.ts";
 import { readJournal } from "./private-sessions/journal.ts";
 import { PrivateControl, UNCERTAIN_INPUT_REASON } from "./private-sessions/control.ts";
 import { MAX_ATTACHMENTS, PrivateUploads, uploadId } from "./private-sessions/uploads.ts";
@@ -326,7 +326,7 @@ export class PrivateSessions {
 
     get local() {
         // One transport, process checker and pane-operation lock for private input and adoption.
-        return this.#app.imports.active.local;
+        return this.#app.piSessions.active.local;
     }
 
     #owner(user: User): void {
@@ -500,7 +500,6 @@ export class PrivateSessions {
         const inputReason = await this.local.inputReason(target.socket, target.wire.pane_id);
 
         reason = inputReason ?? reason;
-        importReason = inputReason ?? importReason;
 
         const revision = hash([
             this.#epoch,
@@ -823,7 +822,6 @@ export class PrivateSessions {
             throw new HttpError(409, "This Pi changed. Refresh before importing.");
         }
 
-        await this.local.requireInputSafe(target.socket, target.wire.pane_id);
         const found = await this.local.list();
         const session = found.sessions.find(
             (item) =>
@@ -839,6 +837,6 @@ export class PrivateSessions {
 
         this.#owner(user);
 
-        return this.#app.imports.active.preview(user, { id: session.id });
+        return this.#app.piSessions.active.preview(user, { id: session.id });
     }
 }

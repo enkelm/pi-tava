@@ -1663,7 +1663,7 @@ export const actions = {
     piSessions: (query = "") =>
         api(query === "" ? "pi-sessions" : `pi-sessions?q=${encodeURIComponent(query)}`),
     piSession: (path) => api(`pi-sessions/preview?path=${encodeURIComponent(path)}`),
-    continuePiSession: (path) => api("pi-sessions/continue", { path }),
+    continuePiSession: (request) => api("pi-sessions/continue", request),
     /** `when` says when, then what Pi gets: `in 2h check the deploy`. Clock times are this device's. */
     schedule: (when) =>
         api(`c/${current()}/schedules`, {

@@ -1,6 +1,6 @@
 // A synthetic Herdr and OS process table. Never connects to the user's Herdr or signals real Pi.
 import type { App } from "./helpers.ts";
-import { parseProcesses, type LocalProcess } from "../src/server/imports/herdr.ts";
+import { parseProcesses, type LocalProcess } from "../src/server/pi-sessions/herdr.ts";
 
 export function fakeHerdr(app: App, path: string) {
     const uid = process.getuid?.() ?? 0;
@@ -21,7 +21,7 @@ export function fakeHerdr(app: App, path: string) {
         refuseExit: false,
         omitArgv: false,
     };
-    const local = app.imports.active.local;
+    const local = app.piSessions.active.local;
 
     local.processes = async () => state.table;
     local.sockets = async () => ["/synthetic/herdr.sock"];
@@ -29,20 +29,8 @@ export function fakeHerdr(app: App, path: string) {
     local.request = async <T>(
         _socket: string,
         method: string,
-        params?: Record<string, unknown>,
+        _params?: Record<string, unknown>,
     ): Promise<T> => {
-        if (method === "pane.send_keys") {
-            state.escapes.push(params);
-            await state.onEscape?.();
-
-            if (!state.refuseAbort) {
-                state.status = "idle";
-                state.table = state.table.filter((item) => item.parent !== pi.pid);
-            }
-
-            return { type: "ok" } as T;
-        }
-
         if (method === "session.snapshot") {
             return {
                 snapshot: {
@@ -85,20 +73,6 @@ export function fakeHerdr(app: App, path: string) {
                     })),
             },
         } as T;
-    };
-
-    local.signal = (pid) => {
-        if (pid !== pi.pid) {
-            throw new Error("Tried to signal something other than the selected fake Pi");
-        }
-
-        state.signals.push(pid);
-
-        if (!state.refuseExit) {
-            state.table = state.table.filter((item) => item.pid !== pid);
-        }
-
-        return true;
     };
 
     return { state, pi, shell, local };

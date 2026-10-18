@@ -39,11 +39,15 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
     // The owner's own other device: it signs in as the owner, not as someone new.
     const [asOwner, setAsOwner] = useState(initialAsOwner && me?.role === "owner");
     const [minutes, setMinutes] = useState(15);
+    const [continuePiSessions, setContinuePiSessions] = useState(false);
+    const canGrantPiSessions =
+        collab() && me?.role === "owner" && !asOwner && role === "guest" && !(only && here);
+    const grantPiSessions = canGrantPiSessions && continuePiSessions;
     const [made, setMade] = useState(null);
     // The newest invite could not be made: the sheet offers to try again rather than wait for ever.
     const [failed, setFailed] = useState(false);
     // What the sheet says now: an invite shows only while it was made for exactly this.
-    const asked = JSON.stringify([asOwner, role, only, minutes]);
+    const asked = JSON.stringify([asOwner, role, only, minutes, grantPiSessions]);
     // Only the newest invite shows: one asked for before a change, answering late, must not stand for what the sheet says.
     const latest = useRef(0);
     // The invite the sheet last showed: a change to what it grants, or how long it lasts, ends it.
@@ -74,7 +78,12 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                     asOwner
                         ? { role: "owner" }
                         : collab()
-                          ? { role, ...(only && here ? { session: here.id } : {}), minutes }
+                          ? {
+                                role,
+                                ...(only && here ? { session: here.id } : {}),
+                                ...(grantPiSessions ? { continuePiSessions: true } : {}),
+                                minutes,
+                            }
                           : { minutes },
                 );
             } catch (error) {
@@ -93,9 +102,17 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
 
             // A server from before owner invites makes a guest's: never shown as the owner's.
             if (asOwner && answer.grant?.role !== "owner") {
+                cancelInvite(answer);
                 setFailed(true);
 
                 throw new Error("Restart Pi Coop to sign in another device as the owner.");
+            }
+
+            if ((answer.grant?.continuePiSessions === true) !== grantPiSessions) {
+                cancelInvite(answer);
+                setFailed(true);
+
+                throw new Error("Restart Pi Coop to update access to local Pi sessions.");
             }
 
             shown.current = answer;
@@ -104,7 +121,12 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
 
     useEffect(() => {
         create({ replacing: true });
-    }, [role, only, asOwner, minutes]);
+    }, [role, only, asOwner, minutes, grantPiSessions]);
+    useEffect(() => {
+        if (!canGrantPiSessions) {
+            setContinuePiSessions(false);
+        }
+    }, [canGrantPiSessions]);
     useEffect(
         () => () => {
             mounted.current = false;
@@ -114,7 +136,12 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
     // Shown only while it is what the sheet says, not for a frame after a change: above all, never an owner's invite
     // under a cleared box (which the server's answer says too).
     const invite =
-        made && made.asked === asked && (made.grant?.role === "owner") === asOwner ? made : null;
+        made &&
+        made.asked === asked &&
+        (made.grant?.role === "owner") === asOwner &&
+        (made.grant?.continuePiSessions === true) === grantPiSessions
+            ? made
+            : null;
     const where = only && here ? `only “${here.title}”` : "every session";
     // As long as the invite shown lasts (a server that does not say: 15 minutes), or, while one is made, as chosen.
     const lasting = LASTS.find(
@@ -180,6 +207,23 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                     </div>
                 </div>`
                 }`
+        }
+        ${
+            canGrantPiSessions &&
+            html`<div class="field">
+                <label class="check">
+                    <input
+                        type="checkbox"
+                        checked=${grantPiSessions}
+                        aria-describedby="invite-pi-sessions-help"
+                        onChange=${(event) => setContinuePiSessions(event.currentTarget.checked)}
+                    />
+                    Continue Pi sessions
+                </label>
+                <div class="muted small" id="invite-pi-sessions-help">
+                    They can read local Pi history and copy sessions into shared conversations.
+                </div>
+            </div>`
         }
         ${
             !asOwner &&
@@ -360,6 +404,26 @@ export function PeopleList() {
                             >
                                 All sessions
                             </button>`
+                        }
+                        ${
+                            collab() &&
+                            person.role === "guest" &&
+                            person.sessions === undefined &&
+                            html`<label
+                                class="check small"
+                                title="Can read local Pi history on this machine and copy sessions into shared conversations"
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked=${person.continuePiSessions === true}
+                                    aria-label=${`Continue Pi sessions for ${person.name}`}
+                                    onChange=${(event) =>
+                                        change(person, {
+                                            continuePiSessions: event.currentTarget.checked,
+                                        })}
+                                />
+                                Continue Pi sessions
+                            </label>`
                         }
                         <button
                             class="button small ghost"

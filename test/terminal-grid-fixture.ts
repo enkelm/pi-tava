@@ -53,7 +53,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const html = `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Structured terminal fixture</title>
-<script type="importmap">{"imports":{"preact":"/preact.mjs","preact/hooks":"/hooks.mjs","htm":"/htm.mjs"}}</script>
+<script type="importmap">{"pi-sessions":{"preact":"/preact.mjs","preact/hooks":"/hooks.mjs","htm":"/htm.mjs"}}</script>
 <link rel="stylesheet" href="/terminal-grid.css">
 <style>html,body{margin:0;background:#101419;color:#d8dee9;font:16px system-ui}*{box-sizing:border-box}
 header{padding:12px}#fixture{height:calc(100dvh - 60px);min-height:300px}header input{font-size:16px;width:150px}</style>

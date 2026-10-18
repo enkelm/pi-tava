@@ -12,8 +12,9 @@ import {
     writeFileSync,
 } from "node:fs";
 import fs from "node:fs/promises";
-import { createServer } from "node:http";
+import { IncomingMessage, ServerResponse } from "node:http";
 import { syncBuiltinESMExports } from "node:module";
+import { Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { after, mock, test } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -37,7 +38,7 @@ async function isolatedHistory(
     process.env.PI_CODING_AGENT_DIR = directory;
     const app = await openApp(scriptedModel(), join(root, `data-${name}`));
 
-    app.imports.active.local.sockets = async () => [];
+    app.piSessions.active.local.sockets = async () => [];
 
     try {
         await run(app, directory);
@@ -74,20 +75,41 @@ test("HTTP history lists saved Pi titles and paths newest first across project d
 
     const sockets = mock.fn(async (): Promise<string[]> => []);
 
-    app.imports.active.local.sockets = sockets;
+    app.piSessions.active.local.sockets = sockets;
     const guest = app.config.addUser("History guest", "guest");
-    const server = createServer(
-        createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
-    );
+    const handler = createHandler({
+        app,
+        listen: { host: "127.0.0.1", port: 0 },
+        restart: () => {},
+    });
 
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/`;
+    // Exercise the real authenticated HTTP handler without a network listener.
+    const get = async (token: string) => {
+        const request = new IncomingMessage(new Socket());
+        const response = new ServerResponse(request);
+        let output = "";
+
+        request.url = "/api/pi-sessions/history";
+        request.method = "GET";
+        request.headers = { authorization: `Bearer ${token}` };
+
+        response.end = (chunk?: unknown) => {
+            output = String(chunk ?? "");
+
+            return response;
+        };
+
+        await handler(request, response);
+
+        return new Response(output, {
+            status: response.statusCode,
+            headers: { "cache-control": String(response.getHeader("cache-control") ?? "") },
+        });
+    };
 
     try {
         for (const token of ["invalid", guest.token]) {
-            const denied = await fetch(base + "imports/history", {
-                headers: { authorization: `Bearer ${token}` },
-            });
+            const denied = await get(token);
 
             assert.equal(denied.status, token === "invalid" ? 401 : 403);
             assert.doesNotMatch(
@@ -96,11 +118,9 @@ test("HTTP history lists saved Pi titles and paths newest first across project d
             );
         }
 
-        await assert.rejects(app.imports.history(guest.user), { status: 403 });
+        await assert.rejects(app.piSessions.history(guest.user), { status: 403 });
         assert.equal(sockets.mock.callCount(), 0, "ownership is checked before local discovery");
-        const response = await fetch(base + "imports/history", {
-            headers: { authorization: `Bearer ${app.config.ownerToken}` },
-        });
+        const response = await get(app.config.ownerToken);
 
         assert.equal(response.status, 200, "the history picker has a real HTTP endpoint");
         assert.equal(response.headers.get("cache-control"), "no-store");
@@ -124,7 +144,8 @@ test("HTTP history lists saved Pi titles and paths newest first across project d
         ]);
         assert.equal(list.directory, realpathSync(join(agent, "sessions")));
         assert.equal(sockets.mock.callCount(), 1, "authorized history runs real discovery");
-        assert.match(list.warnings.join(" "), /exited|stopped/i);
+        assert.match(list.warnings.join(" "), /may still be running/i);
+        assert.match(list.warnings.join(" "), /does not stop or change/i);
         assert.equal(app.sessions().length, 0);
         assert.equal(await app.harness.snapshot(ImportsDoc, context), undefined);
         assert.equal((await app.harness.inspect(context)).tasks.length, 0);
@@ -132,8 +153,6 @@ test("HTTP history lists saved Pi titles and paths newest first across project d
         assert.deepEqual(readFileSync(older.path), older.bytes);
         assert.deepEqual(readFileSync(newer.path), newer.bytes);
     } finally {
-        server.closeAllConnections();
-        await new Promise<void>((resolve) => server.close(() => resolve()));
         await app.close();
     }
 });
@@ -196,7 +215,7 @@ test("saved-file preview returns only the latest six bounded plain-text messages
         });
         source.appendMessage(fauxAssistantMessage("Main answer 4"));
         const before = readFileSync(fixture.path);
-        const preview = await app.imports.preview(owner(app), { path: fixture.path });
+        const preview = await app.piSessions.preview(owner(app), { path: fixture.path });
 
         assert.equal(preview.history.length, 6);
         assert.deepEqual(
@@ -213,7 +232,7 @@ test("saved-file preview returns only the latest six bounded plain-text messages
             JSON.stringify(preview.history),
             /PRIVATE_|Alternate|Shared first|Main prompt 1/,
         );
-        const other = await app.imports.preview(owner(app), {
+        const other = await app.piSessions.preview(owner(app), {
             path: fixture.path,
             leafId: alternate,
         });
@@ -229,26 +248,25 @@ test("saved-file preview returns only the latest six bounded plain-text messages
         assert.equal(await app.harness.snapshot(ImportsDoc, context), undefined);
         assert.equal((await app.harness.inspect(context)).tasks.length, 0);
         await assert.rejects(
-            app.imports.create(owner(app), {
+            app.piSessions.create(owner(app), {
                 path: preview.path,
                 leafId: preview.leafId,
                 sha256: preview.sha256,
-                acknowledged: true,
-                stopped: false,
+                acknowledged: false,
                 model: "faux/faux-vision",
                 thinkingLevel: "off",
             }),
-            /original Pi has exited/,
+            /Confirm copying/,
         );
         source.appendMessage({
             role: "user",
             content: "Unsaved pending request",
             timestamp: Date.now(),
         });
-        await assert.rejects(
-            app.imports.preview(owner(app), { path: fixture.path }),
-            /saved assistant response/,
-        );
+        const pending = await app.piSessions.preview(owner(app), { path: fixture.path });
+
+        assert.equal(pending.history.at(-1)?.text, "Unsaved pending request");
+        assert.equal((await app.harness.inspect(context)).tasks.length, 0);
     });
 });
 
@@ -276,7 +294,7 @@ test("history ignores malformed, oversized, unsupported and symlinked files with
         truncateSync(oversized, 16 * 1024 * 1024 + 1);
         mkdirSync(join(project, "deeper"));
         writeFileSync(join(project, "deeper", "nested.jsonl"), outside.bytes);
-        const list = await app.imports.history(owner(app));
+        const list = await app.piSessions.history(owner(app));
 
         assert.deepEqual(
             list.sessions.map((item) => item.path),
@@ -293,7 +311,7 @@ test("history ignores malformed, oversized, unsupported and symlinked files with
 
 test("missing and symlinked session roots return an empty list with warnings", async () => {
     await isolatedHistory("missing", async (app, directory) => {
-        const missing = await app.imports.history(owner(app));
+        const missing = await app.piSessions.history(owner(app));
 
         assert.deepEqual(missing.sessions, []);
         assert.match(missing.warnings.join(" "), /missing or unreadable/);
@@ -301,7 +319,7 @@ test("missing and symlinked session roots return an empty list with warnings", a
 
         mkdirSync(outside);
         symlinkSync(outside, join(directory, "sessions"));
-        const linked = await app.imports.history(owner(app));
+        const linked = await app.piSessions.history(owner(app));
 
         assert.deepEqual(linked.sessions, []);
         assert.match(linked.warnings.join(" "), /links are not followed/);
@@ -322,7 +340,7 @@ test("history caps and sorts large catalogues and reports a bounded discovery wa
             utimesSync(path, 100 + index, 100 + index);
         }
 
-        const list = await app.imports.history(owner(app));
+        const list = await app.piSessions.history(owner(app));
 
         assert.equal(list.sessions.length, 100);
         assert.equal(list.sessions[0]!.path, join(project, "copy-119.jsonl"));
@@ -357,7 +375,7 @@ test("history omits known live files and carries incomplete active discovery war
             return request<T>(socket, method, params);
         };
 
-        const list = await app.imports.history(owner(app));
+        const list = await app.piSessions.history(owner(app));
 
         assert.deepEqual(list.sessions, []);
         assert.match(list.warnings.join(" "), /Herdr|discover/);
@@ -369,11 +387,11 @@ test("history omits known live files and carries incomplete active discovery war
             throw new Error("Discovery unavailable");
         };
 
-        const uncertain = await app.imports.history(owner(app));
+        const uncertain = await app.piSessions.history(owner(app));
 
         assert.equal(uncertain.sessions[0]!.path, fixture.path);
-        assert.match(uncertain.warnings.join(" "), /Active Pi discovery failed/);
-        assert.match(uncertain.warnings.join(" "), /Confirm.*exited/);
+        assert.match(uncertain.warnings.join(" "), /Live Pi discovery is unavailable/);
+        assert.match(uncertain.warnings.join(" "), /original Pi may still be running/);
     });
 });
 
@@ -391,7 +409,7 @@ test("history stops at its aggregate read budget even when large candidates are 
             utimesSync(path, 100 + index, 100 + index);
         }
 
-        const list = await app.imports.history(owner(app));
+        const list = await app.piSessions.history(owner(app));
 
         assert.deepEqual(list.sessions, []);
         assert.match(list.warnings.join(" "), /64 MiB read budget/);
@@ -410,7 +428,7 @@ test("clearing a saved session name restores its first-user fallback instead of 
 
         fixture.source.appendSessionInfo("");
         const before = readFileSync(fixture.path);
-        const list = await app.imports.history(owner(app));
+        const list = await app.piSessions.history(owner(app));
 
         assert.equal(list.sessions.length, 1);
         assert.equal(list.sessions[0]!.title, "Repair the checkout");
@@ -473,7 +491,7 @@ for (const growth of ["after-stat", "before-stat"]) {
             syncBuiltinESMExports();
 
             try {
-                const list = await app.imports.history(owner(app));
+                const list = await app.piSessions.history(owner(app));
 
                 assert.equal(grown, true, "fault injection reached the actual opened descriptor");
                 assert.deepEqual(list.sessions, [], "both readers reject the changed source");

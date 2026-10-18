@@ -77,8 +77,8 @@ test("a linked session from an owner-only import stays hidden from other people,
 
     try {
         const fixture = importFixture(directory);
-        const preview = await isolated.imports.preview(owner(isolated), { path: fixture.path });
-        const imported = await isolated.imports.create(owner(isolated), {
+        const preview = await isolated.piSessions.preview(owner(isolated), { path: fixture.path });
+        const imported = await isolated.piSessions.create(owner(isolated), {
             path: preview.path,
             sha256: preview.sha256,
             leafId: preview.leafId,

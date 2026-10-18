@@ -572,7 +572,7 @@ export function FolderPicker({ mode, initialPath, onUse }) {
                     html`<button
                         type="button"
                         class="link small fp-pi"
-                        onClick=${() => openSheet({ type: "pi-sessions" })}
+                        onClick=${() => openSheet({ type: "new-session", tab: "import" })}
                     >
                         Continue a Pi session…
                     </button>`

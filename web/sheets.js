@@ -14,7 +14,7 @@ import {
     GallerySourceSheet,
     GalleryUpdateSheet,
 } from "./sheets/gallery.js";
-import { ImportSheet } from "./sheets/import.js";
+import { ImportSheet } from "./sheets/pi-sessions.js";
 import { CwdSheet } from "./sheets/folder.js";
 import { MemorySheet } from "./sheets/memory.js";
 import { MenuSheet, PlacesSheet } from "./sheets/menu.js";
@@ -33,7 +33,7 @@ import { SidebarOptions } from "./sheets/sidebar-options.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
 import { TextSheet } from "./sheets/text.js";
 import { ArtifactsSheet, ArtifactViewer, ImageViewer } from "./sheets/viewers.js";
-import { PiSessionSheet, PiSessionsSheet, piSessionsAvailable } from "./sheets/pi-sessions.js";
+import { piSessionsAvailable } from "./sheets/pi-sessions.js";
 import { WorktreeSheet } from "./sheets/worktree.js";
 import { TrustSheet } from "./trust.js";
 import { addLayer, goBack, removeLayer } from "./back.js";
@@ -197,18 +197,17 @@ function sheetBody(sheet) {
 
     switch (sheet.type) {
         case "import":
-            body =
-                me?.role === "owner"
-                    ? sheet.fromPrivate
-                        ? html`<${ImportSheet}
+            body = piSessionsAvailable()
+                ? sheet.fromPrivate
+                    ? html`<${ImportSheet}
                               initialPreview=${sheet.initialPreview}
                               fromPrivate=${true}
                           />`
-                        : html`<${NewSessionSheet}
+                    : html`<${NewSessionSheet}
                               tab=${sheet.tab ?? "import"}
                               initialPreview=${sheet.initialPreview}
                           />`
-                    : null;
+                : null;
             break;
         case "new-session":
             body = html`<${NewSessionSheet}
@@ -348,14 +347,6 @@ function sheetBody(sheet) {
             break;
         case "trust":
             body = view.conversation ? html`<${TrustSheet} />` : null;
-            break;
-        case "pi-sessions":
-            body = piSessionsAvailable() ? html`<${PiSessionsSheet} />` : null;
-            break;
-        case "pi-session":
-            body = piSessionsAvailable()
-                ? html`<${PiSessionSheet} key=${sheet.id} path=${sheet.id} />`
-                : null;
             break;
         case "file":
             body = view.conversation

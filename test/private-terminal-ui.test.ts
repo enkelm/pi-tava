@@ -301,7 +301,7 @@ test(
     async (t) => {
         const app = await openApp(scriptedModel());
 
-        app.imports.active.local.sockets = async () => [];
+        app.piSessions.active.local.sockets = async () => [];
         const handler = createHandler({
             app,
             listen: { host: "127.0.0.1", port: 0 },
@@ -2116,7 +2116,7 @@ test(
         let launches = 0;
         const recorded: Record<string, unknown>[] = [];
 
-        app.imports.active.local.sockets = async () => [];
+        app.piSessions.active.local.sockets = async () => [];
 
         app.privateTerminals.checkExecutable = async () => {};
 

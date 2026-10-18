@@ -2,7 +2,8 @@
 import { lstat, opendir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { MAX_IMPORT_BYTES, readPiSession, type PiImport } from "./pi-session.ts";
+import { expandHome } from "../paths.ts";
+import { MAX_IMPORT_BYTES, readPiSession, type PiImport } from "./source.ts";
 
 const MAX_SCANNED_ENTRIES = 10_000;
 const MAX_CANDIDATES = 100;
@@ -15,6 +16,10 @@ export type HistorySession = {
     cwd: string;
     modified: number;
     messages: number;
+    /** Internal provenance for copy detection; the service removes the source ID from HTTP responses. */
+    sourceSessionId: string;
+    sha256: string;
+    leafId: string;
     reason?: string;
 };
 
@@ -91,11 +96,15 @@ const newestFirst = (a: Candidate, b: Candidate) =>
     b.modified - a.modified || a.path.localeCompare(b.path);
 
 /** Stream only the root and its immediate project directories. The SDK listAll follows links and retains unbounded text. */
-export async function listSavedHistory(excluded: ReadonlySet<string>, activeWarnings: string[]) {
-    let directory = resolve(join(getAgentDir(), "sessions"));
+export async function listSavedHistory(
+    excluded: ReadonlySet<string> = new Set(),
+    activeWarnings: string[] = [],
+    sessionRoot?: string,
+) {
+    let directory = resolve(expandHome(sessionRoot ?? join(getAgentDir(), "sessions")));
     const sessions: HistorySession[] = [];
     const warnings = [
-        "History does not prove that Pi has stopped. Confirm the original Pi has exited before importing a saved file.",
+        "Sessions are saved snapshots. Their original Pi may still be running; copying one here does not stop or change it.",
         ...activeWarnings,
     ];
     const candidates: Candidate[] = [];
@@ -220,7 +229,12 @@ export async function listSavedHistory(excluded: ReadonlySet<string>, activeWarn
                 continue;
             }
 
-            const source = await readPiSession(candidate.path, undefined, "strict", candidate.size);
+            const source = await readPiSession(
+                candidate.path,
+                undefined,
+                "snapshot",
+                candidate.size,
+            );
             const after = await lstat(candidate.path);
 
             // readPiSession resolves paths itself. Recheck containment and the enumerated identity after it,
@@ -245,6 +259,9 @@ export async function listSavedHistory(excluded: ReadonlySet<string>, activeWarn
                 cwd: source.header.cwd,
                 modified: candidate.modified,
                 messages: source.messages.length,
+                sourceSessionId: source.header.id,
+                sha256: source.sha256,
+                leafId: source.leafId,
             });
         } catch {
             skipped++;
@@ -268,9 +285,7 @@ export async function listSavedHistory(excluded: ReadonlySet<string>, activeWarn
     }
 
     if (activeFiles) {
-        warnings.push(
-            `${activeFiles} known Herdr session files were omitted. Use Live to move those sessions.`,
-        );
+        warnings.push(`${activeFiles} known Herdr session files were omitted from this list.`);
     }
 
     if (links) {

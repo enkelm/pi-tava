@@ -98,7 +98,7 @@ test(
     async () => {
         const app = await openApp(scriptedModel());
 
-        app.imports.active.local.sockets = async () => [];
+        app.piSessions.active.local.sockets = async () => [];
         const durableId = await newSession(app);
 
         await say(app, durableId, "Durable style reference");
@@ -135,6 +135,10 @@ test(
             sourceModel: { provider: "faux", modelId: "faux-1" },
             sourceThinkingLevel: "off",
             models: [{ provider: "faux", id: "faux-1", levels: ["off"], images: false }],
+            history: [
+                { role: "user", text: "Saved private prompt" },
+                { role: "assistant", text: "Saved private answer" },
+            ],
             warnings: [],
         };
         const server = createServer(async (request, response) => {
@@ -146,8 +150,8 @@ test(
 
             if (
                 !path.startsWith("/api/private") &&
-                path !== "/api/imports/active" &&
-                path !== "/api/imports/active/preview"
+                path !== "/api/pi-sessions/active" &&
+                path !== "/api/pi-sessions/active/preview"
             ) {
                 return handler(request, response);
             }
@@ -287,23 +291,23 @@ test(
                 return;
             }
 
-            if (path === "/api/imports/active/preview") {
+            if (path === "/api/pi-sessions/active/preview") {
                 response.end(JSON.stringify({ ...preview, visibility: "shared" }));
 
                 return;
             }
 
-            if (path === "/api/imports/active" && request.method === "GET") {
+            if (path === "/api/pi-sessions/active" && request.method === "GET") {
                 response.end(
                     JSON.stringify({
                         sessions: [
                             {
-                                id: "recovered-shared",
-                                title: "Recovered shared move",
+                                id: "shared-source",
+                                title: "Shared source snapshot",
                                 cwd: preview.cwd,
                                 location: preview.location,
-                                state: "stopped",
-                                recovery: true,
+                                state: "working",
+                                running: true,
                             },
                         ],
                         warnings: [],
@@ -313,7 +317,7 @@ test(
                 return;
             }
 
-            if (path === "/api/imports/active") {
+            if (path === "/api/pi-sessions/active") {
                 response.end(JSON.stringify({ id: durableId, existing: false }));
 
                 return;
@@ -1113,9 +1117,9 @@ test(
                 "private prompts never become Durable transcript entries",
             );
             await click(page, ".sidebar .private-import");
-            await present(page, "#import-share-consent");
+            await present(page, "#import-consent");
             assert.equal(
-                requests.filter((item) => item.path === "/api/imports/active").length,
+                requests.filter((item) => item.path === "/api/pi-sessions/active").length,
                 0,
                 "preview never publishes",
             );
@@ -1128,33 +1132,44 @@ test(
             );
             assert.match(
                 await value<string>(page, `document.querySelector('.import-form').textContent`),
-                /other signed-in app users[\s\S]*archive stays owner-only/,
+                /Share this copied conversation with app participants[\s\S]*archive stays owner-only/,
+            );
+            assert.deepEqual(
+                await value(
+                    page,
+                    `({
+                    label: document.querySelector('.import-form button[type=submit]').textContent.trim(),
+                    checkboxes: document.querySelectorAll('.import-form input[type=checkbox]').length,
+                })`,
+                ),
+                { label: "Move", checkboxes: 1 },
+                "the private entry uses the same single snapshot confirmation",
             );
             await shot(page, "shared-consent");
-            await click(page, "#import-share-consent");
+            await click(page, "#import-consent");
             await page.evaluate(`document.querySelector('.import-form').requestSubmit()`);
             await until(
                 () => value(page, `location.pathname === '/s/${durableId}'`),
                 "shared import route",
             );
             assert.equal(
-                requests.find((item) => item.path === "/api/imports/active")?.body.visibility,
+                requests.find((item) => item.path === "/api/pi-sessions/active")?.body.visibility,
                 "shared",
             );
 
-            // A recovered shared intent must stay truthful in the normal Import picker too.
+            // A source whose preview targets a shared copy uses the same truthful consent in the normal picker.
             await until(
                 () => value(page, `!document.querySelector('.sheet-host')`),
                 "previous sheet finished closing",
             );
             await page.evaluate(`(await import('/store.js')).openSheet({ type: 'import' })`);
-            await present(page, ".import-session button");
-            await click(page, ".import-session button");
-            await present(page, "#import-share-consent");
+            await present(page, ".import-list .pi-session");
+            await click(page, ".import-list .pi-session");
+            await present(page, "#import-consent");
             assert.equal(
                 await value(
                     page,
-                    `document.querySelector('.import-form').textContent.includes('This conversation stays owner-only')`,
+                    `document.querySelector('.import-form').textContent.includes('Continue this saved snapshot')`,
                 ),
                 false,
             );
@@ -1167,28 +1182,30 @@ test(
             );
             assert.equal(
                 requests.filter(
-                    (item) => item.path === "/api/imports/active" && item.method === "POST",
+                    (item) => item.path === "/api/pi-sessions/active" && item.method === "POST",
                 ).length,
                 1,
-                "recovered preview also never publishes",
+                "the normal picker's preview also never publishes",
             );
-            await click(page, "#import-share-consent");
+            await click(page, "#import-consent");
             await until(
                 () =>
                     value(
                         page,
                         `!document.querySelector('.import-form button[type=submit]').disabled`,
                     ),
-                "recovered shared consent",
+                "shared snapshot consent in the normal picker",
             );
             await page.evaluate(`document.querySelector('.import-form').requestSubmit()`);
             await until(
                 () => value(page, `(await import('/store.js')).store.state.sheet === null`),
-                "recovered shared move",
+                "shared snapshot Move",
             );
             assert.equal(
                 requests
-                    .filter((item) => item.path === "/api/imports/active" && item.method === "POST")
+                    .filter(
+                        (item) => item.path === "/api/pi-sessions/active" && item.method === "POST",
+                    )
                     .at(-1)?.body.visibility,
                 "shared",
             );

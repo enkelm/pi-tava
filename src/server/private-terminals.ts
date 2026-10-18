@@ -385,50 +385,54 @@ export class PrivateTerminals {
 
             // Connecting can resize shared panes. Hold through handshake and initial focus enqueue,
             // not the attached lifetime or a PTY-drain acknowledgement. No nested lock ownership is inherited.
-            await this.#app.imports.active.local.withTerminalInput(target.socket, undefined, () => {
-                let initialization: Promise<void> | undefined;
+            await this.#app.piSessions.active.local.withTerminalInput(
+                target.socket,
+                undefined,
+                () => {
+                    let initialization: Promise<void> | undefined;
 
-                this.#ws.handleUpgrade(request, socket, head, (ws) => {
-                    let child: ChildProcessWithoutNullStreams;
+                    this.#ws.handleUpgrade(request, socket, head, (ws) => {
+                        let child: ChildProcessWithoutNullStreams;
 
-                    try {
-                        child = this.launch(endpoint, ticket.size);
-                    } catch {
-                        ws.close(1011, "Could not start the structured Herdr helper");
+                        try {
+                            child = this.launch(endpoint, ticket.size);
+                        } catch {
+                            ws.close(1011, "Could not start the structured Herdr helper");
 
-                        return;
-                    }
+                            return;
+                        }
 
-                    const connection = new Connection({
-                        ws,
-                        child,
-                        target,
-                        authorize: () => this.#owner(request, user.id),
-                        beforeInput: () =>
-                            this.#app.privateSessions.markTerminalInput(
-                                this.#owner(request, user.id),
-                                target.socket,
-                            ),
-                        withInput: (pane, operation) =>
-                            this.#app.imports.active.local.withTerminalInput(
-                                target.socket,
-                                pane,
-                                operation,
-                            ),
-                        finish: () => {
-                            this.#connections.delete(connection);
-                        },
+                        const connection = new Connection({
+                            ws,
+                            child,
+                            target,
+                            authorize: () => this.#owner(request, user.id),
+                            beforeInput: () =>
+                                this.#app.privateSessions.markTerminalInput(
+                                    this.#owner(request, user.id),
+                                    target.socket,
+                                ),
+                            withInput: (pane, operation) =>
+                                this.#app.piSessions.active.local.withTerminalInput(
+                                    target.socket,
+                                    pane,
+                                    operation,
+                                ),
+                            finish: () => {
+                                this.#connections.delete(connection);
+                            },
+                        });
+
+                        this.#connections.add(connection);
+                        // A connecting child now counts as a connection, not also as an upgrade.
+                        this.#upgrading--;
+                        upgrading = false;
+                        initialization = connection.start();
                     });
 
-                    this.#connections.add(connection);
-                    // A connecting child now counts as a connection, not also as an upgrade.
-                    this.#upgrading--;
-                    upgrading = false;
-                    initialization = connection.start();
-                });
-
-                return initialization;
-            });
+                    return initialization;
+                },
+            );
         } finally {
             if (upgrading) {
                 this.#upgrading--;

@@ -13,7 +13,7 @@ import {
     type TaskId,
 } from "@earendil-works/pi-durable";
 import type { Repeat } from "./when.ts";
-import type { ActivePi } from "./imports/herdr.ts";
+import type { ActivePi } from "./pi-sessions/herdr.ts";
 import type { Worktree } from "./worktrees.ts";
 import type { Changes } from "./changes.ts";
 import type { ThreadType } from "./workflow-docs.ts";

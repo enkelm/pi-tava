@@ -7,7 +7,7 @@ import { after, test } from "node:test";
 import { buildSessionProjection, convertToLlm } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { UsageDoc, type EntryRecord } from "@earendil-works/pi-durable";
-import { parsePiSession } from "../src/server/imports/pi-session.ts";
+import { parsePiSession } from "../src/server/pi-sessions/source.ts";
 import { projectEntry } from "../src/server/projection.ts";
 import { importFixture } from "./import-fixtures.ts";
 
@@ -88,11 +88,11 @@ for (const reason of ["error", "aborted"] as const) {
             let app = await openApp(model, join(root, name));
 
             try {
-                const preview = await app.imports.preview(owner(app), { path: source.path });
+                const preview = await app.piSessions.preview(owner(app), { path: source.path });
 
                 assert.equal(preview.messages, source.expected.length);
                 assert.ok(preview.warnings.some((warning) => /failed|cancelled/.test(warning)));
-                const result = await app.imports.create(owner(app), {
+                const result = await app.piSessions.create(owner(app), {
                     path: source.path,
                     sha256: preview.sha256,
                     leafId: preview.leafId,
@@ -109,7 +109,7 @@ for (const reason of ["error", "aborted"] as const) {
 
                 assert.ok(rendered?.kind === "assistant");
                 assert.equal(rendered.stopReason, reason);
-                assert.equal(await app.imports.archive(owner(app), result.id), source.archive);
+                assert.equal(await app.piSessions.archive(owner(app), result.id), source.archive);
                 assert.equal((await app.harness.inspect(context)).tasks.length, 0);
                 assert.equal(model.state.callCount, 0);
                 assert.deepEqual(await app.harness.snapshot(UsageDoc, result.id, context), {
@@ -141,8 +141,8 @@ test("partial tool calls in an aborted generation are archival, never pending to
     const app = await openApp(scriptedModel(), join(root, "partial-call"));
 
     try {
-        const preview = await app.imports.preview(owner(app), { path: source.path });
-        const result = await app.imports.create(owner(app), {
+        const preview = await app.piSessions.preview(owner(app), { path: source.path });
+        const result = await app.piSessions.create(owner(app), {
             path: source.path,
             sha256: preview.sha256,
             leafId: preview.leafId,
@@ -170,7 +170,7 @@ test("partial tool calls in an aborted generation are archival, never pending to
             /not-executed/,
             "retain the original failed attempt in stored history",
         );
-        assert.equal(await app.imports.archive(owner(app), result.id), source.archive);
+        assert.equal(await app.piSessions.archive(owner(app), result.id), source.archive);
         assert.equal((await app.harness.inspect(context)).tasks.length, 0);
     } finally {
         await app.close();

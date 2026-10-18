@@ -12,7 +12,7 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, mock, test } from "node:test";
 import type { Context } from "@earendil-works/chord";
@@ -78,10 +78,9 @@ async function fixture(name: string) {
     return { app, model, data, source, ...attach(app, source.path) };
 }
 
-test("pending admission survives restart, blocks fresh revisions and all app stop paths without replay", async () => {
+test("pending admission survives restart and fences private input without blocking saved snapshot copies", async () => {
     const f = await fixture("pending-control");
     const before = await selected(f.app);
-    const active = (await f.local.list()).sessions[0]!;
     const receipt = await f.app.privateSessions.control.admitPrompt(socket, "pane");
 
     assert.equal(f.transport.sent, 0, "crash boundary before send is still conservatively fenced");
@@ -104,7 +103,8 @@ test("pending admission survives restart, blocks fresh revisions and all app sto
 
         assert.notEqual(current.view.revision, before.view.revision);
         assert.equal(current.view.canPrompt, false);
-        assert.equal(current.view.canImport, false);
+        assert.equal(current.view.canImport, true);
+        assert.equal(current.view.importReason, undefined);
         assert.match(current.view.reason!, /Restarting.*does not clear/);
         await assert.rejects(
             app.privateSessions.prompt(owner(app), current.pane.id, {
@@ -114,15 +114,30 @@ test("pending admission survives restart, blocks fresh revisions and all app sto
             }),
             /delivery is uncertain/,
         );
-        await assert.rejects(next.local.stop(active), /delivery is uncertain/);
         await assert.rejects(
-            next.local.withPane(socket, "pane", async () => next.local.stop(active)),
+            next.local.withPane(socket, "pane", async () =>
+                assert.fail("private input bypassed its fence"),
+            ),
             /delivery is uncertain/,
         );
-        await assert.rejects(
-            app.imports.active.move(owner(app), { id: active.id, acknowledged: true }),
-            /delivery is uncertain/,
-        );
+        const preview = await app.privateSessions.importPreview(owner(app), current.pane.id, {
+            revision: current.view.revision,
+        });
+        const result = await app.piSessions.active.move(owner(app), {
+            id: preview.activeId,
+            sha256: preview.sha256,
+            leafId: preview.leafId,
+            model: "faux/faux-vision",
+            thinkingLevel: "off",
+            acknowledged: true,
+            visibility: "shared",
+        });
+
+        assert.equal(await app.piSessions.archive(owner(app), result.id), f.source.archive);
+        assert.equal(readFileSync(f.source.path, "utf8"), f.source.archive);
+        assert.deepEqual(next.state.table, [next.shell, next.pi]);
+        assert.deepEqual(await app.harness.snapshot(PrivateControlDoc, context), document);
+        assert.equal((await app.harness.inspect(context)).tasks.length, 0);
         // Explicit raw control is still available after restart, but must not settle the unknown Chat receipt.
         let rawWrites = 0;
 
@@ -140,7 +155,6 @@ test("pending admission survives restart, blocks fresh revisions and all app sto
         await next.local.list();
         assert.ok(await app.privateSessions.control.reason(socket, "pane"));
         assert.equal(next.transport.sent, 0);
-        assert.deepEqual(next.state.signals, []);
         assert.equal(f.model.state.callCount, 0);
         assert.equal(
             (await app.harness.snapshot(PrivateControlDoc, context))!.items[
@@ -153,7 +167,7 @@ test("pending admission survives restart, blocks fresh revisions and all app sto
     }
 });
 
-test("restart while agent.prompt is awaiting a reply cannot admit another prompt or takeover", async () => {
+test("restart while agent.prompt is awaiting a reply cannot admit another private prompt", async () => {
     const f = await fixture("in-flight-control");
     const { pane, view } = await selected(f.app);
     const original = f.local.request;
@@ -208,7 +222,6 @@ test("restart while agent.prompt is awaiting a reply cannot admit another prompt
         await sending;
         assert.ok(await app.privateSessions.control.reason(socket, "pane"));
         assert.equal(next.transport.sent, 0);
-        assert.deepEqual(next.state.signals, []);
     } finally {
         release();
         await sending;
@@ -301,9 +314,9 @@ for (const [name, response] of [
                 }),
                 /delivery is uncertain/,
             );
-            assert.equal(current.view.canImport, false);
+            assert.equal(current.view.canImport, true);
+            assert.equal(current.view.importReason, undefined);
             assert.equal(next.transport.sent, 0);
-            assert.deepEqual(next.state.signals, []);
         } finally {
             await app.close();
         }
@@ -346,7 +359,6 @@ for (const failingCommit of [1, 2]) {
                 Boolean(await f.app.privateSessions.control.reason(socket, "pane")),
                 failingCommit === 2,
             );
-            assert.deepEqual(f.state.signals, []);
         } finally {
             fault.mock.restore();
             await f.app.close();
@@ -417,15 +429,14 @@ test("known terminal receipts survive restart without fencing Chat or import, bu
         const uncertain = await selected(app);
 
         assert.equal(uncertain.view.canPrompt, false);
-        assert.equal(uncertain.view.canImport, false);
+        assert.equal(uncertain.view.canImport, true);
         assert.match(uncertain.view.reason!, /Input delivery is uncertain/);
-        assert.match(uncertain.view.importReason!, /Input delivery is uncertain/);
+        assert.equal(uncertain.view.importReason, undefined);
         await assert.rejects(
             next.local.withPane(socket, "pane", async () => true, "prompt"),
             /delivery is uncertain/,
         );
         assert.equal(next.transport.sent, 2);
-        assert.deepEqual(next.state.signals, []);
     } finally {
         await app.close();
     }
@@ -463,13 +474,13 @@ test("native writes reject active Chat while input to unrelated panes stays avai
             f.local.withTerminalInput(socket, "pane", () => {
                 writes++;
             }),
-            /operation in progress/,
+            /input in progress/,
         );
         await assert.rejects(
             f.local.withTerminalInput(socket, undefined, () => {
                 writes++;
             }),
-            /operation in progress/,
+            /input in progress/,
         );
         assert.equal(writes, 0);
         assert.equal(
@@ -487,7 +498,6 @@ test("native writes reject active Chat while input to unrelated panes stays avai
         });
         assert.equal(writes, 1);
         assert.equal(f.transport.sent, 1);
-        assert.deepEqual(f.state.signals, []);
     } finally {
         release();
         await sending;
@@ -517,13 +527,13 @@ test("native reservation covers asynchronous admission and pipe write, blocks ne
         // Reservation precedes durable I/O; undefined pane fences every pane in this instance.
         await assert.rejects(
             f.local.withPane(socket, "other-pane", async () => true, "prompt"),
-            /operation in progress/,
+            /input in progress/,
         );
         await assert.rejects(
             f.local.withTerminalInput(socket, "pane", () => {
                 writes++;
             }),
-            /operation in progress/,
+            /input in progress/,
         );
         await until(() => admitted, "durable admission before native write");
         assert.equal(writes, 0);
@@ -533,7 +543,7 @@ test("native reservation covers asynchronous admission and pipe write, blocks ne
                 text: "Cannot overlap native write",
                 requestId: "overlap-native",
             }),
-            /operation in progress/,
+            /input in progress/,
         );
         assert.equal(
             await f.local.withPane("/other/herdr.sock", "pane", async () => true, "prompt"),
@@ -557,61 +567,9 @@ test("native reservation covers asynchronous admission and pipe write, blocks ne
             /pipe write failed/,
         );
         assert.equal(await f.local.withPane(socket, "pane", async () => true, "prompt"), true);
-        assert.deepEqual(f.state.signals, []);
     } finally {
         release();
         await forwarding;
-        await f.app.close();
-    }
-});
-
-test("standalone stop reserves the pane against native writes and new Chat", async () => {
-    const f = await fixture("native-stop-exclusion");
-    const active = (await f.local.list()).sessions[0]!;
-    const processes = f.local.processes;
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-        release = resolve;
-    });
-
-    f.local.processes = async () => {
-        await gate;
-
-        return processes();
-    };
-
-    const stopping = f.local.stop(active);
-    let writes = 0;
-
-    try {
-        await assert.rejects(
-            f.local.withTerminalInput(socket, "pane", () => {
-                writes++;
-            }),
-            /operation in progress/,
-        );
-        await assert.rejects(
-            f.local.withTerminalInput(socket, undefined, () => {
-                writes++;
-            }),
-            /operation in progress/,
-        );
-        await assert.rejects(
-            f.local.withPane(socket, "pane", async () => true, "prompt"),
-            /operation in progress/,
-        );
-        assert.equal(writes, 0);
-        assert.deepEqual(f.state.signals, []);
-        release();
-        await stopping;
-        assert.deepEqual(f.state.signals, [f.pi.pid], "only the fake signal hook ran");
-        await f.local.withTerminalInput(socket, "pane", () => {
-            writes++;
-        });
-        assert.equal(writes, 1);
-    } finally {
-        release();
-        await stopping;
         await f.app.close();
     }
 });
@@ -647,7 +605,6 @@ test("abrupt process exit after committed admission retains the fence without st
             /delivery is uncertain/,
         );
         assert.equal(next.transport.sent, 0);
-        assert.deepEqual(next.state.signals, []);
         assert.equal(model.state.callCount, 0);
         assert.equal((await app.harness.inspect(context)).tasks.length, 0);
     } finally {

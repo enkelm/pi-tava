@@ -59,8 +59,8 @@ async function worker(projectId: string): Promise<{ id: ConversationId }> {
 
 async function importedOwnerOnly(name: string): Promise<ConversationId> {
     const fixture = importFixture(folder(name));
-    const preview = await app.imports.preview(owner(app), { path: fixture.path });
-    const imported = await app.imports.create(owner(app), {
+    const preview = await app.piSessions.preview(owner(app), { path: fixture.path });
+    const imported = await app.piSessions.create(owner(app), {
         path: preview.path,
         sha256: preview.sha256,
         leafId: preview.leafId,

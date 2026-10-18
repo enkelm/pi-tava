@@ -32,6 +32,7 @@ import { currentTrust, trustAvailable } from "../trust.js";
 import { branchAvailable } from "./branch.js";
 import { memoryAvailable, memoryHint, useMemory } from "./memory.js";
 import { defaultLabel, defaultsKept } from "./model.js";
+import { piSessionsAvailable } from "./pi-sessions.js";
 import { copyText, html, Icon, item, Sheet, shortPath } from "../ui.js";
 
 // Key hints are for people with a keyboard: a touch screen has none.
@@ -487,7 +488,7 @@ export function MenuSheet({ places = true }) {
             session &&
             conversation.imported &&
             me?.role === "owner" &&
-            html`<a class="list-item" href=${`/api/imports/${conversation.id}/archive`} download>
+            html`<a class="list-item" href=${`/api/pi-sessions/${conversation.id}/archive`} download>
                 <span>Download original Pi session</span>
                 <span class="muted small">owner-only source archive</span>
             </a>`
@@ -507,7 +508,7 @@ export function MenuSheet({ places = true }) {
         }
         <div class="group">
             <div class="group-title">App</div>
-            ${me?.role === "owner" && item("Import Pi session", () => openSheet({ type: "import" }), "a stopped session on this server")}
+            ${piSessionsAvailable() && item("Import Pi session", () => openSheet({ type: "import" }), "copy saved history from this server")}
             ${item("Settings", () => openSheet({ type: "settings" }), "appearance, providers, notifications, access, limits")}
             ${item(collab() ? "People" : "Devices and access", () => openSheet({ type: "settings", tab: "account" }), me?.role === "viewer" ? "you can view" : "")}
             ${item("Running now", () => openSheet({ type: "running" }), "everything Pi is doing")}
