@@ -1,8 +1,19 @@
 /** The web app's own files and the modules it imports, its content security policy, and image files it shows. */
 import { createHash } from "node:crypto";
-import { closeSync, createReadStream, openSync, readFileSync, readSync, statSync } from "node:fs";
+import {
+    closeSync,
+    constants,
+    createReadStream,
+    openSync,
+    readFileSync,
+    readSync,
+    statSync,
+} from "node:fs";
+import { open } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 import { APP_ROOT } from "../config.ts";
 import { HttpError } from "../errors.ts";
 import { send } from "./io.ts";
@@ -27,6 +38,7 @@ export const TYPES: Record<string, string> = {
     ".png": "image/png",
     ".json": "application/json",
     ".webmanifest": "application/manifest+json",
+    ".wasm": "application/wasm",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
@@ -112,7 +124,7 @@ function appPolicy(html: string): string {
 
     return [
         "default-src 'self'",
-        ["script-src 'self'", ...hashes].join(" "),
+        ["script-src 'self' 'wasm-unsafe-eval'", ...hashes].join(" "),
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' data: blob:",
         "media-src 'self' data: blob:",
@@ -168,6 +180,153 @@ export function serveFile(response: ServerResponse, file: string, fallbackType?:
             "cache-control": "no-cache",
         },
     );
+}
+
+// Only the offline builder's public, content-addressed outputs are immutable. In particular,
+// build.json, editable web sources and anything outside this allowlist keep ordinary freshness.
+const RENDERER_ASSET =
+    /^\/herdr-renderer\/([a-f0-9]{16})\/(index\.html|renderer\.js|style\.css|pkg\/herdr_renderer(?:\.js|_bg\.wasm)|LICENSE-APACHE|NOTICE-HERDR|NOTICE-PROTOCOL\.md|UPSTREAM\.md|upstream-files\.json|fonts\/(?:JetBrainsMonoNerdFont-OFL\.txt|JetBrainsMonoNerdFont-README\.md|NOTICE-JETBRAINS-NERD\.md))$/;
+
+/** Encoding preferences apply only to the versioned painter's public code, never private output. */
+function rendererEncoding(
+    request: IncomingMessage,
+    compressible: boolean,
+): "gzip" | "identity" | null {
+    const preferences = new Map<string, number>();
+
+    for (const entry of (request.headers["accept-encoding"] ?? "").split(",")) {
+        const [name, ...parameters] = entry.trim().toLowerCase().split(";");
+        const quality = parameters.find((parameter) => parameter.trim().startsWith("q="));
+        const value = quality === undefined ? 1 : Number(quality.trim().slice(2));
+
+        preferences.set(
+            name!.trim(),
+            Number.isFinite(value) && value >= 0 && value <= 1 ? value : 0,
+        );
+    }
+
+    const gzip = preferences.get("gzip") ?? preferences.get("*") ?? 0;
+    const identity = preferences.get("identity") ?? (preferences.get("*") === 0 ? 0 : 1);
+
+    if (compressible && gzip > 0 && gzip >= identity) {
+        return "gzip";
+    }
+
+    return identity > 0 ? "identity" : null;
+}
+
+/** Stream one immutable renderer build asset. False leaves ordinary static routing unchanged. */
+export async function serveRendererAsset(
+    request: IncomingMessage,
+    response: ServerResponse,
+    path: string,
+): Promise<boolean> {
+    const match = RENDERER_ASSET.exec(path);
+
+    if (match === null) {
+        return false;
+    }
+
+    if (request.method !== "GET" && request.method !== "HEAD") {
+        send(response, 405, "Method not allowed", undefined, { allow: "GET, HEAD" });
+
+        return true;
+    }
+
+    const file = join(WEB, path.slice(1));
+    let handle;
+
+    try {
+        handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch {
+        send(response, 404, "Not found");
+
+        return true;
+    }
+
+    try {
+        const stats = await handle.stat();
+
+        if (!stats.isFile()) {
+            send(response, 404, "Not found");
+
+            return true;
+        }
+
+        const extension = extname(file);
+        const compressible = extension === ".wasm" || extension === ".js" || extension === ".css";
+        const encoding = rendererEncoding(request, compressible);
+
+        if (encoding === null) {
+            send(response, 406, "No acceptable encoding", undefined, { vary: "accept-encoding" });
+
+            return true;
+        }
+
+        // Weak validation deliberately names the same content across identity and gzip delivery.
+        const tag = `"${match[1]}-${match[2]}"`;
+        const etag = `W/${tag}`;
+        const headers: Record<string, string> = {
+            "cache-control": "public, max-age=31536000, immutable",
+            etag,
+            "last-modified": stats.mtime.toUTCString(),
+            "content-type": TYPES[extension] ?? "text/plain; charset=utf-8",
+            vary: "accept-encoding",
+        };
+        const ifNoneMatch = request.headers["if-none-match"];
+        const unchanged =
+            ifNoneMatch === undefined
+                ? Date.parse(request.headers["if-modified-since"] ?? "") >=
+                  Math.floor(stats.mtimeMs / 1000) * 1000
+                : ifNoneMatch
+                      .split(",")
+                      .some(
+                          (candidate) =>
+                              candidate.trim() === "*" ||
+                              candidate.trim().replace(/^W\//, "") === tag,
+                      );
+
+        if (encoding === "gzip") {
+            headers["content-encoding"] = "gzip";
+        }
+
+        if (unchanged) {
+            response.writeHead(304, headers);
+            response.end();
+
+            return true;
+        }
+
+        if (encoding === "identity") {
+            headers["content-length"] = String(stats.size);
+        }
+
+        response.writeHead(200, headers);
+
+        if (request.method === "HEAD") {
+            response.end();
+
+            return true;
+        }
+
+        const source = handle.createReadStream({ autoClose: false });
+
+        try {
+            // Backpressure and client cancellation reach disk and zlib; no full-file JS buffer or
+            // process-wide compressed cache is retained for the 12 MB painter payload.
+            if (encoding === "gzip") {
+                await pipeline(source, createGzip(), response);
+            } else {
+                await pipeline(source, response);
+            }
+        } catch {
+            response.destroy();
+        }
+
+        return true;
+    } finally {
+        await handle.close();
+    }
 }
 
 /** An image file from this machine, for `![alt](path)` in replies and for uploaded attachments. */

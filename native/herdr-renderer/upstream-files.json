@@ -1,0 +1,59 @@
+{
+    "revision": "e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf",
+    "files": [
+        {
+            "source": "crates/herdr-gpui/src/terminal_painter.rs",
+            "destination": "src/upstream/terminal_painter.rs",
+            "sourceSha256": "96bbf8b86e71608ca56932097a5ba9420f768b95c868ccb509dbdf7e1f130cf2",
+            "extractedSha256": "2a3e809d106424ff44031efc44e6c7801ec4639332452a714efdbbb2d8e7ae65"
+        },
+        {
+            "source": "crates/herdr-gpui/src/terminal_painter/area.rs",
+            "destination": "src/upstream/terminal_painter/area.rs",
+            "sourceSha256": "d0160e78809f35f3c0b526018db9170412f09ba67ae61406045ba5776dad8654",
+            "extractedSha256": "c29e689a1d70ef55744db216069026d83edb21cccbfdbb913f29c9c8d71a26e2"
+        },
+        {
+            "source": "crates/herdr-gpui/src/terminal_painter/glyphs.rs",
+            "destination": "src/upstream/terminal_painter/glyphs.rs",
+            "sourceSha256": "c9eff1cc95f1ae6ec5f72edbf226a398b9bc3d0431daed3b75bfca7f2740b940",
+            "extractedSha256": "7ea2c35f26d86f23e4602f2132045b1ff402c5e1c6a67f57b893c7efefd75db8"
+        },
+        {
+            "source": "crates/herdr-gpui/src/terminal_painter/graphics.rs",
+            "destination": "src/upstream/terminal_painter/graphics.rs",
+            "sourceSha256": "264da12b34d36cb9f6d713ed86c5fef52d127f7e4fcfa9a8a5a1ea80c4d89533",
+            "extractedSha256": "c7cbac6c953be827bf4d6ce6264f80701da9d38973af244dc60fc9798d241f32"
+        },
+        {
+            "source": "crates/herdr-gpui/src/terminal_painter/grid.rs",
+            "destination": "src/upstream/terminal_painter/grid.rs",
+            "sourceSha256": "dc57768d4d342ff956bf52e066c75619559a5b09b4f11ed0c39cb38d952ff8b6",
+            "extractedSha256": "1bd78313ed7a132e9b42f5f34603ad421caf688fd3e629729c06bf56c2b9693f"
+        },
+        {
+            "source": "crates/herdr-gpui/src/terminal_painter/images.rs",
+            "destination": "src/upstream/terminal_painter/images.rs",
+            "sourceSha256": "d5bd00bed2a751d09e1fbe3c9d027b88d0a80025e00013f958870a1fa4d5c5f1",
+            "extractedSha256": "4222239e0bb69115265e7a2272e9b25a737ff6d6fee53457ebc0479e464ceac9"
+        },
+        {
+            "source": "crates/herdr-client/src/surface_images.rs",
+            "destination": "src/surface_images.rs",
+            "sourceSha256": "cff33cbd50914f03ed302d88a6918698fd47b28465875a454998e3751a065e72",
+            "extractedSha256": "52b2d1c42b705d5c3e6356c9671527c2b6ac059ce3d14029230a6a675c60fe2c"
+        },
+        {
+            "source": "crates/herdr-gpui/src/terminal.rs",
+            "destination": "src/terminal.rs",
+            "sourceSha256": "60d82e2535df07acc9a6812a8aec0c65662330d20e8a73ffe36f74815a93bf60",
+            "extractedSha256": "8722cf17eb31cd0a2b10bf6fc215e801386dc7351afb6a3417b0c16a290128e6"
+        },
+        {
+            "source": "crates/herdr-gpui/src/config/theme.rs",
+            "destination": "src/config.rs",
+            "sourceSha256": "ecb177a8637dc0ae2656528543e200d1202a4930de12a03ebdedc64190d8a43a",
+            "extractedSha256": "0e01ca17ed4d95426efa83904dacf5a9de976fcab20480f648cf4168ca15b41b"
+        }
+    ]
+}

@@ -11,7 +11,7 @@ import { createApi } from "./http/api.ts";
 import { artifact } from "./http/artifacts.ts";
 import { extensionFile } from "./http/extension-routes.ts";
 import { hookRoute } from "./http/hook-routes.ts";
-import { serveApp, serveFile, VENDOR, WEB } from "./http/assets.ts";
+import { serveApp, serveFile, serveRendererAsset, VENDOR, WEB } from "./http/assets.ts";
 import { serveEditor } from "./http/editor-assets.ts";
 import { type HttpOptions, json } from "./http/io.ts";
 import { join as joinPage, login, sharePage } from "./http/sign-in.ts";
@@ -102,6 +102,10 @@ export function createHandler(options: HttpOptions) {
 
             if (file === join(WEB, "index.html")) {
                 return serveApp(response, app.webRevision);
+            }
+
+            if (await serveRendererAsset(request, response, path)) {
+                return;
             }
 
             return serveFile(response, file);

@@ -1414,7 +1414,7 @@ export function PrivateTerminal({
     // but never route input using the preceding frame. Resume focus only for terminal intent.
     const displaySurface = state.surface || lastSurface.current;
 
-    useLayoutEffect(() => {
+    const restoreInputFocus = () => {
         if (
             !interactive ||
             !wantsFocus.current ||
@@ -1434,7 +1434,9 @@ export function PrivateTerminal({
         if (input && focused !== input && !otherField) {
             gridFocus.current?.focus();
         }
-    }, [
+    };
+
+    useLayoutEffect(restoreInputFocus, [
         interactive,
         state.surface,
         state.snapshot?.focused_pane_id,
@@ -1444,7 +1446,7 @@ export function PrivateTerminal({
 
     const captureDiagnostics = () => {
         const viewport = host.current?.querySelector(".terminal-grid-viewport");
-        const canvas = host.current?.querySelector("canvas");
+        const surface = host.current?.querySelector(".terminal-grid-interaction");
         const active = document.activeElement;
         const focus = active?.matches?.(".terminal-grid-input")
             ? "terminal-input"
@@ -1463,8 +1465,9 @@ export function PrivateTerminal({
             rows: displaySurface?.frame?.height,
             scrollTop: viewport?.scrollTop,
             scrollLeft: viewport?.scrollLeft,
-            canvasWidth: canvas?.clientWidth,
-            canvasHeight: canvas?.clientHeight,
+            // Schema 1 names retained: these now measure the GPUI interaction surface.
+            canvasWidth: surface?.clientWidth,
+            canvasHeight: surface?.clientHeight,
             coarsePointer: matchMedia("(pointer: coarse)").matches,
             documentFocused: document.hasFocus(),
             surfaceActive: state.surfaceActive,
@@ -1806,12 +1809,12 @@ export function PrivateTerminal({
             })}
         onFocusIn=${() => controller.current?.send({ type: "focus", focused: true })}
         onFocusOut=${(event) => {
-            if (prefix.current) {
-                setNotice("");
-                prefix.current = null;
-            }
-
             if (!event.currentTarget.contains(event.relatedTarget)) {
+                if (prefix.current) {
+                    setNotice("");
+                    prefix.current = null;
+                }
+
                 controller.current?.send({ type: "focus", focused: false });
             }
         }}>
@@ -1824,6 +1827,7 @@ export function PrivateTerminal({
                 enabled=${interactive}
                 inputEpoch=${state.inputEpoch}
                 focusRef=${gridFocus}
+                onInputReady=${restoreInputFocus}
                 renderFooter=${footer}
                 theme=${theme || undefined}
                 reportAllKeys=${state.reportAllKeys}

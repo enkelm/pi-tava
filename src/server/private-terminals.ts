@@ -11,6 +11,7 @@ import type { PocketApp } from "./app.ts";
 import { Auth, COOKIE, origin, parseCookies } from "./auth.ts";
 import { APP_ROOT, type User } from "./config.ts";
 import { HttpError } from "./errors.ts";
+import { TerminalOutput } from "./terminal-output.ts";
 
 const TICKET_MS = 30_000;
 const MAX_CLIENTS = 4;
@@ -455,9 +456,10 @@ type ConnectionOptions = {
     finish: () => void;
 };
 
-/** One disposable native client. Full reconstructed frames may be dropped only by closing this connection. */
+/** One disposable native client. Only unsent, complete surfaces may supersede one another. */
 class Connection {
     readonly #options: ConnectionOptions;
+    readonly #output: TerminalOutput;
     #boot = "";
     #revision = "";
     #panes = new Set<string>();
@@ -487,6 +489,24 @@ class Connection {
 
     constructor(options: ConnectionOptions) {
         this.#options = options;
+        this.#output = new TerminalOutput({
+            maxEventBytes: MAX_LINE,
+            isOpen: () => !this.#closed && options.ws.readyState === WebSocket.OPEN,
+            bufferedBytes: () => options.ws.bufferedAmount,
+            write: (text, done) => {
+                // Delayed surfaces must still belong to an authorized owner when written.
+                try {
+                    options.authorize();
+                } catch {
+                    void this.close("Owner access ended");
+
+                    return;
+                }
+
+                options.ws.send(text, done);
+            },
+            close: (reason) => void this.close(reason),
+        });
         this.#done = new Promise((resolve) => {
             this.#resolveDone = resolve;
         });
@@ -597,27 +617,8 @@ class Connection {
         return this.#initialization;
     }
 
-    #send(value: unknown) {
-        const { ws } = this.#options;
-
-        if (this.#closed || ws.readyState !== WebSocket.OPEN) {
-            return;
-        }
-
-        const text = JSON.stringify(value);
-
-        if (
-            Buffer.byteLength(text) > MAX_LINE ||
-            ws.bufferedAmount + Buffer.byteLength(text) > MAX_LINE * 2
-        ) {
-            void this.close(
-                "Terminal output exceeded the browser queue limit; reconnect for a fresh frame",
-            );
-
-            return;
-        }
-
-        ws.send(text);
+    #send(value: unknown, surfaceFence?: string) {
+        this.#output.send(value, surfaceFence);
     }
 
     #write(value: unknown) {
@@ -692,6 +693,8 @@ class Connection {
     #event(event: ObjectValue) {
         this.#options.authorize();
 
+        let surfaceFence: string | undefined;
+
         if (event.type === "connected") {
             const welcome = object(event.welcome);
 
@@ -764,6 +767,7 @@ class Connection {
             }
 
             this.#popup = surface.popup ? String(object(surface.popup).terminal_id) : undefined;
+            surfaceFence = JSON.stringify([this.#boot, this.#revision, frame.width, frame.height]);
         } else if (event.type === "closed") {
             void this.close(typeof event.reason === "string" ? event.reason : "Herdr disconnected");
 
@@ -772,7 +776,7 @@ class Connection {
             throw new Error("Unknown structured Herdr helper event");
         }
 
-        this.#send(event);
+        this.#send(event, surfaceFence);
     }
 
     async #command(command: ObjectValue) {
@@ -956,6 +960,7 @@ class Connection {
             const { ws, child } = this.#options;
 
             this.#closed = true;
+            this.#output.dispose();
 
             if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < MAX_LINE) {
                 ws.send(JSON.stringify({ type: "closed", reason: reason.slice(0, 2048) }));

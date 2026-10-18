@@ -131,15 +131,15 @@ window.fixture.draw = (patch = {}) => {
 };
 
 window.fixture.point = (type, x, y, extra = {}) => {
-    const canvas = document.querySelector("canvas"),
-        bounds = canvas.getBoundingClientRect();
+    const interaction = document.querySelector(".terminal-grid-interaction"),
+        bounds = interaction.getBoundingClientRect();
 
     // Synthetic PointerEvents are not registered with the browser's pointer capture system.
-    canvas.setPointerCapture = () => {};
+    interaction.setPointerCapture = () => {};
 
-    canvas.releasePointerCapture = () => {};
+    interaction.releasePointerCapture = () => {};
 
-    canvas.dispatchEvent(
+    interaction.dispatchEvent(
         new PointerEvent(type, {
             bubbles: true,
             cancelable: true,

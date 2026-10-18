@@ -19,7 +19,9 @@ versions with `rustup toolchain list`. Use a named toolchain without changing th
 global default. If 1.96.0 is absent, an operator can install it with
 `rustup toolchain install 1.96.0 --profile minimal`.
 
-From the repository root:
+From the repository root, `npm run build:terminal` builds both this connection
+helper and the canonical [GPUI/WASM renderer](../herdr-renderer/README.md).
+The helper-only build and tests remain available separately:
 
 ```sh
 node scripts/build-herdr-web.mjs --test
@@ -104,6 +106,15 @@ hyperlink table, pane geometry/scroll/mouse flags, splits, optional popup, and
 graphics placements/retained keys. Clear an old displayed frame when its
 `boot_id` or `projection_revision` no longer matches the latest snapshot's
 `boot_id` and `revision`. Do not combine a new hierarchy with stale cells.
+
+After validation, the Node gateway may supersede an unsent complete surface with
+the newest one having the same exact boot/projection and frame dimensions while
+WebSocket writes are outstanding. Surface revision gaps are therefore valid.
+Snapshots, image-set replacements, messages, replies and rejections are ordering
+barriers; the held surface is written before them. This does not change the
+helper's lossless native patch reconstruction or its stdout queue policy. The
+gateway rechecks byte bounds and owner access before delayed writes and discards
+held content on closure. A write callback is not a browser paint acknowledgement.
 
 Colors are **not ARGB**: `0..16` are named colors with 0 meaning reset,
 `0x010000XX` is an indexed color, and `0x02RRGGBB` is RGB. Preserve `modifier`,

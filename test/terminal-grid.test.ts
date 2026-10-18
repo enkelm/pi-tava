@@ -1,4 +1,5 @@
-// Pure protocol rules and real Chromium against generated frames. No live Herdr/Pocket access.
+// Pure protocol rules and Chromium DOM/input contracts against generated frames.
+// The authenticated paint child is a bridge stub, not GPU pixel validation. No live Herdr/Pocket access.
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,9 +13,6 @@ import { terminalFixture } from "./terminal-grid-fixture.ts";
 
 const MODULE: string = "../web/terminal-grid.js";
 const {
-    DEFAULT_THEME,
-    wireColor,
-    cellColors,
     symbolWidth,
     validFrame,
     safeHyperlink,
@@ -22,7 +20,6 @@ const {
     targetAt,
     mouseEvent,
     selectionText,
-    imageBytes,
     clipboardPNG,
     MAX_CLIPBOARD_IMAGE_BYTES,
     MAX_SELECTION_BYTES,
@@ -42,25 +39,6 @@ const frame = (symbols: string[], width = symbols.length) => ({
     cursor: null,
     hyperlinks: [],
     graphics: [],
-});
-
-test("Herdr named/indexed/RGB/default colors and modifier order", () => {
-    assert.equal(wireColor(0, 0x123456), 0x123456);
-    assert.equal(wireColor(1, 0), 0x000000);
-    assert.equal(wireColor(16, 0), 0xffffff);
-    assert.equal(wireColor(0x010000c4, 0), 0xff0000);
-    assert.equal(wireColor(0x010000ff, 0), 0xeeeeee);
-    assert.equal(wireColor(0x02123456, 0), 0x123456);
-    assert.equal(wireColor(0xff123456, 42), 42);
-    assert.deepEqual(cellColors({ ...cell("x", 64), fg: 0x02ff0000, bg: 0x020000ff }), {
-        fg: 0x0000ff,
-        bg: 0xff0000,
-    });
-    assert.deepEqual(cellColors({ ...cell("x", 64 | 2 | 128), fg: 0x02ff0000, bg: 0x020000ff }), {
-        fg: 0xff0000,
-        bg: 0xff0000,
-    });
-    assert.equal(cellColors(cell("x", 1), { ...DEFAULT_THEME, bold: 0xabcdef }).fg, 0xabcdef);
 });
 
 test("Rust externally tagged key enums; browser/IME/dead/AltGraph keys left alone", () => {
@@ -209,20 +187,6 @@ test("pane-local pixel geometry, popup isolation and semantic wheel shape", () =
     assert.equal(targetAt({ ...surface, popup }, 4, 4).id, "popup");
 });
 
-test("native image data accepts RGB/RGBA and rejects excessive, malformed and forged PNG dimensions", () => {
-    const image = {
-        key: { image_width: 1, image_height: 1, data_len: 3, format: "Rgb" },
-        encoding: "base64",
-        data: "AQID",
-    };
-
-    assert.deepEqual([...imageBytes(image)], [1, 2, 3]);
-    assert.throws(() => imageBytes({ ...image, key: { ...image.key, image_width: 5000 } }));
-    assert.throws(() => imageBytes({ ...image, key: { ...image.key, format: "Png" } }));
-    assert.throws(() => imageBytes({ ...image, data: "!!!!" }));
-    assert.throws(() => imageBytes({ ...image, data: "https://example.com/pixel" }));
-});
-
 test("explicit clipboard PNG validation bounds bytes and dimensions before sending", async () => {
     const data =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF9kAAAAASUVORK5CYII=";
@@ -256,94 +220,15 @@ async function value<T>(page: BrowserPage, expression: string): Promise<T> {
 }
 
 async function settle(page: BrowserPage) {
-    await page.evaluate("await new Promise(resolve => setTimeout(resolve, 100))");
+    await page.evaluate(`await new Promise(resolve => setTimeout(resolve, 100));
+        if (fixture.props.enabled && !fixture.props.disabled) {
+            const deadline = performance.now() + 5_000;
+            while (document.querySelector('.terminal-grid').dataset.rendererState !== 'ready') {
+                if (performance.now() > deadline) throw new Error('GPUI fixture did not become ready');
+                await new Promise(resolve => requestAnimationFrame(resolve));
+            }
+        }`);
 }
-
-test(
-    "pane painting clips overlong symbols, graphics and cursor to visible pane geometry",
-    {
-        skip: findBrowser() ? false : "No Chromium installed",
-        timeout: 60_000,
-    },
-    async () => {
-        const fixture = await terminalFixture();
-        const dir = mkdtempSync(join(tmpdir(), "terminal-grid-clipping-"));
-        const browsers = new Browsers({ dataDir: dir });
-
-        try {
-            const page = await browsers.open(1);
-
-            await page.setViewport(VIEWPORTS.desktop);
-            await page.navigate(fixture.url);
-            await settle(page);
-            await page.evaluate(`const blank={symbol:' ',fg:0,bg:0,modifier:0,skip:false,hyperlink:null};
-            const cells=Array.from({length:32*4},()=>({...blank}));
-            cells[0]={...blank,symbol:'LEFT-PANE-TEXT-MUST-NOT-CROSS',fg:0x02ff0000,modifier:1|4|8|256};
-            for(let y=0;y<4;y++){cells[y*32+4]={...blank,symbol:'│',fg:0x020000ff};cells[y*32+5]={...blank,symbol:'█',fg:0x0200ff00};}
-            const rect=(x,width)=>({x,y:0,width,height:4});
-            const panes=[{...fixture.props.surface.panes[0],rect:rect(0,5),inner_rect:rect(0,4),focused:true},
-                {...fixture.props.surface.panes[1],rect:rect(5,8),inner_rect:rect(5,8),focused:false}];
-            const frame={width:32,height:4,cells,graphics:[],hyperlinks:[],cursor:{x:6,y:1,visible:true,shape:2}};
-            fixture.draw({surface:{...fixture.props.surface,frame,panes,splits:[],graphics:{assets:[],placements:[],retained_assets:[]}}});
-            fixture.rightPixels=()=>{const c=document.querySelector('canvas'),s=c.width/320;
-                const data=c.getContext('2d').getImageData(50*s,0,80*s,80*s).data;let red=0,green=0;
-                for(let i=0;i<data.length;i+=4){if(data[i]>150&&data[i+1]<60&&data[i+2]<60)red++;if(data[i+1]>150&&data[i]<60&&data[i+2]<60)green++;}
-                return {red,green};};`);
-            await settle(page);
-            const glyphs = await value<{ red: number; green: number }>(
-                page,
-                "fixture.rightPixels()",
-            );
-            const cursorVisible = await value<boolean>(
-                page,
-                "!!document.querySelector('.terminal-grid-cursor')",
-            );
-            const neighbor = await value<number[]>(
-                page,
-                `(() => {const c=document.querySelector('canvas'),s=c.width/320;return [...c.getContext('2d').getImageData(55*s,10*s,1,1).data]})()`,
-            );
-
-            await page.evaluate(`const key={source:{Terminal:{target:{Pane:{pane_id:'pane-left'}},image_id:1}},image_width:1,image_height:1,format:'Rgb',data_len:3,data_fingerprint:'18446744073709551615'};
-            const placement={asset:key,logical_placement_id:1,x:2,y:2,cols:20,rows:2,source_x:0,source_y:0,source_width:0,source_height:0,x_offset:0,y_offset:0,z:1,scrollback_offset:0};
-            fixture.draw({images:[{key,serial:1,encoding:'base64',data:'/wAA'}],surface:{...fixture.props.surface,graphics:{assets:[],placements:[placement],retained_assets:[]}}});`);
-            await settle(page);
-            const graphics = await value<{ red: number; green: number }>(
-                page,
-                "fixture.rightPixels()",
-            );
-
-            await shot(page, "pane-clip");
-            assert.deepEqual(
-                {
-                    glyphBleed: glyphs.red > 0,
-                    neighborVisible: glyphs.green > 0,
-                    graphicsBleed: graphics.red > 0,
-                    cursorVisible,
-                },
-                {
-                    glyphBleed: false,
-                    neighborVisible: true,
-                    graphicsBleed: false,
-                    cursorVisible: false,
-                },
-            );
-            assert.deepEqual(
-                neighbor,
-                [0, 255, 0, 255],
-                "the neighbor glyph survives an overlong left-pane symbol on the same row",
-            );
-            assert.deepEqual(
-                page.logs().filter((entry) => entry.level === "error"),
-                [],
-            );
-        } finally {
-            await browsers.closeAll({ final: true });
-            fixture.server.closeAllConnections();
-            await new Promise<void>((resolve) => fixture.server.close(() => resolve()));
-            rmSync(dir, { recursive: true, force: true });
-        }
-    },
-);
 
 test(
     "terminal focus regressions: first click, immediate typing and activation border",
@@ -363,7 +248,7 @@ test(
             await page.navigate(fixture.url);
             await settle(page);
             await t.test(
-                "first click reaches the TUI and immediate text uses intended pane before acknowledgement",
+                "first click reaches the TUI and immediate text uses intended pane before pane-focus acknowledgement",
                 async () => {
                     await page.evaluate(
                         `fixture.draw({surface:{...fixture.props.surface,panes:fixture.props.surface.panes.map((p,i)=>({...p,focused:i===1,mouse_reporting:true}))}});`,
@@ -901,13 +786,13 @@ async function mobileKeyboard(page: BrowserPage) {
     await settle(page);
     await constrainedLayout();
     await layout();
-    const canvasPoint = await value<{ x: number; y: number }>(
+    const terminalPoint = await value<{ x: number; y: number }>(
         page,
-        `(() => {const r=document.querySelector('canvas').getBoundingClientRect();
+        `(() => {const r=document.querySelector('.terminal-grid-interaction').getBoundingClientRect();
             return {x:r.left+11,y:r.top+41}})()`,
     );
 
-    await page.click(canvasPoint);
+    await page.click(terminalPoint);
     assert.equal(await value(page, "document.activeElement.matches('.terminal-grid-input')"), true);
     await inputMode();
     await page.input([{ type: "text", text: "native-must-not-open" }]);
@@ -1600,7 +1485,7 @@ async function shot(page: BrowserPage, name: string) {
 }
 
 test(
-    "Chromium desktop/mobile: canvas, IME, shortcuts, paste, selection, mouse, keyboard, popups, disabled mode and cleanup",
+    "Chromium desktop/mobile: GPUI interaction, IME, shortcuts, paste, selection, mouse, keyboard, popups, disabled mode and cleanup",
     {
         skip: findBrowser() ? false : "No Chromium installed",
         timeout: 120_000,
@@ -1627,9 +1512,14 @@ test(
             assert.deepEqual(
                 await value(
                     page,
-                    `(() => { const c=document.querySelector('canvas'); return [...c.getContext('2d').getImageData(c.width/640*5,c.height/280*245,1,1).data] })()`,
+                    `(() => {
+                    const grid=document.querySelector('.terminal-grid');
+                    const interaction=grid.querySelector('.terminal-grid-interaction');
+                    return {renderer:grid.dataset.renderer,state:grid.dataset.rendererState,
+                        role:interaction.getAttribute('role'),canvas:!!grid.querySelector('canvas')};
+                })()`,
                 ),
-                [0x12, 0x34, 0x56, 255],
+                { renderer: "gpui", state: "ready", role: "img", canvas: false },
             );
             assert.equal(
                 await value(
@@ -1700,8 +1590,8 @@ test(
                 { Drag: "Left" },
                 { Up: "Left" },
             ]);
-            await page.evaluate(`fixture.inputs=[]; const c=document.querySelector('canvas'),r=c.getBoundingClientRect();
-            c.dispatchEvent(new WheelEvent('wheel',{clientX:r.left+10,clientY:r.top+20,deltaY:-40,bubbles:true,cancelable:true}));`);
+            await page.evaluate(`fixture.inputs=[]; const interaction=document.querySelector('.terminal-grid-interaction'),r=interaction.getBoundingClientRect();
+            interaction.dispatchEvent(new WheelEvent('wheel',{clientX:r.left+10,clientY:r.top+20,deltaY:-40,bubbles:true,cancelable:true}));`);
             assert.equal(await value(page, "fixture.inputs[0].events[0].Mouse.kind"), "ScrollUp");
             assert.equal(await value(page, "fixture.inputs[0].events[0].Mouse.lines"), 2);
 
@@ -1772,33 +1662,9 @@ test(
             );
             await page.evaluate(`fixture.draw({surface:{...fixture.props.surface,popup:null}});`);
             await settle(page);
-            await page.evaluate(`const key={source:{Terminal:{target:{Pane:{pane_id:'pane-left'}},image_id:1}},image_width:1,image_height:1,format:'Rgb',data_len:3,data_fingerprint:'18446744073709551615'};
-            const placement={asset:key,logical_placement_id:1,x:0,y:10,cols:2,rows:1,source_x:0,source_y:0,source_width:0,source_height:0,x_offset:0,y_offset:0,z:1,scrollback_offset:0};
-            fixture.draw({images:[{key,serial:1,encoding:'base64',data:'/wAA'}],surface:{...fixture.props.surface,graphics:{assets:[],placements:[placement],retained_assets:[]}}});`);
-            await settle(page);
-            assert.deepEqual(
-                await value(
-                    page,
-                    `(() => {const c=document.querySelector('canvas');return [...c.getContext('2d').getImageData(c.width/640*5,c.height/280*205,1,1).data]})()`,
-                ),
-                [255, 0, 0, 255],
-            );
-            await page.evaluate(`const tile=document.createElement('canvas');tile.width=tile.height=1;
-                const ctx=tile.getContext('2d');ctx.fillStyle='#00ff00';ctx.fillRect(0,0,1,1);
-                const data=tile.toDataURL('image/png').split(',')[1];
-                const key={...fixture.props.images[0].key,format:'Png',data_len:atob(data).length,data_fingerprint:'18446744073709551614'};
-                const placement={...fixture.props.surface.graphics.placements[0],asset:key};
-                fixture.draw({images:[{key,serial:2,encoding:'base64',data}],surface:{...fixture.props.surface,graphics:{assets:[],placements:[placement],retained_assets:[]}}});`);
-            await settle(page);
-            assert.deepEqual(
-                await value(
-                    page,
-                    `(() => {const c=document.querySelector('canvas');return [...c.getContext('2d').getImageData(c.width/640*5,c.height/280*205,1,1).data]})()`,
-                ),
-                [0, 255, 0, 255],
-            );
-            await page.evaluate(`fixture.pasteImage = (type = 'image/png', delay = false) => {
-                const bytes=Uint8Array.from(atob(fixture.props.images[0].data),c=>c.charCodeAt(0));
+            await page.evaluate(`fixture.clipboardPNGData='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF9kAAAAASUVORK5CYII=';
+            fixture.pasteImage = (type = 'image/png', delay = false) => {
+                const bytes=Uint8Array.from(atob(fixture.clipboardPNGData),c=>c.charCodeAt(0));
                 const file=new File([bytes],'clipboard.png',{type});
                 if (delay) { file.arrayBuffer=()=>new Promise(resolve=>{fixture.finishImageRead=()=>resolve(bytes.buffer)}); }
                 const data=new DataTransfer();data.items.add(file);
@@ -1811,7 +1677,7 @@ test(
             assert.deepEqual(await value(page, "fixture.pastedImages[0].image"), {
                 encoding: "base64",
                 format: "png",
-                data: await value<string>(page, "fixture.props.images[0].data"),
+                data: await value<string>(page, "fixture.clipboardPNGData"),
             });
             await page.evaluate(`fixture.pasteImage('image/jpeg');`);
             await settle(page);

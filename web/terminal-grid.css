@@ -34,9 +34,44 @@
     position: relative;
     direction: ltr;
     flex: none;
+    z-index: 1;
 }
 
-.terminal-grid canvas {
+.terminal-grid-gpui {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 0;
+    border: 0;
+    pointer-events: none;
+}
+
+.terminal-grid-renderer-status {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    bottom: 8px;
+    left: 8px;
+    z-index: 2;
+    max-width: calc(100% - 16px);
+    margin: 0;
+    padding: 4px 8px;
+    color: var(--text, #d8dee9);
+    background: var(--panel, #101419);
+    border: 1px solid var(--line, #827e91);
+    font-size: 12px;
+}
+
+.terminal-grid-renderer-retry {
+    flex: none;
+    min-height: 44px;
+    padding: 0 10px;
+    font: inherit;
+    touch-action: manipulation;
+}
+
+.terminal-grid-interaction {
     display: block;
     cursor: text;
     touch-action: pinch-zoom;

@@ -61,6 +61,7 @@ import {
 import { prefs, setPrefs, startTheme } from "./theme.js";
 import { Transcript } from "./transcript.js";
 import { ThreadTypeTag } from "./thread-type.js";
+import { startTerminalRendererPrefetch } from "./terminal-renderer-assets.js";
 import {
     APPLE,
     Boot,
@@ -897,6 +898,7 @@ if (new URLSearchParams(location.search).has("pip")) {
 // The worker shows notifications and receives what other apps share; it needs a secure page (https or localhost).
 registerWorker();
 store.subscribe(updateBadge);
+startTerminalRendererPrefetch(store);
 start();
 // Something shared from another app: the service worker kept it, and redirected here to choose where it goes.
 const shared = new URLSearchParams(location.search).get("share");

@@ -1,4 +1,5 @@
-// Real Chromium, synthetic Herdr only. No socket discovery or personal PTY control.
+// Chromium DOM/transport contracts, synthetic Herdr and an authenticated paint-ack child only.
+// The child does not validate GPU pixels. No socket discovery or personal PTY control.
 import { cleanUp, openApp, root, scriptedModel, until } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -12,6 +13,7 @@ import { findBrowser } from "../src/server/browser/discovery.ts";
 import type { BrowserPage } from "../src/server/browser/page.ts";
 import { VIEWPORTS } from "../src/server/browser/viewport.ts";
 import { createHandler } from "../src/server/http.ts";
+import { gpuiFixture } from "./terminal-grid-fixture.ts";
 
 const chromium = findBrowser();
 
@@ -245,8 +247,9 @@ test("synthetic split fixture keeps each pane's text inside its region", () => {
     }
 });
 
-async function mockSocket(page: BrowserPage) {
+async function mockSocket(page: BrowserPage, autoPaint = true) {
     await page.evaluate(`
+        window.fixtureGpuiAutoPaint = ${autoPaint};
         window.fixtureSockets = [];
         window.WebSocket = class {
             readyState = 1; sent = []; closed = false;
@@ -267,7 +270,11 @@ async function mockSocket(page: BrowserPage) {
     `);
 }
 
-async function frames(page: BrowserPage) {
+async function ready(page: BrowserPage) {
+    await present(page, '.terminal-grid[data-renderer="gpui"][data-renderer-state="ready"]');
+}
+
+async function frames(page: BrowserPage, waitForPaint = true) {
     const [cols, rows] = await value<[number, number]>(
         page,
         `(() => { const viewport = document.querySelector('.terminal-grid-viewport'); return [Math.max(20, Math.floor(viewport.clientWidth / 7.8)), Math.max(10, Math.floor(viewport.clientHeight / 20))]; })()`,
@@ -278,7 +285,11 @@ async function frames(page: BrowserPage) {
         ws.receive({type:'snapshot',snapshot:${JSON.stringify(snapshot)}});
         ws.receive({type:'surface',surface:${JSON.stringify(surface(cols, rows))}});
     `);
-    await present(page, ".terminal-grid canvas");
+    await present(page, ".terminal-grid-interaction");
+
+    if (waitForPaint) {
+        await ready(page);
+    }
 }
 
 test(
@@ -315,9 +326,42 @@ test(
         let denied = false;
         let extraInstances = 0;
         let focusedWorkspace = "native-work";
+        let rendererBuildAvailable = true;
+        let rendererBuildReads = 0;
         const reads: string[] = [];
         const server = createServer(async (request, response) => {
             const path = new URL(request.url!, "http://fixture").pathname;
+
+            if (path === "/herdr-renderer/build.json") {
+                rendererBuildReads++;
+                response.setHeader("Cache-Control", "no-store");
+                response.setHeader("Content-Type", "application/json");
+                response.statusCode = rendererBuildAvailable ? 200 : 404;
+                response.end(
+                    JSON.stringify(
+                        rendererBuildAvailable
+                            ? { schema: 2, kind: "live-terminal", entry: gpuiFixture.entry }
+                            : { error: "Synthetic missing-build fixture" },
+                    ),
+                );
+
+                return;
+            }
+
+            if (path === gpuiFixture.wasmPath) {
+                response.setHeader("Content-Type", "application/wasm");
+                response.end(gpuiFixture.wasm);
+
+                return;
+            }
+
+            if (path === `/herdr-renderer/${gpuiFixture.entry}`) {
+                response.setHeader("Cache-Control", "no-store");
+                response.setHeader("Content-Type", "text/html");
+                response.end(gpuiFixture.html);
+
+                return;
+            }
 
             if (!path.startsWith("/api/private")) {
                 return handler(request, response);
@@ -504,7 +548,7 @@ test(
             await page.setViewport(VIEWPORTS.desktop);
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
             await present(page, ".private-tabs");
-            await mockSocket(page);
+            await mockSocket(page, false);
             await page.evaluate(
                 `(await import('/store.js')).navigate(null, {privateId:"opaque-agent"})`,
             );
@@ -560,7 +604,280 @@ test(
             assert.equal(requests[0]?.body.acknowledged, true);
             assert.ok(requests[0]?.pocket);
             assert.ok(Number(requests[0]?.body.cols) > 0);
-            await frames(page);
+            await frames(page, false);
+            await t.test(
+                "GPUI starts automatically, gates input until paint acknowledgement and carries live image assets",
+                async () => {
+                    const connectionsBefore = requests.length;
+
+                    await present(page, ".terminal-grid-gpui");
+                    await page.evaluate(`await document.fonts.ready;
+                        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));`);
+                    await until(
+                        () =>
+                            value(
+                                page,
+                                `!!document.querySelector('.terminal-grid-gpui')?.contentWindow
+                            .fixtureGpui?.messages.some(message=>message.type==='gpui-present')`,
+                            ),
+                        "the authenticated child receives the current live surface",
+                    );
+                    assert.match(
+                        await value<string>(
+                            page,
+                            "new URL(document.querySelector('.terminal-grid-gpui').src).hash",
+                        ),
+                        /^#[a-f0-9]{32}$/,
+                    );
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `(() => {
+                            const grid=document.querySelector('.terminal-grid');
+                            const hit=grid.querySelector('.terminal-grid-interaction');
+                            const child=grid.querySelector('.terminal-grid-gpui');
+                            const a=hit.getBoundingClientRect(),b=child.getBoundingClientRect();
+                            window.fixtureRendererNodes={grid,hit,input:grid.querySelector('.terminal-grid-input'),
+                                child,socket:window.fixtureSockets[0],start:window.fixtureSockets[0].sent.length,
+                                presentations:child.contentWindow.fixtureGpui.messages.filter(message=>message.type==='gpui-present').length};
+                            return {renderer:grid.dataset.renderer,state:grid.dataset.rendererState,
+                                enabled:grid.dataset.enabled,inputDisabled:window.fixtureRendererNodes.input.disabled,
+                                canvas:!!grid.querySelector('canvas'),toggle:!!document.querySelector('.private-gpui-toggle'),
+                                visibility:getComputedStyle(child).visibility,pointerEvents:getComputedStyle(child).pointerEvents,
+                                matchesInteraction:['left','top','width','height'].every(key=>Math.abs(a[key]-b[key])<1)};
+                        })()`,
+                        ),
+                        {
+                            renderer: "gpui",
+                            state: "loading",
+                            enabled: "false",
+                            inputDisabled: true,
+                            canvas: false,
+                            toggle: false,
+                            visibility: "hidden",
+                            pointerEvents: "none",
+                            matchesInteraction: true,
+                        },
+                        "the sole painter starts hidden and the retained interaction layer cannot send input yet",
+                    );
+                    await page.evaluate(`window.fixtureTryText=text=>{
+                        const input=document.querySelector('.terminal-grid-input');
+                        input.value=text;input.dispatchEvent(new InputEvent('input',{bubbles:true,data:text}));
+                    };
+                    window.fixtureTryText('must-not-replay-before-paint');
+                    const input=document.querySelector('.terminal-grid-input');
+                    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+                    const hit=document.querySelector('.terminal-grid-interaction'),r=hit.getBoundingClientRect();
+                    hit.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerId:1,
+                        clientX:r.left+2,clientY:r.top+2}));`);
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            "window.fixtureSockets[0].sent.slice(window.fixtureRendererNodes.start).filter(frame=>frame.type!=='resize')",
+                        ),
+                        [],
+                        "neither typing, keys nor focus actions escape the initial paint fence",
+                    );
+                    // The real transport processes the asset barrier before the surface. The mock
+                    // child records what production serializes; it does not decode or paint pixels.
+                    await page.evaluate(`window.fixtureRendererOriginalSurface=window.fixtureSurface;
+                        const key={source:{Terminal:{target:{Pane:{pane_id:'native-agent'}},image_id:'18446744073709551615'}},
+                            image_width:1,image_height:1,format:'Rgb',data_len:3,data_fingerprint:'18446744073709551614'};
+                        window.fixtureSockets[0].receive({type:'images',images:[{key,serial:1,encoding:'base64',data:'/wAA'}]});
+                        const placement={asset:key,logical_placement_id:1,x:0,y:0,cols:1,rows:1,
+                            source_x:0,source_y:0,source_width:0,source_height:0,x_offset:0,y_offset:0,z:1,scrollback_offset:0};
+                        window.fixtureSurface={...window.fixtureSurface,surface_revision:2,
+                            frame:{...window.fixtureSurface.frame,cells:window.fixtureSurface.frame.cells.map(
+                                (cell,index)=>index===0?{...cell,symbol:'G'}:cell)},
+                            graphics:{assets:[],placements:[placement],retained_assets:[]}};
+                        window.fixtureSockets[0].receive({type:'surface',surface:window.fixtureSurface});
+                        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector('.terminal-grid-gpui').contentWindow.fixtureGpui.messages
+                            .filter(message=>message.type==='gpui-present').length`,
+                        ),
+                        await value(page, "window.fixtureRendererNodes.presentations"),
+                        "a later complete presentation waits behind the outstanding child paint",
+                    );
+                    await page.evaluate(
+                        "document.querySelector('.terminal-grid-gpui').contentWindow.fixtureGpui.paint()",
+                    );
+                    await until(
+                        () =>
+                            value(
+                                page,
+                                `document.querySelector('.terminal-grid-gpui').contentWindow.fixtureGpui.messages
+                            .some(message=>message.presentation?.surface.surface_revision===2)`,
+                            ),
+                        "the latest live surface follows the matching acknowledgement",
+                    );
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `(() => {
+                            const {surface,images}=document.querySelector('.terminal-grid-gpui').contentWindow.fixtureGpui.messages
+                                .find(message=>message.presentation?.surface.surface_revision===2).presentation;
+                            return {boot:surface.boot_id,projection:surface.projection_revision,symbol:surface.frame.cells[0].symbol,
+                                imageId:images[0].key.source.Terminal.image_id,fingerprint:images[0].key.data_fingerprint,
+                                data:images[0].data,placementHasAsset:JSON.stringify(surface.graphics.placements[0].asset)===JSON.stringify(images[0].key)};
+                        })()`,
+                        ),
+                        {
+                            boot: "fixture-boot",
+                            projection: 1,
+                            symbol: "G",
+                            imageId: "18446744073709551615",
+                            fingerprint: "18446744073709551614",
+                            data: "/wAA",
+                            placementHasAsset: true,
+                        },
+                        "image bytes and exact 64-bit identities accompany the surface that references them",
+                    );
+                    await page.evaluate(`window.fixtureGpuiAutoPaint=true;
+                        document.querySelector('.terminal-grid-gpui').contentWindow.fixtureGpui.paint();`);
+                    await ready(page);
+                    await page.evaluate("window.fixtureTryText('after-first-paint')");
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `window.fixtureSockets[0].sent.slice(window.fixtureRendererNodes.start)
+                            .filter(frame=>frame.type!=='resize').map(frame=>({type:frame.type,pane:frame.paneId,events:frame.events}))`,
+                        ),
+                        [
+                            {
+                                type: "input",
+                                pane: "native-agent",
+                                events: [{ TextCommit: "after-first-paint" }],
+                            },
+                        ],
+                        "readiness admits only fresh input and never replays blocked edits",
+                    );
+                    assert.equal(await value(page, "window.fixtureSockets.length"), 1);
+                    assert.equal(requests.length, connectionsBefore);
+                },
+            );
+            await t.test(
+                "renderer failure has no Canvas fallback and retry retains the grid, input and live connection",
+                async () => {
+                    const connectionsBefore = requests.length;
+
+                    await page.evaluate(`const nodes=window.fixtureRendererNodes;
+                        nodes.session=new URL(nodes.child.src).hash;
+                        nodes.start=nodes.socket.sent.length;
+                        nodes.child.contentWindow.fixtureGpui.fail();`);
+                    await present(
+                        page,
+                        '.terminal-grid[data-renderer-state="error"] .terminal-grid-renderer-retry',
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            "document.querySelector('.terminal-grid').dataset.renderer",
+                        ),
+                        "gpui",
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            "document.querySelector('.terminal-grid-input').disabled",
+                        ),
+                        true,
+                    );
+                    assert.equal(
+                        await value(page, "!!document.querySelector('.terminal-grid canvas')"),
+                        false,
+                    );
+                    const failure = await value<string>(
+                        page,
+                        "document.querySelector('.terminal-grid').textContent",
+                    );
+
+                    assert.match(failure, /renderer unavailable/i);
+                    assert.doesNotMatch(
+                        failure,
+                        /Untrusted child failure details|Canvas2D is active|fallback is active/,
+                    );
+                    await page.evaluate("window.fixtureTryText('must-not-replay-after-failure')");
+                    rendererBuildAvailable = false;
+                    const buildsBeforeRetry = rendererBuildReads;
+
+                    await click(page, ".terminal-grid-renderer-retry");
+                    await until(
+                        () => rendererBuildReads > buildsBeforeRetry,
+                        "retry requests a fresh manifest",
+                    );
+                    await present(
+                        page,
+                        '.terminal-grid[data-renderer-state="error"] .terminal-grid-renderer-retry',
+                    );
+                    assert.equal(
+                        await value(page, "!!document.querySelector('.terminal-grid-gpui')"),
+                        false,
+                    );
+                    assert.equal(
+                        await value(
+                            page,
+                            "document.querySelector('.terminal-grid-input').disabled",
+                        ),
+                        true,
+                    );
+                    rendererBuildAvailable = true;
+                    await page.evaluate("window.fixtureGpuiAutoPaint=false");
+                    await click(page, ".terminal-grid-renderer-retry");
+                    await until(
+                        () =>
+                            value(
+                                page,
+                                `!!document.querySelector('.terminal-grid-gpui')?.contentWindow.fixtureGpui
+                            ?.messages.some(message=>message.type==='gpui-present')`,
+                            ),
+                        "retry creates a new authenticated child on the retained transport",
+                    );
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `(() => {
+                            const nodes=window.fixtureRendererNodes,grid=document.querySelector('.terminal-grid');
+                            const child=grid.querySelector('.terminal-grid-gpui');
+                            return [grid===nodes.grid,grid.querySelector('.terminal-grid-interaction')===nodes.hit,
+                                grid.querySelector('.terminal-grid-input')===nodes.input,
+                                window.fixtureSockets[0]===nodes.socket,!nodes.socket.closed,
+                                child!==nodes.child,new URL(child.src).hash!==nodes.session,
+                                grid.dataset.rendererState==='loading',nodes.input.disabled];
+                        })()`,
+                        ),
+                        Array(9).fill(true),
+                    );
+                    await page.evaluate(`window.fixtureTryText('must-not-replay-during-retry');
+                        window.fixtureGpuiAutoPaint=true;
+                        document.querySelector('.terminal-grid-gpui').contentWindow.fixtureGpui.paint();`);
+                    await ready(page);
+                    await page.evaluate("window.fixtureTryText('after-renderer-retry')");
+                    assert.deepEqual(
+                        await value(
+                            page,
+                            `window.fixtureSockets[0].sent.slice(window.fixtureRendererNodes.start)
+                            .filter(frame=>frame.type!=='resize').map(frame=>({type:frame.type,pane:frame.paneId,events:frame.events}))`,
+                        ),
+                        [
+                            {
+                                type: "input",
+                                pane: "native-agent",
+                                events: [{ TextCommit: "after-renderer-retry" }],
+                            },
+                        ],
+                        "renderer failure/retry neither reconnects, changes native interest nor replays input",
+                    );
+                    assert.equal(await value(page, "window.fixtureSockets.length"), 1);
+                    assert.equal(requests.length, connectionsBefore);
+                    await page.evaluate(`window.fixtureSurface=window.fixtureRendererOriginalSurface;
+                        window.fixtureSockets[0].receive({type:'images',images:[]});
+                        window.fixtureSockets[0].receive({type:'surface',surface:window.fixtureSurface});`);
+                    await ready(page);
+                },
+            );
             await t.test(
                 "idle metadata/surface updates do not re-resize the shared terminal",
                 async () => {
@@ -1116,12 +1433,7 @@ test(
             await project("native-agent", "native-tab", 1);
             await until(focused, "terminal focus resumes after explicitly leaving the form");
 
-            // Two inhabited workspaces in one instance: issue native focus, then render native B.
-            const beforeWorkspace = await value<string>(
-                page,
-                "document.querySelector('.terminal-grid canvas').toDataURL()",
-            );
-
+            // Two inhabited workspaces in one instance: native focus and the paint bridge follow B.
             await page.click({
                 selector: '.sidebar .private-space-row[data-workspace-id="native-work-0"]',
             });
@@ -1170,10 +1482,13 @@ test(
             );
             await until(
                 () =>
-                    value(page, "document.querySelector('.terminal-grid canvas').toDataURL()").then(
-                        (image) => image !== beforeWorkspace,
+                    value(
+                        page,
+                        `document.querySelector('.terminal-grid-gpui').contentWindow.fixtureGpui.messages
+                    .some(message=>message.presentation?.surface.projection_revision===6 &&
+                        message.presentation.surface.frame.cells.slice(0,22).map(cell=>cell.symbol).join('')==='SPACE B NATIVE SURFACE')`,
                     ),
-                "B surface really paints, not just its highlight",
+                "the native B surface reaches the real paint bridge, not just the workspace highlight",
             );
             const listingReads = reads.filter((path) => path === "/api/private").length;
 
@@ -1219,7 +1534,7 @@ test(
             await page.evaluate(
                 `(await import('/store.js')).navigate(null, {privateId:"opaque-agent"})`,
             );
-            await present(page, ".terminal-grid canvas");
+            await ready(page);
             await click(page, ".private-view-switch button:last-child");
             await present(page, "#private-prompt");
             assert.equal(
@@ -1236,7 +1551,7 @@ test(
                 "Chat pauses native surfaces",
             );
             await click(page, ".private-view-switch button:first-child");
-            await present(page, ".terminal-grid canvas");
+            await ready(page);
             assert.equal(requests.length, 1, "returning to Terminal reuses the connection");
 
             // An asynchronous paste from the old connection cannot complete into a new epoch.
@@ -1254,7 +1569,7 @@ test(
                 () =>
                     value(
                         page,
-                        `window.fixtureSockets[0].closed && !document.querySelector('.terminal-grid canvas')`,
+                        `window.fixtureSockets[0].closed && !document.querySelector('.terminal-grid-interaction')`,
                     ),
                 "offline drops and clears transport frames",
             );
@@ -1297,7 +1612,7 @@ test(
                 `window.fixtureHoldInterest = true; Object.defineProperty(document, 'visibilityState', {configurable:true, value:'hidden'}); document.dispatchEvent(new Event('visibilitychange'));`,
             );
             await until(
-                () => value(page, `!document.querySelector('.terminal-grid canvas')`),
+                () => value(page, `!document.querySelector('.terminal-grid-interaction')`),
                 "hidden page stops painting immediately",
             );
             assert.equal(
@@ -1313,7 +1628,7 @@ test(
             await new Promise((resolve) => setTimeout(resolve, 2100));
             assert.equal(reads.length, hiddenReads, "hidden page pauses Private polling");
             assert.equal(
-                await value(page, `!!document.querySelector('.terminal-grid canvas')`),
+                await value(page, `!!document.querySelector('.terminal-grid-interaction')`),
                 false,
                 "incoming hidden frames do not paint",
             );
@@ -1329,7 +1644,7 @@ test(
                 `Object.defineProperty(document, 'visibilityState', {configurable:true, value:'visible'}); document.dispatchEvent(new Event('visibilitychange')); window.fixtureSockets[1].receive({type:'response',requestId:'unrelated',response:{result:{}}});`,
             );
             assert.equal(
-                await value(page, `!!document.querySelector('.terminal-grid canvas')`),
+                await value(page, `!!document.querySelector('.terminal-grid-interaction')`),
                 false,
                 "unrelated responses do not activate painting",
             );
@@ -1345,14 +1660,14 @@ test(
                 "reactivation follows pause acknowledgement",
             );
             assert.equal(
-                await value(page, `!!document.querySelector('.terminal-grid canvas')`),
+                await value(page, `!!document.querySelector('.terminal-grid-interaction')`),
                 false,
                 "reactivation awaits its own acknowledgement",
             );
             await page.evaluate(
                 `const ws = window.fixtureSockets[1]; const activate = ws.sent.filter(frame => frame.method === 'client_shell.surface.set').at(-1); ws.receive({type:'surface',surface:window.fixtureSurface}); ws.receive({type:'response',requestId:activate.requestId,response:{result:{}}}); window.fixtureHoldInterest=false;`,
             );
-            await present(page, ".terminal-grid canvas");
+            await ready(page);
             assert.equal(requests.length, 2, "visibility changes do not create a new helper");
 
             await click(page, ".private-disconnect");
@@ -1504,6 +1819,91 @@ test(
                 }
             }
 
+            await t.test(
+                "touch keyboard prefixes survive internal focus but cancel when focus leaves the terminal",
+                async () => {
+                    const tapKey = async (label: string) => {
+                        const result = await page.click({
+                            selector: `.terminal-keyboard button[aria-label="${label}"]`,
+                        });
+
+                        assert.equal(result.covered, undefined, `${label} is reachable`);
+                    };
+
+                    await ready(page);
+                    await page.evaluate(`const outside=document.createElement('button');
+                        outside.id='fixture-prefix-outside';outside.type='button';
+                        outside.textContent='Outside terminal';document.body.append(outside);`);
+
+                    try {
+                        for (const focus of ["pointer baseline", "internal", "outside"]) {
+                            await page.evaluate(`document.querySelector('.terminal-grid-input').focus({preventScroll:true});
+                                window.fixturePrefixStart=window.fixtureSockets[0].sent.length;`);
+                            await tapKey("Control");
+                            await tapKey("b");
+                            await until(
+                                () =>
+                                    value(
+                                        page,
+                                        `document.querySelector('.private-terminal-status').textContent
+                                    .includes('Herdr prefix: waiting for a key.')`,
+                                    ),
+                                `${focus}: the UI Ctrl+B arms the native shortcut prefix`,
+                            );
+
+                            if (focus !== "pointer baseline") {
+                                const selector =
+                                    focus === "internal"
+                                        ? '.terminal-keyboard button[aria-label="q"]'
+                                        : "#fixture-prefix-outside";
+
+                                await page.evaluate(
+                                    `document.querySelector(${JSON.stringify(selector)}).focus({preventScroll:true});`,
+                                );
+                                assert.equal(
+                                    await value(
+                                        page,
+                                        `document.activeElement===document.querySelector(${JSON.stringify(selector)})`,
+                                    ),
+                                    true,
+                                    `${focus}: real DOM focus moves before the chord key`,
+                                );
+                            }
+
+                            await tapKey("c");
+                            assert.deepEqual(
+                                await value(
+                                    page,
+                                    `(() => {
+                                    const sent=window.fixtureSockets[0].sent.slice(window.fixturePrefixStart);
+                                    return {tabs:sent.filter(frame=>frame.method==='tab.create').length,
+                                        inputs:sent.filter(frame=>['input','popup-input','clipboard-image'].includes(frame.type))
+                                            .map(frame=>({type:frame.type,pane:frame.paneId,events:frame.events}))};
+                                })()`,
+                                ),
+                                focus === "outside"
+                                    ? {
+                                          tabs: 0,
+                                          inputs: [
+                                              {
+                                                  type: "input",
+                                                  pane: "native-agent",
+                                                  events: [{ TextCommit: "c" }],
+                                              },
+                                          ],
+                                      }
+                                    : { tabs: 1, inputs: [] },
+                                `${focus}: internal focus preserves one shortcut; leaving the root restores ordinary typing`,
+                            );
+                        }
+                    } finally {
+                        await page.evaluate(`const outside=document.querySelector('#fixture-prefix-outside');
+                            outside?.focus({preventScroll:true});outside?.remove();
+                            document.querySelector('.terminal-grid-input')?.focus({preventScroll:true});`);
+                    }
+                },
+            );
+
             await click(page, '.private-mobile-terminal-nav button[aria-label="Paste"]');
             await present(page, ".terminal-keyboard-paste textarea");
             assert.equal(
@@ -1611,7 +2011,7 @@ test(
                 "mobile Chat retains the transport",
             );
             await click(page, ".private-view-switch button:first-child");
-            await present(page, ".terminal-grid canvas");
+            await ready(page);
             assert.equal(requests.length, mobileStart + 1);
             await page.evaluate(
                 `(await import('/store.js')).navigate(null, {privateId:"opaque-shell"})`,
@@ -1788,6 +2188,27 @@ test(
             state: "idle",
         };
         const server = createServer((request, response) => {
+            if (request.url === "/herdr-renderer/build.json") {
+                response.setHeader("Content-Type", "application/json");
+                response.end(JSON.stringify(gpuiFixture.manifest));
+
+                return;
+            }
+
+            if (request.url === gpuiFixture.wasmPath) {
+                response.setHeader("Content-Type", "application/wasm");
+                response.end(gpuiFixture.wasm);
+
+                return;
+            }
+
+            if (request.url === `/herdr-renderer/${gpuiFixture.entry}`) {
+                response.setHeader("Content-Type", "text/html");
+                response.end(gpuiFixture.html);
+
+                return;
+            }
+
             if (request.url === "/api/private" && request.method === "GET") {
                 response.setHeader("Content-Type", "application/json");
                 response.end(
@@ -1858,7 +2279,7 @@ test(
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
             await present(page, ".private-tabs");
             await page.navigate(`${base}/private/opaque-real`);
-            await present(page, ".terminal-grid canvas");
+            await ready(page);
             assert.equal(
                 launches,
                 1,
@@ -1894,23 +2315,23 @@ test(
                 "real gateway pauses surfaces in Chat",
             );
             await click(page, ".private-view-switch button:first-child");
-            await present(page, ".terminal-grid canvas");
+            await ready(page);
             assert.equal(launches, 1, "Chat reactivation keeps the native helper");
             await click(page, ".private-disconnect");
             await present(page, ".private-connect:not(:disabled)");
             assert.equal(
-                await value(page, "!!document.querySelector('.terminal-grid canvas')"),
+                await value(page, "!!document.querySelector('.terminal-grid-interaction')"),
                 false,
             );
             await new Promise((resolve) => setTimeout(resolve, 650));
             assert.equal(launches, 1, "Disconnect suppresses background reconnect");
             await page.reload();
-            await present(page, ".terminal-grid canvas");
+            await ready(page);
             assert.equal(launches, 2, "reopening a fresh Terminal route reconnects");
             await page.evaluate(`window.dispatchEvent(new Event('pagehide'))`);
             await present(page, ".private-connect:not(:disabled)");
             assert.equal(
-                await value(page, "!!document.querySelector('.terminal-grid canvas')"),
+                await value(page, "!!document.querySelector('.terminal-grid-interaction')"),
                 false,
                 "pagehide closes and clears transport",
             );

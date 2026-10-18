@@ -1,12 +1,12 @@
 /*
- * Structured Herdr terminal renderer. No ANSI parser, transport, or automatic clipboard I/O.
+ * Structured Herdr terminal interaction. No ANSI parser, native connection, or automatic clipboard I/O.
  * Color, input, selection and image geometry rules adapted from Herdr GPUI
  * e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf, crates/herdr-gpui/src/{terminal.rs,
  * terminal/selection.rs,terminal_painter.rs,terminal_painter/images.rs,config/theme.rs}.
  * Copyright the Herdr and Herdr GPUI contributors. Licensed under Apache-2.0.
  * https://www.apache.org/licenses/LICENSE-2.0
  * Full license: native/herdr-web/LICENSE-APACHE. Upstream: https://github.com/penso/herdr-gpui
- * Changes: browser Canvas2D painting, DOM input/selection, bounded RGBA decoding.
+ * Changes: GPUI/WASM presentation bridge and browser-owned DOM input/selection.
  */
 import { h } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
@@ -14,22 +14,16 @@ import htm from "htm";
 import { TerminalKeyboard, TerminalKeyboardControls } from "./terminal-keyboard.js";
 import { terminalTouch } from "./terminal-touch.js";
 import { terminalViewport } from "./terminal-viewport.js";
+import { useTerminalRenderer } from "./terminal-renderer.js";
 
 const html = htm.bind(h);
 
 export const MAX_SELECTION_BYTES = 1024 * 1024;
 const MAX_CELLS = 1_000_000;
-const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
+const MAX_SURFACE_PIXELS = 16_000_000;
 
 export const MAX_CLIPBOARD_IMAGE_BYTES = 8 * 1024 * 1024;
-const MAX_CANVAS_PIXELS = 16_000_000;
-const BOLD = 1,
-    DIM = 2,
-    ITALIC = 4,
-    UNDERLINE = 8,
-    REVERSE = 64,
-    HIDDEN = 128,
-    STRIKE = 256;
+const HIDDEN = 128;
 const encoder = new TextEncoder();
 const clamp = (n, low, high) => Math.max(low, Math.min(high, n));
 const rgb = (n) => `#${(n >>> 0).toString(16).padStart(6, "0").slice(-6)}`;
@@ -42,6 +36,7 @@ const pixels = (style) =>
             typeof value === "number" ? `${value}px` : value,
         ]),
     );
+
 const palette = [
     0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0, 0x808080,
     0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
@@ -65,44 +60,6 @@ export const DEFAULT_THEME = Object.freeze({
     bold: null,
     palette: Object.freeze(palette),
 });
-
-export function wireColor(value, fallback, theme = DEFAULT_THEME) {
-    switch (value >>> 24) {
-        case 0:
-            return (value & 255) >= 1 && (value & 255) <= 16
-                ? theme.palette[(value & 255) - 1]
-                : fallback;
-        case 1:
-            return theme.palette[value & 255];
-        case 2:
-            return value & 0xffffff;
-        default:
-            return fallback;
-    }
-}
-
-export function cellColors(cell, theme = DEFAULT_THEME) {
-    const isDefault = wireColor(cell.fg, -1, theme) === -1;
-    let fg =
-        cell.modifier & BOLD && isDefault && theme.bold != null
-            ? theme.bold
-            : wireColor(cell.fg, theme.foreground, theme);
-    let bg = wireColor(cell.bg, theme.background, theme);
-
-    if (cell.modifier & REVERSE) {
-        [fg, bg] = [bg, fg];
-    }
-
-    if (cell.modifier & DIM) {
-        fg = ((fg & 0xfefefe) >> 1) + ((bg & 0xfefefe) >> 1);
-    }
-
-    if (cell.modifier & HIDDEN) {
-        fg = bg;
-    }
-
-    return { fg, bg };
-}
 
 // The adapter can provide exact unicode-width crate results as frame.cell_widths.
 // This fallback covers common CJK, combining sequences, VS16, flags and emoji ZWJ.
@@ -164,6 +121,29 @@ function cellSpan(frame, index, available) {
         available,
         Math.max(1, integer(supplied, 64) ? supplied : symbolWidth(frame.cells[index].symbol)),
     );
+}
+
+const frameRect = (frame) => ({ x: 0, y: 0, width: frame.width, height: frame.height });
+
+function intersectRect(a, b) {
+    if (
+        !a ||
+        !b ||
+        ![a.x, a.y, a.width, a.height, b.x, b.y, b.width, b.height].every(Number.isFinite)
+    ) {
+        return null;
+    }
+
+    const x = Math.max(a.x, b.x),
+        y = Math.max(a.y, b.y);
+    const width = Math.min(a.x + a.width, b.x + b.width) - x;
+    const height = Math.min(a.y + a.height, b.y + b.height) - y;
+
+    return width > 0 && height > 0 ? { x, y, width, height } : null;
+}
+
+function visiblePaneRect(frame, pane) {
+    return intersectRect(intersectRect(frameRect(frame), pane?.rect), pane?.inner_rect);
 }
 
 export function validFrame(frame) {
@@ -401,131 +381,6 @@ export function selectionText(frame, region, anchor, head, limit = MAX_SELECTION
     return text;
 }
 
-export function decodeRGBA(image) {
-    const { width, height, rgba_base64: data } = image || {};
-
-    if (
-        !integer(width, 4096) ||
-        !integer(height, 4096) ||
-        !width ||
-        !height ||
-        width * height * 4 > MAX_IMAGE_BYTES ||
-        typeof data !== "string" ||
-        data.length !== Math.ceil((width * height * 4) / 3) * 4 ||
-        !/^[A-Za-z0-9+/]*={0,2}$/.test(data)
-    ) {
-        throw new Error("Image exceeds browser RGBA limits or has invalid dimensions");
-    }
-
-    const decoded = atob(data);
-
-    if (decoded.length !== width * height * 4) {
-        throw new Error("Image RGBA byte length does not match its dimensions");
-    }
-
-    return Uint8ClampedArray.from(decoded, (c) => c.charCodeAt(0));
-}
-
-export function imageBytes(image) {
-    const key = image?.key;
-    const width = key?.image_width,
-        height = key?.image_height,
-        data = image?.data;
-
-    if (
-        image?.encoding !== "base64" ||
-        !integer(width, 4096) ||
-        !integer(height, 4096) ||
-        !width ||
-        !height ||
-        width * height * 4 > MAX_IMAGE_BYTES ||
-        typeof data !== "string" ||
-        data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 ||
-        data.length % 4 !== 0 ||
-        !/^[A-Za-z0-9+/]*={0,2}$/.test(data)
-    ) {
-        throw new Error("Image exceeds browser decoding limits");
-    }
-
-    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
-
-    if (String(bytes.length) !== String(key.data_len)) {
-        throw new Error("Image byte length does not match its asset key");
-    }
-
-    if (key.format === "Rgb" || key.format === "Rgba") {
-        if (bytes.length !== width * height * (key.format === "Rgb" ? 3 : 4)) {
-            throw new Error("Image pixel length does not match its dimensions");
-        }
-    } else if (key.format === "Png") {
-        const view = new DataView(bytes.buffer);
-
-        if (
-            bytes.length < 33 ||
-            view.getUint32(0) !== 0x89504e47 ||
-            view.getUint32(4) !== 0x0d0a1a0a ||
-            view.getUint32(8) !== 13 ||
-            view.getUint32(12) !== 0x49484452 ||
-            view.getUint32(16) !== width ||
-            view.getUint32(20) !== height
-        ) {
-            throw new Error("PNG dimensions or signature do not match its asset key");
-        }
-    } else {
-        throw new Error("Unsupported image format");
-    }
-
-    return bytes;
-}
-
-async function browserImage(image) {
-    const bytes = imageBytes(image),
-        key = image.key;
-
-    if (key.format === "Png") {
-        // Local validated bytes only; never fetch a terminal-supplied URL.
-        const blob = new Blob([bytes], { type: "image/png" });
-
-        if (typeof createImageBitmap === "function") {
-            return createImageBitmap(blob);
-        }
-
-        const url = URL.createObjectURL(blob);
-
-        try {
-            const element = new Image();
-
-            await new Promise((resolve, reject) => {
-                element.onload = resolve;
-                element.onerror = () => reject(new Error("PNG could not be decoded"));
-                element.src = url;
-            });
-
-            return element;
-        } finally {
-            URL.revokeObjectURL(url);
-        }
-    }
-
-    const rgba = new Uint8ClampedArray(key.image_width * key.image_height * 4);
-
-    if (key.format === "Rgba") {
-        rgba.set(bytes);
-    } else {
-        for (let i = 0, j = 0; i < bytes.length; i += 3, j += 4) {
-            rgba.set([bytes[i], bytes[i + 1], bytes[i + 2], 255], j);
-        }
-    }
-
-    const element = document.createElement("canvas");
-
-    element.width = key.image_width;
-    element.height = key.image_height;
-    element.getContext("2d").putImageData(new ImageData(rgba, element.width, element.height), 0, 0);
-
-    return element;
-}
-
 /** Validate a file supplied by an explicit paste event. Never reads navigator.clipboard. */
 export async function clipboardPNG(file) {
     if (file?.type !== "image/png") {
@@ -571,289 +426,6 @@ export async function clipboardPNG(file) {
     return { encoding: "base64", format: "png", data: btoa(binary) };
 }
 
-function imageKey(key) {
-    // Native JSON retains u64 fingerprints as strings. Do not parse them as numbers.
-    return JSON.stringify([
-        key?.source,
-        key?.image_width,
-        key?.image_height,
-        key?.format,
-        key?.data_len,
-        key?.data_fingerprint,
-    ]);
-}
-
-const frameRect = (frame) => ({ x: 0, y: 0, width: frame.width, height: frame.height });
-
-function intersectRect(a, b) {
-    if (
-        !a ||
-        !b ||
-        ![a.x, a.y, a.width, a.height, b.x, b.y, b.width, b.height].every(Number.isFinite)
-    ) {
-        return null;
-    }
-
-    const x = Math.max(a.x, b.x),
-        y = Math.max(a.y, b.y);
-    const width = Math.min(a.x + a.width, b.x + b.width) - x;
-    const height = Math.min(a.y + a.height, b.y + b.height) - y;
-
-    return width > 0 && height > 0 ? { x, y, width, height } : null;
-}
-
-function visiblePaneRect(frame, pane) {
-    return intersectRect(intersectRect(frameRect(frame), pane?.rect), pane?.inner_rect);
-}
-
-function canvasClip(ctx, rect, cw, ch) {
-    ctx.beginPath();
-    ctx.rect(rect.x * cw, rect.y * ch, rect.width * cw, rect.height * ch);
-    ctx.clip();
-}
-
-// The composite grid also contains borders/chrome. Partition each row at every
-// pane and content edge, so a wide symbol cannot cover a divider or suppress the
-// next pane's glyphs. Cell positions/colors remain authoritative; the flattened
-// grid does not identify which original pane produced a misplaced character.
-function rowRanges(frame, panes, y) {
-    const edges = new Set([0, frame.width]);
-
-    for (const pane of panes) {
-        for (const rect of [
-            intersectRect(frameRect(frame), pane.rect),
-            visiblePaneRect(frame, pane),
-        ]) {
-            if (rect && y >= rect.y && y < rect.y + rect.height) {
-                edges.add(rect.x);
-                edges.add(rect.x + rect.width);
-            }
-        }
-    }
-
-    const sorted = [...edges].sort((a, b) => a - b);
-
-    return sorted.slice(0, -1).map((start, i) => [start, sorted[i + 1]]);
-}
-
-function paintImages(ctx, images, placements, popupId, cw, ch, below, cache, report, frame, panes) {
-    for (const p of [...placements].sort((a, b) => a.z - b.z)) {
-        const popup = p.asset?.source?.Terminal?.target?.Popup?.terminal_id;
-
-        if (p.z < 0 !== below || (popupId ? popup !== popupId : !!popup)) {
-            continue;
-        }
-
-        const paneId =
-            p.asset?.source?.Terminal?.target?.Pane?.pane_id || p.asset?.source?.PaneLayer?.pane_id;
-        const targetPane = panes.find((pane) => pane.pane_id === paneId);
-
-        if (!popupId && !targetPane) {
-            report("A graphics placement has no target pane; it was not painted.");
-            continue;
-        }
-
-        const clip = popupId ? frameRect(frame) : visiblePaneRect(frame, targetPane);
-
-        if (!clip) {
-            continue;
-        }
-
-        const key = imageKey(p.asset);
-        const image = images.find((i) => imageKey(i.key || i.placement?.asset) === key);
-
-        if (!image) {
-            report("Image data is unavailable for a graphics placement");
-            continue;
-        }
-
-        const bitmap = cache.get(image);
-
-        if (!bitmap) {
-            continue;
-        }
-
-        const iw = p.asset.image_width,
-            ih = p.asset.image_height;
-        const sx = p.source_x || 0,
-            sy = p.source_y || 0;
-        const sw = Math.min(p.source_width || iw, iw - sx),
-            sh = Math.min(p.source_height || ih, ih - sy);
-        const ox =
-            (clamp(p.x_offset || 0, 0, Math.max(0, p.cols * Math.round(cw) - 1)) * cw) /
-            Math.round(cw);
-        const oy =
-            (clamp(p.y_offset || 0, 0, Math.max(0, p.rows * Math.round(ch) - 1)) * ch) /
-            Math.round(ch);
-
-        if (sw > 0 && sh > 0 && p.cols * cw > ox && p.rows * ch > oy) {
-            ctx.save();
-            canvasClip(ctx, clip, cw, ch);
-            ctx.drawImage(
-                bitmap,
-                (sx / iw) * bitmap.width,
-                (sy / ih) * bitmap.height,
-                (sw / iw) * bitmap.width,
-                (sh / ih) * bitmap.height,
-                p.x * cw + ox,
-                p.y * ch + oy,
-                p.cols * cw - ox,
-                p.rows * ch - oy,
-            );
-            ctx.restore();
-        }
-    }
-}
-
-// Keep common terminal borders continuous at the cell edges instead of relying on font ascent.
-function paintCellGraphic(ctx, symbol, x, y, cw, ch) {
-    const arms = {
-        "─": 3,
-        "│": 12,
-        "┌": 10,
-        "┐": 9,
-        "└": 6,
-        "┘": 5,
-        "├": 14,
-        "┤": 13,
-        "┬": 11,
-        "┴": 7,
-        "┼": 15,
-        "━": 3,
-        "┃": 12,
-        "┏": 10,
-        "┓": 9,
-        "┗": 6,
-        "┛": 5,
-        "┣": 14,
-        "┫": 13,
-        "┳": 11,
-        "┻": 7,
-        "╋": 15,
-    };
-    const arm = arms[symbol];
-
-    if (arm) {
-        const thick = "━┃┏┓┗┛┣┫┳┻╋".includes(symbol) ? 2 : 1;
-        const mx = x + cw / 2,
-            my = y + ch / 2;
-
-        if (arm & 1) {
-            ctx.fillRect(x, my - thick / 2, cw / 2 + thick / 2, thick);
-        }
-
-        if (arm & 2) {
-            ctx.fillRect(mx - thick / 2, my - thick / 2, cw / 2 + thick / 2, thick);
-        }
-
-        if (arm & 4) {
-            ctx.fillRect(mx - thick / 2, y, thick, ch / 2 + thick / 2);
-        }
-
-        if (arm & 8) {
-            ctx.fillRect(mx - thick / 2, my - thick / 2, thick, ch / 2 + thick / 2);
-        }
-
-        return true;
-    }
-
-    const cp = symbol.codePointAt(0);
-
-    if (symbol.length === 1 && cp >= 0x2581 && cp <= 0x2588) {
-        const part = (cp - 0x2580) / 8;
-
-        ctx.fillRect(x, y + ch * (1 - part), cw, ch * part);
-
-        return true;
-    }
-
-    if (symbol.length === 1 && cp >= 0x2589 && cp <= 0x258f) {
-        ctx.fillRect(x, y, (cw * (0x2590 - cp)) / 8, ch);
-
-        return true;
-    }
-
-    if (symbol === "▀" || symbol === "▐") {
-        ctx.fillRect(
-            x + (symbol === "▐" ? cw / 2 : 0),
-            y,
-            symbol === "▐" ? cw / 2 : cw,
-            symbol === "▀" ? ch / 2 : ch,
-        );
-
-        return true;
-    }
-
-    return false;
-}
-
-function paintFrame(
-    ctx,
-    frame,
-    { cw, ch, fontSize, fontFamily, theme, images, placements, popupId, cache, report, panes = [] },
-) {
-    ctx.save();
-    canvasClip(ctx, frameRect(frame), cw, ch);
-
-    // Backgrounds are one-cell quads, never measured text runs.
-    for (let i = 0; i < frame.cells.length; i++) {
-        ctx.fillStyle = rgb(cellColors(frame.cells[i], theme).bg);
-        ctx.fillRect((i % frame.width) * cw, Math.floor(i / frame.width) * ch, cw, ch);
-    }
-
-    paintImages(ctx, images, placements, popupId, cw, ch, true, cache, report, frame, panes);
-    ctx.textBaseline = "alphabetic";
-
-    for (let y = 0; y < frame.height; y++) {
-        for (const [start, end] of rowRanges(frame, panes, y)) {
-            ctx.save();
-            canvasClip(ctx, { x: start, y, width: end - start, height: 1 }, cw, ch);
-            let covered = start;
-
-            for (let x = start; x < end; x++) {
-                const index = y * frame.width + x,
-                    c = frame.cells[index];
-                const span = cellSpan(frame, index, end - x);
-
-                ctx.fillStyle = rgb(cellColors(c, theme).fg);
-
-                if (x >= covered && !c.skip) {
-                    covered = x + span;
-                    ctx.font = `${c.modifier & ITALIC ? "italic " : ""}${c.modifier & BOLD ? "bold " : ""}${fontSize}px ${fontFamily}`;
-                    ctx.save();
-                    canvasClip(ctx, { x, y, width: span, height: 1 }, cw, ch);
-
-                    if (
-                        !(c.modifier & HIDDEN) &&
-                        !paintCellGraphic(ctx, c.symbol, x * cw, y * ch, cw, ch)
-                    ) {
-                        ctx.fillText(
-                            c.symbol,
-                            x * cw,
-                            y * ch + (ch - fontSize) / 2 + fontSize * 0.8,
-                        );
-                    }
-
-                    ctx.restore();
-                }
-
-                if (c.modifier & UNDERLINE) {
-                    ctx.fillRect(x * cw, (y + 1) * ch - 2, cw, 1);
-                }
-
-                if (c.modifier & STRIKE) {
-                    ctx.fillRect(x * cw, y * ch + ch / 2, cw, 1);
-                }
-            }
-
-            ctx.restore();
-        }
-    }
-
-    paintImages(ctx, images, placements, popupId, cw, ch, false, cache, report, frame, panes);
-    ctx.restore();
-}
-
 /**
  * Preact component. Parent owns connection/authentication and loads complete frames.
  * images: [{key: SurfaceGraphicsAssetKey, serial, encoding: "base64", data}], never URLs.
@@ -866,6 +438,7 @@ function paintFrame(
  * onPasteImage(targetId, {encoding:"base64",format:"png",data}, popupBoolean) handles
  * only explicit image paste gestures. Parent wraps this in native clipboard-image + bootId.
  * onResize({cols,rows,cell_width_px,cell_height_px}) fires only while enabled.
+ * onInputReady() lets the embedding view restore guarded focus after renderer startup.
  * onAction: focus-pane, unsupported; no Herdr mutation is inferred from a render.
  * focus-pane is called before the first mouse event; false / Promise<false> rejects it.
  * inputEpoch identifies the UI connection/stream generation, even for the same boot/pane.
@@ -883,6 +456,7 @@ export function TerminalGrid({
     enabled = false,
     disabled = false,
     onInput,
+    onInputReady,
     onShortcut,
     onPasteImage,
     onResize,
@@ -903,9 +477,8 @@ export function TerminalGrid({
     clipboardOffer = null,
 }) {
     const theme = { ...DEFAULT_THEME, ...suppliedTheme };
-    const interactive = enabled && !disabled;
     const viewport = useRef(null),
-        canvas = useRef(null),
+        interaction = useRef(null),
         input = useRef(null);
     const latest = useRef(null),
         drag = useRef(null),
@@ -914,7 +487,6 @@ export function TerminalGrid({
         compositionTarget = useRef(null),
         lastCommit = useRef(null);
     const held = useRef(new Map()),
-        imageCache = useRef(new Map()),
         reports = useRef(new Set());
     const wheel = useRef({ id: null, x: 0, y: 0 });
     const pasteState = useRef({ context: "", epoch: 0, pending: false, inputEpoch });
@@ -941,7 +513,6 @@ export function TerminalGrid({
     const [nativeKeyboard, setNativeKeyboard] = useState(false);
     const [keyboardOpen, setKeyboardOpen] = useState(true);
     const touchInput = showKeybar && touchLayout && (!nativeKeyboard || !keyboardOpen);
-    const [imageVersion, setImageVersion] = useState(0);
     const [linkOffer, setLinkOffer] = useState(null);
     const [touchSelection, setTouchSelection] = useState(null);
     const frame = surface?.frame;
@@ -950,7 +521,7 @@ export function TerminalGrid({
     const width = valid ? frame.width * cw : 1,
         height = valid ? frame.height * ch : 1;
     const drawable =
-        valid && width <= 8192 && height <= 8192 && width * height <= MAX_CANVAS_PIXELS;
+        valid && width <= 8192 && height <= 8192 && width * height <= MAX_SURFACE_PIXELS;
 
     const report = (feature) => {
         if (!reports.current.has(feature)) {
@@ -959,6 +530,23 @@ export function TerminalGrid({
             onAction?.({ type: "unsupported", feature });
         }
     };
+
+    const gpui = useTerminalRenderer({
+        drawable,
+        surface,
+        images,
+        selection,
+        cw,
+        ch,
+        fontSize,
+        theme,
+        themeVersion: suppliedTheme,
+        inputEpoch,
+        report,
+        onReady: (message) => setNotice((current) => (current === message ? "" : current)),
+    });
+    // Require a painted input context, but preserve IME across geometry-only repaints.
+    const interactive = enabled && !disabled && gpui.inputReady;
 
     const activeTarget = () => {
         const pending = pendingPane.current;
@@ -1056,7 +644,17 @@ export function TerminalGrid({
         pasteState.current.epoch++;
     }
 
-    latest.current = { interactive, inputEpoch, onResize, onPasteImage, surface, send, report };
+    latest.current = {
+        interactive,
+        resizeEnabled: enabled && !disabled,
+        onInputReady,
+        inputEpoch,
+        onResize,
+        onPasteImage,
+        surface,
+        send,
+        report,
+    };
 
     useLayoutEffect(() => {
         const context = document.createElement("canvas").getContext("2d");
@@ -1090,7 +688,8 @@ export function TerminalGrid({
                 ch,
                 maxCells: MAX_CELLS,
                 read: () => ({
-                    active: latest.current.interactive,
+                    // Parent geometry must recover even before the painter is ready.
+                    active: latest.current.resizeEnabled,
                     epoch: JSON.stringify([
                         latest.current.inputEpoch,
                         latest.current.surface?.boot_id,
@@ -1098,7 +697,7 @@ export function TerminalGrid({
                 }),
                 report: (size) => latest.current.onResize?.(size),
             }),
-        [cw, ch, interactive, inputEpoch, surface?.boot_id],
+        [cw, ch, enabled, disabled, inputEpoch, surface?.boot_id],
     );
 
     useEffect(() => {
@@ -1130,171 +729,8 @@ export function TerminalGrid({
         drag.current = null;
     }, [frame?.width, frame?.height]);
 
-    useEffect(() => {
-        let alive = true;
-        const cache = imageCache.current;
-        const accepted = Array.isArray(images) ? images.slice(0, 128) : [];
-
-        for (const [key, bitmap] of cache) {
-            if (!accepted.includes(key)) {
-                bitmap.close?.();
-                cache.delete(key);
-            }
-        }
-
-        let bytes = 0;
-
-        const decode = async () => {
-            for (const image of accepted) {
-                if (!alive) {
-                    return;
-                }
-
-                bytes += (image.key?.image_width || 0) * (image.key?.image_height || 0) * 4;
-
-                if (bytes > MAX_IMAGE_BYTES) {
-                    latest.current.report("Graphics exceed the 32 MiB browser image memory limit");
-                    break;
-                }
-
-                if (cache.has(image)) {
-                    continue;
-                }
-
-                try {
-                    const bitmap = await browserImage(image);
-
-                    if (!alive) {
-                        bitmap.close?.();
-
-                        return;
-                    }
-
-                    cache.set(image, bitmap);
-                    setImageVersion((v) => v + 1);
-                } catch (error) {
-                    if (alive) {
-                        latest.current.report(error.message);
-                    }
-                }
-            }
-
-            if (images.length > 128 && alive) {
-                latest.current.report("Graphics exceed the 128-image browser limit");
-            }
-        };
-
-        decode();
-
-        return () => {
-            alive = false;
-        };
-    }, [images]);
-
-    useEffect(
-        () => () => {
-            for (const bitmap of imageCache.current.values()) {
-                bitmap.close?.();
-            }
-
-            imageCache.current.clear();
-        },
-        [],
-    );
-
-    useLayoutEffect(() => {
-        if (!drawable || !canvas.current) {
-            return;
-        }
-
-        const dpr = Math.min(
-            window.devicePixelRatio || 1,
-            2,
-            Math.sqrt(MAX_CANVAS_PIXELS / (width * height)),
-        );
-        const element = canvas.current;
-
-        element.width = Math.ceil(width * dpr);
-        element.height = Math.ceil(height * dpr);
-        const ctx = element.getContext("2d");
-
-        if (!ctx) {
-            report("Canvas2D is unavailable in this browser");
-
-            return;
-        }
-
-        ctx.scale(dpr, dpr);
-        const bounded = Array.isArray(images) ? images.slice(0, 128) : [];
-
-        const options = {
-            cw,
-            ch,
-            fontSize,
-            fontFamily,
-            theme,
-            images: bounded,
-            placements: surface.graphics?.placements?.slice(0, 4096) || [],
-            panes: surface.panes || [],
-            cache: imageCache.current,
-            report,
-        };
-
-        paintFrame(ctx, frame, options);
-
-        if (selection && selection.boot === surface.boot_id && !selection.target.popup) {
-            paintSelection(
-                ctx,
-                selection,
-                cw,
-                ch,
-                theme,
-                visiblePaneRect(
-                    frame,
-                    surface.panes?.find((pane) => pane.pane_id === selection.target.id),
-                ),
-            );
-        }
-
-        if (surface.popup) {
-            ctx.fillStyle = "rgba(0,0,0,0.35)";
-            ctx.fillRect(0, 0, width, height);
-            const popup = surface.popup;
-
-            ctx.save();
-            ctx.translate(
-                Math.floor(Math.max(0, width - popup.frame.width * cw) / 2),
-                Math.max(0, height - popup.frame.height * ch) / 2,
-            );
-            paintFrame(ctx, popup.frame, { ...options, panes: [], popupId: popup.terminal_id });
-
-            if (selection?.target.popup) {
-                paintSelection(ctx, selection, cw, ch, theme, frameRect(popup.frame));
-            }
-
-            ctx.restore();
-        }
-
-        if (frame.graphics?.length || surface.popup?.frame.graphics?.length) {
-            report(
-                "Legacy inline graphics controls are not rendered; structured RGBA placements are required",
-            );
-        }
-    }, [
-        surface,
-        images,
-        imageVersion,
-        cw,
-        ch,
-        fontSize,
-        fontFamily,
-        suppliedTheme,
-        selection,
-        drawable,
-    ]);
-
     const point = (event) => {
-        const bounds = canvas.current.getBoundingClientRect();
+        const bounds = interaction.current.getBoundingClientRect();
 
         return { x: (event.clientX - bounds.left) / cw, y: (event.clientY - bounds.top) / ch };
     };
@@ -1360,6 +796,12 @@ export function TerminalGrid({
 
     latest.current.focusSafely = focusSafely;
     latest.current.setTarget = setTarget;
+
+    useLayoutEffect(() => {
+        if (interactive) {
+            latest.current.onInputReady?.();
+        }
+    }, [interactive]);
 
     useLayoutEffect(() => {
         if (!focusRef) {
@@ -1538,7 +980,7 @@ export function TerminalGrid({
         if (event.pointerType === "touch") {
             if (touchGesture.current?.start(event, { target, application, p })) {
                 event.preventDefault();
-                canvas.current.setPointerCapture?.(event.pointerId);
+                interaction.current.setPointerCapture?.(event.pointerId);
             }
 
             return;
@@ -1551,7 +993,7 @@ export function TerminalGrid({
         }
 
         focusInput();
-        canvas.current.setPointerCapture?.(event.pointerId);
+        interaction.current.setPointerCapture?.(event.pointerId);
         const button = ["Left", "Middle", "Right"][event.button] || "Left";
 
         drag.current = { target, button, application, start: p, moved: false };
@@ -1653,7 +1095,7 @@ export function TerminalGrid({
         }
 
         if (event.pointerType !== "touch") {
-            canvas.current.releasePointerCapture?.(event.pointerId);
+            interaction.current.releasePointerCapture?.(event.pointerId);
         }
     };
 
@@ -1668,7 +1110,7 @@ export function TerminalGrid({
     const up = (event) => {
         if (event.pointerType === "touch") {
             touchGesture.current?.end(event);
-            canvas.current?.releasePointerCapture?.(event.pointerId);
+            interaction.current?.releasePointerCapture?.(event.pointerId);
         } else {
             finishPointer(event);
         }
@@ -1709,9 +1151,13 @@ export function TerminalGrid({
             }
 
             const total = clamp(w[axis] + delta, -128, 128);
-            const steps = Math.trunc(total);
+            const nearest = Math.round(total);
+            // Fine touch/pixel-wheel samples can sum to 0.9999999999999999 lines.
+            // Snap only sub-pixel roundoff at a whole-line boundary, never real motion.
+            const steps = Math.abs(total - nearest) < 1e-9 ? nearest : Math.trunc(total);
+            const remainder = total - steps;
 
-            w[axis] = total - steps;
+            w[axis] = Math.abs(remainder) < 1e-9 ? 0 : remainder;
 
             return steps;
         };
@@ -1755,11 +1201,11 @@ export function TerminalGrid({
         const element = viewport.current;
 
         const scroll = (event) => {
-            if (!latest.current.interactive || !canvas.current) {
+            if (!latest.current.interactive || !interaction.current) {
                 return;
             }
 
-            const bounds = canvas.current.getBoundingClientRect();
+            const bounds = interaction.current.getBoundingClientRect();
             const x = (event.clientX - bounds.left) / cw,
                 y = (event.clientY - bounds.top) / ch;
             const target = targetAt(latest.current.surface, x, y);
@@ -1815,7 +1261,7 @@ export function TerminalGrid({
                 ch,
                 viewport.current?.clientWidth,
                 viewport.current?.clientHeight,
-                !!canvas.current?.isConnected,
+                !!interaction.current?.isConnected,
             ]);
         },
         onStart: ({ target: payload }) => {
@@ -2351,7 +1797,7 @@ export function TerminalGrid({
             ),
             { x: 0, y: 0, width, height },
         );
-    const cursorValid = !!cursorBounds;
+    const cursorValid = gpui.active && !!cursorBounds;
     const cursorStyle = cursorBounds
         ? {
               left: cursorBounds.x,
@@ -2396,6 +1842,8 @@ export function TerminalGrid({
     return html`
         <section class=${`terminal-grid ${className}`} aria-label=${label}
             data-enabled=${interactive} data-focused=${focused}
+            data-renderer="gpui"
+            data-renderer-state=${gpui.active ? "ready" : gpui.error ? "error" : "loading"}
             data-touch-selecting=${!!touchSelection}>
             <link rel="stylesheet" href="/terminal-grid.css" />
             <div class="terminal-grid-display" onCopy=${copy}>
@@ -2405,7 +1853,8 @@ export function TerminalGrid({
                     drawable
                         ? html`
                     <div class="terminal-grid-stage" style=${pixels({ width, height })}>
-                        <canvas ref=${canvas} style=${pixels({ width, height })} role="img"
+                        <div ref=${interaction} class="terminal-grid-interaction"
+                            style=${pixels({ width, height })} role="img"
                             aria-label=${`${label}. ${frame.width} columns, ${frame.height} rows. Click to type; Shift-drag to select; Control-click or Command-click to open links. Shift-Escape leaves keyboard input. Touch: swipe to scroll; hold then drag to select text.`}
                             onPointerEnter=${enter}
                             onPointerDown=${down} onPointerMove=${move} onPointerUp=${up}
@@ -2541,7 +1990,36 @@ export function TerminalGrid({
                     </div>`
                         : html`<p class="terminal-grid-empty">${surface ? "This frame exceeds browser rendering limits or is invalid." : "Waiting for a terminal frame…"}</p>`
                 }
+                ${
+                    gpui.source &&
+                    html`<iframe
+                    key="gpui-painter"
+                    ref=${gpui.iframe}
+                    class="terminal-grid-gpui"
+                    title="GPUI terminal renderer"
+                    aria-hidden="true"
+                    tabIndex="-1"
+                    src=${gpui.source}
+                    style=${{ ...pixels({ width, height }), visibility: gpui.active ? "visible" : "hidden" }}
+                    sandbox="allow-scripts allow-same-origin"
+                    allow="webgpu"
+                    referrerpolicy="no-referrer"
+                ></iframe>`
+                }
             </div>
+            ${
+                drawable &&
+                !gpui.active &&
+                html`<div class="terminal-grid-renderer-status" role="status">
+                    <span>${gpui.error ? "Terminal renderer unavailable." : "Loading terminal renderer…"}</span>
+                    ${
+                        gpui.error &&
+                        html`<button type="button" class="terminal-grid-renderer-retry"
+                        onPointerDown=${(event) => event.preventDefault()}
+                        onClick=${gpui.retry}>Retry renderer</button>`
+                    }
+                </div>`
+            }
             ${
                 (selection?.text || linkOffer) &&
                 html`
@@ -2592,32 +2070,4 @@ export function TerminalGrid({
             ${notice && html`<p class="terminal-grid-notice" role="status">${notice}</p>`}
         </section>
         ${renderFooter?.(keyboardControls, pasteAction)}`;
-}
-
-function paintSelection(ctx, selection, cw, ch, theme, clip) {
-    if (!clip) {
-        return;
-    }
-
-    ctx.save();
-    canvasClip(ctx, clip, cw, ch);
-    let { anchor: a, head: b } = selection;
-    const r = selection.target.popup
-        ? { x: 0, width: selection.target.rect.width }
-        : selection.target.rect;
-
-    if (a.y > b.y || (a.y === b.y && a.x > b.x)) {
-        [a, b] = [b, a];
-    }
-
-    ctx.fillStyle = `${rgb(theme.palette[5])}59`;
-
-    for (let y = a.y; y <= b.y; y++) {
-        const start = y === a.y ? a.x : r.x,
-            end = y === b.y ? b.x + 1 : r.x + r.width;
-
-        ctx.fillRect(start * cw, y * ch, (end - start) * cw, ch);
-    }
-
-    ctx.restore();
 }

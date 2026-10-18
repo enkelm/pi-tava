@@ -1,5 +1,9 @@
 node_modules/
 native/herdr-web/target/
+native/herdr-renderer/target/
+web/herdr-renderer/
+# Retain immutable legacy builds while existing tabs can still request them.
+web/herdr-renderer-prototype/
 .impeccable/review/
 *.log
 .env

@@ -70,3 +70,11 @@ These timing findings are source-verified for 0.9.1, not live-tested against the
 ## Next proof
 
 Build an isolated transport/rendering prototype with generated/disposable sessions. Verify interactive shell and full-screen TUI behavior, mobile keyboard/IME and control keys, paste, scrollback, cursor/colors, resize/control ownership, reconnect, and stale-pane fencing. Then attach that terminal view to the existing Private hierarchy and consolidate the Chat presentation with Pocket's public-session components. No production restart, commit or publication has been requested.
+
+## GPUI browser renderer reuse
+
+The exact Herdr pin `e370bf0a55b1bf3e7e7fcb5b3f130ebc1a9e68bf` depends on GPUI 0.3.6. Unlike assumptions based on other GPUI versions, this dependency has an existing browser backend: [gpui-pre-platform 0.3.6](https://docs.rs/crate/gpui-pre-platform/0.3.6/source/src/gpui_platform.rs) selects the web platform on WASM and exposes `web_init`, `application_with_web_backend` and `single_threaded_web`. [gpui-pre-web](https://docs.rs/crate/gpui-pre-web/0.3.6/source/src/platform.rs) supports Auto, forced WebGPU and forced WebGL. [gpui-pre-wgpu](https://docs.rs/crate/gpui-pre-wgpu/0.3.6/source/Cargo.toml) enables wgpu’s webgl feature on WASM. These are source facts, not browser or performance results.
+
+The implementation is in [native/herdr-renderer](../../native/herdr-renderer/README.md): extracted Rust painter, exact protocol types, bundled OFL font and a live-presentation adapter. The first toggle incorrectly opened a generated-frame lab; that path has been removed. The live painter initially shipped behind a toggle. GPUI/WASM is now the only terminal painter; the toggle and Canvas2D implementation have been removed, retaining the existing connection, input and geometry. The old generated demo-frame crate has been removed; synthetic data lives in the tests that use it. The full desktop app is not compiled into the browser.
+
+A stable Rust 1.96 WASM check exposed the platform convenience crate’s default multithreaded dependency (`wasm_thread`, nightly-only). The renderer instead uses `gpui-pre-web =0.3.6` directly with its multithreaded feature/runtime flag disabled. This configuration passes the WASM check and release build. Native/browser font parity, actual GPU presentation and real-device performance remain unverified.
