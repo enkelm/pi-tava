@@ -419,6 +419,21 @@ test(
 
         try {
             const page = await browsers.open(1);
+            const sourceTabDimensions = (scope: string) =>
+                value<{ height: number; width: number; gap: number; buttons: number[] }>(
+                    page,
+                    `(() => {
+                        const track = document.querySelector(${JSON.stringify(`${scope} .private-tabs`)});
+                        const style = getComputedStyle(track);
+
+                        return {
+                            height: track.getBoundingClientRect().height,
+                            width: track.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+                            gap: parseFloat(style.columnGap) || 0,
+                            buttons: [...track.querySelectorAll('button')].map(button => button.getBoundingClientRect().width),
+                        };
+                    })()`,
+                );
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
@@ -453,13 +468,127 @@ test(
             };
 
             assert.deepEqual(await windowAppearance(page), tiledWindows, "shared tiled windows");
+            const desktopCollabTabs = await sourceTabDimensions(".sidebar");
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.evaluate(`(await import('/store.js')).navigate(null)`);
             await present(page, ".home-list .private-tabs");
             durableRequests.length = 0;
+            const collabTabs = await sourceTabDimensions(".home-list");
+
             await page.click({ selector: ".home-list .private-tabs button:last-child" });
             await present(page, ".home-list .private-pane-row");
+            const sectionState = () =>
+                value(
+                    page,
+                    `[...document.querySelectorAll('.home-list .private-section-title > button')].map(button => {
+                        const section = button.closest('section');
+                        const panel = document.getElementById(button.getAttribute('aria-controls'));
+                        return {
+                            name: section.getAttribute('aria-label'),
+                            expanded: button.getAttribute('aria-expanded'),
+                            controlsOwnPanel: !!panel && section.contains(panel),
+                            visible: !!panel?.getClientRects().length,
+                        };
+                    })`,
+                );
+            const openSections = [
+                { name: "Spaces", expanded: "true", controlsOwnPanel: true, visible: true },
+                { name: "Agents", expanded: "true", controlsOwnPanel: true, visible: true },
+            ];
+
+            assert.deepEqual(await sectionState(), openSections, "both sections start open");
+            const herdrTabs = await sourceTabDimensions(".home-list");
+
+            await page.setViewport(VIEWPORTS.desktop);
+            const desktopHerdrTabs = await sourceTabDimensions(".sidebar");
+
+            assert.equal(
+                desktopHerdrTabs.height,
+                desktopCollabTabs.height,
+                "desktop Herdr does not shrink its source tabs",
+            );
+            await page.setViewport(VIEWPORTS.mobile);
+
+            for (const tabs of [collabTabs, herdrTabs, desktopCollabTabs, desktopHerdrTabs]) {
+                const [first, second] = tabs.buttons;
+
+                assert.ok(first !== undefined && second !== undefined && tabs.buttons.length === 2);
+                assert.ok(Math.abs(first - second) < 1, "source tabs are equal width");
+                assert.ok(
+                    Math.abs(first + second + tabs.gap - tabs.width) < 1,
+                    "source tabs fill their track without an empty column",
+                );
+            }
+
+            assert.equal(
+                herdrTabs.height,
+                collabTabs.height,
+                "switching source keeps the tab track height",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `(() => {
+                        const lists = [...document.querySelectorAll('.private-list')];
+                        const buttons = lists.flatMap(list => [...list.querySelectorAll('button[aria-controls]')]);
+                        const ids = buttons.map(button => button.getAttribute('aria-controls'));
+                        return lists.length > 1 && new Set(ids).size === ids.length && buttons.every(button =>
+                            button.closest('.private-list').contains(document.getElementById(button.getAttribute('aria-controls'))));
+                    })()`,
+                ),
+                true,
+                "simultaneously mounted sidebar and home lists control only their own panels",
+            );
+            const writesBeforeFold = requests.filter((request) => request.method !== "GET").length;
+
+            for (const section of ["spaces", "agents"]) {
+                const toggle = `.home-list .private-${section} .private-section-toggle`;
+
+                await page.click({ selector: toggle });
+                assert.deepEqual(
+                    await sectionState(),
+                    openSections.map((state) =>
+                        state.name.toLowerCase() === section
+                            ? { ...state, expanded: "false", visible: false }
+                            : state,
+                    ),
+                    `${section} folds independently`,
+                );
+                assert.equal(
+                    await value(
+                        page,
+                        `document.querySelector('.home-list .private-${section} .private-section-scroll').querySelectorAll('button, a[href], input, textarea, select, [tabindex]').length`,
+                    ),
+                    0,
+                    "folded content leaves no focusable rows behind",
+                );
+                assert.equal(
+                    await value(page, `document.activeElement.matches(${JSON.stringify(toggle)})`),
+                    true,
+                    "folding leaves keyboard focus on its disclosure",
+                );
+                await page.press("Enter");
+                assert.deepEqual(
+                    await sectionState(),
+                    openSections,
+                    "Enter reopens the focused section",
+                );
+            }
+
+            assert.equal(
+                requests.filter((request) => request.method !== "GET").length,
+                writesBeforeFold,
+                "section disclosure never sends terminal input or imports",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `document.querySelector('.home-list .private-import').textContent.trim()`,
+                ),
+                "Import",
+                "the sidebar import action has a visible label, not just an ambiguous icon",
+            );
             assert.match(
                 await value<string>(page, `document.querySelector('.home-list').textContent`),
                 /Spaces[\s\S]*Local Herdr[\s\S]*Pocket work[\s\S]*Agents[\s\S]*Pocket work[\s\S]*Main tab[\s\S]*pi · idle/,

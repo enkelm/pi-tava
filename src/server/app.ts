@@ -116,7 +116,6 @@ import { Workspace } from "./workspace.ts";
 import { LanguageServices } from "./language-services.ts";
 import { Reviews } from "./reviews.ts";
 import { Projects } from "./projects.ts";
-import { GoalNames } from "./goal-names.ts";
 import { Handoffs } from "./handoffs.ts";
 import type { AgentProfile } from "./session-workflows.ts";
 import { HandoffsDoc, WorkflowDoc } from "./workflow-docs.ts";
@@ -297,7 +296,6 @@ export class PocketApp {
     readonly collab = new Collab(this);
     readonly reviews = new Reviews(this);
     readonly projects = new Projects(this);
-    readonly goalNames = new GoalNames(this);
     readonly handoffs = new Handoffs(this);
 
     agentProfile(id: string): AgentProfile | undefined {
@@ -580,7 +578,6 @@ export class PocketApp {
                 tasks: [
                     ResendTask,
                     this.shell.task,
-                    this.goalNames.task,
                     this.commands.followTask,
                     this.extensionCommands.task,
                     this.handoffs.task,
@@ -705,7 +702,7 @@ export class PocketApp {
                 );
             }
 
-            this.#scheduleSessions();
+            this.scheduleSessions();
             this.alerts.announceApprovals();
         });
         // A browser page's address, title, and loading go to the tabs watching its conversation, as they change.
@@ -725,9 +722,6 @@ export class PocketApp {
         if (this.guardOn()) {
             void this.guard.warm().catch(() => {});
         }
-
-        // Repair a first-message admission cut off before its goal naming task was reserved.
-        await this.goalNames.recover();
 
         // Work a previous process left unfinished continues only with a usable provider runtime.
         if (!this.providerExtensions.recoveryRequired) {
@@ -869,7 +863,7 @@ export class PocketApp {
 
         if (sessionsChanged) {
             this.browsers.reconcilePolicy();
-            this.#scheduleSessions();
+            this.scheduleSessions();
         }
     }
 
@@ -1221,7 +1215,7 @@ export class PocketApp {
             }
 
             room.pushPresence();
-            this.#scheduleSessions();
+            this.scheduleSessions();
         } catch (error) {
             client.send("missing", {
                 conversationId: client.conversationId,
@@ -1267,7 +1261,7 @@ export class PocketApp {
 
                 room.pushPresence();
                 room.schedule();
-                this.#scheduleSessions();
+                this.scheduleSessions();
                 this.releaseRoom(room);
             },
             () => {},
@@ -1393,7 +1387,7 @@ export class PocketApp {
         }
 
         // Made just now: the tab learns its id from the PiP state.
-        this.#scheduleSessions();
+        this.scheduleSessions();
     }
 
     async #openPip(tab: Client, id: ConversationId): Promise<void> {
@@ -1906,7 +1900,7 @@ export class PocketApp {
                 collab: 2,
                 // Comment-first reviews and session-folder-scoped live diffs, including viewers.
                 localReviews: 2,
-                // Durable project/goal organization and independently typed threads.
+                // Durable project organization and independently typed threads.
                 projects: 1,
                 agentProfiles: this.agentProfiles().map(
                     ({ id, name, description, title, starter, icon }) => ({
@@ -1965,7 +1959,8 @@ export class PocketApp {
         return { ...hello, connection: client.connection };
     }
 
-    #scheduleSessions(): void {
+    /** Coalesce catalogue refreshes, including derived checkout context detected by rooms. */
+    scheduleSessions(): void {
         if (this.#sessionsTimer !== undefined) {
             return;
         }
@@ -2025,6 +2020,7 @@ export class PocketApp {
             )
             .map(([id, meta]) => {
                 const model = this.#agents.get(Number(id) as unknown as ConversationId)?.model;
+                const branch = this.workspace.head(Number(id) as ConversationId);
                 const busy = this.#busy.has(Number(id) as unknown as ConversationId);
                 const here = [...(people.get(id) ?? new Map<string, string>())].map(
                     ([userId, name]) => ({ id: userId, name }),
@@ -2032,13 +2028,7 @@ export class PocketApp {
                 const chat = this.#lastChat.get(id);
                 const endedAt = this.#endedAt.get(Number(id) as unknown as ConversationId);
                 const counts = countSubagents(subagents.get(id) ?? []);
-                // Which of Pi's sessions it continues is the owner's to know (the Pi sessions sheet), not the list's.
-                const {
-                    fromPi: _fromPi,
-                    accessFrom: _privateAccessOrigin,
-                    linkedFrom,
-                    ...shown
-                } = meta;
+                const { linkedFrom } = meta;
                 // Linking does not share the origin: do not leak its id to someone who only sees the new chat.
                 const origin =
                     linkedFrom === undefined ? undefined : this.#sessions[String(linkedFrom.id)];
@@ -2055,9 +2045,22 @@ export class PocketApp {
                           ? { linkedFrom }
                           : { linkedOrigin: true };
 
+                // Only current public catalogue fields belong in the session list.
                 return {
                     id: Number(id),
-                    ...shown,
+                    cwd: meta.cwd,
+                    createdAt: meta.createdAt,
+                    updatedAt: meta.updatedAt,
+                    ...(meta.title === undefined ? {} : { title: meta.title }),
+                    ...(meta.createdBy === undefined ? {} : { createdBy: meta.createdBy }),
+                    ...(meta.archived === undefined ? {} : { archived: meta.archived }),
+                    ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
+                    ...(meta.workItemId === undefined ? {} : { workItemId: meta.workItemId }),
+                    ...(meta.ownerOnly === undefined ? {} : { ownerOnly: meta.ownerOnly }),
+                    ...(meta.imported === undefined ? {} : { imported: meta.imported }),
+                    ...(meta.forkedFrom === undefined ? {} : { forkedFrom: meta.forkedFrom }),
+                    ...(meta.budget === undefined ? {} : { budget: meta.budget }),
+                    ...(meta.worktree === undefined ? {} : { worktree: meta.worktree }),
                     ...linkage,
                     threadType: meta.threadType ?? "worker",
                     ...this.handoffs.projection(Number(id) as ConversationId, user),
@@ -2068,6 +2071,7 @@ export class PocketApp {
                         ? { failed: true }
                         : {}),
                     ...(model === undefined ? {} : { model: model.modelId }),
+                    ...(branch === undefined ? {} : { branch }),
                     ...(here.length === 0 ? {} : { people: here }),
                     ...(chat === undefined ? {} : { chatAt: chat.at, chatBy: chat.userId }),
                     ...(counts === undefined ? {} : { subagents: counts }),
@@ -2139,7 +2143,6 @@ export class PocketApp {
                 : {
                       threadType: meta.threadType ?? "worker",
                       ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
-                      ...(meta.goalId === undefined ? {} : { goalId: meta.goalId }),
                   }),
             ...(meta?.imported === true ? { imported: true } : {}),
             ...(meta?.ownerOnly === true ? { ownerOnly: true } : {}),

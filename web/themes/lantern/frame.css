@@ -19,6 +19,7 @@
     --r-seg: 6px;
     --r-row: 6px;
     --r-control: 8px;
+    --radius: var(--r-control);
     --r-card: 8px;
     --r-window: 10px;
     --r-sheet: 12px;
@@ -27,8 +28,8 @@
     --gap-out: 6px;
     --gap-in: 3px;
 
-    /* Windows: a hairline, a stronger one in focus, no glow. */
-    --window-border-active: var(--line-strong);
+    /* Windows: a visible palette-accent border in focus, rounded with the window, no glow. */
+    --window-border-active: var(--accent);
     --window-ring: none;
 
     /* No shadows at rest; what floats gets a hairline and a faint drop. */
@@ -41,6 +42,18 @@
      * Pocket's. Appearance's Width (Wide, Full) sets these inline, and so wins. */
     --transcript-width: clamp(calc(36 * var(--text-size, 15px) + 56px), 64%, 1080px);
     --composer-width: calc(var(--transcript-width) - 8px);
+}
+
+/* Border images ignore rounded corners. Use Lantern's solid focus border on its windows. */
+:is(
+    [data-part~="sidebar"],
+    [data-part~="pane"],
+    [data-part~="files-panel"],
+    [data-part~="browser-panel"],
+    [data-part~="people-panel"],
+    [data-part~="peeks"]
+) {
+    border-image: none;
 }
 
 /* The π, quieter: the brand's color, a little toward the ground. */

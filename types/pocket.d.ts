@@ -1060,7 +1060,6 @@ export interface SessionMetadata {
     readonly archived?: boolean;
     readonly threadType: AgentProfile["id"];
     readonly projectId?: string;
-    readonly goalId?: string;
     readonly workItemId?: string;
     readonly workItemTitle?: string;
     readonly activeThreadId?: number;

@@ -1,7 +1,7 @@
 // Owner-only Herdr. Private transcripts, frames and drafts never enter Durable rooms or storage.
 // Private uses GPUI e370bf0 sidebar/render.rs: independent Spaces and Agents, tabs over content.
 // Keep Pocket's fonts/tokens. Desktop opens retained Terminal control; phones open agent Chat.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { goHome } from "./back.js";
 import { api, navigate, openSheet, store, uid } from "./store.js";
 import { html, Icon, Loader, modelLabel } from "./ui.js";
@@ -361,7 +361,17 @@ function workspaceGroups(workspaces) {
     return groups;
 }
 
-function WorkspaceRow({ workspace, instance, live, child = false, group, folded, toggle, state }) {
+function WorkspaceRow({
+    workspace,
+    instance,
+    live,
+    child = false,
+    group,
+    folded,
+    toggle,
+    state,
+    listId,
+}) {
     const panes = workspace.tabs.flatMap((tab) => tab.panes);
     const native =
         live?.view === "terminal" && live.instanceId === instance.id && workspace.nativeId;
@@ -371,7 +381,7 @@ function WorkspaceRow({ workspace, instance, live, child = false, group, folded,
     const first = pickPane(workspace);
     const title =
         (child && !workspace.customLabel && workspace.branch) || workspace.label || "Workspace";
-    const childrenId = `worktrees-${instance.id}-${group?.parents[0].id}`;
+    const childrenId = `${listId}-worktrees-${instance.id}-${group?.parents[0].id}`;
 
     return html`<div class=${`private-space-item ${child ? "private-worktree-item" : ""}`}>
         <button
@@ -410,6 +420,9 @@ function Status({ state }) {
 }
 
 export function PrivateList({ compact = false, home = false }) {
+    const listId = useId();
+    const [spacesOpen, setSpacesOpen] = useState(true);
+    const [agentsOpen, setAgentsOpen] = useState(true);
     const wide = useDesktop();
     const visible = compact || (home ? !wide : wide);
     const { data, error, paused } = useSnapshots(listing, visible);
@@ -536,12 +549,26 @@ export function PrivateList({ compact = false, home = false }) {
         ${error && html`<p class="error-box" role="alert">${error} Reconnecting to Herdr…</p>`}
         ${!data && !error && !paused && html`<${Loader} label="Finding Herdr instances" />`}
         ${data?.warnings?.map((warning) => html`<p class="error-box small">${warning}</p>`)}
-        <section class="private-spaces" aria-label="Spaces">
-            <h2 class="private-section-title">Spaces</h2>
-            <div class="private-section-scroll">
-                ${data?.instances.length === 0 && html`<p class="private-hint small muted">No Herdr instances found. Open Herdr on this server to see its spaces here.</p>`}
-                ${data?.instances.map(
-                    (instance) => html`<div key=${instance.id} class="private-host">
+        <section class=${`private-spaces ${spacesOpen ? "" : "collapsed"}`} aria-label="Spaces">
+            <h2 class="private-section-title">
+                <button
+                    type="button"
+                    class="private-section-toggle"
+                    aria-expanded=${spacesOpen}
+                    aria-controls=${`${listId}-spaces`}
+                    onPointerDown=${keepTerminalFocus}
+                    onClick=${() => setSpacesOpen((open) => !open)}
+                >
+                    <${Icon} name="down" size=${13} />
+                    <span>Spaces</span>
+                </button>
+            </h2>
+            <div id=${`${listId}-spaces`} class="private-section-scroll" hidden=${!spacesOpen}>
+                ${spacesOpen && data?.instances.length === 0 && html`<p class="private-hint small muted">No Herdr instances found. Open Herdr on this server to see its spaces here.</p>`}
+                ${
+                    spacesOpen &&
+                    data?.instances.map(
+                        (instance) => html`<div key=${instance.id} class="private-host">
                     ${data.instances.length > 1 && html`<div class="private-host-label">${shortLabel(instance.label, "Local")}</div>`}
                     ${
                         !instance.available
@@ -597,12 +624,13 @@ export function PrivateList({ compact = false, home = false }) {
                                             folded=${folded}
                                             toggle=${toggle}
                                             state=${state}
+                                            listId=${listId}
                                         />`,
                                         )}
                                         ${
                                             group.children.length > 0 &&
                                             html`<div
-                                            id=${`worktrees-${instance.id}-${group.parents[0].id}`}
+                                            id=${`${listId}-worktrees-${instance.id}-${group.parents[0].id}`}
                                             class="private-worktree-children"
                                             hidden=${folded}
                                         >
@@ -624,26 +652,42 @@ export function PrivateList({ compact = false, home = false }) {
                                 })
                     }
                 </div>`,
-                )}
+                    )
+                }
             </div>
         </section>
-        <section class="private-agents" aria-label="Agents">
-            <h2 class="private-section-title">Agents <span>${agents.length}</span></h2>
-            <div class="private-section-scroll">
-                ${data && !agents.length && html`<p class="private-hint small muted">No agents. Open a space to use its terminals.</p>`}
-                ${agents.map(({ pane, workspace, tab, instance }) => {
-                    const native =
-                        live?.view === "terminal" &&
-                        live.instanceId === instance.id &&
-                        pane.nativeId;
-                    const selected = native
-                        ? live.snapshot.focused_pane_id === pane.nativeId
-                        : store.state.privateId === pane.id;
-                    const supported =
-                        pane.supportsImport === true ||
-                        (pane.supportsImport === undefined && pane.agent === "pi");
+        <section class=${`private-agents ${agentsOpen ? "" : "collapsed"}`} aria-label="Agents">
+            <h2 class="private-section-title">
+                <button
+                    type="button"
+                    class="private-section-toggle"
+                    aria-expanded=${agentsOpen}
+                    aria-controls=${`${listId}-agents`}
+                    onPointerDown=${keepTerminalFocus}
+                    onClick=${() => setAgentsOpen((open) => !open)}
+                >
+                    <${Icon} name="down" size=${13} />
+                    <span>Agents</span>
+                    <span class="private-section-count">${agents.length}</span>
+                </button>
+            </h2>
+            <div id=${`${listId}-agents`} class="private-section-scroll" hidden=${!agentsOpen}>
+                ${agentsOpen && data && !agents.length && html`<p class="private-hint small muted">No agents. Open a space to use its terminals.</p>`}
+                ${
+                    agentsOpen &&
+                    agents.map(({ pane, workspace, tab, instance }) => {
+                        const native =
+                            live?.view === "terminal" &&
+                            live.instanceId === instance.id &&
+                            pane.nativeId;
+                        const selected = native
+                            ? live.snapshot.focused_pane_id === pane.nativeId
+                            : store.state.privateId === pane.id;
+                        const supported =
+                            pane.supportsImport === true ||
+                            (pane.supportsImport === undefined && pane.agent === "pi");
 
-                    return html`<div key=${pane.id} class=${`private-agent-row ${selected ? "active" : ""}`}>
+                        return html`<div key=${pane.id} class=${`private-agent-row ${selected ? "active" : ""}`}>
                     <button
                         class=${`private-pane-row ${selected ? "active" : ""}`}
                         aria-current=${selected ? "page" : undefined}
@@ -657,9 +701,26 @@ export function PrivateList({ compact = false, home = false }) {
                             <span class="session-meta">${pane.agent} · ${pane.state}</span>
                         </span>
                     </button>
-                    ${supported && html`<button class="icon-button private-import" aria-label=${`Import & share ${shortLabel(pane.title, "agent")}`} title=${importBlocks.get(pane.id) ? "Import is blocked while prompt delivery is pending or uncertain" : "Import & share — running operations need confirmation"} disabled=${Boolean(importing) || importBlocks.get(pane.id)} onClick=${() => importPane(pane)}><${Icon} name=${importing === pane.id ? "pulse" : "external"} size=${15} /></button>`}
+                    ${
+                        supported &&
+                        html`<button
+                            class="icon-button private-import"
+                            aria-label=${`Import & share ${shortLabel(pane.title, "agent")}`}
+                            title=${importBlocks.get(pane.id) ? "Import is blocked while prompt delivery is pending or uncertain" : "Import & share — running operations need confirmation"}
+                            disabled=${Boolean(importing) || importBlocks.get(pane.id)}
+                            onClick=${() => importPane(pane)}
+                        >
+                            <${Icon}
+                                name="pulse"
+                                path=${importing === pane.id ? undefined : "M12 3v12M8 11l4 4 4-4M4 15v5h16v-5"}
+                                size=${15}
+                            />
+                            <span>Import</span>
+                        </button>`
+                    }
                     </div>`;
-                })}
+                    })
+                }
             </div>
         </section>
         <p class="private-list-footer small muted" role="status" title=${notice || undefined}>${notice || html`<${Icon} name="terminal" size=${14} /> Only you · Herdr`}</p>

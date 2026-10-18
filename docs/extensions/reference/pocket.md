@@ -815,7 +815,7 @@ Since 0.15.0 · Experimental
 Supported display fields from the existing filtered session catalogue:
 
 - `id`, optional `title`, `cwd`, `createdAt`, `updatedAt` and optional `archived`.
-- `threadType` and optional `projectId`, `goalId`, `workItemId`, `workItemTitle`, `activeThreadId`,
+- `threadType` and optional `projectId`, `workItemId`, `workItemTitle`, `activeThreadId`,
   `linkedFrom: { id }` and `linkedOrigin`. Group/link metadata retains core's visibility filtering.
 - `workflow`, `busy`, `waiting`, optional `failed` and optional `model`.
 

@@ -79,7 +79,6 @@ export const store = {
         /** This person's favorite folders, in shortcut order, sent by the server to every signed-in device. */
         folderFavorites: [],
         projects: [],
-        projectGoals: [],
         projectsLoaded: false,
         /** False until the server's first session list arrives: an empty list until then means "not here yet". */
         sessionsLoaded: false,
@@ -969,8 +968,7 @@ const handlers = {
         handoffSessionsChanged(sessions);
     },
     "folder-favorites": (folderFavorites) => store.set({ folderFavorites }),
-    projects: (data) =>
-        store.set({ projects: data.projects, projectGoals: data.goals, projectsLoaded: true }),
+    projects: (data) => store.set({ projects: data.projects, projectsLoaded: true }),
     models: (models) => store.set({ models }),
     // A theme folder came, went, or changed (`theme.js` loads its new version).
     themes: (themeList) => store.set({ themeList }),
@@ -1597,13 +1595,12 @@ export const actions = {
     loadProjects: async () => {
         const data = await api("projects");
 
-        store.set({ projects: data.projects, projectGoals: data.goals, projectsLoaded: true });
+        store.set({ projects: data.projects, projectsLoaded: true });
 
         return data;
     },
     createProject: (request) => api("projects", { requestId: uid(), ...request }),
     updateProject: (id, patch) => api(`projects/${encodeURIComponent(id)}`, patch),
-    updateProjectGoal: (id, patch) => api(`project-goals/${encodeURIComponent(id)}`, patch),
     updateSession: (id, patch) => api(`sessions/${id}`, patch),
     upload: (file) => api(`c/${current()}/upload?name=${encodeURIComponent(file.name)}`, file),
     fullEntry: (entryId) => api(`c/${current()}/entry/${entryId}`),

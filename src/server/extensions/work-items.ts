@@ -18,7 +18,7 @@ const titles: Record<string, string> = {
 const icons: Record<string, string> = {
     chat: "chat",
     worker: "bot",
-    researcher: "search",
+    researcher: "brain",
     reviewer: "search",
     "follow-up": "pencil",
     pull: "reload",

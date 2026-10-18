@@ -2,13 +2,8 @@
 import { useEffect, useRef } from "preact/hooks";
 import { openSheet, store } from "./store.js";
 
-export function openSidebarOptions(
-    kind,
-    id,
-    at,
-    { archivedView = false, keepDrawer = false } = {},
-) {
-    const sheet = { type: "sidebar-options", kind, id, at, archivedView };
+export function openSidebarOptions(kind, id, at, { keepDrawer = false } = {}) {
+    const sheet = { type: "sidebar-options", kind, id, at };
 
     if (keepDrawer) {
         // Select must still address the source list, as the legacy held-row sheet does.
@@ -97,7 +92,7 @@ export function consumeHeldContact({ identifier, source }) {
     timer = setTimeout(dispose, 30_000);
 }
 
-/** Right-click and keyboard access everywhere; project/goal headers also have a simple touch hold. */
+/** Right-click and keyboard access everywhere; project headers also have a simple touch hold. */
 export function useSidebarContext(ref, onOpen, { longPress = false, enabled = true } = {}) {
     const latest = useRef(onOpen);
 

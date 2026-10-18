@@ -27,7 +27,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
-import { ProjectsDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
+import { SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
 import { HttpError } from "./errors.ts";
 import { hasPendingSubagentReports } from "./subagent-reports.ts";
 import { handoffInputKey, parseHandoffCommand } from "./handoff-input.ts";
@@ -58,7 +58,7 @@ const finished = { status: "terminal", outcome: { status: "completed", result: n
 const empty = (): HandoffsData => ({ workItems: {}, handoffs: {}, requests: {} });
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export type UpdateWorkItem = { archived?: unknown; projectId?: unknown; goalId?: unknown };
+export type UpdateWorkItem = { archived?: unknown; projectId?: unknown };
 export type HandoffResult = { id: number; handoffId: string; workItemId: string };
 type HandoffAdmission = {
     kind: ThreadType;
@@ -1670,7 +1670,6 @@ export class Handoffs {
                 : {}),
             threadIds: item.threadIds.filter((id) => this.#app.canSee(user, id as ConversationId)),
             ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
-            ...(item.goalId === undefined ? {} : { goalId: item.goalId }),
             archived: item.archived === true,
         };
     }
@@ -1938,7 +1937,6 @@ export class Handoffs {
                       threadIds: relation === "new-work" ? [] : [Number(id)],
                       title: meta.title ?? "New work",
                       ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
-                      ...(meta.goalId === undefined ? {} : { goalId: meta.goalId }),
                       ...(relation === "new-work" && oldItem !== undefined
                           ? { predecessorWorkItemId: oldItem.id }
                           : {}),
@@ -1967,7 +1965,6 @@ export class Handoffs {
                 workItemId: item.id,
                 ...(meta.ownerOnly === true ? { ownerOnly: true } : {}),
                 ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
-                ...(meta.goalId === undefined ? {} : { goalId: meta.goalId }),
                 ...(meta.worktree === undefined ? {} : { worktree: { ...meta.worktree } }),
                 ...(meta.budget === undefined ? {} : { budget: meta.budget }),
             },
@@ -2026,7 +2023,7 @@ export class Handoffs {
 
         await this.#app.requireDriver(id, supplied);
         await this.#app.harness.commit(async (tx) => {
-            if (patch.projectId !== undefined || patch.goalId !== undefined) {
+            if (patch.projectId !== undefined) {
                 await this.#app.projects.assignTx(tx, supplied, id, patch);
             }
 
@@ -2058,18 +2055,9 @@ export class Handoffs {
             }
 
             member.archived = archived;
-            delete member.archivedByGoal;
         }
 
         item.archived = archived;
-
-        if (!archived && item.goalId !== undefined) {
-            const goal = (await tx.doc(ProjectsDoc)).goals[item.goalId];
-
-            if (goal !== undefined) {
-                goal.archived = false;
-            }
-        }
     }
 
     /** Projects owns validation and placement; this synchronizes durable group organization in the same commit. */
@@ -2087,12 +2075,10 @@ export class Handoffs {
             item.title = origin.title ?? item.title;
             item.archived = origin.archived === true;
 
-            for (const field of ["projectId", "goalId"] as const) {
-                if (origin[field] === undefined) {
-                    delete item[field];
-                } else {
-                    item[field] = origin[field];
-                }
+            if (origin.projectId === undefined) {
+                delete item.projectId;
+            } else {
+                item.projectId = origin.projectId;
             }
         }
     }

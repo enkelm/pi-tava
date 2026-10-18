@@ -19,10 +19,7 @@ export function canMoveSessions() {
 }
 
 export function samePlacement(session, destination) {
-    return (
-        (session.projectId ?? null) === destination.projectId &&
-        (session.goalId ?? null) === destination.goalId
-    );
+    return (session.projectId ?? null) === destination.projectId;
 }
 
 /** Each independent thread or whole Work Item is one transaction; mixed selections report partial failures. */
@@ -47,7 +44,6 @@ export async function moveSessions(ids, destination) {
             try {
                 const patch = {
                     projectId: destination.projectId,
-                    goalId: destination.goalId,
                 };
 
                 if (workItemId) {
@@ -139,23 +135,15 @@ export function useSessionDrag(options) {
     const route = () =>
         `${store.state.conversationId}:${store.state.privateId}:${store.state.sidebarTab}`;
 
-    const permitted = (destination) => {
-        const goal = destination?.goalId
-            ? store.state.projectGoals.find((each) => each.id === destination.goalId)
-            : null;
+    const permitted = () =>
+        latest.current.enabled &&
+        canMoveSessions() &&
+        current.current &&
+        current.current.route === route();
 
-        return (
-            latest.current.enabled &&
-            canMoveSessions() &&
-            current.current &&
-            current.current.route === route() &&
-            (!destination?.goalId || (goal && !goal.archived))
-        );
-    };
-
-    const accepts = (event, destination) =>
+    const accepts = (event) =>
         current.current?.kind === "native" &&
-        permitted(destination) &&
+        permitted() &&
         event.dataTransfer?.types.includes(DRAG_TYPE);
 
     const hoverAt = (key, onOpen) => {
@@ -184,10 +172,10 @@ export function useSessionDrag(options) {
             return;
         }
 
-        // A goal consumes the event even when it refuses the drop; its parent is not a fallback.
+        // The nearest destination owns the drop, never an ancestor.
         event.stopPropagation();
 
-        if (!accepts(event, destination)) {
+        if (!accepts(event)) {
             event.dataTransfer.dropEffect = "none";
             clearHover();
             setDrag({ ...current.current, target: null });
@@ -228,7 +216,6 @@ export function useSessionDrag(options) {
             if (
                 !destination ||
                 (destination.projectId !== null && typeof destination.projectId !== "string") ||
-                (destination.goalId !== null && typeof destination.goalId !== "string") ||
                 typeof destination.key !== "string" ||
                 typeof destination.label !== "string"
             ) {
@@ -261,7 +248,7 @@ export function useSessionDrag(options) {
                     highlightTouch(point.current);
                 }
             });
-        } else if (hit?.destination && permitted(hit.destination)) {
+        } else if (hit?.destination && permitted()) {
             hoverAt(
                 hit.destination.key,
                 hit.target.dataset.sessionDropClosed === "true"
@@ -270,7 +257,7 @@ export function useSessionDrag(options) {
 
                           if (
                               now?.target === hit.target &&
-                              permitted(now.destination) &&
+                              permitted() &&
                               hit.target.dataset.sessionDropClosed === "true"
                           ) {
                               hit.target
@@ -286,7 +273,7 @@ export function useSessionDrag(options) {
         }
 
         const destination = hit?.destination;
-        const target = destination && permitted(destination) ? destination : null;
+        const target = destination && permitted() ? destination : null;
 
         if (current.current.target?.key !== target?.key) {
             current.current = { ...current.current, target };
@@ -381,10 +368,10 @@ export function useSessionDrag(options) {
             return;
         }
 
-        // Never trust the last highlight: release can occur over a different or archived target.
+        // Never trust the last highlight: release can occur over a different target.
         const destination = touchTarget(position)?.destination;
         const ids = current.current.ids;
-        const allowed = destination && permitted(destination);
+        const allowed = destination && permitted();
 
         end();
 
@@ -694,7 +681,7 @@ export function useSessionDrag(options) {
 
             event.stopPropagation();
 
-            if (!accepts(event, destination)) {
+            if (!accepts(event)) {
                 end();
 
                 return;

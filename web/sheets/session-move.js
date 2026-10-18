@@ -14,20 +14,16 @@ export function SessionMoveSheet({ ids }) {
             first &&
             samePlacement(session, {
                 projectId: first.projectId ?? null,
-                goalId: first.goalId ?? null,
             }),
     );
     const [projectId, setProjectId] = useState(common ? (first?.projectId ?? "") : "");
-    const [goalId, setGoalId] = useState(common ? (first?.goalId ?? "") : "");
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const remaining = useRef(ids);
     const submitting = useRef(false);
-    const { projects, projectGoals, projectsLoaded } = store.state;
-    const goals = projectGoals.filter((goal) => goal.projectId === projectId && !goal.archived);
+    const { projects, projectsLoaded } = store.state;
     const project = projects.find((each) => each.id === projectId);
-    const goal = goals.find((each) => each.id === goalId);
-    const valid = (!projectId || project) && (!goalId || goal);
+    const valid = !projectId || project;
 
     if (!canMoveSessions()) {
         return null;
@@ -49,8 +45,7 @@ export function SessionMoveSheet({ ids }) {
         try {
             const result = await moveSessions(remaining.current, {
                 projectId: projectId || null,
-                goalId: goalId || null,
-                label: goal ? `${project.name} / ${goal.name}` : (project?.name ?? "No project"),
+                label: project?.name ?? "No project",
             });
 
             if (store.state.sheet !== opened) {
@@ -74,7 +69,7 @@ export function SessionMoveSheet({ ids }) {
         onClose=${busy ? () => {} : closeSheet}
     >
         <form class="session-move-form" onSubmit=${save}>
-            <p class="muted small">${workItem ? "All threads in this Work Item move together. " : "Work Item members move together. "}Only project and goal change; history, thread type and working directory stay the same.</p>
+            <p class="muted small">${workItem ? "All threads in this Work Item move together. " : "Work Item members move together. "}Only project changes; history, thread type and working directory stay the same.</p>
             <label>
                 <span class="label">Project</span>
                 <select
@@ -83,7 +78,6 @@ export function SessionMoveSheet({ ids }) {
                     disabled=${busy || !projectsLoaded}
                     onChange=${(event) => {
                         setProjectId(event.currentTarget.value);
-                        setGoalId("");
                         setError("");
                     }}
                 >
@@ -91,26 +85,8 @@ export function SessionMoveSheet({ ids }) {
                     ${projects.map((each) => html`<option key=${each.id} value=${each.id}>${each.name}</option>`)}
                 </select>
             </label>
-            ${
-                projectId &&
-                html`<label>
-                <span class="label">Goal</span>
-                <select
-                    aria-label="Goal"
-                    value=${goalId}
-                    disabled=${busy}
-                    onChange=${(event) => {
-                        setGoalId(event.currentTarget.value);
-                        setError("");
-                    }}
-                >
-                    <option value="">No goal</option>
-                    ${goals.map((each) => html`<option key=${each.id} value=${each.id}>${each.name}</option>`)}
-                </select>
-            </label>`
-            }
             ${!projectsLoaded && html`<p class="muted small" role="status">Loading projects…</p>`}
-            ${!valid && html`<p class="error" role="alert">Choose an available project and goal.</p>`}
+            ${!valid && html`<p class="error" role="alert">Choose an available project.</p>`}
             ${error && html`<p class="error" role="alert">${error}</p>`}
             <div class="session-move-actions">
                 <button class="button" type="button" disabled=${busy} onClick=${closeSheet}>

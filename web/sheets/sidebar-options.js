@@ -2,9 +2,8 @@
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { canMoveSessions } from "../session-moves.js";
 import { openSidebarOptions } from "../sidebar-context.js";
-import { selectFromList, setArchived, setGoalArchived } from "../sessions.js";
+import { selectFromList, setArchived } from "../sessions.js";
 import {
-    actions,
     canSteer,
     closeSheet,
     handoffsAvailable,
@@ -152,8 +151,8 @@ function OptionsSurface({ title, at, children }) {
     </div>`;
 }
 
-export function SidebarOptions({ kind, id, at, archivedView = false }) {
-    const { sessions, projects, projectGoals } = store.state;
+export function SidebarOptions({ kind, id, at }) {
+    const { sessions, projects } = store.state;
     const thread =
         kind === "thread" || kind === "work-item" ? sessions.find((each) => each.id === id) : null;
     const grouped = handoffsAvailable() && Boolean(thread?.workItemId);
@@ -161,9 +160,8 @@ export function SidebarOptions({ kind, id, at, archivedView = false }) {
     const members = workItem
         ? sessions.filter((each) => each.workItemId === thread.workItemId)
         : [];
-    const goal = kind === "goal" ? projectGoals.find((each) => each.id === id) : null;
     const project = kind === "project" ? projects.find((each) => each.id === id) : null;
-    const object = thread ?? goal ?? project;
+    const object = thread ?? project;
     const title = workItem
         ? (thread.workItemTitle ?? "Work Item")
         : thread
@@ -214,10 +212,8 @@ export function SidebarOptions({ kind, id, at, archivedView = false }) {
         }
 
         if ((!grouped || workItem) && canMoveSessions()) {
-            add(
-                workItem ? "Move Work Item to project or goal…" : "Move to project or goal…",
-                "folder",
-                () => openSheet({ type: "move-sessions", ids: [id] }),
+            add(workItem ? "Move Work Item to project…" : "Move to project…", "folder", () =>
+                openSheet({ type: "move-sessions", ids: [id] }),
             );
         }
 
@@ -242,40 +238,7 @@ export function SidebarOptions({ kind, id, at, archivedView = false }) {
         }
     } else if (project && organize) {
         add("New Session here…", "plus", () => openSheet({ type: "new-session", projectId: id }));
-        add("New goal…", "target", () =>
-            openSheet({ type: "new-session", projectId: id, newGoal: true }),
-        );
         add("Edit project…", "pencil", () => openSheet({ type: "project", projectId: id }));
-    } else if (goal && organize) {
-        if (!goal.archived) {
-            add("New Session here…", "plus", () =>
-                openSheet({ type: "new-session", projectId: goal.projectId, goalId: id }),
-            );
-        }
-
-        add("Rename goal…", "pencil", () => openSheet({ type: "project-goal", goalId: id }));
-        add(
-            goal.status === "completed" ? "Mark active" : "Mark completed",
-            goal.status === "completed" ? "target" : "check",
-            () =>
-                actions.updateProjectGoal(id, {
-                    status: goal.status === "completed" ? "active" : "completed",
-                }),
-        );
-        const restorable =
-            goal.archived ||
-            sessions.some((thread) => thread.goalId === id && thread.archivedByGoal === id);
-        const restoring = archivedView || goal.archived;
-
-        // One restored thread reveals the goal, but its other bulk-archived threads still need Restore.
-        if (!archivedView || restorable) {
-            add(
-                restoring ? "Restore goal and threads" : "Archive goal and all threads",
-                restoring ? "unarchive" : "archive",
-                () => setGoalArchived(goal, !restoring),
-                !restoring,
-            );
-        }
     }
 
     const run = async (item) => {

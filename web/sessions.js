@@ -143,98 +143,15 @@ export async function setArchived(ids, archived, { undo = true } = {}) {
     );
 }
 
-/** Archive a goal and all its threads through the server's single atomic action. */
-export async function setGoalArchived(goal, archived, { undo = true } = {}) {
-    const ids = store.state.sessions
-        .filter((session) => session.goalId === goal.id)
-        .map((session) => session.id);
-    const open = store.state.conversationId;
-
-    // A restore may intentionally leave threads archived before the goal; do not dim those rows.
-    if (archived) {
-        markMoving(ids, archived);
-    }
-
-    try {
-        await actions.updateProjectGoal(goal.id, { archived });
-    } catch (error) {
-        unmarkMoving(ids, archived);
-
-        throw error;
-    }
-
-    const left = archived && ids.includes(open);
-
-    if (left) {
-        navigate(null);
-    }
-
-    if (undo && !archived) {
-        // Bulk restore can leave already-active threads untouched; archiving everything is not its inverse.
-        notify("info", "Restored goal.");
-    } else if (undo) {
-        notify("info", "Archived goal and all threads. Tap to undo.", () =>
-            attempt(async () => {
-                await setGoalArchived(goal, !archived, { undo: false });
-
-                if (left && store.state.conversationId === null) {
-                    navigate(open);
-                }
-            }),
-        );
-    }
-}
-
 /** Disclosure and actions are siblings: there are no buttons inside buttons. */
 function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart, trouble }) {
-    const [busy, setBusy] = useState(false);
     const ref = useRef(null);
-    const goal = group.goal;
-    const options = (at) =>
-        openSidebarOptions(goal ? "goal" : "project", goal?.id ?? group.project.id, at, {
-            archivedView: archived,
-        });
+    const options = (at) => openSidebarOptions("project", group.project.id, at);
 
     useSidebarContext(ref, options, { longPress: canStart, enabled: canStart });
-    const count = rowsInGroups([group]).length;
-    const completed = goal?.status === "completed";
-    const archiveLabel = archived ? "Restore goal and threads" : "Archive goal and all threads";
-
-    const run = async (operation) => {
-        setBusy(true);
-        await attempt(operation);
-        setBusy(false);
-    };
+    const count = group.rows.length;
 
     return html`<div class="project-group-head" ref=${ref}>
-        ${
-            goal &&
-            (canStart
-                ? html`<button
-                    class=${`goal-state ${completed ? "completed" : ""}`}
-                    aria-label=${`${goal.name}: ${completed ? "Completed. Mark active" : "Active. Mark completed"}`}
-                    title=${completed ? "Completed. Mark active" : "Active. Mark completed"}
-                    disabled=${busy}
-                    onClick=${(event) => {
-                        event.stopPropagation();
-                        run(() =>
-                            actions.updateProjectGoal(goal.id, {
-                                status: completed ? "active" : "completed",
-                            }),
-                        );
-                    }}
-                >
-                    <${Icon} class="group-symbol" name=${completed ? "check" : "target"} size=${14} />
-                </button>`
-                : html`<span
-                    class=${`goal-state ${completed ? "completed" : ""}`}
-                    role="img"
-                    aria-label=${completed ? "Completed" : "Active"}
-                    title=${completed ? "Completed" : "Active"}
-                >
-                    <${Icon} class="group-symbol" name=${completed ? "check" : "target"} size=${14} />
-                </span>`)
-        }
         <button
             class="group-head"
             data-part="session-group-head"
@@ -242,7 +159,8 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
             onClick=${onToggle}
             aria-expanded=${!closed}
         >
-            ${!goal && html`<${Icon} class="group-disclosure" name="down" size=${14} />`}
+            <${Icon} class="group-disclosure" name="down" size=${14} />
+            <span class="group-count" data-part="session-group-count">${count}</span>
             <span class="group-name" data-part="session-group-name"><${Highlight} text=${group.label} needle=${needle} /></span>
             ${
                 trouble &&
@@ -253,37 +171,17 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                     title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
                 ></span>`
             }
-            <span class="group-count" data-part="session-group-count">${count}</span>
-            ${goal && html`<${Icon} class="group-disclosure" name="down" size=${12} />`}
         </button>
         <div class="project-group-actions">
             ${
                 canStart &&
-                !goal &&
                 html`<button
                     class="icon-button small project-hover-action"
                     title="Edit project"
                     aria-label=${`Edit ${group.project.name}`}
-                    disabled=${busy}
                     onClick=${() => openSheet({ type: "project", projectId: group.project.id })}
                 >
                     <${Icon} name="pencil" size=${14} />
-                </button>`
-            }
-            ${
-                goal &&
-                canStart &&
-                (!archived ||
-                    goal.archived ||
-                    group.rows.some((row) => row.archivedByGoal === goal.id)) &&
-                html`<button
-                    class="icon-button small project-hover-action"
-                    title=${archiveLabel}
-                    aria-label=${archiveLabel}
-                    disabled=${busy}
-                    onClick=${() => run(() => setGoalArchived(goal, !archived))}
-                >
-                    <${Icon} name=${archived ? "unarchive" : "archive"} size=${14} />
                 </button>`
             }
             ${
@@ -291,13 +189,12 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                 !archived &&
                 html`<button
                     class="icon-button small project-hover-action"
-                    title=${`New Session in ${goal?.name ?? group.project.name}`}
-                    aria-label=${`New Session in ${goal?.name ?? group.project.name}`}
+                    title=${`New Session in ${group.project.name}`}
+                    aria-label=${`New Session in ${group.project.name}`}
                     onClick=${() =>
                         openSheet({
                             type: "new-session",
                             projectId: group.project.id,
-                            ...(goal ? { goalId: goal.id } : {}),
                         })}
                 >
                     <${Icon} name="plus" size=${15} />
@@ -308,7 +205,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                 html`<button
                     class="icon-button small sidebar-touch-options"
                     title="Options"
-                    aria-label=${`Options for ${goal?.name ?? group.project.name}`}
+                    aria-label=${`Options for ${group.project.name}`}
                     aria-haspopup="menu"
                     onClick=${() => options()}
                 >
@@ -553,11 +450,13 @@ function SessionRow({
         onDragCancel: () => dnd.cancelTouch(),
     });
     const title = session.title ?? "New session";
+    // Every top-level thread has working context, even without a Coop-created worktree or handoff.
+    const details = !member;
     const path = shortPath(session.cwd, server?.home);
-    const where = [
-        session.worktree ? `${path} ⎇ ${session.worktree.branch}` : path,
-        session.model,
-    ].filter(Boolean);
+    const reference =
+        session.branch?.branch ??
+        (session.branch?.detached && `${session.branch.detached} (detached)`);
+    const where = [reference ? `${path} ⎇ ${reference}` : path, session.model].filter(Boolean);
     // The Folders tab names the folder above the row already: its model comes first.
     const tip = [title, ...(folders ? where.reverse() : where)].join(" · ");
     // A search can match the folder or model instead of the title: the row shows which.
@@ -623,7 +522,7 @@ function SessionRow({
     const disclosureLabel = `${closed ? "Expand" : "Collapse"} Work Item ${session.title} · ${threadTypeLabel(session)}`;
 
     return html`<div
-        class=${`session-row ${session.members ? "work-item-head" : ""} ${member ? "work-item-member" : ""} ${open ? "active" : ""} ${selected ? "selected" : ""} ${hold ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
+        class=${`session-row ${details ? "with-details" : ""} ${session.members ? "work-item-head" : ""} ${member ? "work-item-member" : ""} ${open ? "active" : ""} ${selected ? "selected" : ""} ${hold ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
         ref=${ref}
         data-part="session-row"
         data-state=${ROW_STATES[mark.shape.split(" ")[0]]}
@@ -673,17 +572,22 @@ function SessionRow({
                     : state)
             }
             ${
-                session.members
+                details
                     ? html`<span class="session-main">
                         ${name}
                         <span class="session-meta">
-                            <span class="work-item-status">
-                                ${WORKFLOW_LABELS[session.workflow?.status] ?? "Active"} · ${session.members.length} threads
-                            </span>
+                            ${
+                                session.members &&
+                                html`<span class="work-item-status">
+                                    ${WORKFLOW_LABELS[session.workflow?.status] ?? "Active"} · ${session.members.length} threads
+                                </span>`
+                            }
                             <span class="mono"><${Highlight} text=${path} needle=${needle} /></span>
                             ${
-                                session.worktree
-                                    ? html`<span class="mono">⎇ ${session.worktree.branch}</span>`
+                                reference
+                                    ? html`<span class="mono">
+                                        <${Icon} name="branch" size=${10} /> ${reference}
+                                    </span>`
                                     : session.model &&
                                       html`<span class="mono">${session.model}</span>`
                             }
@@ -692,7 +596,6 @@ function SessionRow({
                     : name
             }
             <span class="session-side">
-                ${(session.members || member || projectsAvailable()) && state}
                 ${
                     fork &&
                     html`<span
@@ -703,6 +606,7 @@ function SessionRow({
                     </span>`
                 }
                 ${!fork && person && html`<${Avatar} person=${person} size=${18} />`}
+                ${(session.members || member || projectsAvailable()) && state}
                 ${
                     session.waiting &&
                     html`<span class="session-needs" title="Waiting for approval">
@@ -899,8 +803,7 @@ const TABS = [
 const listKept = { query: "", scroll: 0 };
 
 export function SessionList({ compact = false, home = false }) {
-    const { sessions, sessionsLoaded, server, me, pinned, projects, projectGoals, projectsLoaded } =
-        store.state;
+    const { sessions, sessionsLoaded, server, me, pinned, projects, projectsLoaded } = store.state;
     const organized = projectsAvailable();
     const tabChoices = organized ? PROJECT_TABS : TABS;
     const privateTab = me?.role === "owner" && store.state.sidebarTab === "private";
@@ -1022,7 +925,6 @@ export function SessionList({ compact = false, home = false }) {
             sessionMatches(session, needle, {
                 home: server?.home,
                 project: organized ? projects.find((each) => each.id === session.projectId) : null,
-                goal: organized ? projectGoals.find((each) => each.id === session.goalId) : null,
             }),
     );
     const rowPins = [
@@ -1040,7 +942,7 @@ export function SessionList({ compact = false, home = false }) {
     ];
     const forest = sessionForest(matching, { pinned: rowPins, folders: tab === "folders" });
     const rawGroups = hierarchical
-        ? projectGroups(sidebarRows, projects, projectGoals, {
+        ? projectGroups(sidebarRows, projects, {
               archived,
               needle,
               pinned,
@@ -1048,7 +950,7 @@ export function SessionList({ compact = false, home = false }) {
           })
         : groupsOf(forest.roots, { tab, needle, home: server?.home, pinned });
 
-    // Linked sessions remain independent placements: only nest families inside the same project/goal section.
+    // Linked sessions remain independent placements: only nest families inside the same project.
     // Keep raw session rows for project counts/moves, alongside their branch guides for rendering.
     const linkGroup = (group) => {
         const linked = hierarchical ? sessionForest(group.rows, { pinned: rowPins }) : forest;
@@ -1068,7 +970,6 @@ export function SessionList({ compact = false, home = false }) {
             ...group,
             rows: linkedRows.map((row) => row.session),
             linkedRows,
-            children: (group.children ?? []).map(linkGroup),
         };
     };
 
@@ -1091,7 +992,7 @@ export function SessionList({ compact = false, home = false }) {
         onMoved: (ids) =>
             setSelected(new Set([...picked.current].filter((id) => !ids.includes(id)))),
     });
-    const unassigned = { key: "unassigned", projectId: null, goalId: null, label: "No project" };
+    const unassigned = { key: "unassigned", projectId: null, label: "No project" };
 
     /** The rows from `from` to `to` as they show, or just `to` when either is out of view. */
     const span = (from, to) => {
@@ -1368,7 +1269,7 @@ export function SessionList({ compact = false, home = false }) {
     const renderGroup = (group) => {
         const isClosed = groupClosed(group);
         const trouble = isClosed
-            ? rowsInGroups([group])
+            ? group.rows
                   .map((session) => sessionMark(session).shape)
                   .find((shape) => shape === "waiting" || shape === "failed")
             : undefined;
@@ -1376,17 +1277,13 @@ export function SessionList({ compact = false, home = false }) {
             ? {
                   key: group.key,
                   projectId: group.project.id,
-                  goalId: group.goal?.id ?? null,
-                  label: group.goal
-                      ? `${group.project.name} / ${group.goal.name}`
-                      : group.project.name,
+                  label: group.project.name,
               }
             : null;
         const dropTarget = destination && dnd.drag?.target?.key === group.key;
         const groupClass = [
             "session-group",
             group.project && "project-section",
-            group.goal && "goal-section",
             isClosed && "closed",
             dropTarget && "drop-target",
         ]
@@ -1398,7 +1295,6 @@ export function SessionList({ compact = false, home = false }) {
             data-part="session-group"
             key=${`${tab}:${group.key}`}
             data-project-id=${group.project?.id}
-            data-goal-id=${group.goal?.id}
             data-session-drop=${destination ? JSON.stringify(destination) : undefined}
             data-session-drop-closed=${isClosed ? "true" : undefined}
             onDragOver=${
@@ -1472,8 +1368,7 @@ export function SessionList({ compact = false, home = false }) {
                         chosen=${chosen}
                     />`,
                     )}
-                    ${(group.children ?? []).map(renderGroup)}
-                    ${group.project && group.rows.length === 0 && !group.children?.length && html`<div class="project-empty muted small">No threads yet.</div>`}
+                    ${group.project && group.rows.length === 0 && html`<div class="project-empty muted small">No threads yet.</div>`}
                 </div>
             </div>
         </section>`;
@@ -1510,8 +1405,8 @@ export function SessionList({ compact = false, home = false }) {
                       <label class=${`search ${query ? "filled" : ""}`} data-part="session-search">
                           <${Icon} name="search" size=${14} />
                           <input
-                              placeholder=${organized ? "Search sessions, projects, goals" : "Search sessions"}
-                              aria-label=${organized ? "Search sessions, projects, goals" : "Search sessions"}
+                              placeholder=${organized ? "Search sessions, projects" : "Search sessions"}
+                              aria-label=${organized ? "Search sessions, projects" : "Search sessions"}
                               value=${query}
                               onInput=${(event) => setQuery(event.currentTarget.value)}
                               onKeyDown=${(event) => {
@@ -1584,27 +1479,6 @@ export function SessionList({ compact = false, home = false }) {
                           )}
                           <${Slide} box=${tabBar} axis="x" />
                       </div>
-        <div class="session-drag-tools" key="drag-tools" hidden=${!dnd.drag}>
-            ${
-                dnd.drag &&
-                html`<p class="session-drag-status small" role="status">
-                    ${
-                        dnd.drag.target
-                            ? `Move to ${dnd.drag.target.label}`
-                            : `Drag ${dnd.drag.ids.length === 1 ? "session" : `${dnd.drag.ids.length} sessions`} to a project or goal`
-                    }
-                </p>
-                <div
-                    class=${`session-drop-unassigned ${dnd.drag.target?.key === unassigned.key ? "drop-target" : ""}`}
-                    data-session-drop=${JSON.stringify(unassigned)}
-                    onDragOver=${(event) => dnd.over(event, unassigned)}
-                    onDragLeave=${dnd.leave}
-                    onDrop=${(event) => dnd.drop(event, unassigned)}
-                >
-                    <${Icon} name="folder" size=${14} /> No project
-                </div>`
-            }
-        </div>
                       <div
                           class="session-items"
                           key="session-items"
@@ -1625,6 +1499,27 @@ export function SessionList({ compact = false, home = false }) {
                           }
                           ${hierarchical && !projectsLoaded && html`<div class="muted pad" role="status">Loading projects…</div>`}
                           ${groups.map(renderGroup)}
+                          <div class="session-drag-tools" key="drag-tools" hidden=${!dnd.drag}>
+                              ${
+                                  dnd.drag &&
+                                  html`<p class="session-drag-status small" role="status">
+                                      ${
+                                          dnd.drag.target
+                                              ? `Move to ${dnd.drag.target.label}`
+                                              : `Drag ${dnd.drag.ids.length === 1 ? "session" : `${dnd.drag.ids.length} sessions`} to a project`
+                                      }
+                                  </p>
+                                  <div
+                                      class=${`session-drop-unassigned ${dnd.drag.target?.key === unassigned.key ? "drop-target" : ""}`}
+                                      data-session-drop=${JSON.stringify(unassigned)}
+                                      onDragOver=${(event) => dnd.over(event, unassigned)}
+                                      onDragLeave=${dnd.leave}
+                                      onDrop=${(event) => dnd.drop(event, unassigned)}
+                                  >
+                                      <${Icon} name="folder" size=${14} /> No project
+                                  </div>`
+                              }
+                          </div>
                       </div>
                   `
         }

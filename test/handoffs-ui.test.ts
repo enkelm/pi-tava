@@ -105,7 +105,45 @@ async function pickCommand(page: BrowserPage, text: string) {
 
 async function rowOptions(page: BrowserPage, row: string, viewport: "desktop" | "mobile") {
     if (viewport === "mobile") {
-        await click(page, `${row} .session-options`);
+        await present(page, `${row} .session`);
+        await page.evaluate(`
+            await Promise.all(document.getAnimations()
+                .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+                .map(animation => animation.finished.catch(() => {})));
+            const target = document.querySelector(${JSON.stringify(`${row} .session`)});
+
+            target.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+            await new Promise(requestAnimationFrame);
+            await new Promise(requestAnimationFrame);
+            const rect = target.getBoundingClientRect();
+            const point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+
+            window.handoffOptionsFinger = { target, point };
+            const touch = new Touch({ identifier: 71, target, clientX: point.x, clientY: point.y });
+
+            target.dispatchEvent(new TouchEvent('touchstart', {
+                bubbles: true, cancelable: true, touches: [touch], changedTouches: [touch],
+            }));
+        `);
+        await present(page, `${row} .session-hold`);
+        await page.evaluate(`
+            const { target, point } = window.handoffOptionsFinger;
+            const touch = new Touch({ identifier: 71, target, clientX: point.x + 16, clientY: point.y });
+
+            target.dispatchEvent(new TouchEvent('touchmove', {
+                bubbles: true, cancelable: true, touches: [touch], changedTouches: [touch],
+            }));
+        `);
+        await present(page, optionsSurface);
+        await page.evaluate(`
+            const { target, point } = window.handoffOptionsFinger;
+            const touch = new Touch({ identifier: 71, target, clientX: point.x + 16, clientY: point.y });
+
+            target.dispatchEvent(new TouchEvent('touchend', {
+                bubbles: true, cancelable: true, touches: [], changedTouches: [touch],
+            }));
+            delete window.handoffOptionsFinger;
+        `);
     } else {
         await page.evaluate(`document.querySelector(${JSON.stringify(`${row} .session`)}).focus()`);
         await page.press("Shift+F10");
@@ -123,6 +161,191 @@ function gate() {
 
     return { promise, release };
 }
+
+test(
+    "Handoffs UI: shared blocking warnings appear once without changing option eligibility",
+    { skip: findBrowser() === undefined ? "no Chromium installed" : false, timeout: 60_000 },
+    async () => {
+        const app = await openApp(scriptedModel(), join(root, "handoff-warning-data"));
+        const source = await app.commands.createSession(owner(app), {
+            cwd: work,
+            threadType: "worker",
+        });
+        const server = createServer(
+            createHandler({
+                app,
+                listen: { host: "127.0.0.1", port: 0 },
+                restart: () => {},
+            }),
+        );
+        const browsers = new Browsers({
+            dataDir: join(root, "handoff-warning-browser"),
+            load: async () => undefined,
+            save: () => {},
+        });
+        const sharedReason =
+            "Wait until all thread work, including delegated helpers and queued reports, is idle before an exclusive workflow operation (handoff or fetch). End the current turn to receive pending reports; do not retry unchanged attempts.";
+        const distinctReason = "This destination has a separate blocking reason.";
+        const blocked = [
+            {
+                targetType: "researcher",
+                relationship: "same-work",
+                enabled: false,
+                reason: sharedReason,
+            },
+            { targetType: "pull", relationship: "same-work", enabled: false, reason: sharedReason },
+            {
+                targetType: "worker",
+                relationship: "new-work",
+                enabled: false,
+                reason: sharedReason,
+            },
+        ];
+        const mixed = [
+            ...blocked,
+            {
+                targetType: "researcher",
+                relationship: "new-work",
+                enabled: false,
+                reason: distinctReason,
+            },
+            { targetType: "pull", relationship: "new-work", enabled: true },
+        ];
+        const dialog = '[role="dialog"]:has(.handoff-picker)';
+
+        try {
+            await new Promise<void>((resolve, reject) => {
+                server.once("error", reject);
+                server.listen(0, "127.0.0.1", resolve);
+            });
+            const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+            const page = await browsers.open(1);
+
+            await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
+            await page.navigate(`${base}/s/${source.id}`);
+            await present(page, ".topbar .handoff-button");
+            // Fixture only the eligibility response, not the sheet or its disabled behavior.
+            // The authenticated app loads and renders the actual extension in Chromium.
+            await page.evaluate(`const fetchOriginal = window.fetch.bind(window);
+                window.fetch = (url, options) => {
+                    if (/\\/api\\/c\\/\\d+\\/x\\/work-items\\/handoffs$/.test(String(url))) {
+                        return Promise.resolve(new Response(JSON.stringify({
+                            workflow: {}, options: window.warningOptions,
+                        }), { headers: { 'Content-Type': 'application/json' } }));
+                    }
+
+                    return fetchOriginal(url, options);
+                };`);
+
+            for (const viewport of ["desktop", "mobile"] as const) {
+                await page.setViewport(VIEWPORTS[viewport]);
+
+                for (const options of [blocked, mixed]) {
+                    await page.evaluate(`window.warningOptions = ${JSON.stringify(options)};
+                        for (const key of Object.keys(sessionStorage)) {
+                            if (key.startsWith('pocket.handoffDraft.')) {
+                                sessionStorage.removeItem(key);
+                            }
+                        }`);
+                    await click(page, ".topbar .handoff-button");
+                    await present(page, `${dialog} input[type="radio"]`);
+                    const rendered = await value<{
+                        occurrences: number;
+                        warningBeforeGroups: boolean;
+                        inlineReasons: string[];
+                        disabled: boolean[];
+                        described: string[];
+                    }>(
+                        page,
+                        `(() => {
+                        const form = document.querySelector(${JSON.stringify(`${dialog} form`)});
+                        const warning = form.querySelector('[role="status"]');
+                        const inputs = [...form.querySelectorAll('input[type="radio"]')];
+
+                        return {
+                            occurrences: form.textContent.split(${JSON.stringify(sharedReason)}).length - 1,
+                            warningBeforeGroups: Boolean(warning && (warning.compareDocumentPosition(form.querySelector('fieldset')) & Node.DOCUMENT_POSITION_FOLLOWING)),
+                            inlineReasons: [...form.querySelectorAll('.handoff-option-copy .small')].map(element => element.textContent),
+                            disabled: inputs.map(input => input.disabled),
+                            described: inputs.map(input => document.getElementById(input.getAttribute('aria-describedby'))?.textContent ?? ''),
+                        };
+                    })()`,
+                    );
+
+                    assert.equal(
+                        rendered.occurrences,
+                        1,
+                        "a repeated blocking reason is shown once",
+                    );
+                    assert.equal(
+                        rendered.warningBeforeGroups,
+                        true,
+                        "the warning precedes both option groups",
+                    );
+                    assert.deepEqual(
+                        rendered.disabled,
+                        options.map((option) => !option.enabled),
+                    );
+                    assert.deepEqual(
+                        rendered.inlineReasons,
+                        options === mixed ? [distinctReason] : [],
+                    );
+                    assert.deepEqual(
+                        rendered.described,
+                        options.map((_, index) => (index < blocked.length ? sharedReason : "")),
+                    );
+                    await click(page, `${dialog} input[value="researcher:same-work"]`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelectorAll(${JSON.stringify(`${dialog} input:checked`)}).length`,
+                        ),
+                        0,
+                    );
+
+                    if (options === mixed) {
+                        await click(page, `${dialog} input[value="pull:new-work"]`);
+                        await present(page, `${dialog} input[value="pull:new-work"]:checked`);
+                        assert.equal(
+                            await value(
+                                page,
+                                `document.querySelector(${JSON.stringify(`${dialog} button[type="submit"]`)}).disabled`,
+                            ),
+                            false,
+                        );
+                    } else {
+                        assert.equal(
+                            await value(
+                                page,
+                                `document.querySelector(${JSON.stringify(`${dialog} button[type="submit"]`)}).disabled`,
+                            ),
+                            true,
+                        );
+                    }
+
+                    assert.equal(
+                        await value(page, "document.documentElement.scrollWidth <= innerWidth"),
+                        true,
+                    );
+                    await shot(
+                        page,
+                        `${viewport}-handoff-${options === mixed ? "mixed" : "shared"}-warning`,
+                    );
+                    await page.press("Escape");
+                    await present(page, dialog, false);
+                }
+            }
+        } finally {
+            await browsers.closeAll({ final: true });
+            await app.close();
+            server.closeAllConnections();
+
+            if (server.listening) {
+                await new Promise<void>((resolve) => server.close(() => resolve()));
+            }
+        }
+    },
+);
 
 test(
     "Handoffs UI: real slash/English input, clarification, tool-result reload and whole Work Items",
@@ -278,7 +501,7 @@ test(
                     );
                     await click(page, `${scope} .session-row[data-id="${origin.id}"] .session`);
                     await present(page, ".topbar .handoff-button");
-                    await present(page, '[role="dialog"][aria-label="Handoff"]', false);
+                    await present(page, '[role="dialog"][aria-label="Choose next thread"]', false);
 
                     // Intercept transport failures only. Model/tool execution and all receipts
                     // still come from the real authenticated app, never a mocked handoff result.
@@ -465,7 +688,7 @@ test(
                     await present(otherTab, composer);
                     const steering =
                         "Keep the exact reproduction.\nDo not restart, commit or publish.";
-                    const dialog = '[role="dialog"][aria-label="Handoff"]';
+                    const dialog = '[role="dialog"][aria-label="Choose next thread"]';
                     const directionField = `${dialog} textarea`;
                     const popupRejected =
                         "/handoff reviewer --same\nInstructions:\nKeep this popup draft.\n--do-not-restart";
@@ -819,7 +1042,7 @@ test(
                             .filter((session) => session.workItemId === reviewer.workItemId);
 
                     await rowOptions(page, `${workItem} > .work-item-head`, viewport);
-                    await button(page, optionsSurface, "Move Work Item to project or goal…");
+                    await button(page, optionsSurface, "Move Work Item to project…");
                     await page.evaluate(
                         `const field = document.querySelector('[role="dialog"] [aria-label="Project"]'); field.value = ''; field.dispatchEvent(new Event('change', { bubbles: true }));`,
                     );

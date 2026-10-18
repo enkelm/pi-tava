@@ -608,21 +608,6 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return json(response, 200, { ok: true });
         }
 
-        if (
-            first === "project-goals" &&
-            second !== undefined &&
-            third === undefined &&
-            method === "POST"
-        ) {
-            const body = await readJson<{ name?: unknown; status?: unknown; archived?: unknown }>(
-                request,
-            );
-
-            await app.projects.updateGoal(user, second, body);
-
-            return json(response, 200, { ok: true });
-        }
-
         if (first === "sessions" && second === undefined && method === "GET") {
             return json(response, 200, app.sessions(user));
         }

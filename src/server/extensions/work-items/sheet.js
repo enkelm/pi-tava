@@ -90,6 +90,18 @@ export function createHandoffSheet(pocket, state) {
         const options = data?.options ?? [];
         const selected = options.find((each) => keyOf(each) === draft.choice);
         const readOnly = source?.workflow?.readOnly || data?.workflow?.readOnly;
+        const blockingReasons = new Map();
+
+        for (const option of options) {
+            if ((!option.enabled || readOnly) && option.reason) {
+                blockingReasons.set(option.reason, (blockingReasons.get(option.reason) ?? 0) + 1);
+            }
+        }
+
+        const sharedReasons = [...blockingReasons]
+            .filter(([, count]) => count > 1)
+            .map(([reason]) => reason);
+        const reasonId = (index) => `handoff-blocking-reason-${opening}-${index}`;
         const valid =
             session.canSteer &&
             selected?.enabled &&
@@ -200,6 +212,12 @@ export function createHandoffSheet(pocket, state) {
                     !direction
                         ? html`
                     <p class="muted small">Choose the next role, then add any instructions before sending.</p>
+                    ${
+                        sharedReasons.length > 0 &&
+                        html`<div class="handoff-warning small" role="status">
+                            ${sharedReasons.map((reason, index) => html`<p id=${reasonId(index)}>${reason}</p>`)}
+                        </div>`
+                    }
                     ${GROUPS.map((group) => {
                         const choices = options.filter(
                             (each) => each.relationship === group.relationship,
@@ -220,6 +238,9 @@ export function createHandoffSheet(pocket, state) {
                             <div class="handoff-options">
                                 ${choices.map((each) => {
                                     const disabled = !each.enabled || readOnly;
+                                    const sharedIndex = disabled
+                                        ? sharedReasons.indexOf(each.reason)
+                                        : -1;
 
                                     return html`<label class=${`handoff-option ${disabled ? "disabled" : ""}`}>
                                         <input
@@ -228,6 +249,7 @@ export function createHandoffSheet(pocket, state) {
                                             value=${keyOf(each)}
                                             checked=${draft.choice === keyOf(each)}
                                             disabled=${disabled}
+                                            aria-describedby=${sharedIndex >= 0 ? reasonId(sharedIndex) : undefined}
                                             onChange=${() => update({ choice: keyOf(each) })}
                                         />
                                         <span class="handoff-option-profile">
@@ -235,7 +257,7 @@ export function createHandoffSheet(pocket, state) {
                                         </span>
                                         <span class="handoff-option-copy">
                                             <strong>Start ${profileName(session.profiles, each.targetType)}</strong>
-                                            ${each.reason && html`<span class="small muted">${each.reason}</span>`}
+                                            ${each.reason && sharedIndex < 0 && html`<span class="small muted">${each.reason}</span>`}
                                         </span>
                                     </label>`;
                                 })}

@@ -41,7 +41,6 @@ import {
     NotesDoc,
     PinsDoc,
     PlanDoc,
-    ProjectsDoc,
     type Schedule,
     SessionCreatesDoc,
     SessionsDoc,
@@ -90,8 +89,6 @@ export type CreateSessionRequest = {
     title?: string;
     worktree?: unknown;
     projectId?: unknown;
-    goalId?: unknown;
-    newGoal?: unknown;
     threadType?: unknown;
     requestId?: string;
 };
@@ -100,7 +97,6 @@ export type SessionPatch = {
     title?: string;
     archived?: boolean;
     projectId?: unknown;
-    goalId?: unknown;
 };
 
 export interface SubmitRequest {
@@ -397,8 +393,6 @@ export class Commands {
             title: optionalText(request.title, "title"),
             worktree: request.worktree === true,
             projectId: request.projectId,
-            goalId: request.goalId,
-            newGoal: request.newGoal,
             threadType: request.threadType,
         });
 
@@ -499,7 +493,7 @@ export class Commands {
                         },
                         init: async (tx, id) => {
                             this.#requireCreate(user);
-                            const placement = await app.projects.place(tx, id, selection);
+                            const placement = await app.projects.place(tx, selection);
                             const sessions = await tx.doc(SessionsDoc);
 
                             sessions.items[String(id)] = {
@@ -801,7 +795,7 @@ export class Commands {
         }
 
         const before = app.sessionMeta(id);
-        const placing = Object.hasOwn(patch, "projectId") || Object.hasOwn(patch, "goalId");
+        const placing = Object.hasOwn(patch, "projectId");
 
         if (placing) {
             if (patch.title !== undefined || patch.archived !== undefined) {
@@ -832,18 +826,6 @@ export class Commands {
                     await app.handoffs.archive(tx, id, user, patch.archived);
                 } else {
                     meta.archived = patch.archived;
-                    delete meta.archivedByGoal;
-                }
-
-                // Restoring one thread reveals its goal, without restoring the goal's other archived threads.
-                if (!patch.archived && meta.goalId !== undefined) {
-                    const projects = await tx.doc(ProjectsDoc);
-                    const goal = projects.goals[meta.goalId];
-
-                    if (goal?.archived === true) {
-                        goal.archived = false;
-                        goal.updatedAt = Date.now();
-                    }
                 }
             }
 
@@ -1241,7 +1223,6 @@ export class Commands {
             return;
         }
 
-        const goalText = await this.#app.goalNames.firstMessage(id);
         let provisional: string | undefined;
 
         await this.#app.harness.commit(async (tx) => {
@@ -1256,8 +1237,6 @@ export class Commands {
             if (meta.title === undefined && text !== "") {
                 meta.title = provisional = text.replace(/\s+/g, " ").slice(0, 80);
             }
-
-            await this.#app.goalNames.schedule(tx, id, goalText ?? text);
         }, context);
 
         if (provisional !== undefined && (expanded !== undefined || wantsTitle(text))) {
@@ -2216,9 +2195,6 @@ export class Commands {
         const init: ConversationCreateOptions["init"] = async (tx, forked) => {
             const sessions = await tx.doc(SessionsDoc);
             const sourceMeta = sessions.items[String(id)];
-            const projects = await tx.doc(ProjectsDoc);
-            const sourceGoal =
-                sourceMeta?.goalId === undefined ? undefined : projects.goals[sourceMeta.goalId];
 
             sessions.items[String(forked)] = {
                 cwd: place.cwd,
@@ -2228,10 +2204,6 @@ export class Commands {
                 createdBy: user.id,
                 threadType: sourceMeta?.threadType ?? "worker",
                 ...(sourceMeta?.projectId === undefined ? {} : { projectId: sourceMeta.projectId }),
-                ...(sourceMeta?.goalId === undefined ? {} : { goalId: sourceMeta.goalId }),
-                ...(sourceGoal?.archived === true
-                    ? { archived: true, archivedByGoal: sourceGoal.id }
-                    : {}),
                 forkedFrom: { id: Number(id), ...(at === undefined ? {} : { entryId: at }) },
                 ...(app.sessionMeta(app.rootOf(id))?.ownerOnly === true ? { ownerOnly: true } : {}),
                 ...(place.worktree === undefined ? {} : { worktree: place.worktree }),

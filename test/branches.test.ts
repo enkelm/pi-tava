@@ -48,6 +48,23 @@ test("switching from the app changes the branch, tells Pi, and shows in the view
     const me = owner(app);
     const tab = fakeTab(id, me);
 
+    const listedBranch = () => {
+        const head = (tab.last("sessions") as unknown as ReturnType<App["sessions"]>)?.find(
+            (session) => session.id === id,
+        )?.branch;
+
+        return head && "branch" in head ? head.branch : undefined;
+    };
+
+    const initial = app.sessions(me).find((session) => session.id === id);
+
+    assert.equal(initial?.worktree, undefined, "this is an ordinary checkout, not a Coop worktree");
+    assert.equal(initial?.workItemId, undefined, "the initial thread has no handoff group");
+    assert.deepEqual(
+        initial?.branch,
+        { branch: "main" },
+        "the initial sidebar catalogue includes its actual Git branch",
+    );
     await app.attach(tab.client);
 
     try {
@@ -58,9 +75,16 @@ test("switching from the app changes the branch, tells Pi, and shows in the view
             branch: "old-idea",
         });
         assert.equal(git(repo, "branch", "--show-current"), "old-idea");
+        assert.deepEqual(app.sessions(me).find((session) => session.id === id)?.branch, {
+            branch: "old-idea",
+        });
         await until(
             () => (tab.field("branch") as { branch?: string })?.branch === "old-idea",
             "the view to show the new branch",
+        );
+        await until(
+            () => listedBranch() === "old-idea",
+            "the sidebar catalogue to receive the app branch switch",
         );
 
         // One switched outside the app shows too, once the session is quiet and nothing else would update its view.
@@ -70,6 +94,14 @@ test("switching from the app changes the branch, tells Pi, and shows in the view
             () => (tab.field("branch") as { branch?: string })?.branch === "main",
             "a switch made in a terminal to show",
             8000,
+        );
+        assert.deepEqual(app.sessions(me).find((session) => session.id === id)?.branch, {
+            branch: "main",
+        });
+        await until(
+            () => listedBranch() === "main",
+            "the sidebar catalogue to receive the terminal branch switch",
+            2000,
         );
     } finally {
         app.detach(tab.client);

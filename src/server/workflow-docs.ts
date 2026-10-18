@@ -74,7 +74,6 @@ export type WorkItem = {
     threadIds: number[];
     title: string;
     projectId?: string;
-    goalId?: string;
     archived?: boolean;
     predecessorWorkItemId?: string;
     createdAt: number;

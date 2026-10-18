@@ -1,7 +1,7 @@
 // Real-app appearance owns browser-local legacy fallback/persistence, native palettes, mode assignments,
 // font rendering and pointer/keyboard disclosure. Launcher previews/commands share that boundary.
 // The fixture controls only the platform color-scheme signal, before the app loads; no production seam.
-import { type App, cleanUp, openApp, root, scriptedModel, until } from "./helpers.ts";
+import { type App, cleanUp, openApp, owner, root, scriptedModel, until, work } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -369,6 +369,165 @@ async function previewTheme(page: BrowserPage, query: string, bg: string, name: 
     );
     await until(async () => (await appearance(page)).bg === bg, `launcher previews ${query}`);
 }
+
+// The real rendered theme owns corner/contrast consistency; token/source assertions cannot
+// detect a missing radius consumer, a third empty grid column, or extension color precedence.
+test(
+    "Lantern keeps rounded focus borders and consistent project creation controls",
+    browserOptions,
+    async (t) => {
+        await withAppearance(async ({ app, page }) => {
+            await app.projects.create(owner(app), {
+                name: "Lantern project",
+                cwd: work,
+                requestId: "lantern-controls",
+            });
+            await page.evaluate(`
+            const theme = await import('/theme.js');
+
+            theme.setPrefs({ motion: 'reduced', tiling: true });
+            theme.chooseLook('lantern');
+        `);
+            await until(
+                () =>
+                    inPage<boolean>(
+                        page,
+                        `return JSON.stringify(document.documentElement.dataset.theme === 'lantern'
+                && getComputedStyle(document.documentElement).getPropertyValue('--r-control').trim() === '8px')`,
+                    ),
+                "Lantern stylesheet loaded",
+            );
+
+            for (const viewport of ["desktop", "mobile"] as const) {
+                await t.test(viewport, async () => {
+                    await page.setViewport(VIEWPORTS[viewport]);
+                    const scope = viewport === "desktop" ? ".sidebar" : ".home-list";
+
+                    await present(page, `${scope} .project-group-head`);
+
+                    if (viewport === "desktop") {
+                        await page.hover({ selector: `${scope} .project-group-head .group-head` });
+                        await until(
+                            () =>
+                                inPage<boolean>(
+                                    page,
+                                    `
+                            const sidebar = document.querySelector('.sidebar');
+                            const swatch = document.createElement('span');
+
+                            sidebar.append(swatch);
+                            swatch.style.color = 'var(--accent)';
+                            const accent = getComputedStyle(swatch).color;
+
+                            swatch.style.color = 'var(--window-border)';
+                            const inactive = getComputedStyle(swatch).color;
+
+                            swatch.remove();
+
+                            return JSON.stringify(document.documentElement.dataset.focus === 'sidebar'
+                                && getComputedStyle(sidebar).borderTopColor === accent
+                                && accent !== inactive);
+                        `,
+                                ),
+                            "hover restores a visible palette-accent border, not the inactive border color",
+                        );
+                    }
+
+                    const frame = await inPage<{
+                        tile: string;
+                        windowToken: string;
+                        borderImage: string;
+                        row: string;
+                        rowToken: string;
+                    }>(
+                        page,
+                        `
+                    const head = document.querySelector('${scope} .project-group-head');
+                    const sidebar = getComputedStyle(document.querySelector('.sidebar'));
+
+                    return JSON.stringify({
+                        tile: sidebar.borderRadius,
+                        windowToken: sidebar.getPropertyValue('--r-window').trim(),
+                        borderImage: sidebar.borderImageSource,
+                        row: getComputedStyle(head).borderRadius,
+                        rowToken: getComputedStyle(head).getPropertyValue('--r-row').trim(),
+                    });
+                `,
+                    );
+
+                    if (viewport === "desktop") {
+                        assert.equal(
+                            frame.tile,
+                            frame.windowToken,
+                            "Lantern keeps its rounded tiled windows",
+                        );
+                        assert.equal(
+                            frame.borderImage,
+                            "none",
+                            "the focused border follows those corners instead of drawing a square border image",
+                        );
+                    }
+
+                    assert.equal(
+                        frame.row,
+                        frame.rowToken,
+                        "project hover surfaces follow Lantern row corners",
+                    );
+                    await page.click({ selector: `${scope} .new-button` });
+                    const sheet = '[role="dialog"][aria-label="New Session"]';
+
+                    await present(page, `${sheet} .project-choice-row`);
+                    await page.click({ selector: `${sheet} .project-choice-row` });
+                    await present(page, `${sheet} .session-destination`);
+                    const controls = await inPage<{
+                        tabsFill: boolean;
+                        selectRadius: string;
+                        buttonRadius: string;
+                        iconColor: string;
+                        buttonColor: string;
+                    }>(
+                        page,
+                        `
+                    const sheet = document.querySelector('${sheet}');
+                    const tabs = sheet.querySelector('.new-session-tabs');
+                    const track = tabs.getBoundingClientRect();
+                    const buttons = [...tabs.querySelectorAll('button')].map(button => button.getBoundingClientRect());
+                    const select = sheet.querySelector('select[aria-label="Thread type"]');
+                    const start = sheet.querySelector('.session-destination .button.primary');
+
+                    return JSON.stringify({
+                        tabsFill: Math.abs(buttons[0].width - buttons[1].width) < 1
+                            && Math.abs(track.right - buttons[1].right - parseFloat(getComputedStyle(tabs).paddingRight)) < 1,
+                        selectRadius: getComputedStyle(select).borderRadius,
+                        buttonRadius: getComputedStyle(start).borderRadius,
+                        iconColor: getComputedStyle(start.querySelector('.thread-type')).color,
+                        buttonColor: getComputedStyle(start).color,
+                    });
+                `,
+                    );
+
+                    assert.equal(
+                        controls.tabsFill,
+                        true,
+                        "Start new and Import fill the entire track equally",
+                    );
+                    assert.equal(
+                        controls.selectRadius,
+                        controls.buttonRadius,
+                        "Thread type uses the same themed corners as its neighboring controls",
+                    );
+                    assert.equal(
+                        controls.iconColor,
+                        controls.buttonColor,
+                        "the Start icon uses its button's monochrome ink",
+                    );
+                    await page.press("Escape");
+                    await present(page, sheet, false);
+                });
+            }
+        });
+    },
+);
 
 test(
     "legacy desktop preferences render the fallback without rewrites; cards, previews and commands work",

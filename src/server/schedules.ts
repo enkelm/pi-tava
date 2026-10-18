@@ -149,7 +149,6 @@ export class Schedules {
                 { type: "input", content: schedule.content, whenBusy: "followUp", requestId },
                 context,
             );
-            await this.#app.goalNames.admitted(conversationId);
         }
 
         await runtime.commit(async (tx) => {

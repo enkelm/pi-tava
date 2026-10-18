@@ -4471,12 +4471,13 @@ button.chip:active:not(:disabled):not(.on) {
     flex-direction: column;
 }
 
-/* Projects and goals use the same folding list, with sibling action buttons. */
+/* Project disclosure and actions are siblings. */
 .project-group-head {
     display: flex;
     align-items: center;
     gap: 0.15rem;
     min-width: 0;
+    border-radius: var(--r-row);
 }
 
 .project-group-head .group-head {
@@ -4484,6 +4485,7 @@ button.chip:active:not(:disabled):not(.on) {
     flex: 1;
     min-height: 40px;
     padding-block: 0.4rem;
+    border-radius: var(--r-row);
     color: var(--body);
     font-size: 0.78rem;
     letter-spacing: normal;
@@ -4504,6 +4506,11 @@ button.chip:active:not(:disabled):not(.on) {
     display: none;
 }
 
+/* Project counts lead the flexible title. */
+.project-section > .project-group-head .group-count {
+    flex: none;
+}
+
 .project-group-actions {
     display: flex;
     align-items: center;
@@ -4513,29 +4520,6 @@ button.chip:active:not(:disabled):not(.on) {
 .project-group-actions .icon-button.small {
     width: 40px;
     height: 40px;
-}
-
-/* Retain the previous goal-control selector for themes and compatible callers. */
-.goal-status {
-    display: inline-grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 40px;
-    min-height: 40px;
-    color: var(--muted);
-}
-
-.goal-state {
-    display: inline-grid;
-    place-items: center;
-    flex-shrink: 0;
-    width: 24px;
-    height: 40px;
-    color: var(--muted);
-}
-
-.goal-state + .group-head {
-    padding-inline-start: 0;
 }
 
 /* Secondary group actions stay available on keyboard focus; touch uses Options instead of hover. */
@@ -4575,10 +4559,6 @@ button.chip:active:not(:disabled):not(.on) {
         display: grid;
     }
 
-    .goal-state {
-        width: 40px;
-    }
-
     .project-group-head,
     .session-row {
         -webkit-touch-callout: none;
@@ -4594,15 +4574,6 @@ button.chip:active:not(:disabled):not(.on) {
     pointer-events: auto;
 }
 
-.goal-status.completed {
-    color: var(--o-green);
-}
-
-.goal-state.completed {
-    color: var(--o-green);
-}
-
-.project-section > .project-group-head .group-symbol,
 .project-section > .project-group-head .group-disclosure {
     order: initial;
     flex-shrink: 0;
@@ -4613,16 +4584,11 @@ button.chip:active:not(:disabled):not(.on) {
     transform: rotate(-90deg);
 }
 
-/* Goals stay aligned with their project; keep the selector available to themes. */
-.goal-section {
-    margin-left: 0;
-}
-
 .project-empty {
     padding: 0.3rem 0.5rem 0.65rem;
 }
 
-/* Drop feedback sits on the exact destination, not every ancestor of a goal. */
+/* Drop feedback sits on the destination header. */
 .project-section.drop-target > .project-group-head,
 .session-drop-unassigned.drop-target {
     background: var(--accent-soft);
@@ -4660,15 +4626,13 @@ button.chip:active:not(:disabled):not(.on) {
     font-size: 0.78rem;
 }
 
-.session-move-form,
-.project-goal-form {
+.session-move-form {
     display: flex;
     flex-direction: column;
     gap: 1rem;
 }
 
-.session-move-actions,
-.project-goal-actions {
+.session-move-actions {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 0.5rem;
@@ -5216,6 +5180,17 @@ button.chip:active:not(:disabled):not(.on) {
     transition: opacity var(--t-hover) var(--ease-out);
 }
 
+/* The shared spinner is 11px; its inline baseline must not push it below its neighbors. */
+.session-side .session-mark {
+    flex: none;
+    width: 11px;
+    height: 11px;
+}
+
+.session-side .session-mark .spinner {
+    display: block;
+}
+
 /* Subagents at work there (or failed ones, in red): ⑂ and how many, in a small pill. */
 .session-fork {
     display: inline-flex;
@@ -5345,74 +5320,20 @@ button.chip:active:not(:disabled):not(.on) {
     display: none;
 }
 
-/* Touch has an explicit Options fallback; holding the row still offers Drag or Options. */
+/* Touch keeps row actions in the deliberate hold/slide chooser, not an always-visible cog. */
 @media (hover: none), (pointer: coarse) {
     .session-actions {
         display: none;
     }
 
-    .session-actions:has(.session-move) {
-        display: flex;
-        margin-top: -20px;
-        right: 0;
-    }
-
-    .session-actions:has(.session-options) {
-        display: flex;
-        margin-top: -20px;
-        right: 0;
-    }
-
-    .session-actions .session-act {
-        display: none;
-    }
-
-    .session-actions .session-move {
-        display: grid;
-        width: 40px;
-        height: 40px;
-        opacity: 1;
-        transform: none;
-        border: none;
-        background: transparent;
-    }
-
-    .session-actions .session-options {
-        display: grid;
-        width: 40px;
-        height: 40px;
-        opacity: 1;
-        transform: none;
-        border: none;
-        background: transparent;
-    }
-
-    .session-actions:has(.session-options) .session-move {
-        display: none;
-    }
-
-    .session-row:has(.session-move) {
-        --session-actions-width: 40px;
-    }
-
-    .session-row:has(.session-move) .session {
+    .session {
         min-height: 40px;
-        padding-right: 44px;
-    }
-
-    .session-row:has(.session-options) {
-        --session-actions-width: 40px;
-    }
-
-    .session-row:has(.session-options) .session {
-        min-height: 40px;
-        padding-right: 44px;
     }
 }
 
 /* The buttons take the right side's place, widened so a long title ends before them (one to four 26px buttons). */
 @media (hover: hover) and (pointer: fine) {
-    /* Options is touch-only: exclude its hidden button and gap from the desktop reserve. */
+    /* Exclude the hidden Options button and its gap from the desktop hover reserve. */
     .session-row:has(> .session-actions > .session-options) {
         --session-hidden-action-width: 30px;
     }
@@ -5458,23 +5379,25 @@ button.chip:active:not(:disabled):not(.on) {
     transform: none;
 }
 
-/* Keyboard focus works independently of hover support. A browser without :has() drops only these rules. */
-.session-row:has(:focus-visible) .session-act {
-    opacity: 1;
-    transform: none;
-}
+/* Desktop row actions also reveal on keyboard focus; touch keeps the context/hold actions. */
+@media (hover: hover) and (pointer: fine) {
+    .session-row:has(:focus-visible) .session-act {
+        opacity: 1;
+        transform: none;
+    }
 
-.session-row:not(.no-acts):has(:focus-visible) .session-side {
-    opacity: 0;
-    min-width: var(--session-actions-width, 56px);
-}
+    .session-row:not(.no-acts):has(:focus-visible) .session-side {
+        opacity: 0;
+        min-width: var(--session-actions-width, 56px);
+    }
 
-.session-row.one-act:has(:focus-visible) .session-side {
-    min-width: var(--session-actions-width, 26px);
-}
+    .session-row.one-act:has(:focus-visible) .session-side {
+        min-width: var(--session-actions-width, 26px);
+    }
 
-.session-row.three-acts:has(:focus-visible) .session-side {
-    min-width: var(--session-actions-width, 86px);
+    .session-row.three-acts:has(:focus-visible) .session-side {
+        min-width: var(--session-actions-width, 86px);
+    }
 }
 
 /* The hold chooser is local to its row. Clip paths widen the chosen surface without stretching its label. */
@@ -6904,6 +6827,10 @@ button.chip:active:not(:disabled):not(.on) {
 }
 
 /* New Session keeps both flows in the same sheet, with their drafts retained. */
+.new-session-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .new-session-tabs button {
     min-height: 40px;
     color: var(--body);
@@ -6978,13 +6905,6 @@ button.chip:active:not(:disabled):not(.on) {
     overflow-wrap: anywhere;
 }
 
-.project-goal-choices {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    margin: 0.25rem 0 0.5rem 1rem;
-}
-
 .session-destination {
     padding-top: 0.7rem;
     border-top: 1px solid var(--line);
@@ -7006,11 +6926,6 @@ button.chip:active:not(:disabled):not(.on) {
     min-width: 0;
     overflow-wrap: anywhere;
     font-size: 0.78rem;
-}
-
-.goal-naming-note {
-    display: block;
-    margin-top: 0.35rem;
 }
 
 .one-time-chat-button {
@@ -17166,6 +17081,7 @@ pre.gallery-code {
 
 .private-tabs {
     flex: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     border-bottom: 1px solid var(--line);
 }
 
@@ -17220,18 +17136,57 @@ pre.gallery-code {
     border-top: 1px solid var(--line-strong);
 }
 
+.private-spaces.collapsed,
+.private-agents.collapsed {
+    flex: none;
+}
+
 .private-section-title {
     flex: none;
-    display: flex;
-    justify-content: space-between;
-    padding: 12px 14px 7px;
     margin: 0;
     font-size: 12px;
     font-weight: 500;
     color: var(--body);
 }
 
-.private-section-title > span,
+.private-section-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-height: 40px;
+    padding: 7px 14px;
+    border-radius: var(--r-row);
+    text-align: start;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.private-section-toggle > .icon {
+    flex: none;
+    color: var(--muted);
+}
+
+.private-section-toggle[aria-expanded="false"] > .icon {
+    transform: rotate(-90deg);
+}
+
+.private-section-count {
+    margin-inline-start: auto;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .private-section-toggle:hover {
+        background: var(--hover);
+    }
+}
+
+.private-section-toggle:active {
+    background: var(--pressed);
+}
+
+.private-section-count,
 .private-row-count {
     font-size: 11px;
     color: var(--muted);
@@ -17264,6 +17219,7 @@ pre.gallery-code {
     min-height: 44px;
     padding: 7px 8px;
     border: 1px solid transparent;
+    border-radius: var(--r-row);
     text-align: left;
     color: var(--body);
 }
@@ -17759,6 +17715,7 @@ pre.gallery-code {
     min-width: 0;
     align-items: center;
     border: 1px solid transparent;
+    border-radius: var(--r-row);
 }
 
 .private-agent-row.active {
@@ -17781,6 +17738,13 @@ pre.gallery-code {
 
 .private-import {
     flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: auto;
+    padding-inline: 6px;
+    font-size: 11px;
     color: var(--muted);
 }
 
@@ -17795,7 +17759,6 @@ pre.gallery-code {
         border-right: 1px solid var(--line-strong);
     }
 
-    .private-sidebar .private-tabs button,
     .private-layout .private-tabbar button,
     .private-layout .private-pane-picker button,
     .private-layout .private-view-switch button {
@@ -17809,7 +17772,6 @@ pre.gallery-code {
     }
 
     .private-sidebar .private-import {
-        width: 30px;
         height: 30px;
         min-height: 30px;
     }
@@ -17846,9 +17808,14 @@ pre.gallery-code {
 }
 
 /* Native catalogue groups remain styled in extension safe mode and while clients reload. */
-.work-item .session {
+.work-item .session,
+.session-row.with-details > .session {
     min-height: 44px;
     padding-block: 0.4rem;
+}
+
+.session-row.with-details > .session {
+    height: auto;
 }
 
 .work-item-head > .session {
@@ -17856,13 +17823,13 @@ pre.gallery-code {
     padding-left: 36px;
 }
 
-.work-item-head .session-main {
+.session-main {
     min-width: 0;
     display: flex;
     flex-direction: column;
 }
 
-.work-item-head .session-main > .session-title {
+.session-main > .session-title {
     min-width: 0;
     flex-shrink: 1;
     overflow: hidden;
@@ -17902,18 +17869,18 @@ pre.gallery-code {
     opacity: 0;
 }
 
-.work-item .session-meta {
+.session-main .session-meta {
     min-width: 0;
     flex-wrap: nowrap;
     gap: 0.6rem;
 }
 
-.work-item .session-meta > span {
+.session-main .session-meta > span {
     min-width: 0;
     white-space: nowrap;
 }
 
-.work-item-head .session-meta > .mono {
+.session-main .session-meta > .mono {
     flex: 1 1 0;
 }
 
@@ -17922,7 +17889,7 @@ pre.gallery-code {
     max-width: 60%;
 }
 
-.work-item-head .session-meta span + span::before {
+.session-main .session-meta span + span::before {
     content: none;
 }
 
@@ -17937,29 +17904,5 @@ pre.gallery-code {
 
     .work-item-head > .session {
         padding-left: 44px;
-    }
-
-    .work-item-head .session-actions {
-        display: flex;
-        right: 0;
-        margin-top: -20px;
-    }
-
-    .work-item-head .session-actions .session-act {
-        display: none;
-    }
-
-    .work-item-head .session-actions .work-item-options {
-        display: grid;
-        width: 40px;
-        height: 40px;
-        opacity: 1;
-        transform: none;
-        border: 0;
-        background: transparent;
-    }
-
-    .work-item-head .session {
-        padding-right: 44px;
     }
 }

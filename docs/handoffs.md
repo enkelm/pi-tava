@@ -143,7 +143,7 @@ The first same-work handoff wraps the source thread and its successor in a Work 
 
 Further same-work handoffs join that item. There are no nested Work Items. A new-work handoff starts a separate item linked to the preceding work. Once work lands, substantial subsequent implementation normally starts a new item; Publish can still follow within the landed item.
 
-An item can stand alone, belong to a project or belong to one of its goals. Move, archive and restore apply to the whole item. Member conversations cannot be archived independently, even through a direct metadata request. Goal archive and restore retain their existing atomic behavior.
+An item can stand alone or belong directly to a project. Move, archive and restore apply to the whole item. Member conversations cannot be archived independently, even through a direct metadata request.
 
 Placement and grouping never grant access. Hidden threads and their full histories remain hidden. The compact handoff brief is copied content belonging to the destination conversation; sharing that destination also shares its brief. A session-scoped invitation is not authority to create unrelated conversations or publish code.
 
@@ -187,4 +187,4 @@ Repository rules govern local integration and delivery details. They cannot disa
 
 ## Scope
 
-This release supports agent-executed human-requested handoffs with state-based transitions, typed successors, Work Items, guarded destination naming and mandatory individual publication approval. Core task registrations recover already-accepted summary/delivery data only; new requests use the current human-input/tool path. Historical milestone/review/risk-acceptance records remain evidence, not thread-creation gates. It does not add an autonomous project/goal orchestrator, automatic merge monitoring or an MCP host.
+This release supports agent-executed human-requested handoffs with state-based transitions, typed successors, Work Items, guarded destination naming and mandatory individual publication approval. Core task registrations recover already-accepted summary/delivery data only; new requests use the current human-input/tool path. Historical milestone/review/risk-acceptance records remain evidence, not thread-creation gates. It does not add an autonomous project orchestrator, automatic merge monitoring or an MCP host.

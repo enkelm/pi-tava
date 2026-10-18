@@ -28,7 +28,6 @@ import { SchedulesSheet } from "./sheets/schedules.js";
 import { SettingsSheet } from "./sheets/settings.js";
 import { NewSessionSheet, SessionActions } from "./sheets/session.js";
 import { ProjectSheet } from "./sheets/project.js";
-import { ProjectGoalSheet } from "./sheets/project-goal.js";
 import { SessionMoveSheet } from "./sheets/session-move.js";
 import { SidebarOptions } from "./sheets/sidebar-options.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
@@ -216,8 +215,6 @@ function sheetBody(sheet) {
                 tab=${sheet.tab}
                 initialPreview=${sheet.initialPreview}
                 projectId=${sheet.projectId}
-                goalId=${sheet.goalId}
-                newGoal=${sheet.newGoal}
                 cwd=${sheet.cwd}
                 continuation=${sheet.continuation}
             />`;
@@ -225,15 +222,11 @@ function sheetBody(sheet) {
         case "project":
             body = html`<${ProjectSheet} projectId=${sheet.projectId} />`;
             break;
-        case "project-goal":
-            body = html`<${ProjectGoalSheet} key=${sheet.goalId} goalId=${sheet.goalId} />`;
-            break;
         case "sidebar-options":
             body = html`<${SidebarOptions}
                 kind=${sheet.kind}
                 id=${sheet.id}
                 at=${sheet.at}
-                archivedView=${sheet.archivedView}
             />`;
             break;
         case "move-sessions":
@@ -266,7 +259,6 @@ function sheetBody(sheet) {
                     ? html`<${NewSessionSheet}
                         tab=${sheet.tab}
                         projectId=${sheet.projectId}
-                        goalId=${sheet.goalId}
                         cwd=${sheet.cwd}
                         continuation=${sheet.continuation}
                     />`

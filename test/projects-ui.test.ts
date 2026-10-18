@@ -1,14 +1,13 @@
-// Authoring gate: real UI choices must preserve project/goal membership and reach durable state.
-// Regressions: orphan goals, lost creation/rename controls, labelled sidebar chips and stale peers.
-// App tests own storage/access/migration; this owns browser disclosure, forms and event delivery.
-// Sidebar regressions: goal indentation, busy-loader drift, active idle accent and lost result-read marks.
+// Authoring gate: real UI choices must preserve project membership and reach durable state.
+// Regressions: lost project controls, extra grouping levels, labelled sidebar chips and stale peers.
+// App tests own storage/access; this owns browser disclosure, forms and event delivery.
+// Sidebar regressions: row indentation, busy-loader drift, active idle accent and lost result-read marks.
 // Real run completion and browser storage/visibility events own the result lifecycle; app tests do not render it.
 // Menu contracts share this fixture: misplaced/right-click navigation, focus loss, omitted actions,
-// coarse-pointer hover-only traps and status text/icon regressions are not reached by app tests.
+// coarse-pointer hover-only traps and thread type icons are not reached by app tests.
 // Header geometry owns invisible shortcuts reserving width and capped labels stranding the count.
-// Session-moves UI owns thread menus; this covers project/goal menus through DOM and trusted input.
-// Pull/Researcher starters own rendered selection, new-goal atomicity and type indicators; backend
-// tests do not reach that boundary. Legacy hello delivery must hide unsupported starter controls.
+// Session-moves UI owns thread menus; this covers project menus through DOM and trusted input.
+// Pull/Researcher starters own rendered selection and type indicators; backend tests do not render them.
 // Uses public app/model/browser APIs; no test-only production seams or state flags.
 import {
     type App,
@@ -25,26 +24,24 @@ import {
     work,
 } from "./helpers.ts";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { Browsers } from "../src/server/browser.ts";
 import { findBrowser } from "../src/server/browser/discovery.ts";
 import { Chromium } from "../src/server/browser/cdp.ts";
 import { BrowserPage } from "../src/server/browser/page.ts";
 import { VIEWPORTS } from "../src/server/browser/viewport.ts";
-import { ProjectsDoc } from "../src/server/docs.ts";
 import { createHandler } from "../src/server/http.ts";
 
 const sessionDialog = '[role="dialog"][aria-label="New Session"]';
 const panel = `${sessionDialog} #session-panel-new`;
 const projectNameField = 'input[aria-label="Project name"]';
 const projectPathField = 'input[aria-label="Default working directory"]';
-const renameDialog = '[role="dialog"][aria-label="Rename goal"]';
-const goalNameField = `${renameDialog} input[aria-label="Goal name"]`;
 
 after(cleanUp);
 
@@ -100,31 +97,22 @@ async function fill(page: BrowserPage, selector: string, text: string) {
     );
 }
 
-function group(scope: string, name: string, goal = false) {
-    const selector = `${scope} ${goal ? ".goal-section" : ".project-section:not(.goal-section)"}`;
+function group(scope: string, name: string) {
+    const selector = `${scope} .project-section`;
 
     return `[...document.querySelectorAll(${JSON.stringify(selector)})].find(section =>
         section.querySelector(':scope > .project-group-head .group-name')?.textContent.trim()
             === ${JSON.stringify(name)})`;
 }
 
-async function waitGroup(page: BrowserPage, scope: string, name: string, goal = false) {
-    await until(
-        () => value<boolean>(page, `Boolean(${group(scope, name, goal)})`),
-        `${goal ? "goal" : "project"} ${name}`,
-    );
+async function waitGroup(page: BrowserPage, scope: string, name: string) {
+    await until(() => value<boolean>(page, `Boolean(${group(scope, name)})`), `project ${name}`);
 }
 
-async function groupClick(
-    page: BrowserPage,
-    scope: string,
-    name: string,
-    selector: string,
-    goal = false,
-) {
-    await waitGroup(page, scope, name, goal);
+async function groupClick(page: BrowserPage, scope: string, name: string, selector: string) {
+    await waitGroup(page, scope, name);
     await page.evaluate(
-        `(${group(scope, name, goal)}).querySelector(${JSON.stringify(selector)}).click()`,
+        `(${group(scope, name)}).querySelector(${JSON.stringify(selector)}).click()`,
     );
 }
 
@@ -136,14 +124,8 @@ function optionsSurface(name: string, mobile: boolean) {
     return `[role="${mobile ? "dialog" : "menu"}"][aria-label=${JSON.stringify(name)}]`;
 }
 
-async function options(
-    page: BrowserPage,
-    scope: string,
-    name: string,
-    mobile: boolean,
-    goal = false,
-) {
-    await waitGroup(page, scope, name, goal);
+async function options(page: BrowserPage, scope: string, name: string, mobile: boolean) {
+    await waitGroup(page, scope, name);
     const before = await value<string>(page, "location.pathname");
     const expanded = await value<string>(
         page,
@@ -323,19 +305,11 @@ async function heldOptions(page: BrowserPage, scope: string, name: string, ghost
     await present(page, surface, false);
 }
 
-async function groupControls(
-    page: BrowserPage,
-    scope: string,
-    name: string,
-    mobile: boolean,
-    goal = false,
-) {
-    const labels = goal
-        ? [`New Session in ${name}`, "Archive goal and all threads"]
-        : [`New Session in ${name}`, `Edit ${name}`];
+async function groupControls(page: BrowserPage, scope: string, name: string, mobile: boolean) {
+    const labels = [`New Session in ${name}`, `Edit ${name}`];
     const visibility = (shown: boolean) =>
         `(() => {
-            const section = ${group(scope, name, goal)};
+            const section = ${group(scope, name)};
             const visible = element => {
                 if (!element || !element.getBoundingClientRect().width) {
                     return false;
@@ -359,7 +333,7 @@ async function groupControls(
 
                 return visible(control) === ${shown}
                     && Math.abs(control.getBoundingClientRect().width - ${shown ? 40 : 0}) < 1;
-            }) && ${goal ? "visible(section.querySelector('.goal-state'))" : "true"};
+            });
         })()`;
 
     await page.input([{ type: "mouse", action: "move", x: 1270, y: 790 }]);
@@ -374,19 +348,22 @@ async function groupControls(
             await value(
                 page,
                 `(() => {
-                    const header = (${group(scope, name, goal)}).querySelector(':scope > .project-group-head');
+                    const header = (${group(scope, name)}).querySelector(':scope > .project-group-head');
                     const edge = header.getBoundingClientRect().right;
                     const button = header.querySelector('.group-head');
                     const head = button.getBoundingClientRect();
                     const padding = parseFloat(getComputedStyle(button).paddingRight);
                     const count = header.querySelector('.group-count').getBoundingClientRect();
+                    const label = header.querySelector('.group-name').getBoundingClientRect();
 
                     return Math.abs(head.right - edge) < 4
-                        && count.width > 0 && Math.abs(head.right - count.right - padding) < 1;
+                        && count.width > 0
+                        && count.right <= label.left
+                        && Math.abs(head.right - label.right - padding) < 1;
                 })()`,
             ),
             true,
-            "idle project and goal labels/counts use the full header width",
+            "idle project labels/counts use the full header width, with counts before titles",
         );
     }
 
@@ -408,72 +385,15 @@ async function groupControls(
             ? "coarse pointers never reveal hover-only shortcuts"
             : "desktop hover reveals header shortcuts",
     );
-    assert.equal(
-        await value(
-            page,
-            `(${group(scope, name, goal)}).querySelectorAll(':scope > .project-group-head [aria-label^="Rename goal "]').length`,
-        ),
-        0,
-        "goal rename lives in options, not a hover control",
-    );
 }
 
-async function goalStatus(
-    page: BrowserPage,
-    scope: string,
-    name: string,
-    state: "Active" | "Completed",
-    interactive = true,
-) {
+async function disclosure(page: BrowserPage, scope: string, name: string, expanded: boolean) {
     await until(
         () =>
             value<boolean>(
                 page,
                 `(() => {
-                    const header = (${group(scope, name, true)}).querySelector(':scope > .project-group-head');
-                    const head = header.querySelector('.group-head');
-                    const status = header.querySelector(':scope > .goal-state');
-                    const icon = status?.querySelector('svg')?.getBoundingClientRect();
-                    const label = head.querySelector('.group-name').getBoundingClientRect();
-                    const swatch = document.createElement('span');
-
-                    swatch.style.color = 'var(${state === "Completed" ? "--o-green" : "--muted"})';
-                    head.append(swatch);
-                    const color = status && getComputedStyle(status).color === getComputedStyle(swatch).color;
-
-                    swatch.remove();
-
-                    return status?.getAttribute('aria-label')?.includes(${JSON.stringify(state)})
-                        && status.title.includes(${JSON.stringify(state)})
-                        && ${interactive ? "status.tagName === 'BUTTON'" : "status.tagName !== 'BUTTON' && status.getAttribute('role') === 'img' && status.tabIndex === -1"}
-                        && status.textContent.trim() === '' && icon?.width > 0 && icon?.height > 0
-                        && Boolean(status.querySelector('svg path')?.getAttribute('d'))
-                        && status.getBoundingClientRect().right <= head.getBoundingClientRect().left
-                        && icon.right <= label.left && color;
-                })()`,
-            ),
-        `the leading sibling goal ${interactive ? "control" : "indicator"} exposes ${state} accessibly`,
-    );
-
-    return value<string>(
-        page,
-        `(${group(scope, name, true)}).querySelector(':scope > .project-group-head .goal-state svg path').getAttribute('d')`,
-    );
-}
-
-async function disclosure(
-    page: BrowserPage,
-    scope: string,
-    name: string,
-    expanded: boolean,
-    goal = false,
-) {
-    await until(
-        () =>
-            value<boolean>(
-                page,
-                `(() => {
-                    const section = ${group(scope, name, goal)};
+                    const section = ${group(scope, name)};
                     const head = section.querySelector(':scope > .project-group-head .group-head');
                     const body = section.querySelector(':scope > .group-body');
 
@@ -515,9 +435,14 @@ async function home(page: BrowserPage, scope: string) {
 
 async function chooseProject(page: BrowserPage, name: string) {
     await button(page, `${panel} .project-choices`, name);
-    await present(
-        page,
-        `${panel} [role="group"][aria-label=${JSON.stringify(`Goals in ${name}`)}]`,
+    await present(page, `${panel} .session-destination`);
+    assert.equal(
+        await value(
+            page,
+            `document.querySelector('${panel} .project-choice-row[aria-pressed=true]')?.textContent.trim()`,
+        ),
+        name,
+        "selecting a project goes directly to thread and working-directory controls",
     );
 }
 
@@ -610,7 +535,8 @@ async function rowTag(
                 text: tag.textContent.trim(),
                 label: tag.getAttribute('aria-label'),
                 title: tag.title,
-                icon: Boolean(icon?.width > 0 && icon?.height > 0),
+                icon: Boolean(icon?.width > 0 && icon?.height > 0
+                    && tag.querySelector('svg path')?.getAttribute('d')?.trim()),
                 decorated: parseFloat(style.borderTopWidth) > 0
                     || style.backgroundColor !== 'rgba(0, 0, 0, 0)',
                 duplicate: row.querySelector('.session-meta .thread-type') !== null,
@@ -679,22 +605,27 @@ async function idleState(page: BrowserPage, scope: string, id: number, unread: b
     );
 }
 
-async function alignedRows(page: BrowserPage, scope: string, goalId: number, otherId: number) {
+async function alignedRows(
+    page: BrowserPage,
+    scope: string,
+    projectThreadId: number,
+    otherId: number,
+) {
     await until(
         () =>
             value<boolean>(
                 page,
                 `(() => {
-                    const goal = document.querySelector('${scope} .session-row[data-id="${goalId}"] .session').getBoundingClientRect();
+                    const projectThread = document.querySelector('${scope} .session-row[data-id="${projectThreadId}"] .session').getBoundingClientRect();
                     const other = document.querySelector('${scope} .session-row[data-id="${otherId}"] .session').getBoundingClientRect();
                     const bar = document.querySelector('${scope} .session-items > .slide-y')?.getBoundingClientRect();
 
-                    return Math.abs(goal.left - other.left) < 1
-                        && Math.abs(goal.right - other.right) < 1
-                        && (!bar || Math.abs(goal.left - bar.left) < 1);
+                    return Math.abs(projectThread.left - other.left) < 1
+                        && Math.abs(projectThread.right - other.right) < 1
+                        && (!bar || Math.abs(projectThread.left - bar.left) < 1);
                 })()`,
             ),
-        "goal thread borders align with other rows and the active bar",
+        "project thread borders align with other rows and the active bar",
     );
 }
 
@@ -712,7 +643,7 @@ async function shot(page: BrowserPage, name: string) {
 }
 
 test(
-    "Projects UI: creation, goal renaming, typed chips, independent folds and live bulk actions",
+    "Projects UI: direct project threads, creation, typed chips, folds and live updates",
     { skip: findBrowser() === undefined ? "no Chromium installed" : false, timeout: 180_000 },
     async (t) => {
         for (const viewport of ["mobile", "desktop"] as const) {
@@ -724,6 +655,21 @@ test(
                 mkdirSync(overrideFolder);
                 const cwd = realpathSync(folder);
                 const override = realpathSync(overrideFolder);
+
+                writeFileSync(join(cwd, "fixture.txt"), "Disposable project checkout\n");
+                execFileSync("git", ["init", "-b", "fixture-initial", cwd]);
+                execFileSync("git", ["-C", cwd, "add", "fixture.txt"]);
+                execFileSync("git", [
+                    "-C",
+                    cwd,
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                    "commit",
+                    "-m",
+                    "fixture",
+                ]);
                 const model = scriptedModel();
                 const app = await openApp(model, join(root, `projects-${viewport}-data`));
                 const user = owner(app);
@@ -732,7 +678,11 @@ test(
                     cwd,
                     title: "Existing Collab work",
                     threadType: "worker",
+                    worktree: true,
                 });
+                const initialBranch = app.sessionMeta(standaloneWorker.id)?.worktree?.branch;
+
+                assert.ok(initialBranch, "the initial Worker owns a real disposable worktree");
                 const standaloneChat = await app.commands.createSession(user, {
                     cwd,
                     title: "Unrelated Chat in the same folder",
@@ -789,6 +739,20 @@ test(
                             await rowTag(connected, scope, standaloneChat.id, "Chat"),
                             true,
                         );
+                        assert.equal(
+                            await value(
+                                connected,
+                                `(() => {
+                                const row = document.querySelector('${scope} .session-row[data-id="${standaloneWorker.id}"]');
+                                const branch = [...row.querySelectorAll('.session-meta span')]
+                                    .find(span => span.textContent.includes(${JSON.stringify(initialBranch)}));
+
+                                return !row.closest('.work-item') && branch?.getBoundingClientRect().width > 16;
+                            })()`,
+                            ),
+                            true,
+                            "the first thread shows its worktree branch before any handoff or Work Item grouping",
+                        );
                     }
 
                     assert.equal(
@@ -823,7 +787,6 @@ test(
 
                     await optionLabels(page, projectOptions, [
                         "New Session here…",
-                        "New goal…",
                         "Edit project…",
                     ]);
                     await button(page, projectOptions, "Edit project…");
@@ -865,35 +828,8 @@ test(
                     await present(page, `${panel} .project-form`);
                     await button(page, `${panel} .project-form`, "Cancel");
                     await chooseProject(page, name);
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${panel} .project-goal-choices button')?.textContent.trim()`,
-                        ),
-                        "New Goal",
-                        "+ New Goal is the first goal choice",
-                    );
-                    await button(page, `${panel} .project-goal-choices`, "New Goal");
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${panel} input:not([type=checkbox]), ${panel} textarea') === null`,
-                        ),
-                        true,
-                        "selecting New Goal never asks for a goal name",
-                    );
-                    assert.equal(
-                        app.projects.list(user).goals.length,
-                        0,
-                        "selection does not create a goal",
-                    );
                     await destination(page, cwd);
                     await closeDialog(page);
-                    assert.equal(
-                        app.projects.list(user).goals.length,
-                        0,
-                        "cancelling leaves no orphan goal",
-                    );
                     assert.equal(app.sessions().length, 2);
 
                     await groupControls(page, scope, name, viewport === "mobile");
@@ -908,28 +844,13 @@ test(
                         await heldOptions(page, scope, name);
                     }
 
-                    const newGoalOptions = await options(page, scope, name, viewport === "mobile");
+                    const projectStart = await options(page, scope, name, viewport === "mobile");
 
-                    await button(page, newGoalOptions, "New goal…");
+                    await button(page, projectStart, "New Session here…");
                     await present(page, `${panel} .session-destination`);
                     await destination(page, cwd);
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${panel} .project-goal-choices [aria-pressed=true]')?.textContent.trim()`,
-                        ),
-                        "New Goal",
-                        "the named project's New goal shortcut preselects creation intent",
-                    );
                     const first = await start(page, app, "Worker");
-                    const createdGoal = app.projects
-                        .list(user)
-                        .goals.find((item) => item.id === first.goalId);
 
-                    assert.ok(createdGoal, "session submission creates its goal");
-                    let goal = createdGoal;
-
-                    assert.equal(app.projects.list(user).goals.length, 1);
                     assert.equal(first.projectId, project.id);
                     assert.equal(first.cwd, cwd);
                     assert.equal(first.threadType, "worker");
@@ -951,17 +872,35 @@ test(
                     }
 
                     await home(page, scope);
-                    await waitGroup(page, scope, goal.name, true);
-                    await waitGroup(peer, scope, goal.name, true);
+                    await waitGroup(page, scope, name);
+                    await waitGroup(peer, scope, name);
                     assert.equal(
                         await value(
                             page,
-                            `(${group(scope, goal.name, true)}).querySelector('.session-row')?.dataset.id`,
+                            `(${group(scope, name)}).querySelectorAll(':scope > .group-body > div > .session-row').length`,
                         ),
-                        String(first.id),
-                        "even one Worker retains a distinct goal section with its session",
+                        1,
+                        "a standalone Worker is a direct project row without another grouping level",
                     );
                     assert.equal(await rowTag(page, scope, first.id, "Worker"), false);
+                    assert.equal(first.worktree, undefined);
+                    assert.equal(
+                        await value(
+                            page,
+                            `(() => {
+                                const row = document.querySelector('${scope} .session-row[data-id="${first.id}"]');
+                                const metadata = row.querySelector('.session-meta');
+                                const branch = [...row.querySelectorAll('.session-meta span')]
+                                    .find(span => span.textContent.includes('fixture-initial'));
+
+                                return !row.closest('.work-item')
+                                    && metadata?.textContent.includes(${JSON.stringify(cwd)})
+                                    && branch?.getBoundingClientRect().width > 16;
+                            })()`,
+                        ),
+                        true,
+                        "an ordinary initial Worker shows its path and actual checkout branch without a Coop worktree or handoff",
+                    );
                     await alignedRows(page, scope, first.id, standaloneWorker.id);
                     assert.equal(
                         await rowTag(page, scope, standaloneChat.id, "Chat"),
@@ -969,123 +908,29 @@ test(
                         "sharing a cwd never assigns a standalone Chat to the project",
                     );
 
-                    await groupControls(page, scope, goal.name, viewport === "mobile", true);
-                    const activeIcon = await goalStatus(page, scope, goal.name, "Active");
-
                     if (viewport === "desktop") {
-                        // Mutate a named sidebar object while another, unassigned conversation stays open.
                         await click(
                             page,
                             `${scope} .session-row[data-id="${standaloneChat.id}"] .session`,
                         );
-                        await keyboardOptions(page, scope, goal.name, true);
-                    } else {
-                        // The ghost click now lands on the newly shown sheet, not its original header.
-                        await heldOptions(page, scope, goal.name, true);
-                        // Landscape crosses the ordinary centered-Sheet breakpoint without gaining hover.
-                        await page.setViewport({ ...VIEWPORTS.mobile, width: 820, height: 600 });
-                        await groupControls(page, scope, goal.name, true, true);
-                        await heldOptions(page, scope, goal.name, true);
-                        await page.setViewport(VIEWPORTS.mobile);
-                    }
-
-                    let goalOptions = await options(
-                        page,
-                        scope,
-                        goal.name,
-                        viewport === "mobile",
-                        true,
-                    );
-
-                    await optionLabels(page, goalOptions, [
-                        "New Session here…",
-                        "Rename goal…",
-                        "Mark completed",
-                        "Archive goal and all threads",
-                    ]);
-                    await button(page, goalOptions, "Rename goal…");
-                    await present(page, renameDialog);
-                    assert.equal(
-                        await value(page, `document.querySelector('${goalNameField}').value`),
-                        goal.name,
-                        "rename starts with the current goal name",
-                    );
-                    assert.equal(
-                        await value(page, `document.querySelector('${goalNameField}').maxLength`),
-                        160,
-                        "goal name entry is bounded",
-                    );
-                    await fill(page, goalNameField, "   ");
-                    assert.equal(
-                        await value(
-                            page,
-                            `[...document.querySelectorAll('${renameDialog} button')]
-                                .find(button => button.textContent.trim() === 'Save').disabled`,
-                        ),
-                        true,
-                        "a whitespace-only goal name cannot be saved",
-                    );
-                    await fill(page, goalNameField, "Discard this rename");
-                    await button(page, renameDialog, "Cancel");
-                    await present(page, renameDialog, false);
-                    assert.deepEqual(
-                        app.projects.list(user).goals.find((item) => item.id === goal.id),
-                        goal,
-                        "cancel leaves the goal unchanged",
-                    );
-                    await waitGroup(peer, scope, goal.name, true);
-
-                    const renamedGoal = `Deliver ${viewport}`;
-
-                    goalOptions = await options(
-                        page,
-                        scope,
-                        goal.name,
-                        viewport === "mobile",
-                        true,
-                    );
-                    await button(page, goalOptions, "Rename goal…");
-                    await fill(page, goalNameField, `  ${renamedGoal}  `);
-                    await button(page, renameDialog, "Save");
-                    await present(page, renameDialog, false);
-                    await waitGroup(page, scope, renamedGoal, true);
-                    await waitGroup(peer, scope, renamedGoal, true);
-                    assert.equal(
-                        (await app.harness.snapshot(ProjectsDoc, context))?.goals[goal.id]?.name,
-                        renamedGoal,
-                        "the trimmed UI rename reaches durable state and the untouched peer",
-                    );
-                    const savedGoal = app.projects
-                        .list(user)
-                        .goals.find((item) => item.id === first.goalId);
-
-                    assert.ok(savedGoal);
-                    goal = savedGoal;
-
-                    if (viewport === "desktop") {
-                        // The hover shortcut stays usable; touch reaches the same action in Options.
-                        await page.hover({ selector: groupHead(scope, goal.name) });
-                        await page.evaluate(
-                            `await new Promise(resolve => setTimeout(resolve, 300))`,
-                        );
+                        await keyboardOptions(page, scope, name, true);
+                        await page.hover({ selector: groupHead(scope, name) });
                         await page.click({
-                            selector: `${scope} [aria-label=${JSON.stringify(`New Session in ${goal.name}`)}]`,
+                            selector: `${scope} [aria-label=${JSON.stringify(`New Session in ${name}`)}]`,
                         });
                     } else {
-                        goalOptions = await options(page, scope, goal.name, true, true);
-                        await button(page, goalOptions, "New Session here…");
+                        // A hold can hand contact to its own sheet without a ghost activation.
+                        await heldOptions(page, scope, name, true);
+                        await page.setViewport({ ...VIEWPORTS.mobile, width: 820, height: 600 });
+                        await groupControls(page, scope, name, true);
+                        await heldOptions(page, scope, name, true);
+                        await page.setViewport(VIEWPORTS.mobile);
+                        const surface = await options(page, scope, name, true);
+
+                        await button(page, surface, "New Session here…");
                     }
 
-                    await present(page, `${panel} .session-destination`);
                     await destination(page, cwd);
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${panel} .project-goal-choices [aria-pressed=true]')?.textContent.trim()`,
-                        ),
-                        goal.name,
-                        "the goal shortcut preselects its project and goal",
-                    );
                     await button(page, `${panel} .session-path`, "Change");
                     await present(page, `${panel} .dir-list`);
                     await fill(page, `${panel} input[aria-label="Working directory"]`, override);
@@ -1095,7 +940,6 @@ test(
 
                     assert.equal(second.cwd, override);
                     assert.equal(second.projectId, project.id);
-                    assert.equal(second.goalId, goal.id);
                     assert.equal(
                         app.projects.list(user).projects.find((item) => item.id === project.id)
                             ?.cwd,
@@ -1112,32 +956,17 @@ test(
                     );
 
                     await button(page, newSessionOptions, "New Session here…");
-                    await present(page, `${panel} .session-destination`);
-                    // Desktop still shows the overridden Worker beside the sidebar here.
                     await destination(page, cwd);
-                    assert.equal(
-                        await value(
-                            page,
-                            `document.querySelector('${panel} .project-goal-choices [aria-pressed=true]')?.textContent.trim()`,
-                        ),
-                        "No goal",
-                        "project options preselect only the named project, not the open thread's goal",
-                    );
                     await closeDialog(page);
 
-                    await groupClick(page, scope, goal.name, ".group-head", true);
-                    await disclosure(page, scope, goal.name, false, true);
-                    await disclosure(page, scope, name, true);
                     await groupClick(page, scope, name, ".group-head");
                     await disclosure(page, scope, name, false);
                     await present(page, `${scope} .session-row[data-id="${standaloneChat.id}"]`);
+                    await disclosure(peer, scope, name, true);
                     await groupClick(page, scope, name, ".group-head");
                     await disclosure(page, scope, name, true);
-                    // Parent reopening preserves the child's fold; the peer remains unfolded.
-                    await disclosure(page, scope, goal.name, false, true);
-                    await disclosure(peer, scope, goal.name, true, true);
-                    await groupClick(page, scope, goal.name, ".group-head", true);
-                    await disclosure(page, scope, goal.name, true, true);
+                    await present(page, `${scope} .session-row[data-id="${first.id}"]`);
+                    await present(page, `${scope} .session-row[data-id="${second.id}"]`);
                     const viewer = app.config.addUser("Read-only project viewer", "viewer");
                     const scoped = app.config.addUser("Scoped project participant", "guest", [
                         String(first.id),
@@ -1152,235 +981,49 @@ test(
                     );
 
                     for (const reader of [peer, participant]) {
-                        await waitGroup(reader, scope, goal.name, true);
-                        await goalStatus(reader, scope, goal.name, "Active", false);
+                        await waitGroup(reader, scope, name);
                         assert.equal(
                             await value(
                                 reader,
-                                `(${group(scope, goal.name, true)}).querySelectorAll('.project-group-actions button').length`,
+                                `(${group(scope, name)}).querySelectorAll('.project-group-actions button').length`,
                             ),
                             0,
-                            "viewers and scoped participants get no goal mutation controls",
+                            "viewers and scoped participants get no project mutation controls",
                         );
                     }
 
-                    const statusControl = `${scope} .goal-section > .project-group-head .goal-state`;
-                    const goalHead = groupHead(scope, goal.name);
-                    const expanded = await value<string>(
-                        page,
-                        `document.querySelector(${JSON.stringify(goalHead)}).getAttribute('aria-expanded')`,
-                    );
-
-                    await page.click({ selector: statusControl });
                     assert.equal(
                         await value(
-                            page,
-                            `document.querySelector(${JSON.stringify(goalHead)}).getAttribute('aria-expanded')`,
+                            participant,
+                            `document.querySelector('${scope} .session-row[data-id="${second.id}"]') === null`,
                         ),
-                        expanded,
-                        "clicking the leading status control does not fold the goal",
-                    );
-                    await until(
-                        () =>
-                            app.projects.list(user).goals.find((item) => item.id === goal.id)
-                                ?.status === "completed",
-                        "goal completion persisted",
-                    );
-
-                    for (const reader of [peer, participant]) {
-                        await goalStatus(reader, scope, goal.name, "Completed", false);
-                    }
-
-                    await shot(page, `${viewport}-completed-goal`);
-                    await shot(peer, `${viewport}-reader-completed-goal`);
-                    await shot(participant, `${viewport}-scoped-completed-goal`);
-
-                    const completedIcon = await goalStatus(page, scope, goal.name, "Completed");
-
-                    assert.notEqual(
-                        completedIcon,
-                        activeIcon,
-                        "completion changes the leading glyph",
-                    );
-
-                    // The same status control must not reopen a collapsed goal.
-                    await groupClick(page, scope, goal.name, ".group-head", true);
-                    await disclosure(page, scope, goal.name, false, true);
-                    await page.click({ selector: statusControl });
-                    await disclosure(page, scope, goal.name, false, true);
-                    await goalStatus(page, scope, goal.name, "Active");
-                    await page.click({ selector: statusControl });
-                    await disclosure(page, scope, goal.name, false, true);
-                    await goalStatus(page, scope, goal.name, "Completed");
-                    await groupClick(page, scope, goal.name, ".group-head", true);
-                    await disclosure(page, scope, goal.name, true, true);
-
-                    // Options remains bound to this named goal and updates its leading state icon.
-                    for (const status of ["active", "completed"] as const) {
-                        goalOptions = await options(
-                            page,
-                            scope,
-                            goal.name,
-                            viewport === "mobile",
-                            true,
-                        );
-                        await button(
-                            page,
-                            goalOptions,
-                            status === "active" ? "Mark active" : "Mark completed",
-                        );
-                        await until(
-                            () =>
-                                app.projects.list(user).goals.find((item) => item.id === goal.id)
-                                    ?.status === status,
-                            `named goal options persist ${status}`,
-                        );
-                        await present(page, goalOptions, false);
-                        // Durable writes precede the coalesced catalogue event; reopen only after it arrives.
-                        assert.equal(
-                            await goalStatus(
-                                page,
-                                scope,
-                                goal.name,
-                                status === "active" ? "Active" : "Completed",
-                            ),
-                            status === "active" ? activeIcon : completedIcon,
-                            "status transitions restore the matching leading glyph",
-                        );
-                    }
-
-                    goalOptions = await options(
-                        page,
-                        scope,
-                        goal.name,
-                        viewport === "mobile",
                         true,
+                        "a scoped project catalogue never reveals sibling threads",
                     );
-                    await optionLabels(page, goalOptions, [
-                        "New Session here…",
-                        "Rename goal…",
-                        "Mark active",
-                        "Archive goal and all threads",
-                    ]);
-                    await button(page, goalOptions, "Archive goal and all threads");
+                    // Archived remains a project projection of the existing thread archive action.
+                    await click(page, `${scope} .session-row[data-id="${first.id}"] .session`);
+                    await click(page, '.topbar [aria-label="Menu"]');
+                    await button(page, '[role="dialog"]', "Archive");
                     await until(
-                        () =>
-                            [first.id, second.id].every(
-                                (id) => app.sessionMeta(id as ConversationId)?.archived === true,
-                            ),
-                        "all goal threads archived",
+                        () => app.sessionMeta(first.id as ConversationId)?.archived === true,
+                        "thread archived",
                     );
-                    assert.equal(app.sessionMeta(standaloneChat.id)?.archived === true, false);
-                    assert.equal(app.sessionMeta(standaloneWorker.id)?.archived === true, false);
-                    await until(
-                        () => value<boolean>(peer, `!(${group(scope, goal.name, true)})`),
-                        "peer removes archived goal from Projects",
-                    );
+                    await present(page, `${scope} .new-button[aria-label="New session"]`);
+                    await present(peer, `${scope} .session-row[data-id="${first.id}"]`, false);
                     await tab(page, scope, "Archived");
-                    await waitGroup(page, scope, goal.name, true);
+                    await waitGroup(page, scope, name);
                     await present(page, `${scope} .session-row[data-id="${first.id}"]`);
-                    await present(page, `${scope} .session-row[data-id="${second.id}"]`);
-                    await tab(peer, scope, "Archived");
-                    await waitGroup(peer, scope, goal.name, true);
-                    goalOptions = await options(
-                        page,
-                        scope,
-                        goal.name,
-                        viewport === "mobile",
-                        true,
-                    );
-                    await optionLabels(page, goalOptions, [
-                        "Rename goal…",
-                        "Mark active",
-                        "Restore goal and threads",
-                    ]);
-                    await button(page, goalOptions, "Restore goal and threads");
-                    await until(
-                        () =>
-                            [first.id, second.id].every(
-                                (id) => app.sessionMeta(id as ConversationId)?.archived === false,
-                            ),
-                        "all goal threads restored",
-                    );
-                    await until(
-                        () => value<boolean>(peer, `!(${group(scope, goal.name, true)})`),
-                        "peer removes restored goal from Archived",
-                    );
-                    await tab(page, scope, "Projects");
-                    await tab(peer, scope, "Projects");
-                    await waitGroup(peer, scope, goal.name, true);
-                    await present(page, `${scope} .session-row[data-id="${first.id}"]`);
-                    await present(page, `${scope} .session-row[data-id="${second.id}"]`);
-                    assert.equal(
-                        app.projects.list(user).goals.find((item) => item.id === goal.id)?.status,
-                        "completed",
-                        "archive/restore never changes completion",
-                    );
-
-                    // Individual restore reveals the goal; restoring its remaining marked row is not invertible
-                    // by archiving the whole goal again. The restore notice must only dismiss when tapped.
-                    goalOptions = await options(
-                        page,
-                        scope,
-                        goal.name,
-                        viewport === "mobile",
-                        true,
-                    );
-                    await button(page, goalOptions, "Archive goal and all threads");
-                    await until(
-                        () =>
-                            [first.id, second.id].every(
-                                (id) => app.sessionMeta(id as ConversationId)?.archived === true,
-                            ),
-                        "goal archived for the partial-restore case",
-                    );
-                    await tab(page, scope, "Archived");
                     await click(page, `${scope} .session-row[data-id="${first.id}"] .session`);
                     await click(page, '.topbar [aria-label="Menu"]');
                     await button(page, '[role="dialog"]', "Unarchive");
-                    await present(page, '[role="dialog"]', false);
+                    await until(
+                        () => app.sessionMeta(first.id as ConversationId)?.archived === false,
+                        "thread restored",
+                    );
                     await home(page, scope);
-                    await tab(page, scope, "Archived");
-                    await until(
-                        () =>
-                            app.sessionMeta(first.id as ConversationId)?.archived === false &&
-                            app.sessionMeta(second.id as ConversationId)?.archived === true &&
-                            app.projects.list(user).goals.find((item) => item.id === goal.id)
-                                ?.archived === false,
-                        "individual restore leaves the other bulk-archived row untouched",
-                    );
-                    goalOptions = await options(
-                        page,
-                        scope,
-                        goal.name,
-                        viewport === "mobile",
-                        true,
-                    );
-                    await button(page, goalOptions, "Restore goal and threads");
-                    await until(
-                        () => app.sessionMeta(second.id as ConversationId)?.archived === false,
-                        "remaining bulk-archived row restored",
-                    );
-                    const restoreNotice = `[...document.querySelectorAll('.notice:not(.leaving)')]
-                        .reverse().find(item => item.textContent.trim().startsWith('Restored goal.'))`;
-
-                    await until(
-                        () => value<boolean>(page, `Boolean(${restoreNotice})`),
-                        "restore result notice",
-                    );
-                    assert.equal(
-                        await value(page, `(${restoreNotice}).textContent.trim()`),
-                        "Restored goal.",
-                        "partial bulk restore does not advertise an unsafe Undo",
-                    );
-                    await page.evaluate(`(${restoreNotice}).click()`);
-                    assert.equal(app.sessionMeta(first.id as ConversationId)?.archived, false);
-                    assert.equal(app.sessionMeta(second.id as ConversationId)?.archived, false);
-                    assert.equal(
-                        app.projects.list(user).goals.find((item) => item.id === goal.id)?.archived,
-                        false,
-                    );
                     await tab(page, scope, "Projects");
+                    await present(peer, `${scope} .session-row[data-id="${first.id}"]`);
+                    await shot(page, `${viewport}-project-threads`);
 
                     await click(page, `${scope} .new-button[aria-label="New session"]`);
                     await button(page, panel, "Start a one-time chat");
@@ -1388,17 +1031,11 @@ test(
 
                     assert.equal(chat.threadType, "chat");
                     assert.equal(chat.projectId, undefined);
-                    assert.equal(chat.goalId, undefined);
-                    assert.equal(
-                        app.projects.list(user).goals.length,
-                        1,
-                        "one-time Chat creates no goal",
-                    );
                     await home(page, scope);
                     assert.equal(await rowTag(page, scope, chat.id, "Chat"), true);
                     await present(peer, `${scope} .session-row[data-id="${chat.id}"]`);
 
-                    for (const [index, type] of (["Pull", "Researcher"] as const).entries()) {
+                    for (const type of ["Pull", "Researcher"] as const) {
                         const threadType = type.toLowerCase();
 
                         await click(page, `${scope} .new-button[aria-label="New session"]`);
@@ -1410,91 +1047,62 @@ test(
 
                         assert.equal(standalone.threadType, threadType);
                         assert.equal(standalone.projectId, undefined);
-                        assert.equal(standalone.goalId, undefined);
                         await home(page, scope);
                         assert.equal(await rowTag(page, scope, standalone.id, type), true);
                         await present(peer, `${scope} .session-row[data-id="${standalone.id}"]`);
                         await click(page, `${scope} .new-button[aria-label="New session"]`);
                         await chooseProject(page, name);
-                        await button(page, `${panel} .project-goal-choices`, "New Goal");
                         await page.evaluate(`const field = document.querySelector('${panel} select[aria-label="Thread type"]');
                             field.value = '${threadType}';
                             field.dispatchEvent(new Event('change', { bubbles: true }));`);
-                        await shot(page, `${viewport}-new-goal-${threadType}`);
+                        await shot(page, `${viewport}-project-${threadType}`);
                         const starter = await start(page, app, type);
-                        const starterGoal = app.projects
-                            .list(user)
-                            .goals.find((item) => item.id === starter.goalId);
 
                         assert.equal(starter.threadType, threadType);
                         assert.equal(starter.projectId, project.id);
                         assert.equal(starter.cwd, cwd);
-                        assert.ok(
-                            starterGoal,
-                            `starting ${type} with New Goal creates its goal, not an orphan or Worker`,
-                        );
-                        assert.equal(starterGoal.status, "active");
-                        assert.equal(app.projects.list(user).goals.length, 2 + index);
                         await home(page, scope);
                         assert.equal(await rowTag(page, scope, starter.id, type), false);
                         await present(peer, `${scope} .session-row[data-id="${starter.id}"]`);
                     }
 
-                    // Advertise the real older hello over the event stream; do not inject UI state.
+                    // Starter availability follows the current public profile catalogue, not old version sentinels.
                     const hello = app.hello.bind(app);
-                    let handoffs = 3;
 
                     app.hello = async (supplied) => {
                         const result = await hello(supplied);
 
-                        return { ...result, server: { ...result.server, handoffs } };
+                        return {
+                            ...result,
+                            server: {
+                                ...result.server,
+                                agentProfiles: result.server.agentProfiles.filter((profile) =>
+                                    ["worker", "chat"].includes(profile.id),
+                                ),
+                            },
+                        };
                     };
 
                     try {
                         await page.reload();
                         await click(page, `${scope} .new-button[aria-label="New session"]`);
                         await chooseProject(page, name);
-                        await present(page, `${panel} select[aria-label="Thread type"]`);
-                        assert.equal(
+                        assert.deepEqual(
                             await value(
                                 page,
-                                `document.querySelector('${panel} option[value="researcher"]') === null`,
+                                `[...document.querySelectorAll('${panel} select[aria-label="Thread type"] option')].map(option => option.value)`,
                             ),
-                            true,
-                            "pre-summary servers must not offer unsupported Researcher starters",
-                        );
-                        assert.equal(
-                            await value(
-                                page,
-                                `document.querySelector('${panel} option[value="pull"]') !== null`,
-                            ),
-                            true,
-                            "version 3 retains its existing Pull starter",
-                        );
-                        await closeDialog(page);
-                        handoffs = 1;
-                        await page.reload();
-                        await click(page, `${scope} .new-button[aria-label="New session"]`);
-                        await chooseProject(page, name);
-                        await present(page, `${panel} .session-destination`);
-                        await present(page, `${panel} select[aria-label="Thread type"]`, false);
-                        assert.equal(
-                            await value(
-                                page,
-                                `[...document.querySelectorAll('${panel} button')].some(button => button.textContent.trim() === 'Start Worker' && !button.disabled)`,
-                            ),
-                            true,
-                            "legacy servers retain their supported Worker creation flow",
+                            ["worker"],
+                            "project starters offer only available non-Chat profiles",
                         );
                         await button(page, panel, "Start a one-time chat");
-                        await present(page, `${panel} select[aria-label="Thread type"]`, false);
                         assert.equal(
                             await value(
                                 page,
                                 `[...document.querySelectorAll('${panel} button')].some(button => button.textContent.trim() === 'Start Chat' && !button.disabled)`,
                             ),
                             true,
-                            "legacy servers retain one-time Chat without offering unsupported Pull creation",
+                            "the advertised Chat starter remains available outside projects",
                         );
                         await closeDialog(page);
                     } finally {
@@ -1532,7 +1140,7 @@ test(
                                 path: location.pathname,
                                 sheet: sheet && {
                                     type: sheet.type, kind: sheet.kind, id: sheet.id,
-                                    at: sheet.at, archivedView: sheet.archivedView,
+                                    at: sheet.at,
                                 },
                                 surfaces: [...document.querySelectorAll('[role="menu"], [role="dialog"]')]
                                     .map(element => ({
@@ -1542,11 +1150,6 @@ test(
                                         css: element.style.cssText,
                                         actions: [...element.querySelectorAll('button')]
                                             .map(button => button.textContent.trim()),
-                                    })),
-                                statuses: [...document.querySelectorAll('.goal-state')]
-                                    .map(element => ({
-                                        label: element.getAttribute('aria-label'), title: element.title,
-                                        rect: element.getBoundingClientRect().toJSON(),
                                     })),
                             };
                         })()`,
@@ -1577,10 +1180,35 @@ test(
     { skip: findBrowser() === undefined ? "no Chromium installed" : false, timeout: 90_000 },
     async () => {
         let gate: { entered: boolean; wait: Promise<void>; release: () => void } | undefined;
+        let helperGate: typeof gate;
         const model = scriptedModel(async (request) => {
-            const text = lastText(request as never).text;
+            const { text, role } = lastText(request as never);
 
-            if (text.includes("held") && gate !== undefined) {
+            if (text.includes("Hold sidebar helper for geometry") && helperGate !== undefined) {
+                helperGate.entered = true;
+                await helperGate.wait;
+
+                return fauxAssistantMessage("helper complete");
+            }
+
+            if (text.includes("held result with helper")) {
+                return fauxAssistantMessage(
+                    [
+                        fauxToolCall("subagent", {
+                            action: "spawn",
+                            name: "sidebar-helper",
+                            message: "Hold sidebar helper for geometry",
+                        }),
+                    ],
+                    { stopReason: "toolUse" },
+                );
+            }
+
+            if (
+                (text.includes("held") ||
+                    (helperGate && role === "toolResult" && text.includes("Started"))) &&
+                gate !== undefined
+            ) {
                 gate.entered = true;
                 await gate.wait;
             }
@@ -1640,7 +1268,7 @@ test(
             return page;
         };
 
-        const startHeld = async () => {
+        const startHeld = async (withHelper = false) => {
             let release = () => {};
 
             const wait = new Promise<void>((resolve) => {
@@ -1648,17 +1276,40 @@ test(
             });
 
             gate = { entered: false, wait, release };
+
+            if (withHelper) {
+                let releaseHelper = () => {};
+
+                const helperWait = new Promise<void>((resolve) => {
+                    releaseHelper = resolve;
+                });
+
+                helperGate = { entered: false, wait: helperWait, release: releaseHelper };
+            }
+
             const { submissionId } = await app.commands.submit(id, owner(app), {
-                text: "held result",
+                text: withHelper ? "held result with helper" : "held result",
                 requestId: crypto.randomUUID(),
             });
 
-            await until(() => gate?.entered === true && app.isBusy(id), "the model held mid-run");
+            await until(
+                () =>
+                    gate?.entered === true &&
+                    app.isBusy(id) &&
+                    (!withHelper || helperGate?.entered === true),
+                "the model held mid-run with its real helper, when requested",
+            );
 
             return async () => {
+                helperGate?.release();
                 release();
                 await (await app.harness.submission(submissionId, context))!.wait(context);
-                await until(() => !app.isBusy(id), "the completed run");
+                await until(
+                    () =>
+                        !app.isBusy(id) &&
+                        (!withHelper || app.subagents().every((agent) => !agent.busy)),
+                    "the parent and any held helper have completed",
+                );
             };
         };
 
@@ -1788,6 +1439,32 @@ test(
             await click(peer, ".topbar .people-button");
             await present(peer, ".chat-msg");
             await idleState(peer, desktop, id, false);
+
+            // A real held child publishes its count while the standalone parent is also busy.
+            finish = await startHeld(true);
+            await page.setViewport(VIEWPORTS.mobile);
+            await spinner(page, mobile);
+            await present(page, `${mobile} .session-row[data-id="${id}"] .session-fork`);
+            assert.equal(
+                await value(
+                    page,
+                    `(() => {
+                    const side = document.querySelector('${mobile} .session-row[data-id="${id}"] .session-side');
+                    const fork = side.querySelector('.session-fork').getBoundingClientRect();
+                    const busy = side.querySelector('.spinner').getBoundingClientRect();
+                    const time = side.querySelector('.session-time').getBoundingClientRect();
+                    const center = rect => (rect.top + rect.bottom) / 2;
+
+                    return side.querySelector('.session-fork').textContent.trim() === '1'
+                        && fork.right < busy.left && busy.right < time.left
+                        && Math.abs(center(busy) - center(fork)) < 1
+                        && Math.abs(center(busy) - center(time)) < 1;
+                })()`,
+                ),
+                true,
+                "the busy spinner follows the real helper count and shares the badge/time vertical center",
+            );
+            await finish();
             assert.deepEqual(
                 pages
                     .flatMap((connected) => connected.logs())
@@ -1796,6 +1473,7 @@ test(
                 "no browser errors or module-cycle failures",
             );
         } finally {
+            helperGate?.release();
             gate?.release();
 
             for (const page of pages) {

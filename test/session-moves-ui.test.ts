@@ -1,5 +1,5 @@
 // Authoring gate: real browser move gestures/forms must deliver committed placement to peers.
-// Risks: native drag cancelled by re-render, nested drops erase goals, partial failures lose selection,
+// Risks: drag-only targets shift rows, native drag cancelled by re-render, partial failures lose selection,
 // cancelled/touch moves mutate the wrong rows, cramped picker actions and reader mutation controls.
 // projects.test.ts owns authorization/storage; projects-ui.test.ts owns creation/disclosure.
 // These tests own move interaction/transport, with no production seams or provider calls.
@@ -20,7 +20,6 @@ const sidebar = ".sidebar .sessions";
 const home = ".home-list .sessions";
 const dialog = '[role="dialog"]';
 const projectField = `${dialog} select[aria-label="Project"]`;
-const goalField = `${dialog} select[aria-label="Goal"]`;
 const browserOptions = {
     skip: findBrowser() === undefined ? "no Chromium installed" : false,
     timeout: 90_000,
@@ -60,14 +59,22 @@ async function button(page: BrowserPage, scope: string, text: string) {
 }
 
 const row = (scope: string, id: ConversationId) => `${scope} .session-row[data-id="${id}"]`;
-const goal = (scope: string, id: string) => `${scope} .goal-section[data-goal-id="${id}"]`;
+const project = (scope: string, id: string) => `${scope} .project-section[data-project-id="${id}"]`;
 const head = (section: string) => `${section} > .project-group-head .group-head`;
 const overlay = (scope: string, id: ConversationId) => `${row(scope, id)} .session-hold`;
 
-async function openMove(page: BrowserPage, scope: string, id: ConversationId, title: string) {
-    await click(page, `${row(scope, id)} [aria-label=${JSON.stringify(`Options for ${title}`)}]`);
+async function openOptions(page: BrowserPage, scope: string, id: ConversationId, title: string) {
+    const point = await beginTouch(page, scope, id);
+
+    await present(page, overlay(scope, id));
+    await finger(page, "touchmove", { x: point.x + 16, y: point.y });
     await present(page, `[role="dialog"][aria-label=${JSON.stringify(title)}]`);
-    await button(page, dialog, "Move to project or goal…");
+    await finger(page, "touchend");
+}
+
+async function openMove(page: BrowserPage, scope: string, id: ConversationId, title: string) {
+    await openOptions(page, scope, id, title);
+    await button(page, dialog, "Move to project…");
     await present(page, '[role="dialog"][aria-label="Move session"]');
 }
 
@@ -194,7 +201,6 @@ function metadata(app: App, id: ConversationId) {
         threadType: item.threadType,
         archived: item.archived === true,
         projectId: item.projectId ?? null,
-        goalId: item.goalId ?? null,
     };
 }
 
@@ -205,14 +211,13 @@ async function moved(
     id: ConversationId,
     before: ReturnType<typeof metadata>,
     projectId: string | null,
-    goalId: string | null = null,
 ) {
     await until(() => {
         const item = fixture.app.sessionMeta(id);
 
-        return (item?.projectId ?? null) === projectId && (item?.goalId ?? null) === goalId;
+        return (item?.projectId ?? null) === projectId;
     }, `committed placement for ${id}`);
-    assert.deepEqual(metadata(fixture.app, id), { ...before, projectId, goalId });
+    assert.deepEqual(metadata(fixture.app, id), { ...before, projectId });
 
     for (const page of pages) {
         await present(page, row(scope, id));
@@ -224,9 +229,8 @@ async function moved(
                     `(() => {
             const row = document.querySelector(${JSON.stringify(row(scope, id))});
 
-            return (row.closest('.project-section:not(.goal-section)')?.dataset.projectId ?? null)
-                    === ${JSON.stringify(projectId)}
-                && (row.closest('.goal-section')?.dataset.goalId ?? null) === ${JSON.stringify(goalId)};
+            return (row.closest('.project-section')?.dataset.projectId ?? null)
+                === ${JSON.stringify(projectId)};
         })()`,
                 ),
             `peer/UI placement for ${id}`,
@@ -255,7 +259,21 @@ async function shot(page: BrowserPage, name: string, settle = true) {
 }
 
 async function nativeDrop(page: BrowserPage, source: string, target: string) {
+    await page.evaluate(`
+        await document.fonts.ready;
+        await Promise.all(document.getAnimations()
+            .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+            .map(animation => animation.finished.catch(() => {})));
+    `);
     const start = await page.locate({ selector: source });
+    const positions = `([...document.querySelectorAll('${sidebar} .project-group-head, ${sidebar} .session-row')]
+        .map(element => ({
+            key: element.classList.contains('session-row')
+                ? element.dataset.id
+                : element.querySelector('.group-head').title,
+            top: element.getBoundingClientRect().top,
+        })))`;
+    const before = await value<{ key: string; top: number }[]>(page, positions);
 
     await page.evaluate(`
         window.nativeMoveEvents = [];
@@ -275,6 +293,38 @@ async function nativeDrop(page: BrowserPage, source: string, target: string) {
 
     try {
         await present(page, `${sidebar} .session-drop-unassigned`);
+        const during = await value<{ key: string; top: number }[]>(page, positions);
+
+        assert.deepEqual(
+            during.map((item) => item.key),
+            before.map((item) => item.key),
+        );
+
+        for (const [index, item] of before.entries()) {
+            assert.ok(
+                Math.abs(during[index]!.top - item.top) < 1,
+                `${item.key}: starting drag does not move existing project headers or rows`,
+            );
+        }
+
+        assert.equal(
+            await value(
+                page,
+                `(() => {
+                const list = document.querySelector('${sidebar} .session-items');
+                const tools = document.querySelector('${sidebar} .session-drag-tools');
+                const target = tools.querySelector('.session-drop-unassigned');
+                const normal = [...list.querySelectorAll('.project-group-head, .session-row')];
+
+                return list.contains(tools) && tools.contains(target)
+                    && normal.every(element =>
+                        Boolean(element.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING)
+                        && tools.getBoundingClientRect().top >= element.getBoundingClientRect().bottom - 1);
+            })()`,
+            ),
+            true,
+            "the status and No project target follow existing rows inside the scrollable list",
+        );
         const destination = await page.locate({ selector: target });
 
         await page.input([
@@ -391,7 +441,7 @@ async function drag(page: BrowserPage, source: string, target: string, expand = 
             await new Promise(resolve => setTimeout(resolve, 800));
 
             if (target.getAttribute('aria-expanded') !== 'true') {
-                throw new Error('Hover did not expand the collapsed goal');
+                throw new Error('Hover did not expand the collapsed project');
             }
         }
 
@@ -439,16 +489,8 @@ async function setup(name: string, viewport: "mobile" | "desktop") {
         threadType: "chat",
         cwd,
     });
-    const seed = await app.commands.createSession(user, { projectId: beta.id, newGoal: true });
-    const goalId = app.sessionMeta(seed.id)!.goalId!;
-    const archived = await app.commands.createSession(user, { projectId: beta.id, newGoal: true });
-    const archivedGoal = app.sessionMeta(archived.id)!.goalId!;
 
-    await app.projects.updateGoal(user, goalId, { name: "Destination", status: "completed" });
-    await app.projects.updateGoal(user, archivedGoal, {
-        name: "Archived destination",
-        archived: true,
-    });
+    await app.commands.createSession(user, { projectId: beta.id });
     const participant = app.config.addUser("Move participant", "guest");
     const viewer = app.config.addUser("Move reader", "viewer");
     const denied = new Set<string>();
@@ -496,7 +538,7 @@ async function setup(name: string, viewport: "mobile" | "desktop") {
         await page.navigate(
             `http://127.0.0.1:${address.port}/login?token=${encodeURIComponent(token)}`,
         );
-        await present(page, goal(scope, goalId));
+        await present(page, project(scope, beta.id));
 
         return page;
     };
@@ -537,8 +579,6 @@ async function setup(name: string, viewport: "mobile" | "desktop") {
         close,
         alpha: alpha.id,
         beta: beta.id,
-        goalId,
-        archivedGoal,
         worker: worker.id,
         chat: chat.id,
     };
@@ -558,17 +598,9 @@ test(
             await nativeDrop(
                 page,
                 `${row(sidebar, fixture.worker)} .session`,
-                head(goal(sidebar, fixture.goalId)),
+                head(project(sidebar, fixture.beta)),
             );
-            await moved(
-                fixture,
-                [page, peer],
-                sidebar,
-                fixture.worker,
-                before,
-                fixture.beta,
-                fixture.goalId,
-            );
+            await moved(fixture, [page, peer], sidebar, fixture.worker, before, fixture.beta);
             const requests = fixture.requests.length;
             const placement = metadata(fixture.app, fixture.worker);
 
@@ -593,21 +625,13 @@ test(
             const peer = await fixture.connect(2, fixture.app.config.ownerToken);
             const before = metadata(fixture.app, fixture.worker);
             const chatBefore = metadata(fixture.app, fixture.chat);
-            const destination = head(goal(sidebar, fixture.goalId));
+            const destination = head(project(sidebar, fixture.beta));
 
             await click(page, destination);
             await selectRows(page, sidebar, [fixture.worker, fixture.chat]);
             fixture.denied.add(`/api/sessions/${fixture.chat}`);
             await drag(page, `${row(sidebar, fixture.worker)} .session`, destination, true);
-            await moved(
-                fixture,
-                [page, peer],
-                sidebar,
-                fixture.worker,
-                before,
-                fixture.beta,
-                fixture.goalId,
-            );
+            await moved(fixture, [page, peer], sidebar, fixture.worker, before, fixture.beta);
             assert.deepEqual(metadata(fixture.app, fixture.chat), chatBefore);
             await present(page, `${row(sidebar, fixture.worker)}.selected`, false);
             await present(page, `${row(sidebar, fixture.chat)}.selected`);
@@ -621,15 +645,7 @@ test(
             );
             fixture.denied.clear();
             await drag(page, `${row(sidebar, fixture.chat)} .session`, destination);
-            await moved(
-                fixture,
-                [page, peer],
-                sidebar,
-                fixture.chat,
-                chatBefore,
-                fixture.beta,
-                fixture.goalId,
-            );
+            await moved(fixture, [page, peer], sidebar, fixture.chat, chatBefore, fixture.beta);
             await present(page, `${sidebar} .session-drop-unassigned`, false);
             await drag(
                 page,
@@ -663,22 +679,33 @@ test(
                 await button(connected, `${home} .session-tabs:not(.private-tabs)`, "Archived");
             }
 
+            assert.equal(
+                await value(
+                    page,
+                    `(() => {
+                    const cog = document.querySelector('${row(home, fixture.worker)} .session-options');
+                    const bounds = cog.getBoundingClientRect();
+
+                    cog.focus();
+
+                    return bounds.width === 0 && bounds.height === 0 && document.activeElement !== cog;
+                })()`,
+                ),
+                true,
+                "mobile row cogs are neither visible nor focusable; the hold chooser owns Options",
+            );
+
             const open = async () => {
                 await openMove(page, home, fixture.worker, "Worker to move");
             };
 
             const choose = async () => {
                 await page.select({ selector: projectField }, fixture.beta);
-                await present(page, goalField);
                 assert.equal(
-                    await value<boolean>(
-                        page,
-                        `[...document.querySelector(${JSON.stringify(goalField)}).options].some(option => option.value === ${JSON.stringify(fixture.archivedGoal)})`,
-                    ),
-                    false,
-                    "archived goals are not destinations",
+                    await value(page, `document.querySelectorAll('${dialog} select').length`),
+                    1,
+                    "a project is the complete destination; no extra placement choice is required",
                 );
-                await page.select({ selector: goalField }, fixture.goalId);
             };
 
             const save = async () => {
@@ -740,19 +767,12 @@ test(
             await open();
             await choose();
             await save();
-            await moved(
-                fixture,
-                [page, peer],
-                home,
-                fixture.worker,
-                before,
-                fixture.beta,
-                fixture.goalId,
-            );
+            await moved(fixture, [page, peer], home, fixture.worker, before, fixture.beta);
             await open();
             assert.equal(
-                await value(page, `document.querySelector(${JSON.stringify(goalField)}).value`),
-                fixture.goalId,
+                await value(page, `document.querySelector(${JSON.stringify(projectField)}).value`),
+                fixture.beta,
+                "the picker reopens at the thread's current project",
             );
             await page.select({ selector: projectField }, "");
             await save();
@@ -796,10 +816,7 @@ test(
                 await value(page, "document.documentElement.scrollWidth <= innerWidth"),
                 true,
             );
-            await click(
-                reader,
-                `${row(home, fixture.worker)} [aria-label="Options for Worker to move"]`,
-            );
+            await openOptions(reader, home, fixture.worker, "Worker to move");
             await present(reader, '[role="dialog"][aria-label="Worker to move"]');
             assert.equal(
                 await value<boolean>(
@@ -977,12 +994,12 @@ test(
             await page.press("Escape");
             await present(page, dialog, false);
             assert.equal(fixture.requests.length, requests);
-            await page.click({ selector: `${source} [aria-label="Options for Worker to move"]` });
+            await openOptions(page, home, fixture.worker, "Worker to move");
             await present(page, '[role="dialog"][aria-label="Worker to move"]');
             assert.equal(
                 await value(page, "location.pathname"),
                 path,
-                "a fresh native Options click is not swallowed by the old held contact",
+                "a fresh intentional Options hold is not swallowed by the old held contact",
             );
             await page.evaluate(`await Promise.all(document.getAnimations()
                 .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
@@ -998,14 +1015,14 @@ test(
                 ["Mark unread", true],
                 ["Mark read", false],
             ] as const) {
-                await click(page, `${source} [aria-label="Options for Worker to move"]`);
+                await openOptions(page, home, fixture.worker, "Worker to move");
                 await present(page, menu);
                 await button(page, menu, label);
                 await present(page, dialog, false);
                 await present(page, `${source}.marked-unread`, marked);
             }
 
-            await click(page, `${source} [aria-label="Options for Worker to move"]`);
+            await openOptions(page, home, fixture.worker, "Worker to move");
             await present(page, menu);
             await button(page, menu, "Select");
             await present(page, dialog, false);
@@ -1119,10 +1136,7 @@ test(
             });
             await present(page, `${row(drawer, fixture.worker)} .session`);
             assert.deepEqual(metadata(fixture.app, fixture.worker), before);
-            await click(
-                page,
-                `${row(drawer, fixture.worker)} [aria-label="Options for Worker to move"]`,
-            );
+            await openOptions(page, drawer, fixture.worker, "Worker to move");
             await present(page, '[role="dialog"][aria-label="Worker to move"]');
         } finally {
             await fixture.close();
@@ -1130,8 +1144,8 @@ test(
     },
 );
 
-// Touch DnD owns hit testing and tracking across source detach. A stale last highlight, parent
-// fallback for an archived goal, or row-owned tracking fails through real committed metadata.
+// Touch DnD owns hit testing and tracking across source detach. A stale last highlight or
+// row-owned tracking fails through real committed metadata.
 test(
     "mobile touch drag keeps its source across tab hover and recomputes release targets",
     browserOptions,
@@ -1142,7 +1156,7 @@ test(
             const page = await fixture.connect(1, fixture.participant.token);
             const peer = await fixture.connect(2, fixture.app.config.ownerToken);
             const before = metadata(fixture.app, fixture.worker);
-            const destination = head(goal(home, fixture.goalId));
+            const destination = head(project(home, fixture.beta));
 
             await click(page, destination);
             await button(page, `${home} .session-tabs:not(.private-tabs)`, "Recent");
@@ -1174,7 +1188,7 @@ test(
                         page,
                         `document.querySelector(${JSON.stringify(destination)}).getAttribute('aria-expanded') === 'true'`,
                     ),
-                "touch dwell expands the closed goal",
+                "touch dwell expands the closed project",
             );
             const requests = fixture.requests.length;
 
@@ -1183,7 +1197,7 @@ test(
             assert.equal(
                 fixture.requests.length,
                 requests,
-                "outside release cannot use the stale highlighted goal",
+                "outside release cannot use the stale highlighted project",
             );
             assert.deepEqual(metadata(fixture.app, fixture.worker), before);
             // No artificial pause: this genuine mouse press must clear the touch owner's click
@@ -1199,38 +1213,12 @@ test(
             await page.click({ selector: ".topbar-back" });
             await present(page, `${row(home, fixture.worker)} .session`);
 
-            // An archived goal consumes the nearest hit instead of silently using its project parent.
-            await touchDrag(page, home, fixture.worker);
-            await button(page, `${home} .session-tabs:not(.private-tabs)`, "Archived");
-            const archived = await page.locate({
-                selector: head(goal(home, fixture.archivedGoal)),
-            });
-
-            await finger(page, "touchmove", archived);
-            await finger(page, "touchend", archived);
-            await present(page, `${home} .session-drop-unassigned`, false);
-            assert.equal(
-                fixture.requests.length,
-                requests,
-                "archived goal is not a project fallback",
-            );
-            assert.deepEqual(metadata(fixture.app, fixture.worker), before);
-            await button(page, `${home} .session-tabs:not(.private-tabs)`, "Projects");
-
             await touchDrag(page, home, fixture.worker);
             const release = await page.locate({ selector: destination });
 
             // No move at this position first: release itself must resolve the nearest destination.
             await finger(page, "touchend", release);
-            await moved(
-                fixture,
-                [page, peer],
-                home,
-                fixture.worker,
-                before,
-                fixture.beta,
-                fixture.goalId,
-            );
+            await moved(fixture, [page, peer], home, fixture.worker, before, fixture.beta);
             await present(page, `${home} .session-drop-unassigned`, false);
 
             await touchDrag(page, home, fixture.worker);
@@ -1246,9 +1234,9 @@ test(
 
 // Access loss has a distinct owner-level lifecycle risk after the source row disappears;
 // it must cancel without transport, while readers can still use the existing Options menu.
-// Stationary edge autoscroll must use the real scroll container and stop on cancellation.
+// Stationary edge autoscroll must reach the bottom drop target and stop on cancellation.
 test(
-    "touch drag autoscrolls, cancels on interruptions and access loss, and keeps reader Options",
+    "touch drag reaches the bottom target, cancels on interruptions and access loss, and keeps reader Options",
     browserOptions,
     async () => {
         const fixture = await setup("touch-lifecycle", "mobile");
@@ -1262,6 +1250,7 @@ test(
             }
 
             const page = await fixture.connect(1, fixture.participant.token);
+            const peer = await fixture.connect(2, fixture.app.config.ownerToken);
             const before = metadata(fixture.app, fixture.worker);
             const requests = fixture.requests.length;
 
@@ -1316,27 +1305,54 @@ test(
                 }
 
                 await present(page, `${home} .session-drop-unassigned`, false);
-                const target = await page.locate({ selector: head(goal(home, fixture.goalId)) });
+                const target = await page.locate({ selector: head(project(home, fixture.beta)) });
 
                 await finger(page, "touchend", target);
                 assert.equal(fixture.requests.length, requests, interrupt);
                 assert.deepEqual(metadata(fixture.app, fixture.worker), before, interrupt);
             }
 
+            // The relocated target must be usable on an overflowing list, not just have dimensions
+            // offscreen. Keep the contact at the edge until the real hit test reaches No project.
+            await touchDrag(page, home, fixture.worker);
+            await page.evaluate(`document.querySelector('${home} .session-items').scrollTop = 0`);
+            assert.equal(
+                await value(
+                    page,
+                    `Boolean(document.elementFromPoint(${edge.x}, ${edge.y})?.closest('.session-drop-unassigned'))`,
+                ),
+                false,
+                "No project starts outside the touch hit area on the long list",
+            );
+            await finger(page, "touchmove", edge);
+            await until(
+                () =>
+                    value<boolean>(
+                        page,
+                        `Boolean(document.elementFromPoint(${edge.x}, ${edge.y})?.closest('.session-drop-unassigned'))`,
+                    ),
+                "stationary edge autoscroll makes No project hit-testable",
+            );
+            await finger(page, "touchend", edge);
+            await moved(fixture, [page, peer], home, fixture.worker, before, null);
+            await present(page, `${home} .session-drop-unassigned`, false);
+            const afterMove = metadata(fixture.app, fixture.worker);
+            const afterMoveRequests = fixture.requests.length;
+
             await touchDrag(page, home, fixture.worker);
             fixture.app.setAccess(owner(fixture.app), fixture.participant.user.id, {
                 role: "viewer",
             });
             await present(page, `${home} .session-drop-unassigned`, false);
-            const target = await page.locate({ selector: head(goal(home, fixture.goalId)) });
+            const target = await page.locate({ selector: head(project(home, fixture.beta)) });
 
             await finger(page, "touchend", target);
             assert.equal(
                 fixture.requests.length,
-                requests,
+                afterMoveRequests,
                 "revoked steering cancels without a move request",
             );
-            assert.deepEqual(metadata(fixture.app, fixture.worker), before);
+            assert.deepEqual(metadata(fixture.app, fixture.worker), afterMove);
             const options = await beginTouch(page, home, fixture.worker);
 
             await present(page, overlay(home, fixture.worker));
@@ -1351,7 +1367,7 @@ test(
             assert.equal(
                 await value<boolean>(
                     page,
-                    `[...document.querySelectorAll('${dialog} button')].some(button => button.textContent.trim() === 'Move to project or goal…')`,
+                    `[...document.querySelectorAll('${dialog} button')].some(button => button.textContent.trim() === 'Move to project…')`,
                 ),
                 false,
                 "reader Options cannot move",

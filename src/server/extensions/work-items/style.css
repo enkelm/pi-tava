@@ -65,6 +65,10 @@
     background: none;
 }
 
+.button.primary .thread-type.icon-only {
+    color: inherit;
+}
+
 /* Work Items inherit the app palette; profile tags are the host's generic public component. */
 .handoff-icon-button {
     width: 40px;
@@ -231,6 +235,11 @@
     resize: vertical;
     font-size: 14.5px;
     border-radius: calc(var(--r-control) + 1px);
+}
+
+.handoff-warning {
+    color: var(--warn);
+    overflow-wrap: anywhere;
 }
 
 .handoff-error {

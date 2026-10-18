@@ -469,8 +469,13 @@ export class Room {
     /** What the folder has checked out now, null outside a repository; kept as the branch this view last read. */
     #readHead(): Head | null {
         const head = this.#app.workspace.head(this.id) ?? null;
+        const next = JSON.stringify(head);
 
-        this.#head = JSON.stringify(head);
+        if (this.#head && this.#head !== next) {
+            this.#app.scheduleSessions();
+        }
+
+        this.#head = next;
 
         return head;
     }

@@ -9,17 +9,13 @@ import { ProjectForm } from "./project.js";
 
 export function ProjectSessionPanel({
     projectId: initialProjectId,
-    goalId: initialGoalId,
-    newGoal: initialNewGoal = false,
     cwd: initialCwd,
     continuation,
     visible,
     onBusyChange,
 }) {
-    const { projects, projectGoals, projectsLoaded, server } = store.state;
+    const { projects, projectsLoaded, server } = store.state;
     const [projectId, setProjectId] = useState(initialProjectId ?? null);
-    const [goalId, setGoalId] = useState(initialGoalId ?? null);
-    const [newGoal, setNewGoal] = useState(initialNewGoal);
     const [chat, setChat] = useState(false);
     const starters = (server?.agentProfiles ?? []).filter((profile) => profile.starter);
     const defaultStarter = starters.find((profile) => profile.id !== "chat")?.id;
@@ -32,7 +28,6 @@ export function ProjectSessionPanel({
     const [error, setError] = useState("");
     const requestId = useRef(uid());
     const project = projects.find((each) => each.id === projectId);
-    const goal = projectGoals.find((each) => each.id === goalId && each.projectId === projectId);
     const cwd = override ?? (!chat ? project?.cwd : null) ?? server?.defaultCwd ?? "~";
     const noProjects = projectsLoaded && projects.length === 0;
     const typeLabel = threadTypeLabel({ threadType });
@@ -62,16 +57,8 @@ export function ProjectSessionPanel({
 
     const chooseProject = (id) => {
         setProjectId(id);
-        setGoalId(null);
-        setNewGoal(false);
         setOverride(initialCwd ?? null);
         setError("");
-        requestId.current = uid();
-    };
-
-    const chooseGoal = (id, create = false) => {
-        setGoalId(id);
-        setNewGoal(create);
         requestId.current = uid();
     };
 
@@ -96,13 +83,7 @@ export function ProjectSessionPanel({
         try {
             const created = await actions.createSession(override ?? undefined, {
                 threadType,
-                ...(chat
-                    ? {}
-                    : {
-                          projectId,
-                          ...(goal ? { goalId } : {}),
-                          ...(newGoal ? { newGoal: true } : {}),
-                      }),
+                ...(!chat ? { projectId } : {}),
                 worktree,
                 requestId: requestId.current,
             });
@@ -146,7 +127,6 @@ export function ProjectSessionPanel({
 
     const renderProject = (each) => {
         const selected = each.id === projectId;
-        const goals = projectGoals.filter((item) => item.projectId === each.id && !item.archived);
 
         return html`<section key=${each.id} class="project-choice">
             <button
@@ -159,46 +139,6 @@ export function ProjectSessionPanel({
                 <span><${Icon} name="folder" size=${16} /> ${each.name}</span>
                 <${Icon} name=${selected ? "down" : "chevron"} size=${14} />
             </button>
-            ${
-                selected &&
-                html`<div
-                    class="project-goal-choices"
-                    role="group"
-                    aria-label=${`Goals in ${each.name}`}
-                >
-                    <button
-                        class=${`list-item ${newGoal ? "active" : ""}`}
-                        aria-pressed=${newGoal}
-                        disabled=${busy}
-                        onClick=${() => chooseGoal(null, true)}
-                    >
-                        <span><${Icon} name="plus" size=${15} /> New Goal</span>
-                    </button>
-                    ${goals.map(
-                        (item) => html`<button
-                            key=${item.id}
-                            class=${`list-item ${goalId === item.id ? "active" : ""}`}
-                            aria-pressed=${goalId === item.id}
-                            disabled=${busy}
-                            onClick=${() => chooseGoal(item.id)}
-                        >
-                            <span><${Icon} name="target" size=${15} /> ${item.name}</span>
-                            ${
-                                item.status === "completed" &&
-                                html`<span class="muted small">Completed</span>`
-                            }
-                        </button>`,
-                    )}
-                    <button
-                        class=${`list-item ${!goalId && !newGoal ? "active" : ""}`}
-                        aria-pressed=${!goalId && !newGoal}
-                        disabled=${busy}
-                        onClick=${() => chooseGoal(null)}
-                    >
-                        <span>No goal</span>
-                    </button>
-                </div>`
-            }
         </section>`;
     };
 
@@ -209,10 +149,10 @@ export function ProjectSessionPanel({
                     <button class="button small" disabled=${busy} onClick=${leaveChat}>
                         <${Icon} name="back" size=${14} /> Projects
                     </button>
-                    <p>A one-time ${typeLabel} stays outside projects and goals.</p>
+                    <p>A one-time ${typeLabel} stays outside projects.</p>
                 </div>`
                 : html`
-                    <p class="muted small">Choose a project for this ${typeLabel}, then a goal if you need one.</p>
+                    <p class="muted small">Choose a project for this ${typeLabel}.</p>
                     ${!projectsLoaded && !error && html`<${Loader} label="Loading projects" />`}
                     ${
                         projectsLoaded &&
@@ -248,11 +188,7 @@ export function ProjectSessionPanel({
                 ${
                     !chat &&
                     html`<p class="small">
-                        <b>${project.name}</b>${newGoal ? " · New Goal" : goal ? ` · ${goal.name}` : " · No goal"}
-                        ${
-                            newGoal &&
-                            html`<span class="muted goal-naming-note">Pi names the goal from your first thread prompt.</span>`
-                        }
+                        <b>${project.name}</b>
                     </p>`
                 }
                 <div class="session-path">

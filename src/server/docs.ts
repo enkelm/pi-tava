@@ -25,10 +25,7 @@ export type SessionMeta = {
     updatedAt: number;
     createdBy?: string;
     archived?: boolean;
-    /** Only a goal bulk archive sets this; direct archive edits clear it. */
-    archivedByGoal?: string;
     projectId?: string;
-    goalId?: string;
     /** Ordinary untyped legacy entries become Worker; linked roots and new unassigned threads are Chats. */
     threadType?: ThreadType;
     /** Handoff visibility flows from this immediate source; older flattened-origin references also remain valid. */
@@ -123,24 +120,8 @@ export type Project = {
     createdBy: string;
 };
 
-/** Thread grouping, distinct from the conversation's executable "Done when" Goal. */
-export type ProjectGoal = {
-    id: string;
-    projectId: string;
-    name: string;
-    status: "active" | "completed";
-    archived?: boolean;
-    namingThreadId?: number;
-    namingTaskId?: number;
-    named?: boolean;
-    createdAt: number;
-    updatedAt: number;
-    createdBy: string;
-};
-
 export type Projects = {
     projects: Record<string, Project & { cwd: string }>;
-    goals: Record<string, ProjectGoal>;
     /** Project-creation receipts are user-scoped hashes with input fingerprints. */
     requests: Record<string, { id: string; fingerprint: string }>;
 };
@@ -150,7 +131,7 @@ export const ProjectsDoc = defineDoc<Projects>({
     kind: "pocket.projects",
     version: 1,
     scope: "session",
-    initial: () => ({ projects: {}, goals: {}, requests: {} }),
+    initial: () => ({ projects: {}, requests: {} }),
 });
 
 /** Session-creation retries publish their result in the same commit as the new session. */
