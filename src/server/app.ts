@@ -6,6 +6,7 @@
  * What people ask of Pi lives in `commands.ts`, the people's side of a session in `collab.ts`, push notifications in
  * `alerts.ts`, provider sign-ins in `providers.ts`, and each conversation's shared live view in `room.ts`.
  */
+import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1137,8 +1138,17 @@ export class PocketApp {
         return this.#clients;
     }
 
+    #webRevision = randomUUID();
+
+    /** The served document and reconnect hello share this revision, including while no tabs are attached. */
+    get webRevision(): string {
+        return this.#webRevision;
+    }
+
     /** Tell every browser to reload, after a web file changed. */
     reloadClients(file: string): void {
+        this.#webRevision = randomUUID();
+
         for (const client of this.#clients) {
             client.send("reload", { file });
         }
@@ -1874,6 +1884,7 @@ export class PocketApp {
             server: {
                 supervised: this.supervised,
                 startedAt: this.startedAt,
+                webRevision: this.webRevision,
                 home: homedir(),
                 defaultCwd: this.defaultCwd,
                 extensions: this.loader.extensionNames(),

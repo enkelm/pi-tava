@@ -6151,6 +6151,12 @@ button.chip:active:not(:disabled):not(.on) {
     padding-inline: 0;
 }
 
+@media (any-pointer: coarse) {
+    .sidebar-options-menu .sidebar-option {
+        min-height: 44px;
+    }
+}
+
 .sidebar-options-error {
     padding: 0.5rem 0.75rem;
 }

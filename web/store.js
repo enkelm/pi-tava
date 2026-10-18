@@ -461,12 +461,13 @@ class ApiError extends Error {
     }
 }
 
-/** Call the server's API: a GET without `body`, a POST with one, or `options.method`; `options.signal` stops it. */
+/** Call the server's API; signal aborts ordinary requests, keepalive lets small unload cleanups finish. */
 export async function api(path, body, options = {}) {
     const init = {
         method: body === undefined && !options.method ? "GET" : (options.method ?? "POST"),
         headers: { "X-Pocket": "1" },
         ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.keepalive ? { keepalive: true } : {}),
     };
 
     if (body !== undefined) {
@@ -941,9 +942,38 @@ export function onExtensionEvent(listener) {
     return () => extensionListeners.delete(listener);
 }
 
+// Keep the document's revision, not the last received hello: a hidden tab can miss reload broadcasts.
+let webRevision = document.querySelector('meta[name="pocket-web-revision"]')?.content;
+let reloading = false;
+
+function requestReload() {
+    if (!reloading) {
+        reloading = true;
+        // Message/editor drafts survive; unsent attachments and an open sign-in may not.
+        setTimeout(() => {
+            // beforeunload may let a dirty editor decline navigation. Only deduplicate pending attempts.
+            reloading = false;
+            location.reload();
+        }, 150);
+    }
+}
+
+function reconcileWeb(server) {
+    if (!server?.webRevision) {
+        return;
+    }
+
+    if (webRevision && webRevision !== server.webRevision) {
+        requestReload();
+    } else {
+        webRevision = server.webRevision;
+    }
+}
+
 /** What the server sends, by event name. Both transports deliver the same events. */
 const handlers = {
     hello: (data) => {
+        reconcileWeb(data.server);
         store.set({
             me: data.user,
             users: data.users,
@@ -1020,11 +1050,7 @@ const handlers = {
     },
     auth: (data) => handleAuth(data),
     closing: () => store.set({ connection: "closed" }),
-    reload: () => {
-        // A web file changed on the server. Message drafts live in localStorage and survive the reload; an unsaved notes
-        // draft, attachments not yet sent, and an open provider sign-in do not.
-        setTimeout(() => location.reload(), 150);
-    },
+    reload: requestReload,
 };
 
 /**
@@ -1056,8 +1082,26 @@ let streamRetries = 0;
 
 const connected = () => store.state.connection !== "open" && store.set({ connection: "open" });
 
+let foreground = true;
+const awake = () =>
+    foreground && document.visibilityState !== "hidden" && navigator.onLine !== false;
+
+/** Release the transport, not the current view/drafts. Old callbacks must lose ownership before close. */
+function suspend() {
+    const previous = source;
+
+    source = null;
+    previous?.close();
+    store.set({ connection: "closed" });
+}
+
 export function connect() {
-    source?.close();
+    suspend();
+
+    if (!awake()) {
+        return;
+    }
+
     store.set({ connection: "connecting" });
     const id = store.state.conversationId;
     const query = `tab=${encodeURIComponent(TAB)}&p=${PROTOCOL}${id === null ? "" : `&c=${id}`}`;
@@ -1068,14 +1112,34 @@ export function connect() {
 // A page kept for Back and Forward stays alive, frozen, and so would its stream: each holds one of the few connections a
 // browser makes to a server, and after a handful nothing else loads. It closes on leaving and reconnects on return.
 addEventListener("pagehide", () => {
-    source?.close();
-    source = null;
+    foreground = false;
+    clearTimeout(startRetry);
+    suspend();
 });
 addEventListener("pageshow", (event) => {
+    foreground = true;
+
     if (event.persisted) {
-        connect();
+        resume();
     }
 });
+addEventListener("offline", () => {
+    clearTimeout(startRetry);
+    suspend();
+});
+addEventListener("online", () => resume());
+
+function resume() {
+    if (!awake() || source) {
+        return;
+    }
+
+    if (store.state.me) {
+        connect();
+    } else if (store.state.me === undefined) {
+        start();
+    }
+}
 
 /** Server-sent events: one long response the server writes to as things change. */
 function streamEvents(query) {
@@ -1083,9 +1147,11 @@ function streamEvents(query) {
     /** The first batch arrived whole: the session's view, or the session list when no session is open. */
     let settled = false;
     const settles = query.includes("&c=") ? ["view", "missing"] : ["sessions"];
+    let retry;
     const connection = {
         close() {
             clearTimeout(fallback);
+            clearTimeout(retry);
             events.close();
         },
     };
@@ -1137,6 +1203,10 @@ function streamEvents(query) {
         try {
             await api("me");
         } catch (error) {
+            if (source !== connection) {
+                return;
+            }
+
             if (error.status === 401) {
                 connection.close();
                 store.set({ me: null });
@@ -1151,7 +1221,7 @@ function streamEvents(query) {
             // A stream that failed was not held back: no reason to switch this address to polling.
             clearTimeout(fallback);
             streamRetries++;
-            setTimeout(
+            retry = setTimeout(
                 () => source === connection && connect(),
                 Math.min(10_000, 1000 * streamRetries),
             );
@@ -1167,9 +1237,13 @@ function pollEvents(query) {
     let ack = 0;
     let stopped = false;
     let request = null;
+    let retry;
+    let wake;
     const connection = {
         close() {
             stopped = true;
+            clearTimeout(retry);
+            wake?.();
             request?.abort();
 
             if (session) {
@@ -1189,6 +1263,10 @@ function pollEvents(query) {
                     `/api/poll?${query}${session ? `&session=${session}&ack=${ack}` : ""}`,
                     { signal: request.signal, cache: "no-store" },
                 );
+
+                if (stopped || source !== connection) {
+                    return;
+                }
 
                 if (response.status === 401) {
                     stopped = true;
@@ -1235,9 +1313,10 @@ function pollEvents(query) {
                     store.set({ connection: "closed" });
                 }
 
-                await new Promise((resolve) =>
-                    setTimeout(resolve, Math.min(10_000, 1000 * failures)),
-                );
+                await new Promise((resolve) => {
+                    wake = resolve;
+                    retry = setTimeout(resolve, Math.min(10_000, 1000 * failures));
+                });
             }
         }
     })();
@@ -1400,10 +1479,22 @@ onRoute(() => {
     }
 });
 
+let startRetry;
+let starting = false;
+
 export async function start() {
+    clearTimeout(startRetry);
+
+    if (starting || !awake()) {
+        return;
+    }
+
+    starting = true;
+
     try {
         const hello = await api("me");
 
+        reconcileWeb(hello.server);
         store.set({
             me: hello.user,
             users: hello.users,
@@ -1416,10 +1507,12 @@ export async function start() {
     } catch (error) {
         store.set({ me: error.status === 401 ? null : undefined });
 
-        if (error.status !== 401) {
+        if (error.status !== 401 && awake()) {
             notify("error", `Server unreachable: ${error.message}`);
-            setTimeout(start, 3000);
+            startRetry = setTimeout(start, 3000);
         }
+    } finally {
+        starting = false;
     }
 }
 
@@ -1789,7 +1882,16 @@ function reportVisibility() {
     api("visibility", { tab: TAB, visible }).catch(() => {});
 }
 
-document.addEventListener("visibilitychange", reportVisibility);
+document.addEventListener("visibilitychange", () => {
+    reportVisibility();
+
+    if (!awake()) {
+        clearTimeout(startRetry);
+        suspend();
+    } else {
+        resume();
+    }
+});
 store.subscribe((state) => {
     // Report again after each (re)connect: the server starts every new connection as visible.
     if (state.connection !== "open") {

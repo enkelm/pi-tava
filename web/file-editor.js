@@ -1,93 +1,9 @@
 // Quick edits use CodeMirror's editor and official LSP client. The daemon owns language-server processes.
-import DOMPurify from "dompurify";
 import { useEffect, useRef, useState } from "preact/hooks";
+import { fileLanguage } from "./file-language.js";
 import { FileLspStatus } from "./file-lsp-status.js";
 import { api, notify, store } from "./store.js";
 import { APPLE, html, Loader } from "./ui.js";
-
-/** Ordered, bounded HTTP transport. Polling renews the daemon's document lease, even while idle. */
-function transportFor(conversation, session, onFailure) {
-    const handlers = new Set();
-    let live = true;
-    let pending = 0;
-    let chain = Promise.resolve();
-
-    const deliver = (messages) => {
-        if (live) {
-            for (const message of messages) {
-                for (const handler of handlers) {
-                    handler(message);
-                }
-            }
-        }
-    };
-
-    const pagehide = () => {
-        // A page reload does not run component cleanup. Keepalive avoids retaining its lease until expiry.
-        stop();
-        fetch(`/api/c/${conversation}/lsp`, {
-            method: "POST",
-            headers: { "X-Pocket": "1", "content-type": "application/json" },
-            body: JSON.stringify({ action: "close", session }),
-            keepalive: true,
-        }).catch(() => {});
-    };
-
-    const stop = () => {
-        if (!live) {
-            return;
-        }
-
-        live = false;
-        clearInterval(timer);
-        window.removeEventListener("pagehide", pagehide);
-        handlers.clear();
-        // Closing after already-admitted messages avoids an in-flight open resurrecting a closed document.
-        chain.finally(() =>
-            api(`c/${conversation}/lsp`, { action: "close", session }).catch(() => {}),
-        );
-    };
-
-    const enqueue = (body) => {
-        if (!live) {
-            throw new Error("Language server disconnected");
-        }
-
-        if (pending >= 64) {
-            stop();
-            onFailure(new Error("Language server queue is full"));
-
-            return;
-        }
-
-        pending++;
-        chain = chain
-            .then(() => live && api(`c/${conversation}/lsp`, { ...body, session }))
-            .then((result) => result && deliver(result.messages))
-            .catch((error) => {
-                stop();
-                onFailure(error);
-            })
-            .finally(() => pending--);
-    };
-
-    const timer = setInterval(() => {
-        if (live && pending === 0) {
-            enqueue({ action: "poll" });
-        }
-    }, 350);
-
-    window.addEventListener("pagehide", pagehide);
-
-    return {
-        send(message) {
-            enqueue({ action: "message", message });
-        },
-        subscribe: (handler) => handlers.add(handler),
-        unsubscribe: (handler) => handlers.delete(handler),
-        stop,
-    };
-}
 
 /** Drafts survive Back and live web reloads; explicit Cancel and successful Save remove them. */
 export function FileEditor({ file, line, onSaved, onCancel, onReload }) {
@@ -110,8 +26,7 @@ export function FileEditor({ file, line, onSaved, onCancel, onReload }) {
     const [lspName, setLspName] = useState("LSP");
     const [canFormat, setCanFormat] = useState(false);
     const formatter = useRef(null);
-    const clientRef = useRef(null);
-    const uriRef = useRef(null);
+    const languageRef = useRef(null);
     const [restored, setRestored] = useState(false);
     const [draftWarning, setDraftWarning] = useState(false);
 
@@ -168,17 +83,7 @@ export function FileEditor({ file, line, onSaved, onCancel, onReload }) {
             setRestored(false);
 
             // Language support is advisory: a disconnect must not turn a completed disk save into an error.
-            try {
-                clientRef.current?.sync();
-                clientRef.current?.notification("textDocument/didSave", {
-                    textDocument: { uri: uriRef.current },
-                });
-            } catch {
-                setLspStatus("Local editing · language server disconnected");
-                setLspState("off");
-                formatter.current = null;
-                setCanFormat(false);
-            }
+            languageRef.current?.saved();
 
             if (liveRef.current) {
                 onSaved({ ...file, ...saved, text, size: new TextEncoder().encode(text).length });
@@ -198,9 +103,7 @@ export function FileEditor({ file, line, onSaved, onCancel, onReload }) {
         liveRef.current = true;
         let live = true;
         let view;
-        let client;
-        let transport;
-        let session;
+        let language;
 
         const beforeUnload = (event) => {
             if (view && view.state.sliceDoc() !== base.current.text) {
@@ -329,86 +232,21 @@ export function FileEditor({ file, line, onSaved, onCancel, onReload }) {
 
             view.focus();
 
-            if (store.state.me?.role !== "owner") {
-                setLspStatus("Local editing · language servers are owner-only");
-                setLspState("off");
-
-                return;
-            }
-
-            const opened = await api(`c/${conversation}/lsp`, { action: "open", path: file.path });
-
-            session = opened.session;
-
-            if (!live) {
-                if (session) {
-                    await api(`c/${conversation}/lsp`, { action: "close", session }).catch(
-                        () => {},
-                    );
-                }
-
-                return;
-            }
-
-            if (!session) {
-                setLspState("off");
-                setLspStatus(
-                    opened.status === "busy"
-                        ? "Local editing · language support is in use by another editor"
-                        : "Local editing · language support unavailable for this file",
-                );
-
-                return;
-            }
-
-            client = new lib.LSPClient({
-                rootUri: opened.rootUri,
-                timeout: 15_000,
-                sanitizeHTML: (source) =>
-                    DOMPurify.sanitize(source, { USE_PROFILES: { html: true } }),
-                extensions: [
-                    lib.serverCompletion(),
-                    lib.serverDiagnostics(),
-                    lib.hoverTooltips(),
-                    lib.signatureHelp(),
-                ],
+            language = fileLanguage({
+                lib,
+                view,
+                compartment: lsp,
+                conversation,
+                path: file.path,
+                changed: ({ state, detail, name, canFormat }) => {
+                    setLspState(state);
+                    setLspStatus(detail);
+                    setLspName(name);
+                    setCanFormat(canFormat);
+                    formatter.current = canFormat ? () => language.format() : null;
+                },
             });
-            transport = transportFor(conversation, session, (failure) => {
-                client.disconnect();
-                clientRef.current = null;
-                formatter.current = null;
-                setCanFormat(false);
-                setLspState("off");
-                setLspStatus(`Local editing · ${failure.message}`);
-            });
-            clientRef.current = client;
-            uriRef.current = opened.uri;
-            client.connect(transport);
-            await client.initializing;
-
-            if (!live || !client.connected) {
-                return;
-            }
-
-            view.dispatch({
-                effects: lsp.reconfigure(client.plugin(opened.uri, opened.languageId)),
-            });
-            const formatting = !!client.serverCapabilities?.documentFormattingProvider;
-
-            formatter.current = formatting ? () => lib.formatDocument(view) : null;
-            setCanFormat(formatting);
-            setLspState("connected");
-            setLspName(
-                opened.languageId.startsWith("typescript") ||
-                    opened.languageId.startsWith("javascript")
-                    ? "TS7"
-                    : "LSP",
-            );
-            setLspStatus(
-                /\.[cm]?[jt]sx?$/i.test(file.path)
-                    ? "TypeScript 7 native LSP connected"
-                    : "Language server connected",
-            );
+            languageRef.current = language;
         })().catch((failure) => {
             if (live) {
                 if (!view) {
@@ -419,8 +257,7 @@ export function FileEditor({ file, line, onSaved, onCancel, onReload }) {
 
                 setLspState("off");
                 formatter.current = null;
-                transport?.stop();
-                client?.disconnect();
+                language?.dispose();
             }
         });
 
@@ -428,13 +265,12 @@ export function FileEditor({ file, line, onSaved, onCancel, onReload }) {
             live = false;
             liveRef.current = false;
             window.removeEventListener("beforeunload", beforeUnload);
+            language?.dispose();
             view?.destroy();
             editor.current = null;
-            clientRef.current = null;
+            languageRef.current = null;
             formatter.current = null;
             suggestRef.current = null;
-            transport?.stop();
-            client?.disconnect();
         };
     }, [conversation, file.path]);
 

@@ -803,6 +803,91 @@ test(
             view.dispatch({ selection: { anchor: view.state.doc.line(2).to } });
             view.focus();
         `);
+            // Background a dirty editor with its status menu open. Transport polling and the
+            // transient menu must stop; real native completion below must work on the same view
+            // after a fresh lease attaches the current unsaved document.
+            await page.hover({ selector: LSP_MENU_BUTTON });
+            await page.click({ selector: LSP_MENU_BUTTON });
+            await until(
+                () => visible('.file-lsp-menu[role="dialog"]'),
+                "status menu before suspension",
+            );
+            await page.evaluate(`
+                const { EditorView } = await import('/vendor/editor.mjs');
+                window.editorBeforeBackground = EditorView.findFromDOM(document.querySelector(${JSON.stringify(EDITOR)}));
+                window.editorSelectionBeforeBackground = window.editorBeforeBackground.state.selection.main.anchor;
+                Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+                document.dispatchEvent(new Event('visibilitychange'));
+            `);
+
+            try {
+                await until(() => !visible(".file-lsp-menu"), "backgrounding closes status menu");
+                await until(() => hasButton("Format", false), "backgrounding disables formatting");
+                await page.evaluate("await new Promise(resolve => setTimeout(resolve, 800))");
+                const suspended = lspRequests.filter(({ path }) => path === endpoint).length;
+
+                await page.evaluate("await new Promise(resolve => setTimeout(resolve, 2300))");
+                assert.equal(
+                    lspRequests.filter(({ path }) => path === endpoint).length,
+                    suspended,
+                    "hidden editor/status menu sends no LSP requests",
+                );
+                await page.evaluate(`
+                    delete document.visibilityState;
+                    document.dispatchEvent(new Event('visibilitychange'));
+                `);
+                await until(
+                    () => hasButton("Format", true),
+                    "fresh native language support after resume",
+                    30_000,
+                );
+                assert.equal(
+                    await inPage<boolean>(`const { EditorView } = await import('/vendor/editor.mjs');
+                        const view = EditorView.findFromDOM(document.querySelector(${JSON.stringify(EDITOR)}));
+                        return JSON.stringify(view === window.editorBeforeBackground
+                            && view.state.selection.main.anchor === window.editorSelectionBeforeBackground);`),
+                    true,
+                    "resume preserves EditorView, cursor and undo history instead of rebuilding",
+                );
+                assert.equal(
+                    await editorText(),
+                    "import { payload } from './dependency';\npayload.\n",
+                );
+                const undoModifier = await inPage<string>(
+                    "return JSON.stringify(/Mac|iPhone|iPad/.test(navigator.platform) ? 'Meta' : 'Control')",
+                );
+
+                await page.evaluate("window.editorBeforeBackground.focus()");
+                await page.press(`${undoModifier}+z`);
+                await until(
+                    async () => (await editorText()) === original,
+                    "pre-background undo history",
+                );
+                await page.press(`${undoModifier}+Shift+z`);
+                await until(
+                    async () =>
+                        (await editorText()) ===
+                        "import { payload } from './dependency';\npayload.\n",
+                    "redo after resuming language support",
+                );
+                await page.evaluate(`
+                    const view = window.editorBeforeBackground;
+                    view.dispatch({ selection: { anchor: view.state.doc.line(2).to } });
+                `);
+                assert.equal(
+                    readFileSync(f.disk, "utf8"),
+                    original,
+                    "backgrounding never saves the dirty buffer",
+                );
+            } finally {
+                await page.evaluate(`
+                    delete document.visibilityState;
+                    document.dispatchEvent(new Event('visibilitychange'));
+                    delete window.editorBeforeBackground;
+                    delete window.editorSelectionBeforeBackground;
+                `);
+            }
+
             await page.hover({ selector: EDITOR });
             await page.hover({ label: "Suggestions" });
             await page.click({ label: "Suggestions" });

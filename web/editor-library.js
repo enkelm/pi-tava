@@ -3,6 +3,7 @@ export { basicSetup } from "codemirror";
 export { EditorState, Compartment } from "@codemirror/state";
 export { EditorView, keymap } from "@codemirror/view";
 export { startCompletion } from "@codemirror/autocomplete";
+export { setDiagnostics } from "@codemirror/lint";
 export {
     LSPClient,
     serverCompletion,

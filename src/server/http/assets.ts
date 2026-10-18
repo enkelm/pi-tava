@@ -127,11 +127,14 @@ function appPolicy(html: string): string {
 }
 
 /** The app page, with its content security policy. */
-export function serveApp(response: ServerResponse): void {
+export function serveApp(response: ServerResponse, webRevision: string): void {
     let body: string;
 
     try {
-        body = readFileSync(join(WEB, "index.html"), "utf8");
+        body = readFileSync(join(WEB, "index.html"), "utf8").replace(
+            "<head>",
+            `<head>\n        <meta name="pocket-web-revision" content="${webRevision}" />`,
+        );
     } catch {
         send(response, 404, "Not found");
 

@@ -143,6 +143,30 @@ export async function setArchived(ids, archived, { undo = true } = {}) {
     );
 }
 
+// Safari can deliver a MouseEvent click after a PointerEvent down. Keep provenance on that button,
+// never on the device: an iPad may switch between touch, mouse and keyboard between openings.
+const optionsPointers = new WeakMap();
+const optionsPointerDown = (event) => optionsPointers.set(event.currentTarget, event.pointerType);
+const optionsPointerCancel = (event) => optionsPointers.delete(event.currentTarget);
+
+/** Button-opened Options stays beside its source on tablets, including keyboard activation. */
+function optionsAt(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointer = event.pointerType || optionsPointers.get(event.currentTarget);
+
+    optionsPointers.delete(event.currentTarget);
+
+    return {
+        x: rect.left,
+        y: rect.bottom,
+        touch:
+            pointer === "touch" ||
+            pointer === "pen" ||
+            event.sourceCapabilities?.firesTouchEvents === true,
+        keyboard: event.detail === 0,
+    };
+}
+
 /** Disclosure and actions are siblings: there are no buttons inside buttons. */
 function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart, trouble }) {
     const ref = useRef(null);
@@ -207,7 +231,9 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
                     title="Options"
                     aria-label=${`Options for ${group.project.name}`}
                     aria-haspopup="menu"
-                    onClick=${() => options()}
+                    onPointerDown=${optionsPointerDown}
+                    onPointerCancel=${optionsPointerCancel}
+                    onClick=${(event) => options(optionsAt(event))}
                 >
                     <${Icon} name="more" size=${16} />
                 </button>`
@@ -629,7 +655,9 @@ function SessionRow({
                 aria-label=${session.members ? "Work Item options" : `Options for ${session.title ?? "New session"}`}
                 aria-haspopup="menu"
                 disabled=${moving}
-                onClick=${() => options()}
+                onPointerDown=${optionsPointerDown}
+                onPointerCancel=${optionsPointerCancel}
+                onClick=${(event) => options(optionsAt(event))}
             >
                 <${Icon} name="settings" size=${16} />
             </button>
@@ -695,7 +723,9 @@ function SessionRow({
                 <button
                     class=${`session-hold-choice options ${hold.choice === "options" ? "selected" : ""}`}
                     data-session-hold-action="true"
-                    onClick=${() => options()}
+                    onPointerDown=${optionsPointerDown}
+                    onPointerCancel=${optionsPointerCancel}
+                    onClick=${(event) => options(optionsAt(event))}
                 >
                     <span class="session-hold-label">
                         <${Icon} name="settings" size=${20} />

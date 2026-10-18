@@ -140,7 +140,7 @@ export function useSessionHold(options) {
                 gesture.phase = "committed";
                 // The sheet can unmount a drawer row. Transfer release/click consumption first.
                 consumeHeldContact({ identifier: point.identifier, source: gesture.source });
-                latest.current.onOptions?.(point);
+                latest.current.onOptions?.({ x: point.x, y: point.y, touch: true });
                 finish();
             } else if (latest.current.onDragStart?.({ ...point, source: gesture.source })) {
                 gesture.phase = "drag";

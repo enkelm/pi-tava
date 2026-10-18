@@ -136,14 +136,14 @@ export function useSidebarContext(ref, onOpen, { longPress = false, enabled = tr
             event.stopPropagation();
             cancel();
 
-            const touch =
-                event.pointerType === "touch" ||
-                event.sourceCapabilities?.firesTouchEvents ||
-                Date.now() < touchedUntil;
+            const touch = event.pointerType
+                ? event.pointerType === "touch"
+                : (event.sourceCapabilities?.firesTouchEvents ??
+                  (event.button !== 2 && Date.now() < touchedUntil));
 
             // Thread holds have their own slide-to-choose gate; a native callout must not skip it.
             if (Date.now() >= suppressUntil && (longPress || !touch)) {
-                latest.current(touch ? undefined : { x: event.clientX, y: event.clientY });
+                latest.current({ x: event.clientX, y: event.clientY, touch });
             }
         };
 
@@ -198,7 +198,7 @@ export function useSidebarContext(ref, onOpen, { longPress = false, enabled = tr
 
                 suppressUntil = Date.now() + 800;
                 consumeHeldContact({ identifier: contact.id, source: contact.source });
-                latest.current();
+                latest.current({ x: contact.x, y: contact.y, touch: true });
                 cancel();
             }, 450);
         };

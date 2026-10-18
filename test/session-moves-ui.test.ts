@@ -584,6 +584,183 @@ async function setup(name: string, viewport: "mobile" | "desktop") {
     };
 }
 
+// Regression: iPad touch capability must not force context actions into a bottom sheet.
+// These cases own menu placement/input routing; existing phone hold tests own sheet actions.
+test(
+    "tablet holds and hybrid-device right clicks open anchored, keyboard-accessible Options",
+    browserOptions,
+    async () => {
+        const fixture = await setup("tablet-options", "desktop");
+        const menu = '.sidebar-options-menu[role="menu"]';
+
+        try {
+            const page = await fixture.connect(1, fixture.participant.token);
+            const path = await value<string>(page, "location.pathname");
+
+            const dismiss = async () => {
+                await page.press("Escape");
+                await present(page, menu, false);
+                await present(page, ".sidebar-options-sheet", false);
+            };
+
+            const assertAnchor = async (point: { x: number; y: number }) => {
+                await present(page, menu);
+                await page.evaluate(`await Promise.all(document.getAnimations()
+                    .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+                    .map(animation => animation.finished.catch(() => {})))`);
+                const bounds = await value<{
+                    left: number;
+                    top: number;
+                    right: number;
+                    bottom: number;
+                }>(
+                    page,
+                    `(() => {
+                        const rect = document.querySelector('${menu}').getBoundingClientRect();
+                        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+                    })()`,
+                );
+
+                assert.ok(
+                    Math.abs(bounds.left - point.x) < 2,
+                    "menu opens at the contact, not screen center",
+                );
+                assert.ok(
+                    bounds.top <= point.y + 2,
+                    "menu stays beside the contact or clamps above it",
+                );
+                assert.ok(
+                    bounds.top >= 8 &&
+                        bounds.bottom <= (await value<number>(page, "innerHeight")) - 7,
+                );
+                assert.ok(bounds.right <= (await value<number>(page, "innerWidth")) - 7);
+                assert.equal(
+                    await value(page, "location.pathname"),
+                    path,
+                    "Options never opens the thread",
+                );
+            };
+
+            for (const viewport of [
+                { width: 820, height: 1180 },
+                { width: 1180, height: 820 },
+            ]) {
+                await page.setViewport({ ...VIEWPORTS.mobile, ...viewport });
+                assert.equal(await value(page, 'matchMedia("(pointer: coarse)").matches'), true);
+                const point = await beginTouch(page, sidebar, fixture.worker);
+
+                await present(page, overlay(sidebar, fixture.worker));
+                await finger(page, "touchmove", { x: point.x + 16, y: point.y });
+                await assertAnchor({ x: point.x + 16, y: point.y });
+                await finger(page, "touchend");
+                await dismiss();
+
+                // Project holds use a separate recognizer and must preserve their contact too.
+                const projectHead = head(project(sidebar, fixture.alpha));
+                const projectPoint = await value<{ x: number; y: number }>(
+                    page,
+                    `(() => {
+                    const target = document.querySelector(${JSON.stringify(projectHead)});
+                    const rect = target.getBoundingClientRect();
+                    const point = { x: rect.left + 80, y: rect.top + rect.height / 2 };
+                    const touch = new Touch({ identifier: 41, target, clientX: point.x, clientY: point.y });
+                    window.sessionFinger = { target, point };
+                    target.dispatchEvent(new TouchEvent('touchstart', {
+                        bubbles: true, cancelable: true, touches: [touch], changedTouches: [touch],
+                    }));
+                    return point;
+                })()`,
+                );
+
+                await assertAnchor(projectPoint);
+                await finger(page, "touchend");
+                await dismiss();
+            }
+
+            // Mouse/keyboard context requests stay menus even in narrow Split View/phone layouts,
+            // and immediately following a touch on the same hybrid input device.
+            await page.setViewport(VIEWPORTS.mobile);
+            await beginTouch(page, home, fixture.worker);
+            await finger(page, "touchend");
+            const source = `${row(home, fixture.worker)} .session`;
+            const mousePoint = { x: 40, y: 120 };
+
+            await page.evaluate(`document.querySelector(${JSON.stringify(source)}).dispatchEvent(
+                new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2,
+                    clientX: ${mousePoint.x}, clientY: ${mousePoint.y} }))`);
+            await assertAnchor(mousePoint);
+            await page.press("End");
+            assert.equal(
+                await value(
+                    page,
+                    `document.activeElement === document.querySelector('${menu} button:last-child')`,
+                ),
+                true,
+            );
+            await page.press("Home");
+            assert.equal(
+                await value(
+                    page,
+                    `document.activeElement === document.querySelector('${menu} button')`,
+                ),
+                true,
+            );
+            await button(page, menu, "Pin to the top");
+            await present(page, menu, false);
+
+            // Safari may expose click as MouseEvent even when pointerdown has a pointerType.
+            // Touch -> mouse -> keyboard must resolve the source button, not a device-wide mode.
+            const sourceOptions = `${row(home, fixture.worker)} .session-options`;
+
+            const pointerClick = async (pointer: string, detail = 1) => {
+                await page.evaluate(`
+                    const target = document.querySelector(${JSON.stringify(sourceOptions)});
+                    target.dispatchEvent(new PointerEvent('pointerdown', {
+                        bubbles: true, pointerType: ${JSON.stringify(pointer)}, button: 0,
+                    }));
+                    target.dispatchEvent(new MouseEvent('click', {
+                        bubbles: true, cancelable: true, detail: ${detail},
+                    }));
+                `);
+            };
+
+            await pointerClick("touch");
+            await present(page, ".sidebar-options-sheet");
+            await dismiss();
+            await pointerClick("mouse");
+            await present(page, menu);
+            await present(page, ".sidebar-options-sheet", false);
+            await dismiss();
+            await pointerClick("touch", 0);
+            await present(page, menu);
+            await dismiss();
+
+            await page.evaluate(`document.querySelector(${JSON.stringify(source)}).dispatchEvent(
+                new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true }))`);
+            await present(page, menu);
+            await until(
+                () =>
+                    value<boolean>(
+                        page,
+                        `document.querySelector('${menu}').contains(document.activeElement)`,
+                    ),
+                "keyboard context menu takes focus",
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `[...document.querySelectorAll('${menu} button')].some(button => button.textContent.trim() === 'Unpin')`,
+                ),
+                true,
+                "menu action pins without navigating",
+            );
+            await dismiss();
+        } finally {
+            await fixture.close();
+        }
+    },
+);
+
 test(
     "native mouse drops update peers and cancellation survives a hover tab switch",
     browserOptions,

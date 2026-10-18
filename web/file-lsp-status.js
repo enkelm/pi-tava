@@ -41,13 +41,21 @@ export function FileLspStatus({ conversation, owner, state, name, detail }) {
             return;
         }
 
+        const awake = () => document.visibilityState !== "hidden" && navigator.onLine !== false;
+
+        if (!awake()) {
+            setOpen(false);
+
+            return;
+        }
+
         let live = true;
         let pending = false;
         const abort = new AbortController();
         const place = () => setAnchor(popAnchor(`[id="${id}"]`));
 
         const refresh = async () => {
-            if (pending) {
+            if (pending || abort.signal.aborted || !awake()) {
                 return;
             }
 
@@ -60,7 +68,7 @@ export function FileLspStatus({ conversation, owner, state, name, detail }) {
                     { signal: abort.signal },
                 );
 
-                if (live) {
+                if (live && !abort.signal.aborted) {
                     if (!Array.isArray(result.servers)) {
                         throw new Error("Restart the daemon to enable language-server status.");
                     }
@@ -69,7 +77,7 @@ export function FileLspStatus({ conversation, owner, state, name, detail }) {
                     setError(null);
                 }
             } catch (failure) {
-                if (live) {
+                if (live && !abort.signal.aborted) {
                     setServers(null);
                     setError(
                         failure.status === 400
@@ -101,6 +109,19 @@ export function FileLspStatus({ conversation, owner, state, name, detail }) {
         menu.current?.focus({ preventScroll: true });
         refresh();
         const timer = setInterval(refresh, 2000);
+
+        const pause = () => {
+            clearInterval(timer);
+            abort.abort();
+            setOpen(false);
+        };
+
+        const visibility = () => {
+            if (!awake()) {
+                pause();
+            }
+        };
+
         const observer = new ResizeObserver(place);
         const footer = trigger.current?.closest(".file-edit-footer");
 
@@ -109,6 +130,9 @@ export function FileLspStatus({ conversation, owner, state, name, detail }) {
         }
 
         document.addEventListener("pointerdown", outside, true);
+        document.addEventListener("visibilitychange", visibility);
+        window.addEventListener("offline", pause);
+        window.addEventListener("pagehide", pause);
         window.addEventListener("keydown", key, true);
         window.addEventListener("resize", place);
         visualViewport?.addEventListener("resize", place);
@@ -119,6 +143,9 @@ export function FileLspStatus({ conversation, owner, state, name, detail }) {
             clearInterval(timer);
             observer.disconnect();
             document.removeEventListener("pointerdown", outside, true);
+            document.removeEventListener("visibilitychange", visibility);
+            window.removeEventListener("offline", pause);
+            window.removeEventListener("pagehide", pause);
             window.removeEventListener("keydown", key, true);
             window.removeEventListener("resize", place);
             visualViewport?.removeEventListener("resize", place);

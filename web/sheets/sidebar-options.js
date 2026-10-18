@@ -16,13 +16,12 @@ import {
 import { isPinned, togglePin } from "../theme.js";
 import { copyText, html, Icon, Sheet, SheetInfo } from "../ui.js";
 
-const MOBILE = matchMedia("(pointer: coarse), (max-width: 699px)");
+const NARROW = matchMedia("(max-width: 699px)");
 
-/** Pointer-positioned desktop menu, using the existing popup surface and the sheets' Back stack. */
-function OptionsSurface({ title, at, children }) {
+/** Contact-positioned tablet/desktop menu, using the existing popup surface and sheets' Back stack. */
+function OptionsSurface({ title, at, bottom: mobile, children }) {
     const ref = useRef(null);
     const [position, setPosition] = useState({ left: at?.x ?? 8, top: at?.y ?? 8 });
-    const mobile = MOBILE.matches;
     const closing = useContext(SheetInfo)?.closing;
 
     useLayoutEffect(() => {
@@ -171,6 +170,9 @@ export function SidebarOptions({ kind, id, at }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const pending = useRef(false);
+    // Coarse pointers also include iPads with trackpads. Only cramped touch openings need a sheet;
+    // a mouse or keyboard context request stays anchored even in narrow Split View.
+    const bottom = NARROW.matches && !at?.keyboard && (!at || at.touch);
     const items = [];
     const add = (label, icon, run, danger = false) => items.push({ label, icon, run, danger });
 
@@ -266,14 +268,14 @@ export function SidebarOptions({ kind, id, at }) {
         }
     };
 
-    return html`<${OptionsSurface} title=${title} at=${at}>
+    return html`<${OptionsSurface} title=${title} at=${at} bottom=${bottom}>
         ${!object && html`<p class="muted small">This item is no longer available.</p>`}
         ${object && !items.length && html`<p class="muted small">No actions available.</p>`}
         ${items.map(
             (item) => html`<button
                 class=${`sidebar-option ${item.danger ? "danger" : ""}`}
-                role=${MOBILE.matches ? undefined : "menuitem"}
-                tabindex=${MOBILE.matches ? undefined : -1}
+                role=${bottom ? undefined : "menuitem"}
+                tabindex=${bottom ? undefined : -1}
                 disabled=${busy}
                 onClick=${() => run(item)}
             >

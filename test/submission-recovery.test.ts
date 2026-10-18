@@ -101,6 +101,7 @@ test("lost browser submission acceptance retains its identity across explicit re
         document: {
             visibilityState: "visible",
             documentElement: { dataset: {} },
+            querySelector: () => null,
             addEventListener() {},
         },
         addEventListener: (name: string, handler: () => void) => events.set(name, handler),

@@ -91,7 +91,7 @@ export function createHandler(options: HttpOptions) {
 
             // The web app: index.html for app routes, files from web/ otherwise.
             if (parts.length === 0 || parts[0] === "s" || parts[0] === "private") {
-                return serveApp(response);
+                return serveApp(response, app.webRevision);
             }
 
             const file = normalize(join(WEB, ...parts));
@@ -101,7 +101,7 @@ export function createHandler(options: HttpOptions) {
             }
 
             if (file === join(WEB, "index.html")) {
-                return serveApp(response);
+                return serveApp(response, app.webRevision);
             }
 
             return serveFile(response, file);
