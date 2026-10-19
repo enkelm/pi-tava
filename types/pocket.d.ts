@@ -14,6 +14,7 @@
  * fails when this file and Pi Pocket's code do not agree.
  */
 import type { Context } from "@earendil-works/chord";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import type {
@@ -151,6 +152,25 @@ export interface Host {
      * @since 0.12.0
      */
     skills(cwd: string): Skill[];
+    /** Host-global skills only, without consulting any project directory. @since 0.14.0 */
+    globalSkills(): Skill[];
+    /**
+     * Skills in this conversation's actual namespace. SSH threads merge explicitly trusted remote project skills
+     * before host-global skills; local threads retain normal discovery. Host paths are never remote file paths.
+     * Read-only remote discovery can fail; no host-local project namesake is substituted. Bind during module setup
+     * so a module needing this API cannot install on a live host that predates it.
+     * @since 0.15.0
+     * @experimental
+     */
+    projectResources(
+        conversationId: ConversationId,
+        context: Context,
+    ): Promise<{ skills: Skill[] }>;
+    /** The actual thread namespace and policy-gated environment; subagents inherit the root target. @since 0.14.0 */
+    workspace(conversationId: ConversationId): {
+        location?: { kind: "ssh"; host: string };
+        env: ExecutionEnv;
+    };
     /**
      * Finds a model by `provider/modelId` (or a model id alone) that is signed in and whose sign-in works. Throws an
      * error when there is none. The error names no other models.

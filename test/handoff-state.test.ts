@@ -21,6 +21,7 @@ const makeSession = () => ({
     sessions: [{ id: 1, workflow: { readOnly: false } }],
     profiles: [{ id: "worker", name: "Worker" }],
 });
+
 type Session = ReturnType<typeof makeSession>;
 type Data = {
     marker: string;
@@ -88,7 +89,11 @@ function fixture(t: TestContext, visibilityState = "visible", onLine = true) {
 
             return {
                 update(patch: { suggest: typeof suggest }) {
-                    assert.notEqual(patch.suggest, suggest, "hint updates replace the contribution");
+                    assert.notEqual(
+                        patch.suggest,
+                        suggest,
+                        "hint updates replace the contribution",
+                    );
                     suggest = patch.suggest;
                     contributionUpdates++;
                 },
@@ -458,7 +463,11 @@ test("command hints refresh settled cache and share pending reads without an idl
     assert.equal(f.requests.length, 4, "the new hint joins the context invalidation read");
     f.requests[3]!.resolve({ marker: "read-only", options: [] });
     assert.deepEqual(await changed, []);
-    assert.equal(f.contributionUpdates, 1, "settling replacement hints cannot invalidate them again");
+    assert.equal(
+        f.contributionUpdates,
+        1,
+        "settling replacement hints cannot invalidate them again",
+    );
 });
 
 test("read-only context tracks its Work Item catalogue but ignores unrelated activity", async (t) => {
@@ -480,22 +489,22 @@ test("read-only context tracks its Work Item catalogue but ignores unrelated act
     await flush();
     session = {
         ...session,
-        sessions: session.sessions.map((each) =>
-            each.id === 3 ? { ...each, busy: true } : each,
-        ),
+        sessions: session.sessions.map((each) => (each.id === 3 ? { ...each, busy: true } : each)),
     };
     f.setSession(session);
     await f.tick(60_000);
     assert.equal(f.requests.length, 1, "unrelated threads cannot keep read-only context polling");
     session = {
         ...session,
-        sessions: session.sessions.map((each) =>
-            each.id === 2 ? { ...each, busy: true } : each,
-        ),
+        sessions: session.sessions.map((each) => (each.id === 2 ? { ...each, busy: true } : each)),
     };
     f.setSession(session);
     await flush();
-    assert.equal(f.requests.length, 2, "busy state of another Work Item member affects eligibility");
+    assert.equal(
+        f.requests.length,
+        2,
+        "busy state of another Work Item member affects eligibility",
+    );
     f.requests[1]!.resolve({ marker: "related-busy" });
     await flush();
     f.setSession({

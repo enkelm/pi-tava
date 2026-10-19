@@ -129,15 +129,40 @@ test("a linked session from an owner-only import stays hidden from other people,
     }
 });
 
-test("new linked roots are explicit Chats and stay independent Chats after reopen", async () => {
+test("new linked roots are independent Chats that retain granted project membership after reopen", async () => {
     const data = join(root, "linked-chat-data");
     const model = scriptedModel();
     let isolated = await openApp(model, data);
 
     try {
-        const origin = await newSession(isolated);
+        const projectId = (
+            await isolated.projects.create(owner(isolated), {
+                name: "Linked project",
+                cwd: work,
+                requestId: "linked-project",
+            })
+        ).id;
+        const guest = isolated.config.addUser(
+            "Project team caller",
+            "guest",
+            undefined,
+            undefined,
+            { projectIds: [projectId] },
+        ).user;
+        const { id: origin } = await isolated.commands.createSession(guest, {
+            projectId,
+            threadType: "chat",
+        });
 
-        await say(isolated, origin, "Start ordinary independent work");
+        await isolated.commands.configure(origin, guest, {
+            model: { provider: "faux", modelId: "faux-1" },
+        });
+        const submitted = await isolated.commands.submit(origin, guest, {
+            text: "Start ordinary independent work",
+            requestId: "linked-project-input",
+        });
+
+        await (await isolated.harness.submission(submitted.submissionId, context))!.wait(context);
         const { session: child } = await isolated.linkedSessions.start(
             origin,
             { message: "A linked task" },
@@ -147,10 +172,19 @@ test("new linked roots are explicit Chats and stay independent Chats after reope
         assert.equal(isolated.sessionMeta(child)?.threadType, "chat");
         assert.equal(isolated.rootOf(child), child, "a link is not Durable parentage");
         assert.equal(isolated.cwdOf(child), isolated.cwdOf(origin));
+        assert.equal(isolated.sessionMeta(child)?.projectId, projectId);
+        assert.equal(isolated.canSee(guest, child), true);
+        await until(
+            async () =>
+                (await modelTexts(isolated, child)).some((text) => text.includes("A linked task")),
+            "the project collaborator's linked task is delivered",
+        );
         await isolated.close();
         isolated = await openApp(model, data);
         assert.equal(isolated.sessionMeta(child)?.threadType, "chat");
         assert.equal(isolated.sessionMeta(child)?.linkedFrom?.id, Number(origin));
+        assert.equal(isolated.sessionMeta(child)?.projectId, projectId);
+        assert.equal(isolated.canSee(guest, child), true);
         assert.equal(isolated.rootOf(child), child);
     } finally {
         await isolated.close();

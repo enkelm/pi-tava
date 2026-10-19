@@ -30,7 +30,12 @@ export default function createGuard(host: PocketHost) {
                         return undefined;
                     }
 
-                    const { decision, subject } = judged;
+                    const { decision } = judged;
+                    const location = host.workspace(api.conversationId).location;
+                    const subject =
+                        location === undefined
+                            ? judged.subject
+                            : `SSH · ${location.host}: ${judged.subject}`;
                     const scored =
                         typeof decision.score === "number"
                             ? ` (score ${decision.score.toFixed(2)})`

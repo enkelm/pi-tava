@@ -133,7 +133,8 @@ export function MessageSheet({ entryId }) {
     const entry =
         view.entries.get(entryId) ?? store.state.history?.find((each) => each.id === entryId);
     const [draft, setDraft] = useState(null);
-    const [worktree, setWorktree] = useState(false);
+    const [ownWorktree, setWorktree] = useState(false);
+    const worktree = store.state.me?.role === "owner" && ownWorktree;
     const field = useRef(null);
 
     useFocus(field, draft !== null);
@@ -188,6 +189,7 @@ export function MessageSheet({ entryId }) {
         <div class="message-preview">${filesAlone ? "(attachments)" : text}</div>
         ${
             canBranch &&
+            store.state.me?.role === "owner" &&
             view.conversation.inRepository &&
             html`<div class="sheet-list">
                 <div class="extension message-worktree">

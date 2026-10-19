@@ -1,8 +1,9 @@
 // The branch picker: the git branch this session's folder has checked out, and the others to switch to or make, in a
 // menu down from the branch in the top bar.
 import { useEffect, useRef, useState } from "preact/hooks";
-import { actions, attempt, canSteer, closeSheet, notify, scoped, store } from "../store.js";
+import { actions, attempt, canSteer, closeSheet, notify, store } from "../store.js";
 import { useDragToClose } from "../gestures.js";
+import { conversationLocation } from "../workspace-location.js";
 import {
     anchorStyle,
     BOTTOM_SHEETS,
@@ -36,8 +37,8 @@ function whyNot() {
         return "Viewers can see the branch, not switch it.";
     }
 
-    if (scoped()) {
-        return "You were invited to one session: switching the branch changes the whole folder.";
+    if (me?.role !== "owner") {
+        return "Only the owner can switch or make branches from this picker.";
     }
 
     if (view.turns?.on && view.turns.driver !== me?.id) {
@@ -183,14 +184,17 @@ export function BranchPicker() {
         if (row.kind === "local" && row.branch.worktree) {
             notify(
                 "info",
-                `${row.branch.name} is checked out in ${shortPath(row.branch.worktree, server?.home)}: git switches to it only there.`,
+                `${row.branch.name} is checked out in ${shortPath(row.branch.worktree, conversationLocation()?.kind === "ssh" ? undefined : server?.home)}: git switches to it only there.`,
             );
 
             return;
         }
 
-        if (blocked) {
-            notify("error", blocked);
+        // A retained owner callback must use today's identity, not its render-time authority.
+        const reason = whyNot();
+
+        if (reason) {
+            notify("error", reason);
 
             return;
         }
@@ -223,7 +227,7 @@ export function BranchPicker() {
         const { branch } = each;
         const sub =
             each.kind === "local" && branch.worktree
-                ? `in another worktree: ${shortPath(branch.worktree, server?.home)}`
+                ? `in another worktree: ${shortPath(branch.worktree, conversationLocation()?.kind === "ssh" ? undefined : server?.home)}`
                 : [branch.subject, branch.at ? timeAgo(branch.at) : "no commits yet"]
                       .filter(Boolean)
                       .join(" · ");
@@ -263,7 +267,7 @@ export function BranchPicker() {
         class=${`pop-menu-row ${index === active ? "on" : ""} ${each.branch?.worktree ? "elsewhere" : ""}`}
         role="option"
         aria-selected=${each.kind === "local" && each.branch.current}
-        disabled=${switching}
+        disabled=${switching || Boolean(blocked)}
         onMouseMove=${() => index !== active && setPicked(index)}
         onClick=${() => pick(each)}
     >

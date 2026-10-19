@@ -406,7 +406,7 @@ function Status({ status }) {
 }
 
 /** A line of a tile: a mark column (who or what), then the words, two lines at most. */
-function PeekLine({ line }) {
+function PeekLine({ line, location }) {
     switch (line.kind) {
         case "user":
             return html`<div class="peek-line user">
@@ -420,7 +420,7 @@ function PeekLine({ line }) {
             </div>`;
 
         case "tool": {
-            const call = describeCall({ name: line.name, args: line.args });
+            const call = describeCall({ name: line.name, args: line.args }, location);
 
             return html`<div class="peek-line cmd">
                 <span class="peek-mark">
@@ -436,7 +436,7 @@ function PeekLine({ line }) {
         case "shell":
             return html`<div class="peek-line cmd">
                 <span class="peek-mark">${">_"}</span>
-                <span class="peek-text">${line.command}${" "}<${Status} status=${line.status} /></span>
+                <span class="peek-text">${location?.kind === "ssh" ? `Bash · ${location.host} · ` : ""}${line.command}${" "}<${Status} status=${line.status} /></span>
             </div>`;
         case "note":
             return html`<div class="peek-line faint">
@@ -586,14 +586,15 @@ class PeekTile extends Component {
                         html`<kbd class="session-num">${number + 1}</kbd>`
                     }
                 </span>
-                <span class="peek-cwd mono">${shortPath(session.cwd, home)}</span>
+                <span class="peek-cwd mono">${session.location?.kind === "ssh" ? `SSH · ${session.location.host} · ${session.cwd}` : shortPath(session.cwd, home)}</span>
             </button>
             <div class="peek-lines" onClick=${open}>
                 ${
                     shown === undefined
                         ? html`<span class="peek-skeleton"><i></i><i></i><i></i></span>`
                         : shown.map(
-                              (line, index) => html`<${PeekLine} key=${index} line=${line} />`,
+                              (line, index) =>
+                                  html`<${PeekLine} key=${index} line=${line} location=${session.location} />`,
                           )
                 }
             </div>

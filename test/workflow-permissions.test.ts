@@ -29,11 +29,12 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import { err, ExecutionError, type ShellExecResult } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { ArtifactsDoc, SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
 import { HandoffsDoc, type ThreadType } from "../src/server/workflow-docs.ts";
 import { PublicationsDoc } from "../src/server/workflow-publication.ts";
-import { workflowGitPath } from "../src/server/workflow-policy.ts";
+import { protectWorkflowEnv, workflowGitPath } from "../src/server/workflow-policy.ts";
 import { createHandler } from "../src/server/http.ts";
 
 const apps = new Set<App>();
@@ -1038,6 +1039,66 @@ test(
     },
 );
 
+test("managed shell delivers literal commit messages and search operands unchanged to confinement", async () => {
+    const f = await fixture();
+    const delivered: { command: string | readonly string[]; readOnly: boolean }[] = [];
+    const refused = err<ShellExecResult, ExecutionError>(
+        new ExecutionError("shell_unavailable", "fixture refuses native launch"),
+    );
+    const protect = (id: ConversationId) =>
+        protectWorkflowEnv(
+            f.app,
+            id,
+            new NodeExecutionEnv({ cwd: f.cwd }),
+            async (readOnly, command) => {
+                delivered.push({ command, readOnly });
+
+                return refused;
+            },
+        );
+    const message =
+        "Document git push/send-pack/receive-pack and gh restrictions.\n\nNo push or restart.";
+    const commands: (string | readonly string[])[] = [
+        `git -C '${f.cwd}' commit -m '${message}' && git -C '${f.cwd}' status --porcelain && test HEAD = HEAD && git -C '${f.cwd}' merge --ff-only topic`,
+        ["git", "-C", f.cwd, "commit", "-m", message],
+        `git commit --message='Explain git push and gh pr create'`,
+        ["git", "commit", "--message", message, "-m", "bash -c 'git push'; gh pr create"],
+        ["git", "commit", "-mExplain git push and gh pr create"],
+        `git commit --amend --no-edit -a -q -m "Explain git push | gh pr create" || git status`,
+        ["git", "-C", "push", "status"],
+        ["git", "stash", "push"],
+        ["git", "rebase", "topic"],
+        `rg -n 'Direct Git|send-pack|receive-pack|publicationCommand|publication.*shell|isPublication|publication.*command' src/server/workflow-policy.ts`,
+        ["rg", "-n", "git push|gh pr create", "src/server/workflow-policy.ts"],
+        `/usr/bin/grep -n 'git push and gh pr create' src/server/workflow-policy.ts`,
+        `rg 'git push|gh pr create' code.txt | head -n 2`,
+    ];
+    const env = protect(f.worker);
+
+    for (const command of commands) {
+        const before = delivered.length;
+        const result = await env.exec(command, undefined, context);
+
+        assert.equal(result, refused, JSON.stringify(command));
+        assert.deepEqual(delivered.slice(before), [{ command, readOnly: false }]);
+    }
+
+    // Retirement still permits literal searches, never local integration or an interpreter.
+    await f.handoff(f.worker, "researcher");
+    const retired = env;
+    const search = commands.find(
+        (command) => typeof command === "string" && command.startsWith("rg -n"),
+    )!;
+
+    assert.equal(await retired.exec(search, undefined, context), refused);
+    assert.deepEqual(delivered.at(-1), { command: search, readOnly: true });
+    const before = delivered.length;
+    const commit = await retired.exec(commands[0]!, undefined, context);
+
+    assert.match(!commit.ok ? commit.error.message : "", /verified simple inspection/);
+    assert.equal(delivered.length, before);
+});
+
 test("managed shell refuses publication before spawning, including wrappers and file remotes", async () => {
     const f = await fixture();
 
@@ -1052,7 +1113,17 @@ test("managed shell refuses publication before spawning, including wrappers and 
         0,
         "Shell publication cannot bypass the mandatory publication tool by creating an ordinary approval",
     );
-    const env = f.app.envFor(f.worker);
+    let launches = 0;
+    const env = protectWorkflowEnv(
+        f.app,
+        f.worker,
+        new NodeExecutionEnv({ cwd: f.cwd }),
+        async () => {
+            launches++;
+
+            return err(new ExecutionError("shell_unavailable", "fixture refuses native launch"));
+        },
+    );
     const program = workflowGitPath() ?? "git";
     const helpers = git(f.cwd, "--exec-path");
     const commands: (string | readonly string[])[] = [
@@ -1064,6 +1135,29 @@ test("managed shell refuses publication before spawning, including wrappers and 
         `git stash push && ${push().command.join(" ")}`,
         `/bin/bash -c 'git stash list; ${push().command.join(" ")}'`,
         `git status | /bin/sh -c '${push().command.join(" ")}'`,
+        `printf '%s' '${push().command.join(" ")}' | /bin/sh`,
+        `rg '${push().command.join(" ")}' code.txt | /bin/sh`,
+        `grep '${push().command.join(" ")}' code.txt | xargs /bin/sh -c`,
+        ["node", "-e", `require('child_process').execSync('${push().command.join(" ")}')`],
+        `/bin/sh -c "git commit -m 'gh pr create'"`,
+        `find . -exec /bin/sh -c '${push().command.join(" ")}' \\;`,
+        `git rebase --exec '${push().command.join(" ")}' HEAD~1`,
+        `rg --pre '${push().command.join(" ")}' pattern code.txt`,
+        `rg --hostname-bin '${push().command.join(" ")}' pattern code.txt`,
+        ["rg", `--pr=${push().command.join(" ")}`, "pattern", "code.txt"],
+        ["rg", `--hostname-b=${push().command.join(" ")}`, "pattern", "code.txt"],
+        `rg "$(${push().command.join(" ")})" code.txt`,
+        `git commit -m 'literal message' && ${push().command.join(" ")}`,
+        `git -c core.editor=/bin/sh commit --edit -m '${push().command.join(" ")}'`,
+        ["git", "-c", "core.editor=/bin/sh", "commit", "-e", "-m", push().command.join(" ")],
+        `git -c core.editor=/bin/sh commit -ae -m '${push().command.join(" ")}'`,
+        `git commit --allow-empty -m 'local; ${push().command.join(" ")}' | /bin/sh`,
+        `git commit -m '${push().command.join(" ")}'; /bin/sh .git/COMMIT_EDITMSG`,
+        `git commit -m '${push().command.join(" ")}' && /bin/sh .git/COMMIT_EDITMSG`,
+        `git commit -m '${push().command.join(" ")}'; git -c core.editor=/bin/sh commit --amend --edit`,
+        `git commit --template -m 'gh pr create'`,
+        `git commit -m "$(${push().command.join(" ")})"`,
+        ["git", "-c", `core.editor=${push().command.join(" ")}`, "commit", "-m", "literal"],
         `(${push().command.join(" ")})`,
         `echo "$(${push().command.join(" ")})"`,
         `git -c alias.publish='!${push().command.join(" ")}' publish`,
@@ -1104,8 +1198,9 @@ test("managed shell refuses publication before spawning, including wrappers and 
         assert.match(
             !execution.ok ? execution.error.message : "",
             /publication/,
-            "Known publication CLI commands must be refused before spawning, not merely fail offline or because a binary is missing",
+            `Known publication CLI commands must be refused before spawning, not merely fail offline or because a binary is missing: ${JSON.stringify(command)}`,
         );
+        assert.equal(launches, 0, "No publication candidate may reach native execution");
         assert.equal(remoteRefs(f.remote), "", JSON.stringify(command));
         assert.equal(f.app.approvals.all().length, 0);
     }

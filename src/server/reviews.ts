@@ -4,6 +4,7 @@ import { constants, fstatSync, lstatSync, realpathSync, statSync, type Stats } f
 import { open, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import { changesIn, diffOf, type Changes } from "./changes.ts";
@@ -11,14 +12,22 @@ import type { User } from "./config.ts";
 import { CommentReviewDoc, type ChangeReviews } from "./docs.ts";
 import { describe, HttpError } from "./errors.ts";
 import { boundedBytes, decodeText, MAX_EDIT_BYTES } from "./file-edits.ts";
-import { git } from "./git.ts";
+import { inspectRemoteFileEdit } from "./remote-file-edits.ts";
+import { git, GitError } from "./git.ts";
+import { isMissingWorkspaceFile, type WorkspaceBackend } from "./workspace-backend.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_COMMENTS = 500;
 const MAX_REQUESTS = 4000;
 const MAX_METADATA_BYTES = 1024 * 1024;
 
-type Scope = { cwd: string; folder: string; root?: string; prefix: string };
+type Scope = {
+    cwd: string;
+    folder: string;
+    root?: string;
+    prefix: string;
+    backend: WorkspaceBackend;
+};
 type ReviewData = ChangeReviews & { requests: Record<string, string> };
 export type CommentReview = {
     requestId: unknown;
@@ -130,6 +139,43 @@ function inScope(scope: Scope, path: string): boolean {
     );
 }
 
+/** Remote anchors canonicalize parents on the selected host, including deleted files. */
+async function inDestinationScope(
+    scope: Scope,
+    path: string,
+    requirePrefix = true,
+): Promise<boolean> {
+    if (!scope.backend.remote) {
+        return requirePrefix
+            ? inScope(scope, path)
+            : inside(scope.folder, canonicalParent(resolve(scope.root ?? scope.cwd, path)));
+    }
+
+    const backend = scope.backend;
+    const file = backend.paths.resolve(scope.root ?? scope.folder, path);
+    const parent = backend.paths.dirname(file);
+
+    try {
+        const canonical = backend.paths.resolve(
+            await backend.canonicalWithMissingTail(parent),
+            backend.paths.relative(parent, file),
+        );
+        const tail = backend.paths.relative(scope.folder, canonical);
+
+        return (
+            (!requirePrefix || path.startsWith(scope.prefix)) &&
+            (tail === "" ||
+                (tail !== ".." && !tail.startsWith("../") && !backend.paths.isAbsolute(tail)))
+        );
+    } catch (error) {
+        if (isMissingWorkspaceFile(error)) {
+            return false;
+        }
+
+        throw error;
+    }
+}
+
 /** Identity and byte-version checks keep a raced context read from being returned as current text. */
 function unchangedFile(before: Stats, after: Stats): boolean {
     return (
@@ -164,12 +210,18 @@ export class Reviews {
             throw new HttpError(401, "Your access was removed");
         }
 
+        if (user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your sign-in changed. Reload before reviewing.");
+        }
+
         this.#app.requireSee(user, id);
 
         return user;
     }
 
     async list(id: ConversationId, supplied: User): Promise<ChangeReviews> {
+        // Config can update its User object in place; retain this request's original token across awaits.
+        supplied = { ...supplied };
         this.#person(id, supplied);
         await this.#app.conversation(id);
         const doc = await this.#app.harness.snapshot(CommentReviewDoc, id, context);
@@ -181,38 +233,65 @@ export class Reviews {
         ) as ChangeReviews;
     }
 
-    async #scope(id: ConversationId, user: User): Promise<Scope> {
+    async #scope(id: ConversationId, user: User, backend?: WorkspaceBackend): Promise<Scope> {
         this.#person(id, user);
+        backend ??= this.#app.workspace.backend(id, user);
         const cwd = this.#app.cwdOf(id);
         let folder: string;
 
         try {
-            folder = realpathSync(cwd);
+            folder = await backend.canonical(cwd);
         } catch {
             throw new HttpError(404, "The session folder is not accessible");
         }
 
         const root = await git(folder, ["rev-parse", "--show-toplevel"], {
+            backend,
             offline: () => this.#app.handoffs.isManaged(id),
-        }).then(record, () => undefined);
-        const scope = { cwd, folder, root, prefix: "" };
+        }).then(record, (error: unknown) => {
+            if (backend.remote && (!(error instanceof GitError) || error.exitCode !== 128)) {
+                throw error;
+            }
+
+            return undefined;
+        });
+        const scope = { cwd, folder, root, prefix: "", backend };
 
         if (root !== undefined) {
-            if (!inside(root, folder)) {
+            if (!(await backend.contains(root, folder))) {
                 throw new HttpError(409, "The session folder is outside its checkout");
             }
 
-            const tail = relative(root, folder).split(sep).join("/");
+            const tail = backend.paths.relative(root, folder).split(backend.paths.sep).join("/");
 
             scope.prefix = tail === "" ? "" : `${tail}/`;
         }
 
-        this.#guard(id, user, scope);
+        await this.#guard(id, user, scope);
 
         return scope;
     }
 
-    #guard(id: ConversationId, user: User, scope: Scope): void {
+    async #guard(id: ConversationId, user: User, scope: Scope): Promise<void> {
+        if (!scope.backend.remote) {
+            this.#guardLocal(id, user, scope);
+
+            return;
+        }
+
+        this.#person(id, user);
+
+        if (
+            this.#app.cwdOf(id) !== scope.cwd ||
+            (await scope.backend.canonical(scope.cwd)) !== scope.folder
+        ) {
+            throw new HttpError(409, "The session folder changed; refresh before trying again");
+        }
+
+        this.#person(id, user);
+    }
+
+    #guardLocal(id: ConversationId, user: User, scope: Scope): void {
         this.#person(id, user);
 
         if (this.#app.cwdOf(id) !== scope.cwd) {
@@ -233,71 +312,191 @@ export class Reviews {
     async #changes(id: ConversationId, user: User, scope: Scope): Promise<Changes> {
         const entries = await this.#app.transcripts.allEntries(id, false);
         const changes = await changesIn(scope.cwd, entries, true, {
+            backend: scope.backend,
             offline: () => this.#app.handoffs.isManaged(id),
         });
 
-        this.#guard(id, user, scope);
+        await this.#guard(id, user, scope);
 
         if (changes.repo?.root !== scope.root) {
             throw new HttpError(409, "The session checkout changed; refresh before trying again");
         }
 
+        const files = await Promise.all(
+            changes.files.map(async (file) =>
+                (await inDestinationScope(scope, file.path)) ? file : undefined,
+            ),
+        );
+        const piOnly = await Promise.all(
+            changes.piOnly.map(async (file) =>
+                (await inDestinationScope(scope, file.path, false)) ? file : undefined,
+            ),
+        );
+
+        await this.#guard(id, user, scope);
+
         return {
             ...changes,
-            files: changes.files.filter((file) => inScope(scope, file.path)),
-            piOnly: changes.piOnly.filter((file) =>
-                inside(scope.folder, canonicalParent(resolve(scope.root ?? scope.cwd, file.path))),
-            ),
+            files: files.filter((file) => file !== undefined),
+            piOnly: piOnly.filter((file) => file !== undefined),
         };
     }
 
     /** Keep the shared Changes attribution and Pi-only edits, with review access restricted to cwd. */
-    async changes(id: ConversationId, user: User): Promise<Changes> {
+    async changes(
+        id: ConversationId,
+        user: User,
+        context: Context = BACKGROUND_CONTEXT,
+    ): Promise<Changes> {
+        user = { ...user };
         this.#person(id, user);
         await this.#app.conversation(id);
-        const scope = await this.#scope(id, user);
 
-        return this.#changes(id, user, scope);
+        return this.#app.sshSessions.withWorkspace(id, user, context, async (backend) => {
+            const scope = await this.#scope(id, user, backend);
+
+            return this.#changes(id, user, scope);
+        });
     }
 
-    async diff(id: ConversationId, user: User, value: string): Promise<string> {
+    async diff(
+        id: ConversationId,
+        user: User,
+        value: string,
+        context: Context = BACKGROUND_CONTEXT,
+    ): Promise<string> {
+        user = { ...user };
         this.#person(id, user);
         const path = filePath(value);
 
         await this.#app.conversation(id);
-        const scope = await this.#scope(id, user);
-        const changes = await this.#changes(id, user, scope);
 
-        if (!changes.files.some((file) => file.path === path)) {
-            throw new HttpError(404, "That file has no uncommitted changes in this session folder");
-        }
+        return this.#app.sshSessions.withWorkspace(id, user, context, async (backend) => {
+            const scope = await this.#scope(id, user, backend);
 
-        const diff = await diffOf(scope.cwd, path, true, {
-            offline: () => this.#app.handoffs.isManaged(id),
-        }).catch((error: unknown) => {
-            throw new HttpError(404, describe(error));
+            if (!(await inDestinationScope(scope, path))) {
+                throw new HttpError(
+                    404,
+                    "That file has no uncommitted changes in this session folder",
+                );
+            }
+
+            const diff = await diffOf(scope.cwd, path, true, {
+                backend: scope.backend,
+                offline: () => this.#app.handoffs.isManaged(id),
+                checkRoot(root) {
+                    if (root !== scope.root) {
+                        throw new HttpError(
+                            409,
+                            "The session checkout changed; refresh before trying again",
+                        );
+                    }
+                },
+            }).catch((error: unknown) => {
+                if (error instanceof HttpError) {
+                    throw error;
+                }
+
+                throw new HttpError(404, describe(error));
+            });
+
+            await this.#guard(id, user, scope);
+
+            if (!(await inDestinationScope(scope, path))) {
+                throw new HttpError(404, "That file is outside this session folder");
+            }
+
+            return diff;
         });
-
-        this.#guard(id, user, scope);
-
-        if (!inScope(scope, path)) {
-            throw new HttpError(404, "That file is outside this session folder");
-        }
-
-        return diff;
     }
 
     /** Complete current text for hidden diff context, never a general-purpose file viewer. */
-    async context(id: ConversationId, user: User, value: string): Promise<{ text: string }> {
+    async context(
+        id: ConversationId,
+        user: User,
+        value: string,
+        context: Context = BACKGROUND_CONTEXT,
+    ): Promise<{ text: string }> {
+        user = { ...user };
         this.#person(id, user);
         const path = filePath(value);
 
         await this.#app.conversation(id);
-        const scope = await this.#scope(id, user);
+
+        return this.#app.sshSessions.withWorkspace(id, user, context, (backend) =>
+            this.#context(id, user, path, backend),
+        );
+    }
+
+    async #context(
+        id: ConversationId,
+        user: User,
+        path: string,
+        backend: WorkspaceBackend,
+    ): Promise<{ text: string }> {
+        const scope = await this.#scope(id, user, backend);
         const changes = await this.#changes(id, user, scope);
 
         if (!changes.files.some((file) => file.path === path)) {
             throw new HttpError(404, "That file has no uncommitted changes in this session folder");
+        }
+
+        if (scope.backend.remote) {
+            try {
+                const backend = scope.backend;
+                const file = backend.paths.resolve(scope.root ?? scope.folder, path);
+
+                // Reviews intentionally retain their stricter no-symlink-spelling rule, even
+                // though Files quick edits can authorize a canonical alias within their root.
+                if (
+                    (await backend.canonical(file)) !== file ||
+                    !(await inDestinationScope(scope, path))
+                ) {
+                    throw new HttpError(
+                        404,
+                        "Review context requires a regular file inside this session folder",
+                    );
+                }
+
+                await this.#guard(id, user, scope);
+                const snapshot = await inspectRemoteFileEdit({
+                    backend,
+                    root: scope.folder,
+                    file,
+                    offline: this.#app.handoffs.isManaged(id),
+                });
+                const text = decodeText(snapshot.bytes);
+
+                if (text === undefined) {
+                    throw new HttpError(
+                        415,
+                        "Review context requires UTF-8 text without NUL characters",
+                    );
+                }
+
+                await this.#guard(id, user, scope);
+
+                if (
+                    !(await inDestinationScope(scope, path)) ||
+                    (await backend.canonical(file)) !== file
+                ) {
+                    throw new HttpError(
+                        404,
+                        "That file is outside this session folder or changed to a symlink",
+                    );
+                }
+
+                this.#person(id, user);
+                backend.checkAccess();
+
+                return { text };
+            } catch (error) {
+                if (error instanceof HttpError) {
+                    throw error;
+                }
+
+                throw new HttpError(404, "That file is unavailable for native review context");
+            }
         }
 
         let handle: FileHandle | undefined;
@@ -328,7 +527,7 @@ export class Reviews {
             }
 
             const check = () => {
-                this.#guard(id, user, scope);
+                this.#guardLocal(id, user, scope);
                 const currentParent = statSync(parent);
 
                 if (
@@ -400,6 +599,7 @@ export class Reviews {
         supplied: User,
         input: CommentReview,
     ): Promise<{ id: string }> {
+        supplied = { ...supplied };
         const person = this.#person(id, supplied);
         const key = requestKey(person, input?.requestId);
         const messageId = `c-${key}`;
@@ -484,7 +684,7 @@ export class Reviews {
             // No disk read is required for conversation comments or replies, including after a cwd change.
             const scope = path === undefined ? undefined : await this.#scope(id, supplied);
 
-            if (scope !== undefined && !inScope(scope, path!)) {
+            if (scope !== undefined && !(await inDestinationScope(scope, path!))) {
                 throw new HttpError(400, "The comment must name a file inside this session folder");
             }
 
@@ -521,6 +721,7 @@ export class Reviews {
     }
 
     async resolve(id: ConversationId, supplied: User, input: ResolveReview): Promise<void> {
+        supplied = { ...supplied };
         const person = this.#person(id, supplied);
         const key = requestKey(person, input?.requestId);
         const resolved = input?.resolved;

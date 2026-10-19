@@ -1636,13 +1636,12 @@ test(
 );
 
 test(
-    "local Pi invite access starts off and delayed grants never appear under a cleared checkbox",
+    "project invite access starts empty and delayed broad grants never appear under a cleared checkbox",
     real,
     async () => {
         const { Auth } = await import("../src/server/auth.ts");
         const auth = new Auth(app.config);
-        const checkbox = "#invite-pi-sessions-help";
-        const input = '.sheet input[aria-describedby="invite-pi-sessions-help"]';
+        const input = ".sheet input[aria-describedby]";
         const code = () =>
             inPage<string | null>(
                 `return JSON.stringify(document.querySelector(".invite-code-value")?.textContent.replace(/\\s/g, "") ?? null)`,
@@ -1653,7 +1652,7 @@ test(
         await until(async () => (await code()) !== null, "an ordinary invite");
         const original = await code();
 
-        assert.equal(auth.invite(original!)!.continuePiSessions, undefined);
+        assert.deepEqual(auth.invite(original!)!.projectAccess, {});
         assert.equal(
             await inPage<boolean>(
                 `return JSON.stringify(document.querySelector(${JSON.stringify(input)}).checked)`,
@@ -1662,20 +1661,26 @@ test(
         );
         assert.match(
             await inPage<string>(
-                `return JSON.stringify(document.querySelector(${JSON.stringify(checkbox)}).textContent)`,
+                `return JSON.stringify(document.getElementById(document.querySelector(${JSON.stringify(input)}).getAttribute('aria-describedby')).textContent)`,
             ),
-            /read local Pi history/,
+            /Includes future projects/,
+        );
+        assert.equal(
+            await inPage<boolean>(
+                `return JSON.stringify(document.querySelector('#invite-pi-sessions-help') === null)`,
+            ),
+            true,
         );
         // Hold the actual server response, not an invented grant: a newer unchecked request must win.
         await page.evaluate(`
             window.inviteFetch = window.fetch;
-            window.delayedPiInvite = null;
+            window.delayedProjectInvite = null;
             window.fetch = async (...args) => {
                 const response = await window.inviteFetch(...args);
 
-                if (String(args[0]).endsWith('/api/invite') && JSON.parse(args[1]?.body ?? '{}').continuePiSessions === true) {
-                    window.delayedPiInvite = (await response.clone().json()).code;
-                    await new Promise((resolve) => { window.releasePiInvite = resolve; });
+                if (String(args[0]).endsWith('/api/invite') && JSON.parse(args[1]?.body ?? '{}').projectAccess?.all === true) {
+                    window.delayedProjectInvite = (await response.clone().json()).code;
+                    await new Promise((resolve) => { window.releaseProjectInvite = resolve; });
                 }
 
                 return response;
@@ -1686,12 +1691,14 @@ test(
             await tap(input);
             await until(
                 async () =>
-                    await inPage<boolean>(`return JSON.stringify(!!window.delayedPiInvite)`),
+                    await inPage<boolean>(`return JSON.stringify(!!window.delayedProjectInvite)`),
                 "the granted response held in transit",
             );
-            const delayed = await inPage<string>(`return JSON.stringify(window.delayedPiInvite)`);
+            const delayed = await inPage<string>(
+                `return JSON.stringify(window.delayedProjectInvite)`,
+            );
 
-            assert.equal(auth.invite(delayed)!.continuePiSessions, true);
+            assert.deepEqual(auth.invite(delayed)!.projectAccess, { all: true });
             await tap(input);
             await until(
                 async () => ![null, original].includes(await code()),
@@ -1699,8 +1706,8 @@ test(
             );
             const replacement = await code();
 
-            assert.equal(auth.invite(replacement!)!.continuePiSessions, undefined);
-            await page.evaluate(`window.releasePiInvite()`);
+            assert.deepEqual(auth.invite(replacement!)!.projectAccess, {});
+            await page.evaluate(`window.releaseProjectInvite()`);
             await until(
                 () => auth.invite(delayed) === undefined,
                 "the delayed granted invite cancelled",
@@ -1714,7 +1721,7 @@ test(
         } finally {
             await page.evaluate(`
                 window.fetch = window.inviteFetch;
-                window.releasePiInvite?.();
+                window.releaseProjectInvite?.();
             `);
         }
 
@@ -1722,8 +1729,8 @@ test(
         await until(async () => {
             const shown = await code();
 
-            return shown !== null && auth.invite(shown)?.continuePiSessions === true;
-        }, "the explicit local Pi grant");
+            return shown !== null && auth.invite(shown)?.projectAccess?.all === true;
+        }, "the explicit all-projects grant");
         const granted = await code();
 
         await page.evaluate(
@@ -1732,12 +1739,14 @@ test(
         await until(async () => ![null, granted].includes(await code()), "a viewer invite");
         assert.equal(
             await inPage<boolean>(
-                `return JSON.stringify(document.querySelector(${JSON.stringify(input)}) === null)`,
+                `return JSON.stringify(document.querySelector(${JSON.stringify(input)}).checked)`,
             ),
             true,
-            "viewers cannot receive local Pi access",
+            "viewers keep the selected projects but cannot steer",
         );
         assert.equal(auth.invite(granted!), undefined);
+        assert.deepEqual(auth.invite((await code())!)!.projectAccess, { all: true });
+        assert.equal(auth.invite((await code())!)!.role, "viewer");
         assert.equal(auth.invite((await code())!)!.continuePiSessions, undefined);
     },
 );

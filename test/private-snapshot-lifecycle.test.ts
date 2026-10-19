@@ -96,11 +96,13 @@ registerHooks({
 const { PrivateList, PrivatePane } = await import(
     new URL("../web/private.js", import.meta.url).href
 );
+
 const flush = async () => {
     for (let i = 0; i < 4; i++) {
         await new Promise<void>((resolve) => setImmediate(resolve));
     }
 };
+
 const sameDeps = (left?: any[], right?: any[]) =>
     Boolean(left && right && left.length === right.length && left.every((v, i) => v === right[i]));
 
@@ -190,9 +192,7 @@ const listData = () => ({
                     tabs: [
                         {
                             id: "tab",
-                            panes: [
-                                { id: "pane", nativeId: "native", agent: "pi", state: "idle" },
-                            ],
+                            panes: [{ id: "pane", nativeId: "native", agent: "pi", state: "idle" }],
                         },
                     ],
                 },

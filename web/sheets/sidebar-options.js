@@ -10,6 +10,7 @@ import {
     isUnread,
     notify,
     openSheet,
+    scoped,
     setUnread,
     store,
 } from "../store.js";
@@ -238,9 +239,16 @@ export function SidebarOptions({ kind, id, at }) {
                 !thread.archived,
             );
         }
-    } else if (project && organize) {
-        add("New Session here…", "plus", () => openSheet({ type: "new-session", projectId: id }));
-        add("Edit project…", "pencil", () => openSheet({ type: "project", projectId: id }));
+    } else if (project) {
+        if (canSteer() && !scoped()) {
+            add("New Session here…", "plus", () =>
+                openSheet({ type: "new-session", projectId: id }),
+            );
+        }
+
+        if (organize) {
+            add("Edit project…", "pencil", () => openSheet({ type: "project", projectId: id }));
+        }
     }
 
     const run = async (item) => {

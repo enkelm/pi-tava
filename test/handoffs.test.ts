@@ -1268,11 +1268,11 @@ test("Git fingerprint inspection contains configured filters and binds physical 
     const id = await source("worker", cwd);
 
     writeFileSync(join(cwd, "code.txt"), "changedA\n");
-    const first = await app.handoffs.fingerprint(id);
+    const first = await app.handoffs.fingerprint(id, owner(app));
 
     writeFileSync(join(cwd, "code.txt"), "changedB\n");
     assert.notEqual(
-        await app.handoffs.fingerprint(id),
+        await app.handoffs.fingerprint(id, owner(app)),
         first,
         "equal-length tracked bytes cannot alias through configured clean normalization",
     );

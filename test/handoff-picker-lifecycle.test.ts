@@ -10,6 +10,7 @@ const { createHandoffSheet } = await import(
     new URL("../src/server/extensions/work-items/sheet.js", import.meta.url).href
 );
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 type Component = (props: Record<string, any>) => Tree;
 type Element = { type: string | Component; props: Record<string, any>; children: Tree[] };
 type Tree = Element | Tree[] | string | number | boolean | null | undefined;
@@ -31,11 +32,13 @@ function html(parts: TemplateStringsArray, ...values: any[]): Tree {
     const source = parts
         .map((part, index) => part + (index < values.length ? marker(index) : ""))
         .join("");
+
     const valueOf = (value: string) => {
         const match = /^\u0001(\d+)\u0002$/.exec(value);
 
         return match ? values[Number(match[1])] : value;
     };
+
     const root: Element = h("fragment");
     const stack = [root];
 
@@ -98,6 +101,7 @@ const eligibility = (reason = "Fresh eligibility") => ({
     workflow: { readOnly: false, profileAvailable: true },
     options: [{ targetType: "reviewer", relationship: "same-work", enabled: true, reason }],
 });
+
 type Data = ReturnType<typeof eligibility>;
 type Request = {
     signal: AbortSignal;
@@ -146,11 +150,13 @@ function fixture(t: TestContext) {
     let dirty = true;
     let tree: Tree = null;
     let sequence = 0;
+
     const hook = () => {
         const index = current.cursor++;
 
         return (current.hooks[index] ??= {});
     };
+
     const effect = (queue: Map<Hook, Effect>, run: Effect["run"], deps: unknown[]) => {
         const item = hook();
 
@@ -159,6 +165,7 @@ function fixture(t: TestContext) {
             queue.set(item, { hook: item, run });
         }
     };
+
     const pocket = {
         h,
         html,
@@ -211,6 +218,7 @@ function fixture(t: TestContext) {
     const state = createHandoffState(pocket);
     const Sheet = createHandoffSheet(pocket, state);
     const props = { id: 1, opening: "opening-1", close: () => {}, isOpen: () => true };
+
     const runEffects = (queue: Map<Hook, Effect>) => {
         const pending = [...queue.values()];
 
@@ -221,6 +229,7 @@ function fixture(t: TestContext) {
             item.hook.cleanup = item.run() || undefined;
         }
     };
+
     const resolveTree = (node: Tree, path: string): Tree => {
         if (Array.isArray(node)) {
             return node.map((child, index) => resolveTree(child, `${path}.${index}`));
@@ -263,6 +272,7 @@ function fixture(t: TestContext) {
 
         return element;
     };
+
     const render = () => {
         for (let count = 0; dirty; count++) {
             assert.ok(count < 20, "render loop did not settle");
@@ -279,6 +289,7 @@ function fixture(t: TestContext) {
             runEffects(layouts);
         }
     };
+
     const commit = () => {
         for (let count = 0; dirty || effects.size; count++) {
             assert.ok(count < 20, "effect loop did not settle");
@@ -286,6 +297,7 @@ function fixture(t: TestContext) {
             runEffects(effects);
         }
     };
+
     const settle = async () => {
         for (let count = 0; count < 3; count++) {
             commit();
@@ -294,6 +306,7 @@ function fixture(t: TestContext) {
 
         commit();
     };
+
     const find = (type: string, label?: string) =>
         elements(tree).filter(
             (node) => node.type === type && (label === undefined || textOf(node).trim() === label),

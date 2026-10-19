@@ -8,9 +8,10 @@
  */
 import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord";
 import { clampThinkingLevel, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
     type CreateModelRuntimeOptions,
@@ -39,7 +40,7 @@ import {
     UsageDoc,
     type UsageState,
 } from "@earendil-works/pi-durable";
-import type { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Alerts } from "./alerts.ts";
@@ -50,6 +51,7 @@ import { Collab, REACTIONS } from "./collab.ts";
 import { Commands } from "./commands.ts";
 import { LinkedSessions } from "./linked-sessions.ts";
 import { APP_ROOT, canContinuePiSessions, ConfigStore, type User } from "./config.ts";
+import { parseProjectAccess, type ProjectAccess } from "./project-access.ts";
 import {
     ArtifactBodyDoc,
     type ArtifactMeta,
@@ -98,9 +100,12 @@ import { PushStore } from "./push.ts";
 import { type ExtensionInfo, ExtensionLoader, linkTypes, prepareDropInFolder } from "./reload.ts";
 import { ResendTask } from "./resend.ts";
 import { type Client, reportingOf, Room, ROOM_DOCS, subagentView } from "./room.ts";
+import { DestinationHeads } from "./destination-heads.ts";
+import type { RemoteProjectSkill } from "./remote-project-resources.ts";
 import { Schedules } from "./schedules.ts";
 import { Shell } from "./shell.ts";
 import {
+    loadGlobalSkills,
     loadSessionSkills,
     projectDistrusted,
     type ProjectTrust,
@@ -113,6 +118,10 @@ import { Spend } from "./spend.ts";
 import { Transcripts } from "./transcripts.ts";
 import { Watches } from "./watches.ts";
 import { Workspace } from "./workspace.ts";
+import { workflowWorkspaceBackend } from "./workspace-backend-factory.ts";
+import type { WorkspaceLocation } from "./workspace-location.ts";
+import { SshSessions } from "./ssh-sessions.ts";
+import { createStageUploadTool } from "./ssh-uploads.ts";
 import { LanguageServices } from "./language-services.ts";
 import { Reviews } from "./reviews.ts";
 import { Projects } from "./projects.ts";
@@ -357,7 +366,9 @@ export class PocketApp {
     #websAll = false;
     readonly #clients = new Set<Client>();
     readonly #rooms = new Map<ConversationId, Promise<Room>>();
-    readonly #envs = new Map<string, NodeExecutionEnv>();
+    readonly #envs = new Map<string, ExecutionEnv>();
+    readonly #destinationHeads = new DestinationHeads(this);
+    readonly sshSessions: SshSessions;
     readonly #busy = new Set<ConversationId>();
     readonly #answeringApprovals = new Set<string>();
     /** When each conversation's last run ended, since this server started: peek tiles show sessions done since a look. */
@@ -393,6 +404,7 @@ export class PocketApp {
     private constructor(options: OpenOptions) {
         this.#configureModels = options.configureModels;
         this.#home = options.home ?? (process.env.HOME || homedir());
+        this.sshSessions = new SshSessions(this, this.#home);
         this.now = options.now ?? Date.now;
         this.dataDir = options.dataDir;
         this.defaultCwd = options.defaultCwd;
@@ -570,9 +582,14 @@ export class PocketApp {
             defineExtension({
                 name: "pocket-core",
                 tools: [
-                    createPublicationTool(this),
-                    createPullTool(this),
+                    createPublicationTool(this, (id, context) =>
+                        workflowWorkspaceBackend(this, id, context),
+                    ),
+                    createPullTool(this, (id, context) =>
+                        workflowWorkspaceBackend(this, id, context),
+                    ),
                     createResearchTool(this),
+                    createStageUploadTool(this),
                 ],
                 tasks: [
                     ResendTask,
@@ -599,6 +616,9 @@ export class PocketApp {
                 }
             },
             skills: (cwd) => this.skills(cwd),
+            globalSkills: () => loadGlobalSkills(this.#skillSources()),
+            projectResources: (id, context) => this.projectResources(id, context),
+            workspace: (id) => ({ location: this.locationOf(id), env: this.envFor(id) }),
             resolveModel: (spec) => resolveModel(this.models, spec, this.signInNeeded),
             subagentModels: () => this.config.subagentModels,
             modelProblem: (ref, fresh) => this.providers.problem(ref, fresh),
@@ -1002,6 +1022,24 @@ export class PocketApp {
             }
         }
 
+        if (kind === ProjectsDoc.definition.kind || kind === SessionsDoc.definition.kind) {
+            for (const client of this.#clients) {
+                if (
+                    client.conversationId !== undefined &&
+                    !this.canSee(client.user, client.conversationId)
+                ) {
+                    this.#evict(client, "The owner changed access to this project.");
+                }
+
+                for (const peek of client.peeks ?? []) {
+                    if (!this.canSee(client.user, peek)) {
+                        client.peeks?.delete(peek);
+                        this.#unpeek(client, peek);
+                    }
+                }
+            }
+        }
+
         return sessionsChanged;
     }
 
@@ -1068,17 +1106,38 @@ export class PocketApp {
         } as HarnessSettings;
     }
 
-    /** Where a conversation's commands run: its folder on this machine. */
-    envFor(id: ConversationId): NodeExecutionEnv {
-        return this.#env(id, this.cwdOf(id));
+    /** An actual viewer's HEAD observation; only an opened thread starts remote inspection. */
+    workspaceHead(id: ConversationId, user?: User) {
+        return this.locationOf(id) !== undefined &&
+            user !== undefined &&
+            !this.watching(user.id, id)
+            ? this.#destinationHeads.peek(id, user)
+            : this.#destinationHeads.get(id, user);
     }
 
-    #env(id: ConversationId, cwd: string): NodeExecutionEnv {
-        const key = JSON.stringify([id, cwd]);
+    /** The conversation's pinned filesystem and command destination, with live workflow/requester checks. */
+    envFor(id: ConversationId, user?: User): ExecutionEnv {
+        return this.#env(id, this.cwdOf(id), user);
+    }
+
+    #env(id: ConversationId, cwd: string, user?: User): ExecutionEnv {
+        if (this.locationOf(id) !== undefined) {
+            return this.sshSessions.envFor(id, cwd, user);
+        }
+
+        const key = JSON.stringify([
+            id,
+            cwd,
+            user?.id,
+            user?.tokenHash,
+            user?.role,
+            user?.sessions,
+            user?.projectAccess,
+        ]);
         let env = this.#envs.get(key);
 
         if (env === undefined) {
-            env = createWorkflowEnv(this, id, cwd);
+            env = createWorkflowEnv(this, id, cwd, user);
             this.#envs.set(key, env);
         }
 
@@ -1099,7 +1158,7 @@ export class PocketApp {
             // about PiP reaches the tabs with its panel open too: the panel has no notices of its own.
             const reaches =
                 conversationId === undefined
-                    ? client.user.sessions === undefined
+                    ? client.user.sessions === undefined && client.user.projectAccess === undefined
                     : (client.conversationId === conversationId ||
                           client.pip?.conversationId === conversationId) &&
                       this.canSee(client.user, conversationId);
@@ -1243,6 +1302,7 @@ export class PocketApp {
 
         client.peeks = undefined;
         this.#closePip(client);
+        this.#destinationHeads.releaseUnwatched();
 
         if (!this.#online(client.user.id)) {
             this.#peopleChanged(client.user.id);
@@ -1483,6 +1543,8 @@ export class PocketApp {
                 );
             }
         }
+
+        this.#destinationHeads.releaseUnwatched();
     }
 
     #online(userId: string): boolean {
@@ -1548,6 +1610,17 @@ export class PocketApp {
                     each.sessions === undefined ||
                     each.sessions.some((id) => scope.includes(id)),
             )
+            .filter(
+                (each) =>
+                    viewer.projectAccess === undefined ||
+                    each.id === viewer.id ||
+                    each.role === "owner" ||
+                    Object.keys(this.#sessions).some(
+                        (id) =>
+                            this.canSee(viewer, Number(id) as ConversationId) &&
+                            this.canSee(each, Number(id) as ConversationId),
+                    ),
+            )
             .map((each) => ({
                 id: each.id,
                 name: each.name,
@@ -1556,8 +1629,13 @@ export class PocketApp {
                 ...(viewer.role === "owner" && canContinuePiSessions(each)
                     ? { continuePiSessions: true as const }
                     : {}),
+                ...(viewer.role === "owner" && each.projectAccess !== undefined
+                    ? { projectAccess: structuredClone(each.projectAccess) }
+                    : {}),
                 ...(each.lastSeen === undefined ? {} : { lastSeen: each.lastSeen }),
-                ...(each.sessions === undefined || scope !== undefined
+                ...(each.sessions === undefined ||
+                scope !== undefined ||
+                viewer.projectAccess !== undefined
                     ? {}
                     : { sessions: each.sessions.map(Number) }),
             }));
@@ -1599,10 +1677,22 @@ export class PocketApp {
 
     /** Scoped grants flow forward through handoff ancestry; every PiP/owner-only hop still restricts it. */
     canSee(user: User, id: ConversationId): boolean {
+        const currentUser = this.config.userById(user.id);
+
+        if (currentUser === undefined || currentUser.tokenHash !== user.tokenHash) {
+            return false;
+        }
+
+        user = currentUser;
         const root = this.rootOf(id);
         const seen = new Set<ConversationId>();
         let current = root;
-        let granted = user.sessions === undefined;
+        const rootMeta = this.sessionMeta(root);
+        let granted =
+            user.sessions === undefined &&
+            (user.role === "owner" ||
+                user.projectAccess === undefined ||
+                (rootMeta !== undefined && this.projects.canAccessThread(user, rootMeta)));
 
         while (!seen.has(current)) {
             seen.add(current);
@@ -1640,7 +1730,13 @@ export class PocketApp {
 
     /** Viewers read, chat, and react; they never make Pi do anything. */
     requireSteer(user: User): void {
-        if (user.role === "viewer") {
+        const current = this.config.userById(user.id);
+
+        if (current === undefined || current.tokenHash !== user.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed");
+        }
+
+        if (current.role === "viewer") {
             throw new HttpError(
                 403,
                 "You can view this session but not steer Pi. Ask the owner for steering rights.",
@@ -1659,6 +1755,9 @@ export class PocketApp {
     async requireDriver(id: ConversationId, user: User): Promise<void> {
         this.requireSteer(user);
         const turns = await this.harness.snapshot(TurnsDoc, this.rootOf(id), context);
+
+        this.requireSteer(user);
+        this.requireSee(user, id);
 
         if (turns?.on !== true || turns.driver === user.id) {
             return;
@@ -1879,6 +1978,9 @@ export class PocketApp {
                 role: user.role,
                 ...(canContinuePiSessions(user) ? { continuePiSessions: true as const } : {}),
                 ...(user.sessions === undefined ? {} : { sessions: user.sessions.map(Number) }),
+                ...(user.projectAccess === undefined
+                    ? {}
+                    : { projectAccess: structuredClone(user.projectAccess) }),
             },
             users: this.people(user),
             models: await this.modelList(),
@@ -1915,6 +2017,9 @@ export class PocketApp {
                 localReviews: 2,
                 // Durable project organization and independently typed threads.
                 projects: 1,
+                sshWorkspaces: 1,
+                sshPasswords: 1,
+                hostName: hostname(),
                 agentProfiles: this.agentProfiles().map(
                     ({ id, name, description, title, starter, icon }) => ({
                         id,
@@ -2033,7 +2138,10 @@ export class PocketApp {
             )
             .map(([id, meta]) => {
                 const model = this.#agents.get(Number(id) as unknown as ConversationId)?.model;
-                const branch = this.workspace.head(Number(id) as ConversationId);
+                const branch =
+                    meta.location === undefined
+                        ? this.workspace.head(Number(id) as ConversationId)
+                        : this.#destinationHeads.peek(Number(id) as ConversationId, user);
                 const busy = this.#busy.has(Number(id) as unknown as ConversationId);
                 const here = [...(people.get(id) ?? new Map<string, string>())].map(
                     ([userId, name]) => ({ id: userId, name }),
@@ -2062,6 +2170,7 @@ export class PocketApp {
                 return {
                     id: Number(id),
                     cwd: meta.cwd,
+                    ...(meta.location === undefined ? {} : { location: meta.location }),
                     createdAt: meta.createdAt,
                     updatedAt: meta.updatedAt,
                     ...(meta.title === undefined ? {} : { title: meta.title }),
@@ -2129,7 +2238,7 @@ export class PocketApp {
         return `Conversation ${String(id)}`;
     }
 
-    conversationInfo(room: Room) {
+    conversationInfo(room: Room, user?: User) {
         const meta = this.#sessions[String(room.id)];
         const agent = (room.value?.docs["pi.agent"] ?? {}) as AgentState;
         const forkedFrom = meta?.forkedFrom;
@@ -2148,7 +2257,10 @@ export class PocketApp {
                 meta?.title ??
                 room.subagentName ??
                 (meta === undefined ? `Conversation ${String(room.id)}` : "New session"),
-            cwd: agent.cwd ?? meta?.cwd ?? this.defaultCwd,
+            cwd: agent.cwd ?? meta?.cwd ?? this.cwdOf(room.id),
+            ...(this.locationOf(room.id) === undefined
+                ? {}
+                : { location: this.locationOf(room.id) }),
             archived: meta?.archived === true,
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
@@ -2179,7 +2291,12 @@ export class PocketApp {
             // Whether a fork could get a worktree of its own.
             ...(meta === undefined
                 ? {}
-                : { inRepository: this.workspace.inRepository(agent.cwd ?? meta.cwd) }),
+                : {
+                      inRepository:
+                          this.locationOf(room.id) === undefined
+                              ? this.workspace.inRepository(agent.cwd ?? meta.cwd)
+                              : this.workspaceHead(room.id, user) !== undefined,
+                  }),
         };
     }
 
@@ -2301,9 +2418,16 @@ export class PocketApp {
     setAccess(
         owner: User,
         userId: string,
-        patch: { role?: unknown; sessions?: unknown; continuePiSessions?: unknown },
+        patch: {
+            role?: unknown;
+            sessions?: unknown;
+            continuePiSessions?: unknown;
+            projectAccess?: unknown;
+        },
     ): void {
-        if (owner.role !== "owner") {
+        const currentOwner = this.config.userById(owner.id);
+
+        if (currentOwner?.role !== "owner" || currentOwner.tokenHash !== owner.tokenHash) {
             throw new HttpError(403, "Only the owner can do that");
         }
 
@@ -2321,6 +2445,7 @@ export class PocketApp {
             role?: "guest" | "viewer";
             sessions?: string[] | undefined;
             continuePiSessions?: true | undefined;
+            projectAccess?: ProjectAccess;
         } = {};
 
         if (patch.role !== undefined) {
@@ -2344,6 +2469,10 @@ export class PocketApp {
             }
         }
 
+        if (patch.projectAccess !== undefined) {
+            change.projectAccess = parseProjectAccess(patch.projectAccess);
+        }
+
         if (patch.continuePiSessions !== undefined) {
             if (typeof patch.continuePiSessions !== "boolean") {
                 throw new HttpError(400, "continuePiSessions must be a boolean");
@@ -2351,11 +2480,15 @@ export class PocketApp {
 
             const role = change.role ?? target.role;
             const sessions = "sessions" in change ? change.sessions : target.sessions;
+            const projectAccess = change.projectAccess ?? target.projectAccess;
 
-            if (patch.continuePiSessions && (role !== "guest" || sessions !== undefined)) {
+            if (
+                patch.continuePiSessions &&
+                (role !== "guest" || sessions !== undefined || projectAccess !== undefined)
+            ) {
                 throw new HttpError(
                     400,
-                    "Only unrestricted steering guests can continue Pi sessions",
+                    "Only legacy unrestricted steering guests can continue Pi sessions; project collaborators cannot browse host history",
                 );
             }
 
@@ -2421,6 +2554,7 @@ export class PocketApp {
     }
 
     #forget(userId: string): void {
+        this.sshSessions.revoke(userId);
         this.config.removeUser(userId);
         this.pushStore?.removeUser(userId);
 
@@ -2508,6 +2642,11 @@ export class PocketApp {
         return { meta, version: chosen.version, content: body.content };
     }
 
+    /** The bound namespace is inherited by locally running subagents, never inferred from a path. */
+    locationOf(id: ConversationId): WorkspaceLocation | undefined {
+        return this.#sessions[String(this.rootOf(id))]?.location;
+    }
+
     /** The folder a conversation works in. */
     cwdOf(id: ConversationId): string {
         return this.#agents.get(id)?.cwd ?? this.#sessions[String(id)]?.cwd ?? this.defaultCwd;
@@ -2551,18 +2690,34 @@ export class PocketApp {
      * Whether Pi trusts the project a conversation works in, and the project skills that wait for it. The owner's: the
      * skills may be in folders above the session's, which someone invited to it cannot see.
      */
-    projectTrust(id: ConversationId, user: User): ProjectTrust {
-        if (user.role !== "owner") {
-            throw new HttpError(403, "Only the owner decides which projects Pi trusts.");
+    async projectTrust(id: ConversationId, user: User): Promise<ProjectTrust> {
+        user = { ...user };
+        this.#resourceOwner(id, user);
+
+        if (this.locationOf(id) !== undefined) {
+            return this.sshSessions.projectTrust(id, user);
         }
 
         return readProjectTrust(this.cwdOf(id), this.#skillSources());
     }
 
     /** The owner's answer to "trust this project?", saved where Pi's CLI keeps its own, as its `/trust` does. */
-    setProjectTrust(id: ConversationId, user: User, choice: TrustChoice): ProjectTrust {
-        // Before anything is saved: only the owner may read it, or answer.
-        const now = this.projectTrust(id, user);
+    async setProjectTrust(
+        id: ConversationId,
+        user: User,
+        choice: TrustChoice,
+    ): Promise<ProjectTrust> {
+        user = { ...user };
+        this.#resourceOwner(id, user);
+        const cwd = this.cwdOf(id);
+        const location = this.locationOf(id);
+        const key = JSON.stringify(location);
+
+        if (location !== undefined) {
+            return this.sshSessions.setProjectTrust(id, user, choice);
+        }
+
+        const now = await this.projectTrust(id, user);
 
         if (now.unreadable) {
             throw new HttpError(
@@ -2575,27 +2730,94 @@ export class PocketApp {
             throw new HttpError(400, "This folder has no folder above it.");
         }
 
-        saveProjectTrust(this.cwdOf(id), getAgentDir(), choice);
+        this.#resourceOwner(id, user);
+
+        if (cwd !== this.cwdOf(id) || key !== JSON.stringify(this.locationOf(id))) {
+            throw new HttpError(
+                409,
+                "The workspace changed. Reload project trust before choosing.",
+            );
+        }
+
+        saveProjectTrust(cwd, getAgentDir(), choice);
 
         return this.projectTrust(id, user);
     }
 
-    /** Pi's skills in a conversation's folder, to run as `/skill:name`. */
-    skillCommands(id: ConversationId): SkillCommand[] {
-        try {
-            return this.skills(this.cwdOf(id)).map((skill) => ({
+    #resourceOwner(id: ConversationId, supplied: User): User {
+        const user = this.config.userById(supplied.id);
+
+        if (user === undefined || user.tokenHash !== supplied.tokenHash || user.role !== "owner") {
+            throw new HttpError(403, "Only the signed-in owner decides project trust.");
+        }
+
+        this.requireSee(user, id);
+
+        return user;
+    }
+
+    /** Host orchestration resources, with remote project content read only through its pinned namespace. */
+    async projectResources(
+        id: ConversationId,
+        context: Context,
+        user?: User,
+    ): Promise<{
+        skills: Skill[];
+        remoteSkills: RemoteProjectSkill[];
+        templates: PromptTemplate[];
+    }> {
+        const cwd = this.cwdOf(id);
+
+        if (this.locationOf(id) === undefined) {
+            return {
+                skills: this.skills(cwd),
+                remoteSkills: [],
+                templates: this.#templates(cwd, !projectDistrusted(cwd, this.#skillSources())),
+            };
+        }
+
+        const remote = await this.sshSessions.projectResources(id, user, context);
+        const skills = [...remote.skills, ...loadGlobalSkills(this.#skillSources())];
+
+        return {
+            skills: skills.filter(
+                (skill, index) => skills.findIndex((each) => each.name === skill.name) === index,
+            ),
+            remoteSkills: remote.skills,
+            templates: this.#templates(this.#home, false, remote.templates),
+        };
+    }
+
+    /** Content-aware slash expansion never opens an SSH skill path on the Coop host. */
+    async skillCommands(id: ConversationId, user?: User): Promise<SkillCommand[]> {
+        const resources = await this.projectResources(id, BACKGROUND_CONTEXT, user);
+        const remote = new Map(resources.remoteSkills.map((skill) => [skill.name, skill]));
+
+        return resources.skills.map((skill) => {
+            const base = {
                 name: skill.name,
                 description: skill.description,
                 path: skill.filePath,
                 baseDir: skill.baseDir,
-            }));
-        } catch {
-            return [];
-        }
+            };
+            const project = remote.get(skill.name);
+
+            return project === undefined
+                ? { ...base, source: "host" as const }
+                : { ...base, source: "ssh" as const, content: project.content };
+        });
     }
 
     /** Pi's prompt templates, as a conversation in its folder offers them. */
-    promptTemplates(id: ConversationId): PromptTemplate[] {
+    async promptTemplates(id: ConversationId, user?: User): Promise<PromptTemplate[]> {
+        return (await this.projectResources(id, BACKGROUND_CONTEXT, user)).templates;
+    }
+
+    #templates(
+        cwd: string,
+        project: boolean,
+        projectTemplates?: readonly PromptTemplate[],
+    ): PromptTemplate[] {
         let paths: string[] = [];
 
         try {
@@ -2604,12 +2826,7 @@ export class PocketApp {
             // Unreadable settings: the default folders still count.
         }
 
-        const cwd = this.cwdOf(id);
-
-        // A project told "Don't trust" offers none of its own, as its .pi/skills.
-        return loadPromptTemplates(cwd, getAgentDir(), paths, {
-            project: !projectDistrusted(cwd, this.#skillSources()),
-        });
+        return loadPromptTemplates(cwd, getAgentDir(), paths, { project, projectTemplates });
     }
 
     // ─── Extensions ─────────────────────────────────────────────────────────
@@ -3106,6 +3323,9 @@ export class PocketApp {
 
     close(): Promise<void> {
         this.#closing ??= (async () => {
+            const headsClosed = this.#destinationHeads.close();
+            const sshClosed = this.sshSessions.close();
+
             clearTimeout(this.#sessionsTimer);
             this.alerts.close();
             this.themes.close();
@@ -3133,6 +3353,9 @@ export class PocketApp {
 
             this.providers.close();
             this.languages.close();
+            await headsClosed;
+
+            await sshClosed;
             await this.privateTerminals.close();
 
             // A timer that holds the process: with nothing else to do, Node would end it here, before the rest closed.

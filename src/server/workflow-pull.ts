@@ -10,6 +10,12 @@ import { defineTool, type ConversationId, type ToolExecutionApi } from "@earendi
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { PocketApp } from "./app.ts";
 import { WorkflowDoc } from "./workflow-docs.ts";
+import type { WorkspaceBackend } from "./workspace-backend.ts";
+import {
+    importHostFetch,
+    requireHostTransport,
+    type WorkflowBackendFactory,
+} from "./workflow-host-stage.ts";
 import {
     requireWorkflowRequester,
     safeWorkflowGit,
@@ -250,8 +256,21 @@ async function requireActive(
     }
 }
 
-async function remoteUrl(cwd: string, remote: string, context: Context): Promise<string> {
-    const bytes = await safeWorkflowGit(cwd, ["remote", "get-url", "--all", remote], context);
+async function remoteUrl(
+    cwd: string,
+    remote: string,
+    context: Context,
+    backend?: WorkspaceBackend,
+): Promise<string> {
+    const args = ["remote", "get-url", "--all", remote];
+    const bytes =
+        backend === undefined
+            ? await safeWorkflowGit(cwd, args, context)
+            : await backend.gitBytes(cwd, args, {
+                  offline: true,
+                  readOnly: true,
+                  maxBuffer: 64 * 1024,
+              });
 
     if (!isUtf8(bytes)) {
         throw new Error("Non-UTF-8 Git remote URLs are unsupported.");
@@ -289,6 +308,10 @@ async function remoteUrl(cwd: string, remote: string, context: Context): Promise
         );
     }
 
+    if (backend !== undefined) {
+        requireHostTransport(url);
+    }
+
     return isAbsolute(url) ? resolve(cwd, url) : url;
 }
 
@@ -298,6 +321,7 @@ async function fetchRemote(
     context: Context,
     remote: string,
     requester: string,
+    backendFor?: WorkflowBackendFactory,
 ) {
     const id = api.conversationId;
 
@@ -307,8 +331,20 @@ async function fetchRemote(
         );
     }
 
-    const cwd = await realpath(app.cwdOf(id));
-    const url = await remoteUrl(cwd, remote, context);
+    const location = app.locationOf(id);
+
+    if (location !== undefined && backendFor === undefined) {
+        throw new Error(
+            "SSH Pull requires a destination-bound offline workspace backend; no host-local fallback.",
+        );
+    }
+
+    const backend = location === undefined ? undefined : await backendFor!(id, context);
+    const canonicalCwd = () =>
+        backend === undefined ? realpath(app.cwdOf(id)) : backend.canonical(app.cwdOf(id));
+    const cwd = await canonicalCwd();
+    const url = await remoteUrl(cwd, remote, context, backend);
+    const destination = JSON.stringify(location);
     const program = await executable("git");
     const stage = await mkdtemp(join(tmpdir(), "pi-pull-"));
 
@@ -323,8 +359,9 @@ async function fetchRemote(
         await requireActive(app, api, context, requester);
 
         if (
-            (await realpath(app.cwdOf(id))) !== cwd ||
-            (await remoteUrl(cwd, remote, context)) !== url
+            (await canonicalCwd()) !== cwd ||
+            JSON.stringify(app.locationOf(id)) !== destination ||
+            (await remoteUrl(cwd, remote, context, backend)) !== url
         ) {
             throw new Error(
                 "Pull cwd or fetch URL changed before execution. No external fetch ran.",
@@ -395,8 +432,27 @@ async function fetchRemote(
 
         await requireActive(app, api, context, requester);
 
-        if ((await realpath(app.cwdOf(id))) !== cwd) {
-            throw new Error("Pull cwd changed during the read; fetched refs were not imported.");
+        if (
+            (await canonicalCwd()) !== cwd ||
+            JSON.stringify(app.locationOf(id)) !== destination ||
+            (await remoteUrl(cwd, remote, context, backend)) !== url
+        ) {
+            throw new Error(
+                "Pull destination, cwd or URL changed during the read; fetched refs were not imported.",
+            );
+        }
+
+        if (backend !== undefined) {
+            await importHostFetch(backend.at(cwd), stage, remote, context);
+
+            return {
+                content: [
+                    {
+                        type: "text" as const,
+                        text: `Fetched ${remote} on the Coop host and imported refs/remotes/${remote}/* into SSH · ${location!.host}. HEAD and working files were not integrated. Tags and pruning are not supported.`,
+                    },
+                ],
+            };
         }
 
         // Git fetch dereferences symbolic destinations, even when their names are remote-tracking
@@ -482,7 +538,7 @@ async function fetchRemote(
 }
 
 /** Register with pocket-core; role prompts and optional guards cannot grant this capability. */
-export function createPullTool(app: PocketApp) {
+export function createPullTool(app: PocketApp, backendFor?: WorkflowBackendFactory) {
     return defineTool({
         name: "pull",
         description:
@@ -511,39 +567,45 @@ export function createPullTool(app: PocketApp) {
                         context,
                     );
 
-                    return fetchRemote(app, api, context, parsed.remote, requester);
+                    return fetchRemote(app, api, context, parsed.remote, requester, backendFor);
                 }
 
                 const program = await executable("gh");
-                const cwd = await realpath(app.cwdOf(api.conversationId));
+                // Explicit --repo reads never need checkout discovery. In particular an SSH cwd
+                // must not gain host-local namesake meaning or load checkout-owned gh config.
+                const cwd = await mkdtemp(join(tmpdir(), "pi-pull-github-"));
 
-                await requireActive(app, api, context, requester);
-                const execution = await new NodeExecutionEnv({ cwd }).exec(
-                    [program, ...parsed.command.slice(1)],
-                    {
-                        timeout: 60,
-                        inheritEnv: false,
-                        env: externalEnvironment(),
-                        onOutput: (text, _context, info) => api.output(text, info.skipped),
-                        window: api.outputWindow,
-                    },
-                    context,
-                );
-
-                if (!execution.ok) {
-                    throw new Error(
-                        `Pull read stopped: ${execution.error.message}. No automatic retry.`,
+                try {
+                    await requireActive(app, api, context, requester);
+                    const execution = await new NodeExecutionEnv({ cwd }).exec(
+                        [program, ...parsed.command.slice(1)],
+                        {
+                            timeout: 60,
+                            inheritEnv: false,
+                            env: externalEnvironment(),
+                            onOutput: (text, _context, info) => api.output(text, info.skipped),
+                            window: api.outputWindow,
+                        },
+                        context,
                     );
-                }
 
-                if (execution.value.exitCode !== 0) {
-                    throw new Error(
-                        `Pull read exited ${execution.value.exitCode}. No automatic retry.`,
-                    );
-                }
+                    if (!execution.ok) {
+                        throw new Error(
+                            `Pull read stopped: ${execution.error.message}. No automatic retry.`,
+                        );
+                    }
 
-                // Returning no explicit content makes Durable retain stdout/stderr as the model's result.
-                return {};
+                    if (execution.value.exitCode !== 0) {
+                        throw new Error(
+                            `Pull read exited ${execution.value.exitCode}. No automatic retry.`,
+                        );
+                    }
+
+                    // Returning no explicit content makes Durable retain stdout/stderr as the model's result.
+                    return {};
+                } finally {
+                    await rm(cwd, { recursive: true, force: true });
+                }
             });
         },
     });

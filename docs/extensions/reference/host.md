@@ -50,6 +50,39 @@ Since 0.12.0 · Stable
 
 Pi's skills for a session that works in the folder `cwd`. The list has the skills from all the places where Pi looks.
 
+### `globalSkills`
+
+```ts
+globalSkills(): Skill[];
+```
+
+Since 0.14.0 · Stable
+
+The Coop host’s configured global skills, without consulting a project directory or project trust. SSH threads use this list with `host_skill` to read host resources without treating their paths as remote files.
+
+### `projectResources`
+
+```ts
+projectResources(conversationId: ConversationId, context: Context): Promise<{ skills: Skill[] }>;
+```
+
+Since 0.15.0 · Experimental
+
+The thread’s trusted project skills merged with the Coop host’s global skills, in normal project-first precedence. SSH resources are read through the pinned execution environment and require explicit host-owned project trust; their `sourceInfo.source` identifies the remote filesystem. Host-global paths remain host paths. Use `read` for remote resources and `host_skill` for registered host-global resources. The supplied context cancels remote reads. Remote failures never substitute a host-local project namesake.
+
+### `workspace`
+
+```ts
+workspace(conversationId: ConversationId): {
+    location?: { kind: "ssh"; host: string };
+    env: ExecutionEnv;
+};
+```
+
+Since 0.14.0 · Stable
+
+A conversation’s actual file namespace and policy-gated execution environment. An omitted location means the Coop host, not the browser device. Subagents inherit their root thread’s location. Remote failures never return a local environment. Managed commands require native offline confinement on the target; unavailable confinement fails that operation without unrestricted fallback. Cached environments retain live requester, access, writer and publication controls. Trusted extensions must use this environment for project operations rather than interpreting remote cwd strings with Node filesystem APIs.
+
 ## Models
 
 ### `resolveModel`

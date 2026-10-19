@@ -29,6 +29,7 @@ import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
 import type { ThreadType } from "../src/server/workflow-docs.ts";
+import { sshFixture } from "./ssh-fixture.ts";
 
 after(cleanUp);
 let serial = 0;
@@ -70,7 +71,7 @@ async function fixture(t: TestContext, threadType: ThreadType = "pull") {
         join(bin, "gh"),
         `#!${process.execPath}
 import {appendFileSync, existsSync, readFileSync} from 'node:fs';
-appendFileSync(${JSON.stringify(log)}, JSON.stringify({argv:process.argv.slice(2), pager:process.env.GH_PAGER, host:process.env.GH_HOST, configCount:process.env.GIT_CONFIG_COUNT})+'\\n');
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({argv:process.argv.slice(2), cwd:process.cwd(), pager:process.env.GH_PAGER, host:process.env.GH_HOST, configCount:process.env.GIT_CONFIG_COUNT})+'\\n');
 while (existsSync(${JSON.stringify(barrier)})) { await new Promise(resolve=>setTimeout(resolve,20)); }
 console.log('UPSTREAM READ RESULT');
 process.exitCode=existsSync(${JSON.stringify(exit)})?Number(readFileSync(${JSON.stringify(exit)},'utf8')):0;
@@ -202,7 +203,12 @@ test("Pull delivers bounded explicit GitHub reads and model-visible output; inhe
 
     process.env.GIT_CONFIG_COUNT = "1";
     assert.match(await f.send("pull", { command: view }), /UPSTREAM READ RESULT/);
-    assert.deepEqual(f.calls()[0], {
+    const { cwd: externalCwd, ...firstCall } = f.calls()[0];
+
+    assert.notEqual(externalCwd, f.cwd, "GitHub reads must not discover checkout configuration");
+    assert.match(externalCwd, /pi-pull-github-/);
+    assert.equal(existsSync(externalCwd), false, "neutral host staging is removed after the read");
+    assert.deepEqual(firstCall, {
         argv: ["pr", "view", "7", "--repo=github.com/team/project"],
         pager: "/bin/cat",
         host: "github.com",
@@ -241,6 +247,30 @@ test("Pull delivers bounded explicit GitHub reads and model-visible output; inhe
 
     assert.equal(direct.ok, false, "The Pull role never enables direct gh commands in bash");
     assert.equal(f.calls().length, 2);
+});
+
+test("SSH Pull GitHub reads remain host-owned when remote authentication fails", async (t) => {
+    const ssh = await sshFixture("auth-failed");
+    const f = await fixture(t);
+
+    t.after(async () => {
+        await ssh.env.cleanup(context);
+        await ssh.close();
+    });
+    await f.app.harness.commit(async (tx) => {
+        (await tx.doc(SessionsDoc)).items[String(f.id)]!.location = {
+            kind: "ssh",
+            host: "auth-failed",
+        };
+    }, context);
+
+    assert.match(await f.send("pull", { command: view }), /UPSTREAM READ RESULT/);
+    assert.equal(f.calls().length, 1);
+    assert.notEqual(f.calls()[0].cwd, f.cwd);
+    assert.match(f.calls()[0].cwd, /pi-pull-github-/);
+    assert.equal(existsSync(f.calls()[0].cwd), false);
+    assert.deepEqual(f.calls()[0].argv, ["pr", "view", "7", "--repo=github.com/team/project"]);
+    assert.equal(f.app.approvals.all().length, 0);
 });
 
 test("Pull refuses mutation, interactive/config/script payloads, arbitrary API and unbounded reads before spawning", async (t) => {

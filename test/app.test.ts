@@ -769,7 +769,7 @@ test("viewers read and chat but never steer; people invited to one session see o
         // Nor move it elsewhere: what they may read is its folder.
         await assert.rejects(
             app.commands.configure(id, scoped, { cwd: "/etc" }),
-            /cannot move it to another folder/,
+            /Only the owner can change/,
         );
         assert.equal(app.cwdOf(id), work);
         // Model settings remain available within the shared session.
@@ -1267,7 +1267,7 @@ test("an invite lasts as long as asked (an owner's always 15 minutes), outlives 
         copyFileSync(app.config.file, join(copy, "config.json"));
         const again = new Auth(new ConfigStore(copy));
 
-        assert.deepEqual(again.invite(week.code), { role: "guest" });
+        assert.deepEqual(again.invite(week.code), { role: "guest", projectAccess: {} });
         assert.ok(!readFileSync(app.config.file, "utf8").includes(week.code));
 
         // Only whoever made it ends it.
@@ -1278,12 +1278,11 @@ test("an invite lasts as long as asked (an owner's always 15 minutes), outlives 
             200,
         );
         assert.ok(!(await live(week.code)), "its maker can");
-        const guests = (await (await call(guest.token, "invite", { minutes: 60 })).json()) as {
-            code: string;
-        };
-
-        await call(app.config.ownerToken, "invite/cancel", { code: guests.code });
-        assert.ok(await live(guests.code), "not even the owner ends someone else's");
+        assert.equal(
+            (await call(guest.token, "invite", { minutes: 60 })).status,
+            403,
+            "only the owner can issue new invites",
+        );
 
         // Two devices spending one at once: one gets in.
         const once = await make({ minutes: 60 });
@@ -1330,9 +1329,16 @@ test("an invite lasts as long as asked (an owner's always 15 minutes), outlives 
 
         // Someone removed takes the invites they made along.
         const leaving = app.config.addUser("Lee", "guest").user;
-        const left = auth.createInvite(leaving, { role: "viewer" }, 24 * 60);
+        const left = { code: "retained-legacy-invite" };
 
+        app.config.addInvite(left.code, {
+            role: "viewer",
+            createdBy: leaving.id,
+            expiresAt: Date.now() + 60_000,
+        });
+        assert.ok(app.config.invite(left.code));
         app.config.removeUser(leaving.id);
+        assert.equal(app.config.invite(left.code), undefined);
         assert.equal(auth.invite(left.code), undefined);
         assert.ok(!(await live(left.code)));
 
@@ -1342,7 +1348,7 @@ test("an invite lasts as long as asked (an owner's always 15 minutes), outlives 
 
         app.config.rotateOwnerToken();
         assert.equal(auth.invite(mine.code), undefined);
-        assert.deepEqual(auth.invite(theirs.code), { role: "guest" });
+        assert.deepEqual(auth.invite(theirs.code), { role: "guest", projectAccess: {} });
     } finally {
         app.config.removeUser(guest.user.id);
         server.closeAllConnections();
@@ -1731,15 +1737,20 @@ test("access holds: a refused tab hears nothing, narrowed access evicts, removal
     }
 });
 
-test("an invite stops working when its creator loses the right to invite", async () => {
+test("new invitations are owner-only and retained non-owner invites cannot be redeemed", async () => {
     const { Auth } = await import("../src/server/auth.ts");
     const auth = new Auth(app.config);
     const guest = app.config.addUser("Gil", "guest").user;
 
     try {
-        const { code } = auth.createInvite(guest, { role: "guest" });
+        assert.throws(() => auth.createInvite(guest, { role: "guest" }), /owner/i);
+        const code = "legacy-non-owner-invite";
 
-        app.setAccess(owner(), guest.id, { role: "viewer" });
+        app.config.addInvite(code, {
+            role: "guest",
+            createdBy: guest.id,
+            expiresAt: Date.now() + 60_000,
+        });
         assert.equal(auth.redeem(code, "Mallory"), undefined);
         assert.ok(!app.config.users.some((each) => each.name === "Mallory"));
         const fine = auth.createInvite(owner(), { role: "viewer" });

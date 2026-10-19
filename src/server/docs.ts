@@ -17,10 +17,13 @@ import type { ActivePi } from "./pi-sessions/herdr.ts";
 import type { Worktree } from "./worktrees.ts";
 import type { Changes } from "./changes.ts";
 import type { ThreadType } from "./workflow-docs.ts";
+import type { WorkspaceLocation } from "./workspace-location.ts";
 
 export type SessionMeta = {
     title?: string;
     cwd: string;
+    /** Creation-time destination; project moves/default edits never change it. */
+    location?: WorkspaceLocation;
     createdAt: number;
     updatedAt: number;
     createdBy?: string;
@@ -115,6 +118,8 @@ export type Project = {
     name: string;
     /** Omitted in projections for people invited to particular sessions. */
     cwd?: string;
+    /** Creation-time default for new threads, omitted with cwd in scoped projections. */
+    location?: WorkspaceLocation;
     createdAt: number;
     updatedAt: number;
     createdBy: string;

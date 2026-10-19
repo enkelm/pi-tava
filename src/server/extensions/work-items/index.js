@@ -81,5 +81,7 @@ export default function setup(pocket) {
 
     // The composer retains rendered hints until its contribution changes. Replace only on a
     // semantic invalidation, never on request completion (which would create a refresh loop).
-    state.onInvalidate(() => command.update({ suggest: (...args) => commandSpec.suggest(...args) }));
+    state.onInvalidate(() =>
+        command.update({ suggest: (...args) => commandSpec.suggest(...args) }),
+    );
 }

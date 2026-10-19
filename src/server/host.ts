@@ -1,4 +1,6 @@
 import type { Context } from "@earendil-works/chord";
+import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
+import type { WorkspaceLocation } from "./workspace-location.ts";
 import { awaitWithContext } from "@earendil-works/chord/context";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
@@ -221,6 +223,15 @@ export interface PocketHost {
     skillPaths(): string[];
     /** Pi's skills for a session working in `cwd`, from the places Pi looks (`skills.ts`). */
     skills(cwd: string): Skill[];
+    /** Host-global skills only, without consulting any project directory. */
+    globalSkills(): Skill[];
+    /** Trusted project resources on the pinned namespace, merged with explicit host-global skills. */
+    projectResources(
+        conversationId: ConversationId,
+        context: Context,
+    ): Promise<{ skills: Skill[] }>;
+    /** The actual thread namespace and policy-gated file/shell environment; helpers inherit the root target. */
+    workspace(conversationId: ConversationId): { location?: WorkspaceLocation; env: ExecutionEnv };
     /**
      * `provider/modelId` (or a bare model id) to a signed-in model whose sign-in has not expired, or an error that says
      * it is not available. The error names no other models: models are a person's to choose.

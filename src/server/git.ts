@@ -1,27 +1,25 @@
-/**
- * Git as Pi Pocket runs it for itself (Changes, branches, worktrees): literal paths, no optional locks or fsmonitor,
- * and English diagnostics. Managed callers opt into the offline OS sandbox, read-only unless a local mutation
- * explicitly permits writes. Ordinary callers retain configured clean/smudge filters and executable configuration.
- */
+/** Literal, bounded Git execution, optionally bound to a remote workspace backend. */
 import { isUtf8 } from "node:buffer";
 import { execFile } from "node:child_process";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord";
 import { safeWorkflowGit } from "./workflow-policy.ts";
+import type { WorkspaceBackend } from "./workspace-backend.ts";
 
 export type GitOptions = {
-    /** Exit codes besides 0 that still mean success. */
     allowExit?: number[];
     timeoutMs?: number;
     maxBuffer?: number;
-    /** Re-evaluated for each subprocess when a conversation can become managed during an in-flight read. */
+    /** Re-evaluated for every subprocess; cached backends never freeze workflow policy. */
     offline?: boolean | (() => boolean);
-    /** Sandboxed inspection is read-only unless an explicit local Git operation needs writes. */
     readOnly?: boolean;
+    backend?: WorkspaceBackend;
+    context?: Context;
+    /** Trusted core callers can suppress checkout/global config; mandatory safety variables win. */
+    env?: Record<string, string>;
 };
 
-/** A git command that failed, with what git said (or why it did not run) as its message. */
 export class GitError extends Error {
-    /** Git's exit code; undefined when it did not get to exit (a timeout, or no git). */
     readonly exitCode: number | undefined;
 
     constructor(message: string, exitCode: number | undefined) {
@@ -30,44 +28,46 @@ export class GitError extends Error {
     }
 }
 
-/** Run git in `cwd` and return what it printed. */
-export function git(cwd: string, args: string[], options: GitOptions = {}): Promise<string> {
+/** Raw stdout, for bundles/objects and callers that independently validate pathname encodings. */
+export function gitBytes(cwd: string, args: string[], options: GitOptions = {}): Promise<Buffer> {
+    if (options.backend !== undefined) {
+        return options.backend.gitBytes(cwd, args, options);
+    }
+
     const { allowExit = [], timeoutMs = 60_000, maxBuffer = 16 * 1024 * 1024 } = options;
     const offline = typeof options.offline === "function" ? options.offline() : options.offline;
 
     if (offline) {
-        return safeWorkflowGit(cwd, args, BACKGROUND_CONTEXT, {
+        return safeWorkflowGit(cwd, args, options.context ?? BACKGROUND_CONTEXT, {
             timeoutMs,
             maxBytes: maxBuffer,
             allowExit,
             readOnly: options.readOnly,
-            env: { GIT_LITERAL_PATHSPECS: "1", LC_ALL: "C" },
-        })
-            .then((output) => {
-                if (!isUtf8(output)) {
-                    throw new GitError("Non-UTF-8 Git output is unsupported", undefined);
-                }
+            env: {
+                ...options.env,
+                GIT_LITERAL_PATHSPECS: "1",
+                GIT_OPTIONAL_LOCKS: "0",
+                GIT_NO_LAZY_FETCH: "1",
+                LC_ALL: "C",
+            },
+        }).catch((error: unknown) => {
+            if (error instanceof GitError) {
+                throw error;
+            }
 
-                return output.toString("utf8");
-            })
-            .catch((error: unknown) => {
-                if (error instanceof GitError) {
-                    throw error;
-                }
+            const failed = error as { code?: unknown; stderr?: unknown };
+            const code = typeof failed.code === "number" ? failed.code : undefined;
+            const stderr = Buffer.isBuffer(failed.stderr)
+                ? failed.stderr.toString("utf8")
+                : typeof failed.stderr === "string"
+                  ? failed.stderr
+                  : "";
 
-                const failed = error as { code?: unknown; stderr?: unknown };
-                const code = typeof failed.code === "number" ? failed.code : undefined;
-                const stderr = Buffer.isBuffer(failed.stderr)
-                    ? failed.stderr.toString("utf8")
-                    : typeof failed.stderr === "string"
-                      ? failed.stderr
-                      : "";
-
-                throw new GitError(
-                    stderr.trim() || (error instanceof Error ? error.message : String(error)),
-                    code,
-                );
-            });
+            throw new GitError(
+                stderr.trim() || (error instanceof Error ? error.message : String(error)),
+                code,
+            );
+        });
     }
 
     return new Promise((resolve, reject) => {
@@ -76,12 +76,16 @@ export function git(cwd: string, args: string[], options: GitOptions = {}): Prom
             ["-c", "core.fsmonitor=false", ...args],
             {
                 cwd,
+                encoding: "buffer",
                 timeout: timeoutMs,
                 maxBuffer,
+                signal: options.context?.abortSignal,
                 env: {
                     ...process.env,
+                    ...options.env,
                     GIT_LITERAL_PATHSPECS: "1",
                     GIT_OPTIONAL_LOCKS: "0",
+                    GIT_NO_LAZY_FETCH: "1",
                     LC_ALL: "C",
                 },
             },
@@ -91,9 +95,20 @@ export function git(cwd: string, args: string[], options: GitOptions = {}): Prom
                 if (error === null || (code !== undefined && allowExit.includes(code))) {
                     resolve(stdout);
                 } else {
-                    reject(new GitError(stderr.trim() || error.message, code));
+                    reject(new GitError(stderr.toString("utf8").trim() || error.message, code));
                 }
             },
         );
     });
+}
+
+/** Text consumers reject invalid UTF-8 rather than inspecting a different replacement-character pathname. */
+export async function git(cwd: string, args: string[], options: GitOptions = {}): Promise<string> {
+    const bytes = await gitBytes(cwd, args, options);
+
+    if (!isUtf8(bytes)) {
+        throw new GitError("Non-UTF-8 Git output is unsupported", undefined);
+    }
+
+    return bytes.toString("utf8");
 }

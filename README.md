@@ -18,6 +18,22 @@ Open the owner sign-in link printed by the launcher. Keep that link private.
 
 Pi Coop keeps this fork's existing default, `~/.pi-durable-app`, separate from upstream Pocket's `~/.pi-pocket`. The rename does not move existing data. `--data` and `PI_POCKET_DIR` still override it. Do not point the fork at an existing Pocket database while evaluating it. As in Pocket, normal operation uses your Pi provider configuration and sign-ins; tests use isolated configuration and mock providers.
 
+## Private HTTPS with Tailscale
+
+Coop can serve HTTPS directly on a macOS/Linux Tailscale host: no separate `tailscale serve`, Funnel, reverse proxy or certificate files to manage.
+
+1. In the Tailscale admin console’s **DNS** settings, enable **MagicDNS** and **HTTPS certificates**. Issuing a certificate publicly logs the device’s full `.ts.net` name in Certificate Transparency; rename sensitive machine names before issuance. This does not make Coop publicly accessible.
+2. With an updated launcher, press **a** and choose **Tailscale (HTTPS)**, or start it explicitly:
+    ```sh
+    pi-coop --access tailscale-https --port 8790 --data "$HOME/.pi-durable-app"
+    ```
+    Use your existing port/data folder and stop the old launcher before starting another. A launcher-code update needs a launcher restart; **Menu → Restart server** alone only restarts its child. Existing saved **Tailscale (HTTP)** access is not silently upgraded.
+3. Open the launcher’s new **`https://DEVICE.TAILNET.ts.net:PORT`** sign-in link or QR on the phone. Use the full hostname, not the `100.x` address. The service stays on the Tailscale interface and retains normal Coop sign-in/access checks.
+
+Coop uses the native Tailscale CLI to obtain a matched certificate/key in memory, rechecks it every 12 hours and asks for at least seven days’ remaining validity. It updates the live TLS context without restarting agents. Tailscale manages its own certificate cache; Coop writes no certificate/private-key files. Setup errors never fall back to HTTP. Certificate preflight failure while changing access leaves the existing server running.
+
+Opening HTTPS changes browser origin: sign in again and add the new URL to your bookmarks/home screen. Existing HTTP-origin drafts and browser preferences are not automatically moved. On iPhone/iPad, open the HTTPS URL in Safari, **Add to Home Screen**, reopen the installed app, then use **Settings → Notifications → This device** and allow notifications. Permission and a real device push test remain your actions; HTTPS does not enable notifications automatically.
+
 ## Private Herdr sessions
 
 Open **Private** in the sidebar to see local Herdr instances, workspaces, tabs and every pane, including shells and other agents. Only the app owner can access this list or its contents. The same tab is available in the mobile session list and drawer.

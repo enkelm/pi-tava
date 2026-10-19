@@ -5,7 +5,7 @@
  * Every command checks access; changes others should know about become activity lines in the session's chat.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -59,10 +59,13 @@ import { WorkflowDoc } from "./workflow-docs.ts";
 import { handoffInputKey } from "./handoff-input.ts";
 import { describe, HttpError, optionalText } from "./errors.ts";
 import { homePath } from "./paths.ts";
-import { mentionedPaths, viewFile } from "./files.ts";
+import { type FileView, mentionedPaths } from "./files.ts";
 import { isThinkingLevel, THINKING_LEVELS } from "./models.ts";
 import { snippet } from "./projection.ts";
 import { globalModelSettings, projectModelDefault } from "./project-model.ts";
+import { parseWorkspaceLocation } from "./workspace-location.ts";
+import { WorkspaceBackend } from "./workspace-backend.ts";
+import { userWorkspaceBackend } from "./workspace-backend-factory.ts";
 import { expandPromptTemplate, expandSkillCommand, unwrapSkill } from "./prompts.ts";
 import { queuedInputText } from "./queued-input.ts";
 import { clientKey, ownRequest, requestFor } from "./requests.ts";
@@ -73,10 +76,12 @@ import { describeMoment, describeRepeat, knownZone } from "./when.ts";
 import {
     createWorktree,
     discardWorktree,
-    inWorktree,
+    inWorktreeAt,
     removeWorktree,
-    sourceFolders,
+    sourceFolder,
+    worktreeStorage,
     type Worktree,
+    type WorktreePolicy,
 } from "./worktrees.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -85,6 +90,7 @@ export type Attachment = { path: string; name: string; mime: string; size: numbe
 
 export type CreateSessionRequest = {
     cwd?: string;
+    location?: unknown;
     title?: string;
     worktree?: unknown;
     projectId?: unknown;
@@ -181,8 +187,8 @@ function entryIdOf(value: unknown): number {
  * An image file for the model, at most 2000 pixels a side as Pi's read tool sends images: models refuse bigger ones once
  * a conversation holds many, and then every request fails until they leave its context.
  */
-async function modelImage(path: string, mimeType: string): Promise<ImageContent> {
-    const image = await resizeImage(readFileSync(path), mimeType);
+async function modelImage(bytes: Buffer, mimeType: string): Promise<ImageContent> {
+    const image = await resizeImage(bytes, mimeType);
 
     if (image === null) {
         throw new Error("it could not be made small enough for the model");
@@ -384,6 +390,7 @@ export class Commands {
         request: CreateSessionRequest,
         { projectDefaults = true }: { projectDefaults?: boolean } = {},
     ): Promise<{ id: ConversationId }> {
+        user = { ...user };
         this.#requireCreate(user);
         const asked = optionalText(request.requestId, "requestId");
         const key = asked === undefined ? undefined : `${user.id}:${clientKey(asked)}`;
@@ -393,6 +400,9 @@ export class Commands {
             worktree: request.worktree === true,
             projectId: request.projectId,
             threadType: request.threadType,
+            ...(request.location === undefined
+                ? {}
+                : { location: parseWorkspaceLocation(request.location) ?? null }),
         });
 
         if (key === undefined) {
@@ -423,12 +433,18 @@ export class Commands {
         }
     }
 
-    #requireCreate(supplied: User): void {
+    #requireCurrentUser(supplied: User): User {
         const user = this.#app.config.userById(supplied.id);
 
-        if (user === undefined) {
-            throw new HttpError(401, "Your access was removed");
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access changed. Sign in again.");
         }
+
+        return user;
+    }
+
+    #requireCreate(supplied: User): void {
+        const user = this.#requireCurrentUser(supplied);
 
         this.#app.requireSteer(user);
 
@@ -467,61 +483,105 @@ export class Commands {
         const selection = app.projects.prepare(user, request);
         const given = optionalText(request.title, "title");
         const title = (given === undefined ? undefined : oneLine(given)) || undefined;
-        const folder = app.workspace.checkDirectory(
-            optionalText(request.cwd, "cwd") ?? selection.cwd ?? app.defaultCwd,
-        );
+        const location =
+            request.location === undefined
+                ? selection.location
+                : parseWorkspaceLocation(request.location);
+
+        const sameLocation = location?.host === selection.location?.host;
+        const askedFolder =
+            optionalText(request.cwd, "cwd") ??
+            (sameLocation ? selection.cwd : undefined) ??
+            (location === undefined ? app.defaultCwd : "~");
+
+        if (
+            user.role !== "owner" &&
+            (selection.projectId === undefined ||
+                !sameLocation ||
+                askedFolder !== selection.cwd ||
+                request.worktree === true)
+        ) {
+            throw new HttpError(
+                403,
+                "Collaborators use the shared project's fixed destination; only the owner can choose a different directory or worktree",
+            );
+        }
+
+        const folder =
+            user.role !== "owner"
+                ? selection.cwd!
+                : location === undefined
+                  ? app.workspace.checkDirectory(askedFolder)
+                  : await app.sshSessions.prepare(user, { cwd: askedFolder, location }, context);
         const now = Date.now();
-
-        return this.#inPlace(
-            folder,
-            request.worktree === true,
-            title ?? basename(folder),
-            async ({ cwd, worktree }) => {
-                this.#requireCreate(user);
-                // An internal caller about to apply a person's explicit model keeps its previous starting pair.
-                const initial = this.#defaultModel(undefined, projectDefaults ? cwd : undefined);
-                const conversation = await app.harness.createConversation(
-                    {
-                        ownership: { kind: "ownerless" },
-                        agent: {
-                            cwd,
-                            ...(initial.model === undefined ? {} : { model: initial.model }),
-                            ...(initial.thinkingLevel === undefined
-                                ? {}
-                                : { thinkingLevel: initial.thinkingLevel }),
-                        },
-                        init: async (tx, id) => {
-                            this.#requireCreate(user);
-                            const placement = await app.projects.place(tx, selection);
-                            const sessions = await tx.doc(SessionsDoc);
-
-                            sessions.items[String(id)] = {
+        const create = (backend?: WorkspaceBackend) =>
+            this.#inPlace(
+                folder,
+                request.worktree === true,
+                title ?? basename(folder),
+                async ({ cwd, worktree }) => {
+                    this.#requireCreate(user);
+                    // An internal caller about to apply a person's explicit model keeps its previous starting pair.
+                    const remoteDefault =
+                        projectDefaults &&
+                        user.role === "owner" &&
+                        location !== undefined &&
+                        app.config.defaultModel === undefined
+                            ? await app.sshSessions.modelDefault(user, location.host, cwd, context)
+                            : undefined;
+                    const initial =
+                        remoteDefault ??
+                        this.#defaultModel(
+                            undefined,
+                            projectDefaults && location === undefined ? cwd : undefined,
+                        );
+                    const conversation = await app.harness.createConversation(
+                        {
+                            ownership: { kind: "ownerless" },
+                            agent: {
                                 cwd,
-                                ...placement,
-                                createdAt: now,
-                                updatedAt: now,
-                                createdBy: user.id,
-                                ...(title === undefined ? {} : { title }),
-                                ...(worktree === undefined ? {} : { worktree }),
-                            };
+                                ...(initial.model === undefined ? {} : { model: initial.model }),
+                                ...(initial.thinkingLevel === undefined
+                                    ? {}
+                                    : { thinkingLevel: initial.thinkingLevel }),
+                            },
+                            init: async (tx, id) => {
+                                this.#requireCreate(user);
+                                const placement = await app.projects.place(tx, selection);
+                                const sessions = await tx.doc(SessionsDoc);
 
-                            if (receipt !== undefined) {
-                                const creates = await tx.doc(SessionCreatesDoc);
-
-                                creates.items[receipt.key] = {
-                                    id: Number(id),
-                                    input: receipt.input,
+                                sessions.items[String(id)] = {
+                                    cwd,
+                                    ...(location === undefined ? {} : { location }),
+                                    ...placement,
+                                    createdAt: now,
+                                    updatedAt: now,
+                                    createdBy: user.id,
+                                    ...(title === undefined ? {} : { title }),
+                                    ...(worktree === undefined ? {} : { worktree }),
                                 };
-                            }
-                        },
-                    },
-                    context,
-                );
 
-                return { id: conversation.id };
-            },
-            selection.threadType !== "chat",
-        );
+                                if (receipt !== undefined) {
+                                    const creates = await tx.doc(SessionCreatesDoc);
+
+                                    creates.items[receipt.key] = {
+                                        id: Number(id),
+                                        input: receipt.input,
+                                    };
+                                }
+                            },
+                        },
+                        context,
+                    );
+
+                    return { id: conversation.id };
+                },
+                { offline: selection.threadType !== "chat", backend },
+            );
+
+        return location !== undefined && request.worktree === true
+            ? app.sshSessions.prepare(user, { location, cwd: folder }, context, create)
+            : create();
     }
 
     /**
@@ -533,14 +593,18 @@ export class Commands {
         isolated: boolean,
         label: string,
         create: (place: Place) => Promise<T>,
-        offline: boolean | (() => boolean) = false,
+        policy: WorktreePolicy = {},
     ): Promise<T> {
         if (!isolated) {
             return create({ cwd, skipped: [] });
         }
 
-        const policy = { offline };
-        const made = await createWorktree(cwd, join(this.#app.dataDir, "worktrees"), label, policy);
+        const folder = await worktreeStorage(
+            policy.backend ?? WorkspaceBackend.local(cwd),
+            join(this.#app.dataDir, "worktrees"),
+            policy,
+        );
+        const made = await createWorktree(cwd, folder, label, policy);
 
         try {
             return await create(made);
@@ -556,6 +620,10 @@ export class Commands {
     /** Remove a session's worktree folder; its branch stays. One with uncommitted changes stays too, unless `force`. */
     async removeWorktree(id: ConversationId, user: User, force: unknown): Promise<void> {
         const app = this.#app;
+
+        if (user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can remove a thread's worktree destination");
+        }
 
         app.requireSee(user, id);
         await app.requireDriver(id, user);
@@ -581,21 +649,26 @@ export class Commands {
             await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
         }
 
-        const inside = (cwd: string) => inWorktree(worktree, cwd);
+        const backend = userWorkspaceBackend(app, id, context, user);
+        const destination = JSON.stringify(app.locationOf(id));
+        const inside = (each: ConversationId) =>
+            JSON.stringify(app.locationOf(each)) === destination
+                ? inWorktreeAt(worktree, app.cwdOf(each), backend)
+                : Promise.resolve(false);
 
-        // Anything at work there would lose its folder: this session's runs, its subagents', or another session's.
-        if (app.busyConversations().some((busy) => inside(app.cwdOf(busy)))) {
+        // Equal path strings on another destination do not share or occupy this worktree.
+        const occupied = await Promise.all(app.busyConversations().map(inside));
+
+        if (occupied.some(Boolean)) {
             throw new HttpError(409, "Pi is working in the worktree: stop it first.");
         }
 
         // A fork made without a worktree of its own works in this one.
-        const sharing = app
-            .sessions()
-            .find(
-                (session) =>
-                    !memberIds.has(session.id) &&
-                    inside(app.cwdOf(session.id as unknown as ConversationId)),
-            );
+        const candidates = app.sessions().filter((session) => !memberIds.has(session.id));
+        const shared = await Promise.all(
+            candidates.map((session) => inside(session.id as ConversationId)),
+        );
+        const sharing = candidates.find((_, index) => shared[index]);
 
         if (sharing !== undefined) {
             throw new HttpError(
@@ -604,12 +677,17 @@ export class Commands {
             );
         }
 
-        const policy = { offline: () => app.handoffs.isManaged(id) };
-        const back = await sourceFolders(worktree, policy);
-        const moves = members
-            .flatMap((member) => app.conversationsOf(member))
-            .filter((each) => inside(app.cwdOf(each)))
-            .map((each) => ({ id: each, cwd: back(app.cwdOf(each)) }));
+        const policy = { offline: () => app.handoffs.isManaged(id), backend };
+        const moves: { id: ConversationId; cwd: string }[] = [];
+
+        for (const each of members.flatMap((member) => app.conversationsOf(member))) {
+            if (await inside(each)) {
+                moves.push({
+                    id: each,
+                    cwd: await sourceFolder(worktree, app.cwdOf(each), policy),
+                });
+            }
+        }
 
         await removeWorktree(worktree, force === true, policy);
 
@@ -840,10 +918,12 @@ export class Commands {
         requestId: string;
         handoffRequestKey?: string;
     }> {
+        user = { ...user };
         const app = this.#app;
+        const initialUser = this.#requireCurrentUser(user);
 
-        app.requireSee(user, id);
-        await app.requireDriver(id, user);
+        app.requireSee(initialUser, id);
+        await app.requireDriver(id, initialUser);
 
         // PiP turned off takes nothing, from its person either: it would run without its rules, and be compacted without
         // its own summary (`pip-compact.ts`). What else goes to it (reports, schedules, watches) waits meanwhile.
@@ -865,9 +945,9 @@ export class Commands {
         const text = /^\/handoff(?:\s|$)/i.test(typed)
             ? typed
             : typed.startsWith("/skill:")
-              ? (expandSkillCommand(typed, app.skillCommands(id)) ?? typed)
+              ? (expandSkillCommand(typed, await app.skillCommands(id, user)) ?? typed)
               : typed.startsWith("/")
-                ? (expandPromptTemplate(typed, app.promptTemplates(id)) ?? typed)
+                ? (expandPromptTemplate(typed, await app.promptTemplates(id, user)) ?? typed)
                 : typed;
         const attachments = request.attachments ?? [];
 
@@ -914,7 +994,7 @@ export class Commands {
             }
 
             try {
-                parts.push(await modelImage(file.path, file.mime));
+                parts.push(await modelImage(readFileSync(file.path), file.mime));
             } catch (error) {
                 app.notice("warning", `Could not attach ${file.name}: ${describe(error)}`, id);
             }
@@ -927,6 +1007,13 @@ export class Commands {
                 : requestFor(user.id, clientKey(request.requestId));
         // A failed subagent's failure as the person writes to it: what their message comes to settles it.
         const failure = await this.#failureOf(id);
+
+        await app.requireDriver(id, this.#requireCurrentUser(user));
+        const current = this.#requireCurrentUser(user);
+
+        app.requireSee(current, id);
+        app.requireSteer(current);
+        app.spend.check(current, id);
         const submission = await conversation.submit(
             {
                 type: "input",
@@ -1091,25 +1178,30 @@ export class Commands {
     ): Promise<(TextContent | ImageContent)[]> {
         const app = this.#app;
         const parts: (TextContent | ImageContent)[] = [];
+
+        const remote = app.locationOf(id) !== undefined;
         let total = 0;
 
         for (const mention of mentionedPaths(text).slice(0, MAX_MENTIONED)) {
             let file: string | undefined;
+            let view: FileView | undefined;
 
             for (const candidate of mention.candidates) {
                 try {
-                    const resolved = app.workspace.readableFile(user, id, candidate);
+                    // Reuse the authorized Files boundary, including its namespace and read bounds.
+                    const opened = await app.workspace.viewFile(id, user, candidate);
 
-                    if (statSync(resolved).isFile()) {
-                        file = resolved;
+                    if (opened.kind !== "folder" && opened.kind !== "other") {
+                        file = opened.path;
+                        view = opened;
                         break;
                     }
                 } catch {
-                    // Not there, or not this person's to load.
+                    // Not there, or not this person's to load. Never try the other machine.
                 }
             }
 
-            if (file === undefined) {
+            if (file === undefined || view === undefined) {
                 continue;
             }
 
@@ -1117,14 +1209,16 @@ export class Commands {
                 const mime = IMAGE_MIME[extname(file).toLowerCase()];
 
                 if (mime !== undefined) {
-                    if (images && statSync(file).size <= MAX_INLINE_IMAGE) {
-                        parts.push(await modelImage(file, mime));
+                    if (images && view.kind === "image" && view.size <= MAX_INLINE_IMAGE) {
+                        const bytes = remote
+                            ? await app.workspace.imageBytes(id, user, file)
+                            : readFileSync(file);
+
+                        parts.push(await modelImage(bytes, mime));
                     }
 
                     continue;
                 }
-
-                const view = await viewFile(file);
 
                 if (view.kind !== "text" || total >= MAX_MENTIONED_TOTAL) {
                     continue;
@@ -1445,11 +1539,8 @@ export class Commands {
         }
 
         // Someone invited to one session sees files in its folder only: moving it would move what they see.
-        if (request.cwd !== undefined && user.sessions !== undefined) {
-            throw new HttpError(
-                403,
-                "You were invited to one session and cannot move it to another folder.",
-            );
+        if (request.cwd !== undefined && user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can change a thread's working directory.");
         }
 
         const conversation = await app.conversation(id);
@@ -1470,7 +1561,15 @@ export class Commands {
             "off") as ModelThinkingLevel;
         const thinkingLevel = model === undefined ? wanted : clampThinkingLevel(model, wanted);
         const cwd =
-            request.cwd === undefined ? undefined : app.workspace.checkDirectory(request.cwd);
+            request.cwd === undefined
+                ? undefined
+                : app.locationOf(id) === undefined
+                  ? app.workspace.checkDirectory(request.cwd)
+                  : await app.sshSessions.prepare(
+                        user,
+                        { cwd: request.cwd, location: app.locationOf(id)! },
+                        context,
+                    );
 
         const change = {
             ...(request.model === undefined
@@ -1489,9 +1588,15 @@ export class Commands {
                     throw new HttpError(409, "PiP is working. Change its model when it is idle.");
                 }
 
-                Object.assign(await tx.doc(AgentDoc, id), change);
+                const agent = await tx.doc(AgentDoc, id);
+
+                app.requireSee(user, id);
+                app.requireSteer(user);
+                Object.assign(agent, change);
             }, context);
         } else {
+            await app.requireDriver(id, user);
+            app.requireSee(user, id);
             await conversation.configure(change, context);
         }
 
@@ -1903,7 +2008,7 @@ export class Commands {
         user: User,
         request: { entryId?: unknown; worktree?: unknown },
     ): Promise<{ id: ConversationId }> {
-        this.#requireForkable(id, user);
+        this.#requireForkable(id, user, request.worktree);
         const entryId = entryIdOf(request.entryId);
         const entry = await this.#app.transcripts.visibleEntry(id, entryId);
 
@@ -1941,7 +2046,7 @@ export class Commands {
     ): Promise<{ id: ConversationId }> {
         const app = this.#app;
 
-        this.#requireForkable(id, user);
+        this.#requireForkable(id, user, request.worktree);
         const entryId = entryIdOf(request.entryId);
         const edited = optionalText(request.text, "text")?.trim();
         const asked = request.model as { provider?: unknown; modelId?: unknown } | undefined;
@@ -2050,8 +2155,12 @@ export class Commands {
     }
 
     /** Forks are new sessions: who may start one may fork, from a session they can see. */
-    #requireForkable(id: ConversationId, user: User): void {
+    #requireForkable(id: ConversationId, user: User, worktree?: unknown): void {
         const app = this.#app;
+
+        if (worktree === true && user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can choose a new worktree destination");
+        }
 
         app.requireSee(user, id);
         app.requireSteer(user);
@@ -2094,6 +2203,7 @@ export class Commands {
         },
     ): Promise<ConversationId> {
         const app = this.#app;
+
         const meta = app.sessionMeta(id)!;
         const source = await app.agentState(id);
         const sourceTitle = meta.title ?? "New session";
@@ -2104,7 +2214,10 @@ export class Commands {
             branch.worktree,
             title,
             (place) => this.#fork(id, user, { ...branch, title, sourceTitle, place }),
-            () => app.handoffs.isManaged(id),
+            {
+                offline: () => app.handoffs.isManaged(id),
+                backend: branch.worktree ? userWorkspaceBackend(app, id, context, user) : undefined,
+            },
         );
     }
 
@@ -2142,8 +2255,11 @@ export class Commands {
             const sessions = await tx.doc(SessionsDoc);
             const sourceMeta = sessions.items[String(id)];
 
+            this.#requireForkable(id, this.#requireCurrentUser(user));
+
             sessions.items[String(forked)] = {
                 cwd: place.cwd,
+                ...(sourceMeta?.location === undefined ? {} : { location: sourceMeta.location }),
                 title,
                 createdAt: now,
                 updatedAt: now,

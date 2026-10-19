@@ -196,6 +196,21 @@ export function loadSessionSkills(cwd: string, sources: SkillSources): Skill[] {
     }).skills;
 }
 
+/** Host-global skills for SSH workspaces: no project discovery, settings, or project trust lookup. */
+export function loadGlobalSkills(sources: SkillSources): Skill[] {
+    return loadSkills({
+        // Relative paths in host-global settings are host-home-relative, never remote-cwd-relative.
+        cwd: sources.home,
+        agentDir: sources.agentDir,
+        skillPaths: [
+            ...sources.settingsPaths,
+            join(sources.agentDir, "skills"),
+            join(sources.home, ".agents", "skills"),
+        ],
+        includeDefaults: false,
+    }).skills;
+}
+
 /** Whether Pi trusts the project a session in `cwd` works in, and the project skills that wait for it. */
 export function readProjectTrust(cwd: string, sources: SkillSources): ProjectTrust {
     const folder = canonical(cwd);

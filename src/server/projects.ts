@@ -14,6 +14,8 @@ import {
 } from "./docs.ts";
 import { HttpError } from "./errors.ts";
 import { HandoffsDoc, type ThreadType } from "./workflow-docs.ts";
+import { parseWorkspaceLocation, type WorkspaceLocation } from "./workspace-location.ts";
+import { projectGranted } from "./project-access.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_NAME = 160;
@@ -23,6 +25,7 @@ export type ProjectSelection = {
     projectId?: string;
     threadType: ThreadType;
     cwd?: string;
+    location?: WorkspaceLocation;
 };
 
 export type ProjectPlacement = { projectId?: string; threadType: ThreadType };
@@ -30,8 +33,13 @@ export type SelectProject = {
     projectId?: unknown;
     threadType?: unknown;
 };
-export type CreateProject = { name?: unknown; cwd?: unknown; requestId?: unknown };
-export type UpdateProject = { name?: unknown; cwd?: unknown };
+export type CreateProject = {
+    name?: unknown;
+    cwd?: unknown;
+    location?: unknown;
+    requestId?: unknown;
+};
+export type UpdateProject = { name?: unknown; cwd?: unknown; location?: unknown };
 export type AssignProject = { projectId?: unknown };
 
 function empty(): ProjectsData {
@@ -96,7 +104,14 @@ function selection(
     return {
         ...(projectId === undefined ? {} : { projectId }),
         threadType,
-        ...(selectedProject === undefined ? {} : { cwd: selectedProject.cwd }),
+        ...(selectedProject === undefined
+            ? {}
+            : {
+                  cwd: selectedProject.cwd,
+                  ...(selectedProject.location === undefined
+                      ? {}
+                      : { location: selectedProject.location }),
+              }),
     };
 }
 
@@ -122,7 +137,7 @@ export class Projects {
     #person(supplied: User): User {
         const user = this.#app.config.userById(supplied.id);
 
-        if (user === undefined) {
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
             throw new HttpError(401, "Your access was removed");
         }
 
@@ -134,11 +149,8 @@ export class Projects {
 
         this.#app.requireSteer(user);
 
-        if (user.sessions !== undefined) {
-            throw new HttpError(
-                403,
-                "You were invited to particular sessions and cannot edit projects",
-            );
+        if (user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can manage projects and their destinations");
         }
 
         return user;
@@ -153,6 +165,46 @@ export class Projects {
         }
     }
 
+    canAccess(supplied: User, id: string): boolean {
+        const user = this.#app.config.userById(supplied.id);
+        const item = Object.hasOwn(this.#doc.projects, id) ? this.#doc.projects[id] : undefined;
+
+        return (
+            user !== undefined &&
+            user.tokenHash === supplied.tokenHash &&
+            item !== undefined &&
+            user.sessions === undefined &&
+            projectGranted(user, item)
+        );
+    }
+
+    /** Machine/local selectors never expose an old thread pinned to a different namespace. */
+    canAccessThread(user: User, meta: SessionMeta): boolean {
+        if (meta.projectId === undefined || !this.canAccess(user, meta.projectId)) {
+            return false;
+        }
+
+        const current = this.#app.config.userById(user.id)!;
+
+        return projectGranted(current, { id: meta.projectId, location: meta.location });
+    }
+
+    #creator(supplied: User, selected: ProjectSelection): User {
+        const user = this.#person(supplied);
+
+        this.#app.requireSteer(user);
+
+        if (
+            user.sessions !== undefined ||
+            (user.role !== "owner" &&
+                (selected.projectId === undefined || !this.canAccess(user, selected.projectId)))
+        ) {
+            throw new HttpError(403, "Choose a project the owner has shared with you");
+        }
+
+        return user;
+    }
+
     list(supplied: User): { projects: Project[] } {
         const user = this.#person(supplied);
         const scoped = user.sessions !== undefined;
@@ -162,12 +214,13 @@ export class Projects {
                 .flatMap((item) => (item.projectId === undefined ? [] : [item.projectId])),
         );
         const projects = Object.values(this.#doc.projects)
-            .filter((item) => !scoped || projectIds.has(item.id))
+            .filter((item) => (scoped ? projectIds.has(item.id) : this.canAccess(user, item.id)))
             .map((item): Project => {
                 const copy: Project = { ...item };
 
                 if (scoped) {
                     delete copy.cwd;
+                    delete copy.location;
                 }
 
                 return copy;
@@ -177,11 +230,31 @@ export class Projects {
     }
 
     async create(supplied: User, request: CreateProject): Promise<{ id: string }> {
+        supplied = { ...supplied };
         const user = this.#editor(supplied);
         const name = text(request.name, "name", MAX_NAME);
         const askedCwd = text(request.cwd, "cwd", 4096);
         const key = digest([user.id, text(request.requestId, "requestId", 160)]);
-        const fingerprint = digest([name, askedCwd]);
+        const location = parseWorkspaceLocation(request.location);
+        const fingerprint = digest(
+            location === undefined ? [name, askedCwd] : [name, askedCwd, location],
+        );
+        const previous = this.#doc.requests[key];
+
+        // A committed retry needs no SSH connection. The transaction below still arbitrates
+        // concurrent first attempts after preparation, without holding the global mutation line.
+        if (previous !== undefined) {
+            if (previous.fingerprint !== fingerprint) {
+                throw new HttpError(409, "This requestId was already used for another project");
+            }
+
+            return { id: previous.id };
+        }
+
+        const cwd =
+            location === undefined
+                ? this.#app.workspace.checkDirectory(askedCwd)
+                : await this.#app.sshSessions.prepare(user, { cwd: askedCwd, location }, context);
 
         return this.#app.harness.commit(async (tx) => {
             const doc = await tx.doc(ProjectsDoc);
@@ -201,7 +274,6 @@ export class Projects {
                 throw new HttpError(413, "The project creation request limit has been reached");
             }
 
-            const cwd = this.#app.workspace.checkDirectory(askedCwd);
             const id = `p-${randomUUID()}`;
             const now = Date.now();
 
@@ -209,6 +281,7 @@ export class Projects {
                 id,
                 name,
                 cwd,
+                ...(location === undefined ? {} : { location }),
                 createdAt: now,
                 updatedAt: now,
                 createdBy: current.id,
@@ -220,17 +293,46 @@ export class Projects {
     }
 
     async update(supplied: User, id: string, request: UpdateProject): Promise<void> {
-        this.#editor(supplied);
+        supplied = { ...supplied };
+        const user = this.#editor(supplied);
         const name = request.name === undefined ? undefined : text(request.name, "name", MAX_NAME);
         const askedCwd = request.cwd === undefined ? undefined : text(request.cwd, "cwd", 4096);
+        const original = project(this.#doc, id);
+        const originalCwd = original.cwd;
+        const originalLocation = JSON.stringify(original.location);
+        const location =
+            request.location === undefined
+                ? original.location
+                : parseWorkspaceLocation(request.location);
+        const changedLocation = request.location !== undefined;
+        const path = askedCwd ?? (changedLocation ? originalCwd : undefined);
+        const cwd =
+            path === undefined
+                ? undefined
+                : location === undefined
+                  ? this.#app.workspace.checkDirectory(path)
+                  : await this.#app.sshSessions.prepare(user, { cwd: path, location }, context);
 
         await this.#app.harness.commit(async (tx) => {
             const doc = await tx.doc(ProjectsDoc);
 
             this.#editor(supplied);
             const item = project(doc, id);
-            const cwd =
-                askedCwd === undefined ? undefined : this.#app.workspace.checkDirectory(askedCwd);
+
+            if (
+                path !== undefined &&
+                (item.cwd !== originalCwd || JSON.stringify(item.location) !== originalLocation)
+            ) {
+                throw new HttpError(409, "The project folder changed. Reload before editing it.");
+            }
+
+            if (changedLocation) {
+                if (location === undefined) {
+                    delete item.location;
+                } else {
+                    item.location = location;
+                }
+            }
 
             if (name !== undefined) {
                 item.name = name;
@@ -248,8 +350,8 @@ export class Projects {
 
     /** Validate before worktree creation without creating a conversation. */
     prepare(supplied: User, request: SelectProject): ProjectSelection {
-        const user = this.#editor(supplied);
         const prepared = Object.freeze(selection(this.#doc, request, this.#app.defaultStarter()));
+        const user = this.#creator(supplied, prepared);
 
         this.#requireStarter(prepared.threadType);
         this.#prepared.set(prepared, user.id);
@@ -281,12 +383,16 @@ export class Projects {
             throw new HttpError(401, "Your access was removed");
         }
 
-        this.#editor(user);
         const current = selection(doc, prepared);
+
+        this.#creator(user, current);
 
         this.#requireStarter(current.threadType);
 
-        if (current.cwd !== prepared.cwd) {
+        if (
+            current.cwd !== prepared.cwd ||
+            JSON.stringify(current.location) !== JSON.stringify(prepared.location)
+        ) {
             throw new HttpError(409, "The project folder changed; try starting the session again");
         }
 

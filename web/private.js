@@ -75,12 +75,18 @@ function snapshots(path, interval) {
     const listeners = new Set();
     const available = () => awake() && !departed;
     const emit = () => listeners.forEach((listener) => listener(state));
+
     const update = (next) => {
-        if (next.data !== state.data || next.error !== state.error || next.paused !== state.paused) {
+        if (
+            next.data !== state.data ||
+            next.error !== state.error ||
+            next.paused !== state.paused
+        ) {
             state = next;
             emit();
         }
     };
+
     const eligible = () => listeners.size > 0 && owner() !== null && available();
 
     const reset = () => {
@@ -158,10 +164,12 @@ function snapshots(path, interval) {
         update({ ...state, paused: !available() });
         refresh();
     };
+
     const hide = () => {
         departed = true;
         wake();
     };
+
     const show = () => {
         departed = false;
 

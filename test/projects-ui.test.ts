@@ -448,6 +448,14 @@ async function chooseProject(page: BrowserPage, name: string) {
 
 async function destination(page: BrowserPage, cwd: string) {
     assert.equal(
+        await value(
+            page,
+            `document.querySelector('${panel} select[aria-label="Working location"]')`,
+        ),
+        null,
+        "starting from a project does not mount destination or SSH controls until Change",
+    );
+    assert.equal(
         await value(page, `document.querySelector('${panel} .session-path .mono').title`),
         cwd,
         "new sessions display the project's default cwd, not the open thread's cwd",
@@ -767,6 +775,8 @@ test(
                     await click(page, `${scope} .new-button[aria-label="New session"]`);
                     await present(page, panel);
                     await fill(page, `${panel} ${projectNameField}`, initialName);
+                    await present(page, `${panel} ${projectPathField}`, false);
+                    await button(page, `${panel} .project-form .session-path`, "Change");
                     await fill(page, `${panel} ${projectPathField}`, cwd);
                     await button(page, `${panel} .project-form`, "Create project");
                     await chooseProject(page, initialName);
@@ -932,9 +942,9 @@ test(
 
                     await destination(page, cwd);
                     await button(page, `${panel} .session-path`, "Change");
-                    await present(page, `${panel} .dir-list`);
+                    await present(page, `${panel} select[aria-label="Working location"]`);
                     await fill(page, `${panel} input[aria-label="Working directory"]`, override);
-                    await button(page, panel, `Use ${override}`);
+                    await button(page, `${panel} .session-path`, "Done");
                     await destination(page, override);
                     const second = await start(page, app, "Worker");
 

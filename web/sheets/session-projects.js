@@ -1,10 +1,13 @@
-// Start new chooses organization first; the server resolves a project's default cwd.
+// Start new chooses organization first; destination controls stay behind Change.
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useBack } from "../back.js";
 import { actions, insertIntoComposer, navigate, store, uid } from "../store.js";
 import { ThreadTypeTag, threadTypeLabel } from "../thread-type.js";
-import { html, Icon, Loader, shortPath } from "../ui.js";
-import { FolderPicker } from "./folder.js";
+import { html, Icon, Loader } from "../ui.js";
+import { ProjectFilters, projectsMatchingFilter } from "../project-access.js";
+import { rememberSshFolder } from "../workspace-location.js";
+import { WorkspaceField } from "../workspace-field.js";
+import { RemoteProjectIcon } from "../ssh-status.js";
 import { ProjectForm } from "./project.js";
 
 export function ProjectSessionPanel({
@@ -14,35 +17,64 @@ export function ProjectSessionPanel({
     visible,
     onBusyChange,
 }) {
-    const { projects, projectsLoaded, server } = store.state;
+    const { projects, projectsLoaded, server, me } = store.state;
+    const owner = me?.role === "owner";
+    const [filter, setFilter] = useState("all");
     const [projectId, setProjectId] = useState(initialProjectId ?? null);
-    const [chat, setChat] = useState(false);
+    const [chatChoice, setChat] = useState(false);
+    const chat = owner && chatChoice;
     const starters = (server?.agentProfiles ?? []).filter((profile) => profile.starter);
     const defaultStarter = starters.find((profile) => profile.id !== "chat")?.id;
     const [threadType, setThreadType] = useState(defaultStarter ?? "chat");
     const [creating, setCreating] = useState(false);
     const [override, setOverride] = useState(initialCwd ?? null);
-    const [browse, setBrowse] = useState(false);
+    const [locationOverride, setLocationOverride] = useState(undefined);
     const [worktree, setWorktree] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const requestId = useRef(uid());
     const project = projects.find((each) => each.id === projectId);
-    const cwd = override ?? (!chat ? project?.cwd : null) ?? server?.defaultCwd ?? "~";
+    const location =
+        !owner || locationOverride === undefined
+            ? !chat
+                ? (project?.location ?? null)
+                : null
+            : locationOverride;
+    const remote = location?.kind === "ssh";
+    const locationReady = !remote || (server?.sshWorkspaces >= 1 && location.host.trim());
+    const cwd =
+        (owner ? override : null) ??
+        (!chat ? project?.cwd : null) ??
+        (remote ? "~" : server?.defaultCwd) ??
+        "~";
     const noProjects = projectsLoaded && projects.length === 0;
     const typeLabel = threadTypeLabel({ threadType });
     const profiles = starters.filter((profile) => chat || profile.id !== "chat");
     const profileAvailable = profiles.some((profile) => profile.id === threadType);
+    const listed = projectsMatchingFilter(projects, filter);
+
+    const changeLocation = (next, path) => {
+        if (JSON.stringify(next ?? null) !== JSON.stringify(location ?? null)) {
+            setWorktree(false);
+        }
+
+        setLocationOverride(next);
+        setOverride(path);
+        setError("");
+        requestId.current = uid();
+    };
 
     const leaveChat = () => {
         setChat(false);
+        setLocationOverride(undefined);
+        setOverride(initialCwd ?? null);
+        setWorktree(false);
         setThreadType(defaultStarter ?? "chat");
         requestId.current = uid();
     };
 
     useBack(visible && chat, leaveChat);
     useBack(visible && creating, () => setCreating(false));
-    useBack(visible && browse, () => setBrowse(false));
 
     const reload = () => {
         setError("");
@@ -57,7 +89,14 @@ export function ProjectSessionPanel({
 
     const chooseProject = (id) => {
         setProjectId(id);
+        setLocationOverride(undefined);
         setOverride(initialCwd ?? null);
+        setWorktree(false);
+
+        if (threadType === "chat") {
+            setThreadType(defaultStarter ?? "chat");
+        }
+
         setError("");
         requestId.current = uid();
     };
@@ -65,14 +104,22 @@ export function ProjectSessionPanel({
     const chooseChat = () => {
         setChat(true);
         setThreadType("chat");
+        setLocationOverride(null);
+        setWorktree(false);
         setCreating(false);
         setOverride(initialCwd ?? null);
-        setBrowse(false);
         requestId.current = uid();
     };
 
     const start = async () => {
-        if (busy || !profileAvailable || (!chat && !project)) {
+        if (
+            me?.role === "viewer" ||
+            busy ||
+            !locationReady ||
+            !cwd.trim() ||
+            !profileAvailable ||
+            (!chat && !project)
+        ) {
             return;
         }
 
@@ -81,12 +128,18 @@ export function ProjectSessionPanel({
         setError("");
 
         try {
-            const created = await actions.createSession(override ?? undefined, {
+            // Pin the displayed destination, even if the project default changes while this is open.
+            const created = await actions.createSession(cwd, {
+                location,
                 threadType,
                 ...(!chat ? { projectId } : {}),
-                worktree,
+                worktree: owner && worktree,
                 requestId: requestId.current,
             });
+
+            if (owner) {
+                rememberSshFolder(location, cwd);
+            }
 
             navigate(created.id);
 
@@ -101,7 +154,7 @@ export function ProjectSessionPanel({
         }
     };
 
-    if (!chat && (creating || noProjects)) {
+    if (owner && !chat && (creating || noProjects)) {
         return html`<div class="project-session-flow">
             <${ProjectForm}
                 visible=${visible}
@@ -115,11 +168,7 @@ export function ProjectSessionPanel({
                     setCreating(false);
                 }}
             />
-            <button
-                class="button wide one-time-chat-button"
-                disabled=${busy}
-                onClick=${chooseChat}
-            >
+            <button class="button wide one-time-chat-button" disabled=${busy} onClick=${chooseChat}>
                 <${Icon} name="chat" size=${16} /> Start a one-time chat
             </button>
         </div>`;
@@ -136,7 +185,14 @@ export function ProjectSessionPanel({
                 disabled=${busy}
                 onClick=${() => chooseProject(each.id)}
             >
-                <span><${Icon} name="folder" size=${16} /> ${each.name}</span>
+                <span>
+                    ${
+                        each.location?.kind === "ssh"
+                            ? html`<${RemoteProjectIcon} location=${each.location} />`
+                            : html`<${Icon} name="folder" size=${16} />`
+                    }
+                    ${each.name}
+                </span>
                 <${Icon} name=${selected ? "down" : "chevron"} size=${14} />
             </button>
         </section>`;
@@ -146,106 +202,114 @@ export function ProjectSessionPanel({
         ${
             chat
                 ? html`<div class="one-time-chat">
-                    <button class="button small" disabled=${busy} onClick=${leaveChat}>
-                        <${Icon} name="back" size=${14} /> Projects
-                    </button>
-                    <p>A one-time ${typeLabel} stays outside projects.</p>
-                </div>`
+                      <button class="button small" disabled=${busy} onClick=${leaveChat}>
+                          <${Icon} name="back" size=${14} /> Projects
+                      </button>
+                  </div>`
                 : html`
-                    <p class="muted small">Choose a project for this ${typeLabel}.</p>
-                    ${!projectsLoaded && !error && html`<${Loader} label="Loading projects" />`}
-                    ${
-                        projectsLoaded &&
-                        projects.length === 0 &&
-                        html`<p class="muted">No projects yet. Create one with a name and default working directory.</p>`
-                    }
-                    <div class="project-choices">${projects.map(renderProject)}</div>
-                    <button class="button" disabled=${busy} onClick=${() => setCreating(true)}>
-                        <${Icon} name="plus" size=${15} /> New Project
-                    </button>
-                `
+                      ${!projectsLoaded && !error && html`<${Loader} label="Loading projects" />`}
+                      <${ProjectFilters}
+                          projects=${projects}
+                          filter=${filter}
+                          onChange=${setFilter}
+                          disabled=${busy}
+                      />
+                      <div class="project-choices">${listed.map(renderProject)}</div>
+                      ${
+                          noProjects &&
+                          html`<p class="muted small">
+                              No project access yet. Ask the owner to grant a project before starting a thread.
+                          </p>`
+                      }
+                      ${
+                          projectsLoaded &&
+                          !noProjects &&
+                          listed.length === 0 &&
+                          html`<p class="muted small">
+                              No projects match this filter. Choose another machine.
+                          </p>`
+                      }
+                      ${
+                          owner &&
+                          html`<button class="button" disabled=${busy} onClick=${() => setCreating(true)}>
+                              <${Icon} name="plus" size=${15} /> New Project
+                          </button>`
+                      }
+                  `
         }
         ${
             (chat || project) &&
             html`<div class="session-destination">
-                ${html`<label>
-                        <span class="label">Thread type</span>
-                        <select
-                            aria-label="Thread type"
-                            value=${threadType}
-                            disabled=${busy}
-                            onChange=${(event) => {
-                                setThreadType(event.currentTarget.value);
-                                setError("");
-                                requestId.current = uid();
-                            }}
-                        >
-                            ${!profileAvailable && html`<option value=${threadType} disabled>${typeLabel} (unavailable)</option>`}
-                            ${profiles.map((profile) => html`<option value=${profile.id}>${profile.name}</option>`)}
-                        </select>
-                    </label>`}
-                ${profiles.find((profile) => profile.id === threadType)?.description && html`<p class="muted small">${profiles.find((profile) => profile.id === threadType).description}</p>`}
-                ${
-                    !chat &&
-                    html`<p class="small">
-                        <b>${project.name}</b>
-                    </p>`
-                }
-                <div class="session-path">
-                    <span class="mono" title=${cwd}>${shortPath(cwd, server?.home)}</span>
-                    <button class="button small" disabled=${busy} onClick=${() => setBrowse(!browse)}>
-                        ${browse ? "Hide" : "Change"}
-                    </button>
-                    ${
-                        override !== null &&
-                        html`<button
-                            class="button small"
-                            disabled=${busy}
-                            onClick=${() => {
-                                setOverride(null);
-                                requestId.current = uid();
-                            }}
-                        >
-                            Default
-                        </button>`
-                    }
-                </div>
-                ${
-                    browse &&
-                    html`<${FolderPicker}
-                        mode="pick"
-                        initialPath=${cwd}
-                        onUse=${(path) => {
-                            setOverride(path);
-                            setBrowse(false);
-                            requestId.current = uid();
-                        }}
-                    />`
-                }
-                <label class="check">
-                    <input
-                        type="checkbox"
-                        checked=${worktree}
+                <label>
+                    <span class="label">Thread type</span>
+                    <select
+                        aria-label="Thread type"
+                        value=${threadType}
                         disabled=${busy}
                         onChange=${(event) => {
-                            setWorktree(event.currentTarget.checked);
+                            setThreadType(event.currentTarget.value);
+                            setError("");
                             requestId.current = uid();
                         }}
-                    /> In a git worktree of its own: a branch, apart from this folder
+                    >
+                        ${!profileAvailable && html`<option value=${threadType} disabled>${typeLabel} (unavailable)</option>`}
+                        ${profiles.map((profile) => html`<option value=${profile.id}>${profile.name}</option>`)}
+                    </select>
                 </label>
-                ${!profileAvailable && html`<p class="error" role="status">This agent profile is unavailable. Enable its workflow extension or select another available starter.</p>`}
-                <button class="button primary wide" disabled=${busy || !profileAvailable} onClick=${start}>
-                    <${ThreadTypeTag} session=${{ threadType }} iconOnly=${true} /> ${busy ? "Starting…" : `Start ${typeLabel}`}
+                <${WorkspaceField}
+                    key=${chat ? "chat" : projectId}
+                    location=${location}
+                    cwd=${cwd}
+                    visible=${visible}
+                    disabled=${busy}
+                    onChange=${changeLocation}
+                    onReset=${
+                        owner && (override !== null || locationOverride !== undefined)
+                            ? () => {
+                                  setOverride(null);
+                                  setLocationOverride(undefined);
+                                  setWorktree(false);
+                                  requestId.current = uid();
+                              }
+                            : undefined
+                    }
+                >
+                    ${
+                        owner &&
+                        html`<label class="check" title="Create a branch and checkout of its own">
+                            <input
+                                type="checkbox"
+                                checked=${worktree}
+                                disabled=${busy}
+                                onChange=${(event) => {
+                                    setWorktree(event.currentTarget.checked);
+                                    requestId.current = uid();
+                                }}
+                            /> Own Git worktree
+                        </label>`
+                    }
+                <//>
+                ${owner && worktree && html`<span class="muted small">Own Git worktree</span>`}
+                ${
+                    !profileAvailable &&
+                    html`<p class="error" role="status">
+                        This agent profile is unavailable. Choose another thread type.
+                    </p>`
+                }
+                <button
+                    class="button primary wide"
+                    disabled=${me?.role === "viewer" || busy || !locationReady || !cwd.trim() || !profileAvailable}
+                    onClick=${start}
+                >
+                    <${ThreadTypeTag} session=${{ threadType }} iconOnly=${true} />
+                    ${busy ? "Starting…" : `Start ${typeLabel}`}
                 </button>
             </div>`
         }
         ${
+            owner &&
             !chat &&
-            html`<button
-                class="button wide one-time-chat-button"
-                disabled=${busy}
-                onClick=${chooseChat}
-            >
+            html`<button class="button wide one-time-chat-button" disabled=${busy} onClick=${chooseChat}>
                 <${Icon} name="chat" size=${16} /> Start a one-time chat
             </button>`
         }

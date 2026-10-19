@@ -12,7 +12,10 @@ Usage: pi-coop [options]
                         local       this device only
                         lan         devices on the same network (http)
                         cloudflare  anywhere, through a Cloudflare quick tunnel (https)
-                        tailscale   devices on your tailnet
+                        tailscale   devices on your tailnet (http)
+                        tailscale-https  private https using a Tailscale certificate
+                      HTTPS needs MagicDNS and HTTPS certificates enabled in Tailscale.
+                      Issuing a certificate publicly logs this device's full .ts.net name.
                       Without it, a menu asks (in a terminal) or the last choice is used.
   -y, --yes           Use the last choice without asking
   -p, --port N        Port (default 8787)

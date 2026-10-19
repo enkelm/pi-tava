@@ -2,6 +2,8 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync, readlinkSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord";
+import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
 import type { PocketApp } from "../app.ts";
 import type { User } from "../config.ts";
 import { HttpError } from "../errors.ts";
@@ -26,6 +28,38 @@ export interface ApiRequest {
     readonly response: ServerResponse;
     readonly url: URL;
     readonly user: User;
+}
+
+/** Tie read work to its HTTP reader. Await the operation's own cleanup rather than racing it away. */
+export async function withReadContext<T>(
+    { request, response }: Pick<ApiRequest, "request" | "response">,
+    operation: (context: Context) => Promise<T>,
+): Promise<T> {
+    const pending = withCancel(BACKGROUND_CONTEXT);
+    const cancel = () => pending.cancel();
+
+    const close = () => {
+        if (!response.writableFinished) {
+            cancel();
+        }
+    };
+
+    request.once("aborted", cancel);
+    response.once("close", close);
+
+    if (request.aborted || response.destroyed) {
+        cancel();
+    }
+
+    try {
+        pending.context.abortSignal?.throwIfAborted();
+
+        return await operation(pending.context);
+    } finally {
+        request.off("aborted", cancel);
+        response.off("close", close);
+        pending.cancel();
+    }
 }
 
 export function send(

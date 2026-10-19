@@ -9,7 +9,7 @@ import { fingerprint, firstLine, hunkRows, markRanges, parseDiff } from "./diff-
 import { highlight, highlightLines, langOf } from "./highlight.js";
 import { ReviewsPanel, ReviewThreads } from "./reviews.js";
 import { branchAvailable } from "./sheets/branch.js";
-import { actions, attempt, canSteer, notify, openSheet, store } from "./store.js";
+import { actions, api, attempt, canSteer, notify, openSheet, store } from "./store.js";
 import { html, Icon, Loader, openFile, shortPath } from "./ui.js";
 
 // ─── Preferences ────────────────────────────────────────────────────────────────────
@@ -140,27 +140,31 @@ function useFileText(path, key, wanted, reviewPath = null) {
             return;
         }
 
+        const controller = new AbortController();
         let live = true;
 
         const keep = (lines) => {
+            if (!live) {
+                return;
+            }
+
             if (fileTexts.size >= FILE_TEXTS) {
                 fileTexts.delete(fileTexts.keys().next().value);
             }
 
             fileTexts.set(id, lines);
-
-            if (live) {
-                setRead((count) => count + 1);
-            }
+            setRead((count) => count + 1);
         };
 
         // Review context is a bounded, complete-text read of this changed file, not generic Files access.
         // Other diff consumers keep the usual file reader, but cut-short text cannot reveal omitted lines.
         const read =
             reviewPath !== null
-                ? actions.reviewContext(conversationId, reviewPath).then((file) => file.text)
+                ? actions
+                      .reviewContext(conversationId, reviewPath, { signal: controller.signal })
+                      .then((file) => file.text)
                 : actions
-                      .view(path)
+                      .view(path, { signal: controller.signal })
                       .then((file) =>
                           file.kind === "text" && !file.truncated ? file.text : false,
                       );
@@ -172,6 +176,7 @@ function useFileText(path, key, wanted, reviewPath = null) {
 
         return () => {
             live = false;
+            controller.abort();
         };
     }, [wanted, id]);
 
@@ -1115,17 +1120,42 @@ const BUSY_WAIT = 4000;
 /** While Pi works, the longest the changes go without being read again. */
 const BUSY_MAX = 8000;
 
-/** What changed, per conversation: the last answer, and the request on its way, shared by everything that shows it. */
+/** One answer, request and refresh lifecycle for all readers of this caller/conversation/folder. */
 const changesCache = new Map();
+const changesReaders = new Map();
 
 const commentsEnabled = () => store.state.server?.localReviews >= 2;
 const reviewCwd = () => store.state.view.agent?.cwd ?? store.state.view.conversation?.cwd ?? "";
-const changesKey = (id) =>
-    `${id}\u0000${commentsEnabled() ? "review" : "working"}\u0000${reviewCwd()}`;
 
-/** Ask again for scoped Changes, using review-only reads for everyone on new servers. */
+const changesScope = () => {
+    const user = store.state.me;
+
+    return user ? JSON.stringify([user.id, user.role, user.sessions ?? null]) : null;
+};
+
+const changesKey = (id) =>
+    `${id}\u0000${changesScope()}\u0000${commentsEnabled() ? "review" : "working"}\u0000${reviewCwd()}`;
+const changesAllowed = () => Boolean(store.state.me) && (commentsEnabled() || canSteer());
+let changesUser = changesScope();
+let changesDeparted = false;
+let changesWatch = null;
+let changesTimer = null;
+const changesAwake = () => !changesDeparted && !document.hidden && navigator.onLine !== false;
+
+function stopChangesRead(known) {
+    known.controller?.abort();
+    known.controller = null;
+    known.pending = null;
+}
+
+function clearChangesTimer() {
+    clearTimeout(changesTimer);
+    changesTimer = null;
+}
+
+/** Ask again for the current scoped Changes. Explicit Refresh bypasses freshness, not page/access fences. */
 export function reloadChanges(id = store.state.conversationId) {
-    if (id === null || (!commentsEnabled() && !canSteer())) {
+    if (id === null || id !== store.state.conversationId || !changesAllowed() || !changesAwake()) {
         return Promise.resolve();
     }
 
@@ -1136,76 +1166,165 @@ export function reloadChanges(id = store.state.conversationId) {
         return known.pending;
     }
 
-    // The conversation's newest entry when it asked: nothing newer, and Pi quiet, what it said still holds.
-    const entry = id === store.state.conversationId ? store.state.view.order?.at(-1) : undefined;
-    const read = commentsEnabled() ? actions.reviewChanges(id) : actions.changes(id);
+    const controller = new AbortController();
+    const entry = store.state.view.order?.at(-1);
+    const busy = Boolean(store.state.view.live?.busy);
+    const current = () =>
+        !controller.signal.aborted &&
+        changesCache.get(key) === known &&
+        id === store.state.conversationId &&
+        key === changesKey(id) &&
+        changesAllowed();
 
-    known.pending = read.then(
-        (data) => Object.assign(known, { data, error: null, pending: null, at: Date.now(), entry }),
-        (failure) => Object.assign(known, { error: failure.message, pending: null }),
-    );
+    known.controller = controller;
     changesCache.set(key, known);
-    known.pending.finally(() => store.set({}));
+    known.pending = api(`c/${id}/${commentsEnabled() ? "reviews/changes" : "changes"}`, undefined, {
+        signal: controller.signal,
+    })
+        .then(
+            (data) => {
+                if (current()) {
+                    Object.assign(known, { data, error: null });
+                }
+            },
+            (failure) => {
+                if (current()) {
+                    known.error = failure.message;
+                }
+            },
+        )
+        .finally(() => {
+            if (current()) {
+                Object.assign(known, {
+                    pending: null,
+                    controller: null,
+                    at: Date.now(),
+                    entry,
+                    busy,
+                });
+                store.set({});
+            }
+        });
+    clearChangesTimer();
 
     return known.pending;
 }
 
+/** Store and page events update one debounce, independent of how many UI surfaces show Changes. */
+function syncChanges() {
+    const scope = changesScope();
+    const id = store.state.conversationId;
+    const key = changesKey(id);
+    const awake = changesAwake() && id !== null && changesAllowed();
+
+    if (scope !== changesUser) {
+        changesUser = scope;
+
+        for (const known of changesCache.values()) {
+            stopChangesRead(known);
+        }
+
+        changesCache.clear();
+    }
+
+    for (const [cached, known] of changesCache) {
+        if (!awake || cached !== key) {
+            stopChangesRead(known);
+        }
+    }
+
+    if (!awake || !changesReaders.has(key)) {
+        clearChangesTimer();
+        changesWatch = null;
+
+        return;
+    }
+
+    const entry = store.state.view.order?.at(-1);
+    const busy = Boolean(store.state.view.live?.busy);
+
+    if (changesWatch?.key !== key) {
+        changesWatch = { key, entry, busy };
+        // A new active conversation or foreground return checks external edits once, not once per consumer.
+        reloadChanges(id);
+
+        return;
+    }
+
+    if (entry !== changesWatch.entry || busy !== changesWatch.busy) {
+        clearChangesTimer();
+        Object.assign(changesWatch, { entry, busy });
+    }
+
+    const known = changesCache.get(key);
+
+    if (known?.pending || (known?.entry === entry && known?.busy === busy)) {
+        clearChangesTimer();
+
+        return;
+    }
+
+    if (changesTimer === null) {
+        // Moving entries debounce together, with a maximum wait while Pi keeps working. No idle polling.
+        const since = Date.now() - (known?.at ?? Date.now());
+        const wait = busy ? Math.max(0, Math.min(BUSY_WAIT, BUSY_MAX - since)) : QUIET_WAIT;
+
+        changesTimer = setTimeout(() => {
+            changesTimer = null;
+            reloadChanges(id);
+        }, wait);
+    }
+}
+
+store.subscribe(syncChanges);
+document.addEventListener("visibilitychange", syncChanges);
+addEventListener("online", syncChanges);
+addEventListener("offline", syncChanges);
+addEventListener("pagehide", () => {
+    changesDeparted = true;
+    syncChanges();
+});
+addEventListener("pageshow", () => {
+    changesDeparted = false;
+    syncChanges();
+});
+
 /**
- * What changed in this conversation's folder, `{ changes, error }`, fetched and kept current only while `live`.
- * Review readers use the cwd-scoped endpoint; older servers still require steering.
- * A tab out of sight waits until it shows again; with nothing new since the last answer and Pi quiet, the answer
- * holds (Refresh asks again).
+ * What changed in this conversation's folder, shared by the header, Files and Changes. `live` registers interest;
+ * the first active reader owns no special timer or forced read. Hidden/offline/departed pages suspend the shared
+ * lifecycle; returning checks once. Caller, folder and review/working namespaces never share answers.
  */
 export function useChanges(live = true) {
     const id = store.state.conversationId;
     const key = changesKey(id);
-    const allowed = commentsEnabled() || canSteer();
+    const allowed = changesAllowed();
     const known = allowed ? changesCache.get(key) : null;
-    const lastEntry = store.state.view.order?.at(-1);
-    const busy = store.state.view.live?.busy;
 
     useEffect(() => {
-        if (live && allowed && !changesCache.get(key)?.data) {
-            reloadChanges(id);
-        }
-    }, [key, live, allowed]);
-    // The first look after it shows (or turns live) always asks: the folder can have changed outside the conversation
-    // (an editor, a terminal, another session), and so can it while the tab was out of sight.
-    const first = useRef(true);
-
-    useEffect(() => {
-        if (!live || !allowed) {
-            first.current = true;
-
+        if (!live || !allowed || id === null) {
             return;
         }
 
-        const look = (always) => {
-            const known = changesCache.get(key);
-
-            if (document.hidden || (!always && !busy && known?.data && known.entry === lastEntry)) {
-                return;
-            }
-
-            reloadChanges(id);
-        };
-
-        const shown = () => !document.hidden && look(true);
-        // While Pi works, entries come quickly: look less often then, but at least every few seconds.
-        const since = Date.now() - (changesCache.get(key)?.at ?? 0);
-        const wait = busy ? Math.max(0, Math.min(BUSY_WAIT, BUSY_MAX - since)) : QUIET_WAIT;
-        const timer = setTimeout(() => {
-            look(first.current);
-            first.current = false;
-        }, wait);
-
-        document.addEventListener("visibilitychange", shown);
+        changesReaders.set(key, (changesReaders.get(key) ?? 0) + 1);
+        syncChanges();
 
         return () => {
-            clearTimeout(timer);
-            document.removeEventListener("visibilitychange", shown);
+            const readers = changesReaders.get(key) - 1;
+
+            if (readers > 0) {
+                changesReaders.set(key, readers);
+            } else {
+                changesReaders.delete(key);
+                const known = changesCache.get(key);
+
+                if (known) {
+                    stopChangesRead(known);
+                }
+            }
+
+            syncChanges();
         };
-    }, [lastEntry, busy, live, key, allowed]);
+    }, [key, live, allowed]);
 
     return { changes: known?.data ?? null, error: known?.error ?? null };
 }
@@ -1261,14 +1380,30 @@ const DIFF_FETCHES = 4;
 let fetching = 0;
 const waiting = [];
 
-function fetchDiff(id, path, review = commentsEnabled()) {
+function fetchDiff(id, path, signal, review = commentsEnabled()) {
     return new Promise((resolve, reject) => {
+        if (signal.aborted) {
+            reject(signal.reason);
+
+            return;
+        }
+
+        const cancel = () => {
+            const index = waiting.indexOf(run);
+
+            if (index !== -1) {
+                waiting.splice(index, 1);
+            }
+
+            reject(signal.reason);
+        };
+
         const run = async () => {
             fetching++;
 
             try {
                 if (review) {
-                    const result = await actions.reviewDiff(id, path);
+                    const result = await actions.reviewDiff(id, path, { signal });
 
                     resolve(result.diff);
 
@@ -1281,6 +1416,7 @@ function fetchDiff(id, path, review = commentsEnabled()) {
 
                 const response = await fetch(
                     `/api/c/${id}/changes/diff?path=${encodeURIComponent(path)}`,
+                    { signal },
                 );
                 const text = await response.text();
 
@@ -1300,10 +1436,13 @@ function fetchDiff(id, path, review = commentsEnabled()) {
             } catch (error) {
                 reject(error);
             } finally {
+                signal.removeEventListener("abort", cancel);
                 fetching--;
                 waiting.shift()?.();
             }
         };
+
+        signal.addEventListener("abort", cancel, { once: true });
 
         if (fetching < DIFF_FETCHES) {
             run();
@@ -1436,6 +1575,7 @@ function TreeNode({ node, depth, current, viewed, onPick }) {
 function ReviewFile({
     id,
     file,
+    active,
     root,
     base,
     open,
@@ -1476,6 +1616,10 @@ function ReviewFile({
     }, [near]);
 
     useEffect(() => {
+        if (!active) {
+            return;
+        }
+
         const cached = diffCache.get(key);
 
         if (cached) {
@@ -1495,29 +1639,32 @@ function ReviewFile({
             return;
         }
 
+        const controller = new AbortController();
         let live = true;
 
         setEntry(null);
         setError(null);
-        fetchDiff(id, file.path).then(
+        fetchDiff(id, file.path, controller.signal).then(
             (text) => {
+                if (!live) {
+                    return;
+                }
+
                 const parsed = parseDiff(text, file.path).files[0] ?? null;
                 const made = { key, parsed, print: fingerprint(text) };
 
                 keepDiff(key, made);
-
-                if (live) {
-                    setEntry(made);
-                    onLoaded(file.path, made.print);
-                }
+                setEntry(made);
+                onLoaded(file.path, made.print);
             },
             (failure) => live && setError(failure.message),
         );
 
         return () => {
             live = false;
+            controller.abort();
         };
-    }, [key, near, Boolean(target)]);
+    }, [key, near, Boolean(target), active]);
 
     // The same object while nothing changed: the diff's colors and rows are worked out once per version.
     const shown = useMemo(
@@ -1617,7 +1764,7 @@ function ReviewFile({
             version=${key}
             loading=${!entry && !error}
             error=${error}
-            expand=${!file.discussionOnly && (commenting || canSteer())}
+            expand=${active && !file.discussionOnly && (commenting || canSteer())}
             onComment=${commenting && !file.discussionOnly ? comment : null}
             discussion=${
                 commenting
@@ -2191,6 +2338,7 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
                         (file) => html`<${ReviewFile}
                             key=${`${viewId}:${file.path}`}
                             id=${id}
+                            active=${active}
                             file=${file}
                             root=${changes?.repo?.root ?? cwd}
                             base=${changes?.repo?.head}

@@ -4,11 +4,10 @@
  * there, with each file's diff on request.
  */
 import { realpathSync } from "node:fs";
-import { lstat, rm } from "node:fs/promises";
-import { devNull } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, resolve, posix } from "node:path";
 import { GitError, type GitOptions, git as runGit } from "./git.ts";
 import type { ClientEntry } from "./projection.ts";
+import { WorkspaceBackend } from "./workspace-backend.ts";
 
 /** How a file changed, as git sees it: `new` is a file git does not track yet. */
 export type ChangeKind = "modified" | "added" | "deleted" | "renamed" | "new";
@@ -103,8 +102,13 @@ function realpathWithMissingTail(path: string): string {
 }
 
 /** Resolve a recorded tool path lexically, canonicalizing it only for repository-backed sessions. */
-function piEditPath(cwd: string, path: string, canonicalize: boolean): string {
-    const absolute = resolve(cwd, path);
+function piEditPath(
+    cwd: string,
+    path: string,
+    canonicalize: boolean,
+    paths: Pick<typeof posix, "resolve">,
+): string {
+    const absolute = paths.resolve(cwd, path);
 
     if (!canonicalize) {
         return absolute;
@@ -121,6 +125,7 @@ function piEdits(
     entries: readonly ClientEntry[],
     cwd: string,
     canonicalize = false,
+    paths: Pick<typeof posix, "resolve"> = { resolve },
 ): Map<string, number> {
     const edits = new Map<string, number>();
     /** The reply that made each tool call, by call id. */
@@ -148,7 +153,7 @@ function piEdits(
                     typeof path === "string" &&
                     path !== ""
                 ) {
-                    edits.set(piEditPath(cwd, path, canonicalize), entry.id);
+                    edits.set(piEditPath(cwd, path, canonicalize, paths), entry.id);
                 }
             }
         } else if (entry.kind === "toolResult" && entry.name === CODEMODE) {
@@ -170,7 +175,7 @@ function piEdits(
                 }
 
                 edits.set(
-                    piEditPath(cwd, call.path, canonicalize),
+                    piEditPath(cwd, call.path, canonicalize, paths),
                     callers.get(entry.callId) ?? entry.id,
                 );
             }
@@ -253,9 +258,9 @@ export function parseNumstat(output: string): Map<string, { added?: number; remo
 }
 
 /** A file's size and modification time, one of which changes when it does; undefined when it is not there. */
-async function versionOf(file: string): Promise<string | undefined> {
+async function versionOf(file: string, backend: WorkspaceBackend): Promise<string | undefined> {
     try {
-        const info = await lstat(file);
+        const info = await backend.lstat(file);
 
         return `${info.size}:${info.mtimeMs}`;
     } catch {
@@ -279,6 +284,8 @@ export async function changesIn(
     options: GitOptions = {},
 ): Promise<Changes> {
     const git = inspector(options);
+    const backend = options.backend ?? WorkspaceBackend.local(cwd);
+    const { join, relative } = backend.paths;
     let root: string;
 
     try {
@@ -286,11 +293,18 @@ export async function changesIn(
     } catch (error) {
         const offline = typeof options.offline === "function" ? options.offline() : options.offline;
 
-        if (offline && (!(error instanceof GitError) || error.exitCode === undefined)) {
+        if (
+            (offline || backend.remote) &&
+            (!(error instanceof GitError) ||
+                error.exitCode === undefined ||
+                (backend.remote && error.exitCode !== 128))
+        ) {
             throw error;
         }
 
-        const edits = piEdits(entries, cwd);
+        const edits = piEdits(entries, cwd, false, backend.paths);
+
+        backend.checkAccess();
 
         return {
             files: [],
@@ -299,7 +313,23 @@ export async function changesIn(
         };
     }
 
-    const edits = piEdits(entries, cwd, true);
+    const edits = piEdits(entries, cwd, !backend.remote, backend.paths);
+
+    if (backend.remote) {
+        const canonical = await Promise.all(
+            [...edits].map(
+                async ([path, entry]) =>
+                    [await backend.canonicalWithMissingTail(path), entry] as const,
+            ),
+        );
+
+        edits.clear();
+
+        for (const [path, entry] of canonical) {
+            edits.set(path, entry);
+        }
+    }
+
     const branch = await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]).then(
         (name) => name.trim(),
         () => undefined,
@@ -326,14 +356,23 @@ export async function changesIn(
     // symlinks and final-newline handling the same as each file's diff. No index or files are changed.
     const count = async (path: string) => {
         try {
-            if ((await lstat(join(root, path))).size > MAX_COUNTED_BYTES) {
+            if ((await backend.lstat(join(root, path))).size > MAX_COUNTED_BYTES) {
                 return;
             }
 
             const added = parseNumstat(
                 await git(
                     root,
-                    ["diff", "--no-index", "--numstat", "-z", ...DIFF_FLAGS, "--", devNull, path],
+                    [
+                        "diff",
+                        "--no-index",
+                        "--numstat",
+                        "-z",
+                        ...DIFF_FLAGS,
+                        "--",
+                        !backend.remote && process.platform === "win32" ? "nul" : "/dev/null",
+                        path,
+                    ],
                     {
                         allowExit: [1],
                     },
@@ -359,7 +398,9 @@ export async function changesIn(
         }),
     );
 
-    const versions = await Promise.all(status.map(({ path }) => versionOf(join(root, path))));
+    const versions = await Promise.all(
+        status.map(({ path }) => versionOf(join(root, path), backend)),
+    );
     const files = status.map(({ code, path }, index): ChangedFile => {
         const version = versions[index];
 
@@ -375,6 +416,8 @@ export async function changesIn(
     const piOnly = [...edits]
         .filter(([path]) => !shown.has(path))
         .map(([path, entryId]) => ({ path: relative(root, path), entryId }));
+
+    backend.checkAccess();
 
     return {
         repo: {
@@ -397,16 +440,21 @@ export async function diffOf(
     cwd: string,
     path: string,
     onlyHere = false,
-    options: GitOptions = {},
+    options: GitOptions & { checkRoot?: (root: string) => void } = {},
 ): Promise<string> {
-    const git = inspector(options);
+    const { checkRoot, ...gitOptions } = options;
+    const git = inspector(gitOptions);
+    const backend = gitOptions.backend ?? WorkspaceBackend.local(cwd);
+    const devNull = !backend.remote && process.platform === "win32" ? "nul" : "/dev/null";
     const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
+
+    checkRoot?.(root);
     const change = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
     ).find((each) => each.path === path);
 
     // A file outside the folder is as unknown as one without changes.
-    const prefix = onlyHere ? await prefixOf(cwd, options) : "";
+    const prefix = onlyHere ? await prefixOf(cwd, gitOptions) : "";
 
     if (
         change === undefined ||
@@ -441,13 +489,21 @@ export async function diffOf(
  * `diffOf`, only a file git lists as changed, so the path cannot point anywhere else; with `onlyHere`, only one in
  * `cwd`. A renamed file is left alone, as undoing it changes two paths.
  */
-export async function revertFile(cwd: string, path: string, onlyHere = false): Promise<ChangeKind> {
+export async function revertFile(
+    cwd: string,
+    path: string,
+    onlyHere = false,
+    options: GitOptions = {},
+): Promise<ChangeKind> {
+    const git = inspector({ ...options, readOnly: false });
+    const backend = options.backend ?? WorkspaceBackend.local(cwd);
+    const { join } = backend.paths;
     const root = (await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
     const change = parseStatus(
         await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
     ).find((each) => each.path === path);
 
-    if (change === undefined || (onlyHere && !path.startsWith(await prefixOf(cwd)))) {
+    if (change === undefined || (onlyHere && !path.startsWith(await prefixOf(cwd, options)))) {
         throw new Error("That file has no uncommitted changes");
     }
 
@@ -463,7 +519,7 @@ export async function revertFile(cwd: string, path: string, onlyHere = false): P
     }
 
     if (kind === "new") {
-        await rm(join(root, path), { force: true });
+        await backend.remove(join(root, path));
 
         return kind;
     }
@@ -482,14 +538,14 @@ export async function revertFile(cwd: string, path: string, onlyHere = false): P
     if (kind === "added" && !inHead) {
         // Added since the last commit: out of the index, then gone.
         await git(root, ["rm", "--cached", "--quiet", "--force", "--", path]);
-        await rm(join(root, path), { force: true });
+        await backend.remove(join(root, path));
 
         return kind;
     }
 
     if (!hasHead) {
         await git(root, ["rm", "--cached", "--quiet", "--force", "--", path]);
-        await rm(join(root, path), { force: true });
+        await backend.remove(join(root, path));
 
         return kind;
     }

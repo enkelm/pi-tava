@@ -7,6 +7,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import QRCode from "qrcode";
+import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
+import { parseWorkspaceLocation } from "../workspace-location.ts";
+import { parseProjectAccess } from "../project-access.ts";
 import { MAX_PEEKS } from "../app.ts";
 import {
     type Auth,
@@ -31,7 +34,14 @@ import { browserRoutes } from "./browser-routes.ts";
 import { conversationRoutes } from "./conversation-routes.ts";
 import { createEventStreams } from "./events.ts";
 import { extensionRoute } from "./extension-routes.ts";
-import { type ApiRequest, conversationId, type HttpOptions, json, readJson } from "./io.ts";
+import {
+    type ApiRequest,
+    conversationId,
+    type HttpOptions,
+    json,
+    readJson,
+    withReadContext,
+} from "./io.ts";
 import { pushRoutes } from "./push-routes.ts";
 import { providerPackageRoutes } from "./provider-package-routes.ts";
 
@@ -70,24 +80,21 @@ export function createApi(options: HttpOptions, auth: Auth) {
      */
     const inviteGrant = (
         user: User,
-        body: { role?: unknown; session?: unknown; continuePiSessions?: unknown },
+        body: {
+            role?: unknown;
+            session?: unknown;
+            continuePiSessions?: unknown;
+            projectAccess?: unknown;
+        },
     ): InviteGrant => {
+        requireOwner(user);
+
         if (body.continuePiSessions !== undefined && typeof body.continuePiSessions !== "boolean") {
             throw new HttpError(400, "continuePiSessions must be a boolean");
         }
 
         if (body.continuePiSessions === true) {
-            requireOwner(user);
-
-            if (
-                (body.role !== undefined && body.role !== "guest") ||
-                (body.session !== undefined && body.session !== null)
-            ) {
-                throw new HttpError(
-                    400,
-                    "Only unrestricted steering guests can continue Pi sessions",
-                );
-            }
+            throw new HttpError(400, "Project invitations cannot include host Pi history access");
         }
 
         if (body.role === "owner") {
@@ -101,11 +108,14 @@ export function createApi(options: HttpOptions, auth: Auth) {
         }
 
         const role = body.role === "viewer" ? "viewer" : "guest";
+        const projectAccess = parseProjectAccess(
+            body.projectAccess === undefined ? {} : body.projectAccess,
+        );
 
         if (body.session === undefined || body.session === null) {
             return {
                 role,
-                ...(body.continuePiSessions === true ? { continuePiSessions: true } : {}),
+                projectAccess,
             };
         }
 
@@ -115,7 +125,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
             throw new HttpError(400, "No such session");
         }
 
-        return { role, session: String(session) };
+        return { role, session: String(session), projectAccess: {} };
     };
 
     /** How long an invite lasts, in minutes: one of `INVITE_MINUTES`, 15 when not said. */
@@ -227,6 +237,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
         }
 
         if (first === "logout" && method === "POST") {
+            app.sshSessions.revoke(user.id);
             clearAuthCookie(response);
 
             return json(response, 200, { ok: true });
@@ -243,7 +254,9 @@ export function createApi(options: HttpOptions, auth: Auth) {
         }
 
         if (first === "users" && second !== undefined && third === undefined && method === "POST") {
-            app.setAccess(user, second, await readJson(request));
+            const patch = await readJson<Parameters<typeof app.setAccess>[2]>(request);
+
+            app.setAccess(requireUser(request), second, patch);
 
             return json(response, 200, app.people(user));
         }
@@ -702,14 +715,137 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return json(response, 200, { ok: true });
         }
 
+        if (first === "ssh-auth" && second === undefined) {
+            requireOwner(user);
+            response.setHeader("cache-control", "no-store");
+
+            if (method === "GET") {
+                const location = parseWorkspaceLocation({
+                    kind: "ssh",
+                    host: url.searchParams.get("host"),
+                });
+
+                return json(response, 200, app.sshSessions.status(user, location!.host));
+            }
+
+            if (method === "POST") {
+                const body = await readJson<{
+                    host?: unknown;
+                    password?: unknown;
+                    forget?: unknown;
+                }>(request, 8192);
+                const current = requireUser(request);
+
+                requireOwner(current);
+                const location = parseWorkspaceLocation({ kind: "ssh", host: body.host })!;
+
+                if (body.forget === true) {
+                    app.sshSessions.forget(current, location.host);
+
+                    return json(response, 200, { authenticated: false });
+                }
+
+                const here = new URL(origin(request));
+                const loopback = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/.test(here.hostname);
+
+                if (here.protocol !== "https:" && !loopback) {
+                    throw new HttpError(
+                        403,
+                        "Password login needs HTTPS or localhost. Open Coop through a secure address.",
+                    );
+                }
+
+                if (
+                    typeof body.password !== "string" ||
+                    !body.password ||
+                    Buffer.byteLength(body.password) > 1024 ||
+                    /[\r\n\0]/.test(body.password)
+                ) {
+                    throw new HttpError(
+                        400,
+                        "Enter an SSH password without line breaks or NUL characters, at most 1024 UTF-8 bytes.",
+                    );
+                }
+
+                const tokenHash = current.tokenHash;
+                const cancelled = withCancel(BACKGROUND_CONTEXT);
+                const cancel = () => cancelled.cancel();
+                const timer = setTimeout(cancel, 60_000);
+
+                timer.unref();
+                request.once("aborted", cancel);
+                response.once("close", cancel);
+
+                try {
+                    const login = app.sshSessions.login(
+                        current,
+                        location.host,
+                        body.password,
+                        cancelled.context,
+                        () => {
+                            const fresh = auth.user(request);
+
+                            return (
+                                fresh?.id === current.id &&
+                                fresh.role === "owner" &&
+                                fresh.tokenHash === tokenHash
+                            );
+                        },
+                    );
+
+                    delete body.password;
+
+                    return json(response, 200, await login);
+                } finally {
+                    delete body.password;
+                    clearTimeout(timer);
+                    cancelled.cancel();
+                    request.off("aborted", cancel);
+                    response.off("close", cancel);
+                }
+            }
+
+            throw new HttpError(405, "Use GET or POST for SSH login.");
+        }
+
+        if (first === "ssh-hosts" && second === undefined && method === "GET") {
+            requireOwner(user);
+            response.setHeader("cache-control", "no-store");
+            const discovered = await app.sshSessions.hosts(user);
+
+            // Configuration scanning can await filesystem I/O; do not return private aliases after revocation.
+            requireOwner(requireUser(request));
+
+            return json(response, 200, discovered);
+        }
+
         if (first === "fs" && method === "GET") {
-            app.requireSteer(user);
+            requireOwner(user);
 
             if (user.sessions !== undefined) {
                 throw new HttpError(403, "You were invited to one session.");
             }
 
             const requested = url.searchParams.get("path") || "~";
+            const host = url.searchParams.get("host");
+            const location = parseWorkspaceLocation(
+                host === null ? undefined : { kind: "ssh", host },
+            );
+
+            if (location !== undefined) {
+                const listing = await withReadContext({ request, response }, (context) =>
+                    app.sshSessions.browse(
+                        user,
+                        location.host,
+                        requested,
+                        url.searchParams.get("hidden") === "1",
+                        context,
+                    ),
+                );
+
+                return json(response, 200, listing);
+            }
+
             const path = app.workspace.checkDirectory(requested);
             const showHidden = url.searchParams.get("hidden") === "1";
             const dirs: { name: string; path: string }[] = [];
@@ -735,10 +871,17 @@ export function createApi(options: HttpOptions, auth: Auth) {
             }
 
             dirs.sort((a, b) => a.name.localeCompare(b.name));
-            const recent = [...new Set(app.sessions(user).map((session) => session.cwd))].slice(
-                0,
-                8,
-            );
+            const recent = [
+                ...new Set(
+                    app
+                        .sessions(user)
+                        .filter(
+                            (session) =>
+                                app.locationOf(conversationId(String(session.id))) === undefined,
+                        )
+                        .map((session) => session.cwd),
+                ),
+            ].slice(0, 8);
 
             return json(response, 200, {
                 path,
@@ -751,13 +894,28 @@ export function createApi(options: HttpOptions, auth: Auth) {
 
         // A new folder, from the folder picker: it opens in the picker, ready to use.
         if (first === "fs" && second === undefined && method === "POST") {
-            const body = await readJson<{ path?: unknown }>(request);
+            const body = await readJson<{ path?: unknown; location?: unknown }>(request);
+            const current = requireUser(request);
+
+            requireOwner(current);
+            const location = parseWorkspaceLocation(body.location);
 
             if (typeof body.path !== "string") {
                 throw new HttpError(400, "Name the folder to make.");
             }
 
-            return json(response, 200, { path: app.workspace.makeFolder(user, body.path) });
+            if (location !== undefined) {
+                const made = await app.sshSessions.createDirectory(
+                    current,
+                    location.host,
+                    body.path,
+                    BACKGROUND_CONTEXT,
+                );
+
+                return json(response, 200, made);
+            }
+
+            return json(response, 200, { path: app.workspace.makeFolder(current, body.path) });
         }
 
         if (first === "agents" && third === undefined) {
@@ -1029,7 +1187,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
             }
 
             // Only whoever made it ends it; for anyone else it stays as it was, and nothing says whether it exists.
-            auth.cancelInvite(body.code, user);
+            auth.cancelInvite(body.code, requireUser(request));
 
             return json(response, 200, { ok: true });
         }
@@ -1039,10 +1197,12 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 role?: unknown;
                 session?: unknown;
                 continuePiSessions?: unknown;
+                projectAccess?: unknown;
                 minutes?: unknown;
             };
-            const grant = inviteGrant(user, body);
-            const invite = auth.createInvite(user, grant, inviteMinutes(body));
+            const creator = requireUser(request);
+            const grant = inviteGrant(creator, body);
+            const invite = auth.createInvite(creator, grant, inviteMinutes(body));
             const here = origin(request);
             const loopback = /^https?:\/\/(localhost|127\.\d+\.\d+\.\d+|\[::1\])(:\d+)?$/.test(
                 here,

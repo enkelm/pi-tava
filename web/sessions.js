@@ -13,6 +13,7 @@ import { projectGroups, rowsInGroups, sessionMatches } from "./project-groups.js
 import { useSessionHold } from "./session-hold.js";
 import { canMoveSessions, useSessionDrag } from "./session-moves.js";
 import { sessionResultUnread } from "./session-seen.js";
+import { RemoteProjectIcon } from "./ssh-status.js";
 import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
 import { ThreadTypeTag, threadTypeLabel } from "./thread-type.js";
 import { organizationTargets, workItemRows, WORKFLOW_LABELS } from "./work-items.js";
@@ -185,6 +186,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
         >
             <${Icon} class="group-disclosure" name="down" size=${14} />
             <span class="group-count" data-part="session-group-count">${count}</span>
+            <${RemoteProjectIcon} location=${group.project.location} />
             <span class="group-name" data-part="session-group-name"><${Highlight} text=${group.label} needle=${needle} /></span>
             ${
                 trouble &&
@@ -199,6 +201,7 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
         <div class="project-group-actions">
             ${
                 canStart &&
+                store.state.me?.role === "owner" &&
                 html`<button
                     class="icon-button small project-hover-action"
                     title="Edit project"

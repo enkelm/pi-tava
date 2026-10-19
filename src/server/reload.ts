@@ -97,6 +97,8 @@ export const RESERVED_EXTENSIONS = /^(pocket-.*|coding-tools)$/;
 /** The tools of Pi Durable's coding tools and of the built-in modules, kept in step with what they install by hand. */
 export const BUILT_IN_TOOLS: ReadonlySet<string> = new Set([
     "read",
+    "host_skill",
+    "stage_upload",
     "write",
     "edit",
     "bash",

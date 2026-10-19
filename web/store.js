@@ -1613,7 +1613,8 @@ export const actions = {
     extensionCommand: (commandId, args, requestId = uid()) =>
         api(`c/${current()}/extension-commands`, { commandId, args, requestId }),
     /** A file or folder for the viewer. */
-    view: (path) => api(`c/${current()}/view?path=${encodeURIComponent(path)}`),
+    view: (path, options) =>
+        api(`c/${current()}/view?path=${encodeURIComponent(path)}`, undefined, options),
     /** What changed in the session's folder: git's uncommitted changes, and Pi's edits. */
     changes: (id = current()) => api(`c/${id}/changes`),
     /** Comment-first reviews capture their session so navigation cannot retarget a send. */
@@ -1621,8 +1622,10 @@ export const actions = {
     resolveReviewThreads: (request, id = current()) => api(`c/${id}/reviews/resolve`, request),
     /** Scoped, read-only Changes access for everyone in the conversation, including viewers. */
     reviewChanges: (id = current()) => api(`c/${id}/reviews/changes`),
-    reviewDiff: (id, path) => api(`c/${id}/reviews/diff?path=${encodeURIComponent(path)}`),
-    reviewContext: (id, path) => api(`c/${id}/reviews/context?path=${encodeURIComponent(path)}`),
+    reviewDiff: (id, path, options) =>
+        api(`c/${id}/reviews/diff?path=${encodeURIComponent(path)}`, undefined, options),
+    reviewContext: (id, path, options) =>
+        api(`c/${id}/reviews/context?path=${encodeURIComponent(path)}`, undefined, options),
     branches: () => api(`c/${current()}/branches`),
     switchBranch: (target) => api(`c/${current()}/branch`, target),
     /** Undo the uncommitted changes to one file. */
@@ -1679,9 +1682,10 @@ export const actions = {
     unwatchPr: () => api(`c/${current()}/watch`, { stop: true }),
     approve: (id, allow) => api(`approvals/${encodeURIComponent(id)}`, { allow }),
     /** Project defaults are resolved server-side; an explicit cwd overrides them. */
-    createSession: (cwd, { worktree = false, ...organization } = {}) =>
+    createSession: (cwd, { worktree = false, location, ...organization } = {}) =>
         api("sessions", {
             cwd,
+            ...(location !== undefined ? { location } : {}),
             ...(worktree ? { worktree } : {}),
             ...(projectsAvailable() ? { requestId: uid(), ...organization } : {}),
         }),

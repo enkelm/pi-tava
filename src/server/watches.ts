@@ -321,6 +321,13 @@ export class Watches {
     ): Promise<PrWatch> {
         const app = this.#app;
 
+        if (app.locationOf(asking) !== undefined) {
+            throw new HttpError(
+                409,
+                "PR watches are not supported for SSH workspaces. No host-local repository was inspected.",
+            );
+        }
+
         if (!this.running) {
             throw new HttpError(409, "Triggers are turned off in Extensions.");
         }

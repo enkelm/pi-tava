@@ -14,6 +14,46 @@ const SHOWN = 50;
  */
 const lists = new Map();
 
+const caller = () => {
+    const user = store.state.me;
+
+    return user ? JSON.stringify([user.id, user.role, user.sessions ?? null]) : null;
+};
+
+const listKey = () => JSON.stringify([caller(), store.state.conversationId, cwd() ?? null]);
+let userScope = caller();
+let departed = false;
+const awake = () => !departed && !document.hidden && navigator.onLine !== false;
+
+// Mentions load only on foreground intent. Scope/departure changes cancel work, never replay it on return.
+function suspendLists() {
+    const scope = caller();
+
+    for (const [key, list] of lists) {
+        if (!awake() || scope !== userScope || key !== listKey()) {
+            list.controller?.abort();
+            list.controller = null;
+            list.loading = false;
+        }
+    }
+
+    if (scope !== userScope) {
+        userScope = scope;
+        lists.clear();
+    }
+}
+
+store.subscribe(suspendLists);
+document.addEventListener("visibilitychange", suspendLists);
+addEventListener("offline", suspendLists);
+addEventListener("pagehide", () => {
+    departed = true;
+    suspendLists();
+});
+addEventListener("pageshow", () => {
+    departed = false;
+});
+
 function prepare(files) {
     // Folders are not listed: every folder that holds a file is one.
     const dirs = new Set();
@@ -44,22 +84,18 @@ const cwd = () => store.state.view.agent?.cwd;
 export function loadFiles({ ifMissing = false } = {}) {
     const id = store.state.conversationId;
 
-    if (id === null) {
+    if (id === null || caller() === null || !awake()) {
         return;
     }
 
-    let list = lists.get(id);
+    const key = listKey();
+    const list = lists.get(key);
 
-    // Another folder (`/cwd`) is another list. One asked for before the folder was known is the folder's.
-    if (list !== undefined && list.cwd === undefined) {
-        list.cwd = cwd();
-    }
-
-    if (list !== undefined && cwd() !== undefined && list.cwd !== cwd()) {
-        list = undefined;
-    }
-
-    if (list?.loading || (list !== undefined && (ifMissing || Date.now() - list.at < RECHECK_MS))) {
+    if (
+        list?.loading ||
+        (list !== undefined &&
+            ((ifMissing && list.version !== null) || Date.now() - list.at < RECHECK_MS))
+    ) {
         return;
     }
 
@@ -71,25 +107,33 @@ export function loadFiles({ ifMissing = false } = {}) {
         lower: [],
         bases: new Uint32Array(0),
         dirs: 0,
-        at: 0,
+        at: -Infinity,
         memo: null,
         last: null,
     };
+    const controller = new AbortController();
+    const current = () =>
+        !controller.signal.aborted && lists.get(key) === entry && listKey() === key;
 
     entry.loading = true;
-    lists.set(id, entry);
+    entry.controller = controller;
+    lists.set(key, entry);
     const since = entry.version === null ? "" : `?since=${encodeURIComponent(entry.version)}`;
 
     const done = () => {
-        entry.loading = false;
-        entry.at = Date.now();
-
-        if (lists.get(id) === entry) {
+        if (current()) {
+            entry.loading = false;
+            entry.controller = null;
+            entry.at = Date.now();
             store.set({ filesLoaded: (store.state.filesLoaded ?? 0) + 1 });
         }
     };
 
-    api(`c/${id}/files${since}`).then((data) => {
+    api(`c/${id}/files${since}`, undefined, { signal: controller.signal }).then((data) => {
+        if (!current()) {
+            return;
+        }
+
         if (!data.same) {
             Object.assign(entry, prepare(data.files), {
                 version: data.version,
@@ -262,7 +306,7 @@ const byKind = (list) => (a, b) => {
  * nameHits, parentHits }`. An empty query, or one ending in "/", lists that folder; any other matches the whole list.
  */
 export function suggestFiles(query) {
-    const list = lists.get(store.state.conversationId);
+    const list = lists.get(listKey());
 
     if (list === undefined) {
         return { items: [], loading: true, truncated: false };

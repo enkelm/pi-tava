@@ -350,7 +350,7 @@ function actionItems() {
         // What extensions' browser modules added (`extension-ui.js`).
         ...extensionLauncherItems(),
         // Last: a list that is cut keeps the actions above, however many favorites there are (up to 100).
-        ...(canStart
+        ...(canStart && me?.role === "owner"
             ? folderFavorites.map((path, index) => ({
                   key: `action:new-favorite:${path}`,
                   label: `New session in ${favoriteNames[index]}`,
@@ -358,6 +358,10 @@ function actionItems() {
                   icon: "star",
                   run: () =>
                       attempt(async () => {
+                          if (store.state.me?.role !== "owner") {
+                              return;
+                          }
+
                           const created = await actions.createSession(path);
 
                           navigate(created.id);

@@ -16,9 +16,10 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
-import { createServer } from "node:http";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { Socket } from "node:net";
 import { join } from "node:path";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import type { User } from "../src/server/config.ts";
 import { ProjectsDoc, SessionsDoc } from "../src/server/docs.ts";
@@ -128,6 +129,72 @@ test("projects have opaque identity, direct thread membership and independent ty
     );
 });
 
+// Remote preparation may wait on an unreachable SSH host. It must not own Durable's global
+// mutation line while waiting; the same check protects both project creation and default edits.
+test("SSH project directory preparation does not block unrelated commits and cannot overwrite changed defaults", async () => {
+    const person = owner(app);
+    const projectId = await project("Preparation source");
+
+    for (const operation of ["create", "update"] as const) {
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const delayed = mock.method(app.sshSessions, "prepare", async () => {
+            entered.resolve();
+            await release.promise;
+
+            return "/prepared/remote";
+        });
+        const request = {
+            cwd: "/prepared/remote",
+            location: { kind: "ssh", host: "fixture-host" },
+        };
+        const pending =
+            operation === "create"
+                ? app.projects.create(person, {
+                      ...request,
+                      name: "Prepared",
+                      requestId: "prepared-remote",
+                  })
+                : app.projects.update(person, projectId, request);
+        const outcome = pending.then(
+            () => undefined,
+            (error: unknown) => error,
+        );
+
+        try {
+            await entered.promise;
+            const unrelated = app.projects.update(person, projectId, {
+                name: "Unrelated commit completed",
+                ...(operation === "update" ? { cwd: folder("concurrent-project-default") } : {}),
+            });
+            const settled = await Promise.race([
+                unrelated.then(() => true),
+                new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+            ]);
+
+            release.resolve();
+            await unrelated;
+            const result = await outcome;
+
+            assert.equal(settled, true, "SSH preparation held the global mutation line");
+
+            if (operation === "update") {
+                assert.ok(result instanceof HttpError && result.status === 409);
+                assert.equal(
+                    app.projects.list(person).projects.find((item) => item.id === projectId)?.cwd,
+                    folder("concurrent-project-default"),
+                );
+            } else {
+                assert.equal(result, undefined);
+            }
+        } finally {
+            release.resolve();
+            await outcome;
+            delayed.mock.restore();
+        }
+    }
+});
+
 // Direct projection and commit delivery own scoped privacy, including an owner-only import in the same project.
 test("scoped catalogues contain only visible projects without cwd and follow committed membership", async () => {
     const projectId = await project("Visible project", folder("projection-visible"));
@@ -178,15 +245,15 @@ test("scoped catalogues contain only visible projects without cwd and follow com
 
         await assert.rejects(
             app.projects.assign(full, hidden, { projectId: otherProjectId }),
-            status(404),
+            status(403),
         );
         assert.equal(app.sessionMeta(hidden)?.projectId, projectId);
-        await app.projects.update(full, projectId, { name: "Shared rename" });
+        await app.projects.update(owner(app), projectId, { name: "Shared rename" });
         await until(
             () => JSON.stringify(tab.last("projects")).includes("Shared rename"),
             "live committed project rename",
         );
-        await app.commands.updateSession(visible.id, full, { projectId: otherProjectId });
+        await app.commands.updateSession(visible.id, owner(app), { projectId: otherProjectId });
         await until(() => {
             const projection = tab.last("projects") as { projects?: { id: string }[] } | undefined;
 
@@ -204,7 +271,7 @@ test("scoped catalogues contain only visible projects without cwd and follow com
             app.sessions(viewer.user).map((item) => item.id),
             [Number(visible.id)],
         );
-        await app.commands.updateSession(visible.id, full, { projectId: null });
+        await app.commands.updateSession(visible.id, owner(app), { projectId: null });
         await until(
             () => JSON.stringify(tab.last("projects")) === JSON.stringify({ projects: [] }),
             "empty committed scoped project projection",
@@ -217,30 +284,47 @@ test("scoped catalogues contain only visible projects without cwd and follow com
 // HTTP owns authentication, CSRF, route retirement and JSON request/response adaptation.
 test("HTTP project routes require auth and CSRF and expose project-only creation, editing and moves", async () => {
     const full = app.config.addUser("HTTP steer", "guest");
-    const server = createServer(
-        createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} }),
-    );
+    const handler = createHandler({
+        app,
+        listen: { host: "127.0.0.1", port: 0 },
+        restart: () => {},
+    });
 
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-
-    assert.ok(address !== null && typeof address === "object");
-    const base = `http://127.0.0.1:${address.port}/api`;
-    const request = (
+    const request = async (
         path: string,
         body?: unknown,
-        token: string | null = full.token,
+        token: string | null = app.config.ownerToken,
         csrf = true,
-    ) =>
-        fetch(base + path, {
-            method: body === undefined ? "GET" : "POST",
-            headers: {
-                "content-type": "application/json",
-                ...(token === null ? {} : { authorization: `Bearer ${token}` }),
-                ...(csrf ? { "x-pocket": "1" } : {}),
-            },
-            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        });
+    ) => {
+        const incoming = new IncomingMessage(new Socket());
+        const response = new ServerResponse(incoming);
+        let output = "";
+
+        incoming.method = body === undefined ? "GET" : "POST";
+        incoming.url = `/api${path}`;
+        incoming.headers = {
+            "content-type": "application/json",
+            ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+            ...(csrf ? { "x-pocket": "1" } : {}),
+        };
+
+        response.end = (chunk?: unknown) => {
+            output = String(chunk ?? "");
+
+            return response;
+        };
+
+        const handled = handler(incoming, response);
+
+        if (body !== undefined) {
+            incoming.push(Buffer.from(JSON.stringify(body)));
+        }
+
+        incoming.push(null);
+        await handled;
+
+        return new Response(output, { status: response.statusCode });
+    };
 
     const post = async (path: string, body: unknown, expected = 200) => {
         const response = await request(path, body);
@@ -250,47 +334,51 @@ test("HTTP project routes require auth and CSRF and expose project-only creation
         return response.json();
     };
 
-    try {
-        assert.equal((await request("/projects", undefined, null)).status, 401);
-        assert.equal(
-            (
-                await request(
-                    "/projects",
-                    { name: "No CSRF", cwd: work, requestId: "csrf" },
-                    full.token,
-                    false,
-                )
-            ).status,
-            403,
-        );
-        const created = await post("/projects", {
-            name: "Guest-created",
-            cwd: work,
-            requestId: "http-project",
-        });
-        const started = await post("/sessions", {
-            projectId: created.id,
-            requestId: "http-worker",
-        });
+    assert.equal((await request("/projects", undefined, null)).status, 401);
+    assert.equal(
+        (
+            await request(
+                "/projects",
+                { name: "No CSRF", cwd: work, requestId: "csrf" },
+                app.config.ownerToken,
+                false,
+            )
+        ).status,
+        403,
+    );
+    assert.equal(
+        (
+            await request(
+                "/projects",
+                { name: "No guest setup", cwd: work, requestId: "guest-setup" },
+                full.token,
+            )
+        ).status,
+        403,
+    );
+    const created = await post("/projects", {
+        name: "Owner-created",
+        cwd: work,
+        requestId: "http-project",
+    });
+    const started = await post("/sessions", {
+        projectId: created.id,
+        requestId: "http-worker",
+    });
 
-        assert.equal(typeof created.id, "string");
-        assert.equal(app.sessionMeta(started.id)?.projectId, created.id);
-        await post(`/projects/${created.id}`, { name: "HTTP rename" });
-        const listed = await (await request("/projects")).json();
+    assert.equal(typeof created.id, "string");
+    assert.equal(app.sessionMeta(started.id)?.projectId, created.id);
+    await post(`/projects/${created.id}`, { name: "HTTP rename" });
+    const listed = await (await request("/projects")).json();
 
-        assert.deepEqual(Object.keys(listed), ["projects"]);
-        assert.equal(
-            listed.projects.find((item: { id: string }) => item.id === created.id)?.name,
-            "HTTP rename",
-        );
-        await post(`/sessions/${started.id}`, { projectId: null });
-        assert.equal(app.sessionMeta(started.id)?.projectId, undefined);
-        await post("/project-goals/no-longer-a-route", { name: "No goal" }, 404);
-    } finally {
-        await new Promise<void>((resolve, reject) =>
-            server.close((error) => (error ? reject(error) : resolve())),
-        );
-    }
+    assert.deepEqual(Object.keys(listed), ["projects"]);
+    assert.equal(
+        listed.projects.find((item: { id: string }) => item.id === created.id)?.name,
+        "HTTP rename",
+    );
+    await post(`/sessions/${started.id}`, { projectId: null });
+    assert.equal(app.sessionMeta(started.id)?.projectId, undefined);
+    await post("/project-goals/no-longer-a-route", { name: "No goal" }, 404);
 });
 
 // Independent archive changes only the requested thread, not other threads in the same project.
@@ -396,17 +484,20 @@ test("moves preserve legacy Workers, explicit Chats, directory, archive state an
     assert.equal(app.sessionMeta(first.id)?.threadType, "worker");
     assert.equal(app.cwdOf(first.id), join(work, "move-origin"));
     await app.collab.turns(legacy, owner(app), { action: "on" });
-    await assert.rejects(app.projects.assign(full, legacy, { projectId }), status(409));
+    await assert.rejects(app.projects.assign(full, legacy, { projectId }), status(403));
     assert.equal(app.sessionMeta(legacy)?.projectId, otherProjectId);
     await app.collab.turns(legacy, owner(app), { action: "handover", to: full.id });
-    await app.projects.assign(full, legacy, { projectId });
+    await assert.rejects(app.projects.assign(full, legacy, { projectId }), status(403));
+    await assert.rejects(app.projects.assign(owner(app), legacy, { projectId }), status(409));
+    await app.collab.turns(legacy, full, { action: "handover", to: owner(app).id });
+    await app.projects.assign(owner(app), legacy, { projectId });
     assert.equal(app.sessionMeta(legacy)?.projectId, projectId);
     assert.equal(app.sessionMeta(legacy)?.threadType, "worker");
     await app.collab.turns(legacy, owner(app), { action: "off" });
 });
 
 // A Work Item move rechecks every member before publishing any placement, including combined archive edits.
-test("whole Work Item placement rejects hidden or non-driver members atomically", async () => {
+test("whole Work Item placement is owner-only and rejects non-driver members atomically", async () => {
     const projectId = await project("Work Item source");
     const otherProjectId = await project("Work Item destination");
     const first = await worker(projectId);
@@ -426,10 +517,19 @@ test("whole Work Item placement rejects hidden or non-driver members atomically"
 
     await assert.rejects(
         app.handoffs.updateWorkItem(next, full, { projectId: otherProjectId, archived: true }),
-        status(409),
+        status(403),
     );
     assert.deepEqual(await app.harness.snapshot(SessionsDoc, context), beforeSessions);
     assert.deepEqual(await app.harness.snapshot(HandoffsDoc, context), beforeGroups);
+    await app.collab.turns(first.id, owner(app), { action: "handover", to: full.id });
+    await assert.rejects(
+        app.handoffs.updateWorkItem(next, owner(app), {
+            projectId: otherProjectId,
+            archived: true,
+        }),
+        status(409),
+    );
+    assert.deepEqual(await app.harness.snapshot(SessionsDoc, context), beforeSessions);
     await app.collab.turns(first.id, owner(app), { action: "off" });
     await app.harness.commit(async (tx) => {
         (await tx.doc(SessionsDoc)).items[String(next)]!.ownerOnly = true;
@@ -438,7 +538,7 @@ test("whole Work Item placement rejects hidden or non-driver members atomically"
 
     await assert.rejects(
         app.projects.assign(full, first.id, { projectId: otherProjectId }),
-        status(404),
+        status(403),
     );
     assert.deepEqual(await app.harness.snapshot(SessionsDoc, context), hiddenSessions);
     assert.deepEqual(await app.harness.snapshot(HandoffsDoc, context), beforeGroups);
@@ -617,12 +717,19 @@ test("project and thread retries survive restart while obsolete grouping data le
     );
     assert.equal(app.projects.list(owner(app)).projects.length, projectsBefore);
     assert.equal(app.sessions().length, sessionsBefore);
-    const otherActor: User = app.config.addUser("Retry actor", "guest").user;
-    const other = await app.projects.create(otherActor, request);
+    const otherActor: User = app.config.addUser("Retry actor", "guest", undefined, undefined, {
+        projectIds: [created.id],
+    }).user;
 
-    assert.notEqual(other.id, created.id);
-    const actorRequest = { cwd: work, requestId: "removed-actor-retry" };
+    await assert.rejects(app.projects.create(otherActor, request), status(403));
+    const actorRequest = { projectId: created.id, requestId: sessionRequest.requestId };
     const actorSession = await app.commands.createSession(otherActor, actorRequest);
+
+    assert.notEqual(
+        actorSession.id,
+        session.id,
+        "creation retry identity belongs to the current person",
+    );
     const beforeRemoval = app.sessions().length;
 
     app.removeUser(owner(app), otherActor.id);

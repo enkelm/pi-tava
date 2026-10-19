@@ -48,7 +48,7 @@ const hooks = `
 const inert = (names: string[]) =>
     names.map((name) => `export const ${name} = () => null;`).join("\n");
 const stubs: Record<string, string> = {
-    "preact": "export class Component {}",
+    preact: "export class Component {}",
     "preact/hooks": hooks,
     "./avatar.js": inert(["initials", "personColor", "folderColor"]),
     "./back.js": inert(["useBack"]),
@@ -67,16 +67,36 @@ const stubs: Record<string, string> = {
         export const api = async () => ({});
         export const canSteer = () => true;
         ${inert([
-            "actions", "attempt", "collab", "discuss", "isRow", "navigate", "notify", "openSheet",
+            "actions",
+            "attempt",
+            "collab",
+            "discuss",
+            "isRow",
+            "navigate",
+            "notify",
+            "openSheet",
         ])}
         export const TRANSCRIPT_ROWS = 100;
     `,
     "./theme.js": "export const prefs = () => ({showThinking: true});",
+    "./workspace-location.js": inert(["conversationLocation"]),
     "./ui.js": `
         export const html = (parts, ...values) => ({parts: [...parts], values});
         ${inert([
-            "Boot", "copyText", "entryImageUrl", "fileUrl", "Icon", "Markdown", "openFile",
-            "plainText", "readable", "replyText", "Spinner", "splitAttachments", "Thumb", "timeAgo",
+            "Boot",
+            "copyText",
+            "entryImageUrl",
+            "fileUrl",
+            "Icon",
+            "Markdown",
+            "openFile",
+            "plainText",
+            "readable",
+            "replyText",
+            "Spinner",
+            "splitAttachments",
+            "Thumb",
+            "timeAgo",
         ])}
     `,
     "./sheets/memory.js": inert(["LessonCall", "memoryAvailable"]),
@@ -100,9 +120,7 @@ registerHooks({
               ? "Bar"
               : "";
 
-        return names
-            ? { ...result, source: `${result.source}\nexport { ${names} };` }
-            : result;
+        return names ? { ...result, source: `${result.source}\nexport { ${names} };` } : result;
     },
 });
 

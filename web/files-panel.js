@@ -10,6 +10,8 @@ import { loadFiles, suggestFiles } from "./files.js";
 import { FileView } from "./sheets/file.js";
 import { actions, canSteer, closePeople, panelsBeside, store } from "./store.js";
 import { html, Icon, Loader, Marked, shortPath, usePresence } from "./ui.js";
+import { conversationLocation } from "./workspace-location.js";
+import { observeSsh } from "./ssh-status.js";
 
 const WIDTH_KEY = "pocket.filesWidth";
 /** Tree and viewer side by side from this width of the tile; one at a time below it. */
@@ -93,18 +95,25 @@ function readExpanded(id) {
 const HIDDEN = new Set([".git"]);
 
 /** A folder's entries, `{ entries, truncated }` or `{ entries, error }`: the kept ones at once, then read again. */
-function useFolder(id, path, version) {
+function useFolder(id, path, version, active) {
     const key = `${id}\u0000${path}`;
     const [state, setState] = useState(() => folders.get(key) ?? null);
 
     useEffect(() => {
+        if (!active) {
+            return;
+        }
+
+        const controller = new AbortController();
         let live = true;
 
         if (folders.has(key)) {
             setState(folders.get(key));
         }
 
-        actions.view(path).then(
+        observeSsh(conversationLocation(), () =>
+            actions.view(path, { signal: controller.signal }),
+        ).then(
             (folder) => {
                 const entries =
                     folder.kind === "folder"
@@ -129,15 +138,16 @@ function useFolder(id, path, version) {
 
         return () => {
             live = false;
+            controller.abort();
         };
-    }, [key, version]);
+    }, [key, version, active]);
 
     return state;
 }
 
 /** One folder's entries in the tree, and the open folders under it. */
 function TreeFolder({ path, depth, ctx }) {
-    const folder = useFolder(ctx.id, path, ctx.version);
+    const folder = useFolder(ctx.id, path, ctx.version, ctx.active);
 
     if (folder === null) {
         return html`<div class="ft-row muted" style=${`--depth:${depth}`}>…</div>`;
@@ -275,7 +285,7 @@ if (savedWidth > 0) {
  * The Files tab: the tree, a filter over every file in the folder, and the open file. `covering`: the tile covers the
  * screen and is not on its way out, so back closes a file that hides the tree.
  */
-function FilesTab({ changes, covering }) {
+function FilesTab({ changes, covering, active }) {
     const { conversationId: id, view, server, filesTarget } = store.state;
     const root = view.agent?.cwd ?? view.conversation?.cwd ?? "";
     const [expanded, setExpanded] = useState(() => readExpanded(id));
@@ -463,6 +473,7 @@ function FilesTab({ changes, covering }) {
 
     const ctx = {
         id,
+        active,
         expanded,
         selected: selected?.path,
         changed,
@@ -627,6 +638,7 @@ function FilesTab({ changes, covering }) {
                           }
                       </div>
                       <${FileView}
+                          active=${active}
                           key=${`${shown.path}:${shown.line ?? ""}:${head}`}
                           path=${shown.path}
                           line=${shown.line}
@@ -645,6 +657,11 @@ function FilesTab({ changes, covering }) {
 export function FilesPanel({ leaving = false }) {
     const { view, server } = store.state;
     const root = view.agent?.cwd ?? view.conversation?.cwd ?? "";
+    const location = conversationLocation();
+    const destination =
+        location?.kind === "ssh"
+            ? `SSH · ${location.host} · ${root}`
+            : shortPath(root, server?.home);
     const filesTab = canSteer() ? store.state.filesTab : "changes";
     const { changes } = useChanges(canSteer() || store.state.server?.localReviews >= 2);
     // Pi's edits git does not list count too: outside a repository, they are all there is.
@@ -708,7 +725,7 @@ export function FilesPanel({ leaving = false }) {
                     ${count > 0 && html`<span class="files-count">${count}</span>`}
                 </button>
             </div>
-            <span class="files-root" title=${root}>${shortPath(root, server?.home)}</span>
+            <span class="files-root" title=${destination}>${destination}</span>
             ${
                 beside &&
                 html`<button
@@ -725,7 +742,11 @@ export function FilesPanel({ leaving = false }) {
         ${
             canSteer() &&
             html`<div class="files-body" role="tabpanel" aria-label="Files" hidden=${filesTab !== "files"}>
-                <${FilesTab} changes=${changes} covering=${!beside && !leaving} />
+                <${FilesTab}
+                    changes=${changes}
+                    covering=${!beside && !leaving}
+                    active=${filesTab === "files" && !leaving}
+                />
             </div>`
         }
         <div

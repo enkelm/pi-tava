@@ -1,11 +1,6 @@
 /** Human-activated, independently owned durable handoffs with one writer per work item. */
-import { execFile } from "node:child_process";
 import { isUtf8 } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { lstat, readlink } from "node:fs/promises";
-import { join } from "node:path";
-import { promisify } from "node:util";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -38,6 +33,8 @@ import { createSessionRoot } from "./session-roots.ts";
 import { threadRolePrompt } from "./thread-prompts.ts";
 import { addUsage, cleanTitle, titleModel, TITLE_PROMPT } from "./titles.ts";
 import { withWorkflowPublicationLock, workflowExclusiveReason } from "./workflow-policy.ts";
+import { type WorkspaceBackend, isMissingWorkspaceFile } from "./workspace-backend.ts";
+import { workflowWorkspaceBackend, userWorkspaceBackend } from "./workspace-backend-factory.ts";
 import {
     type CodeFingerprint,
     type ExternalReview,
@@ -52,7 +49,6 @@ import {
 } from "./workflow-docs.ts";
 
 const context = BACKGROUND_CONTEXT;
-const run = promisify(execFile);
 const MAX_HANDOFF_INSTRUCTIONS = 8000;
 const finished = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 const empty = (): HandoffsData => ({ workItems: {}, handoffs: {}, requests: {} });
@@ -139,82 +135,75 @@ function publicWorkflow(state?: Readonly<Workflow>) {
     };
 }
 
-const FINGERPRINT_SANDBOX = [
-    "(version 1)",
-    "(allow default)",
-    "(deny network*)",
-    "(deny mach-lookup)",
-    "(deny appleevent-send)",
-    "(deny file-write*)",
-    '(allow file-write* (literal "/dev/null"))',
-    "(deny signal)",
-].join("\n");
+/** Git may execute filters: inspection and all descendants stay target-native read-only/offline. */
+async function fingerprintGit(backend: WorkspaceBackend, ...args: string[]): Promise<string> {
+    const bytes = await backend.gitBytes(backend.cwd, args, {
+        offline: true,
+        readOnly: true,
+        maxBuffer: 32 * 1024 * 1024,
+        timeoutMs: 15_000,
+        env: { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    });
 
-let gitExecutable: string | undefined;
-
-/** Git status can execute clean/process filters. Every helper and descendant is read-only and offline. */
-async function git(cwd: string, ...args: string[]): Promise<string> {
-    if (process.platform !== "darwin") {
-        throw new HttpError(409, "Checkout fingerprint inspection requires a supported OS sandbox");
-    }
-
-    // /usr/bin/git is an Apple developer-tools shim that writes an xcrun cache. Resolve the selected real binary
-    // through the same read-only sandbox instead of weakening it to allow cache writes.
-    if (gitExecutable === undefined) {
-        const selected = await run(
-            "/usr/bin/sandbox-exec",
-            ["-p", FINGERPRINT_SANDBOX, "/usr/bin/xcode-select", "-p"],
-            { cwd, timeout: 15_000 },
-        );
-        const developer = selected.stdout.trim();
-
-        if (!developer.startsWith("/") || developer.includes("\0")) {
-            throw new Error("No supported Git binary is selected");
-        }
-
-        gitExecutable = join(developer, "usr/bin/git");
-    }
-
-    const result = await run(
-        "/usr/bin/sandbox-exec",
-        ["-p", FINGERPRINT_SANDBOX, gitExecutable, "-c", "core.fsmonitor=false", ...args],
-        {
-            cwd,
-            encoding: "buffer",
-            maxBuffer: 32 * 1024 * 1024,
-            timeout: 15_000,
-            env: {
-                ...process.env,
-                GIT_OPTIONAL_LOCKS: "0",
-                GIT_CONFIG_NOSYSTEM: "1",
-                GIT_CONFIG_GLOBAL: "/dev/null",
-                GIT_NO_LAZY_FETCH: "1",
-            },
-        },
-    );
-
-    if (!isUtf8(result.stdout)) {
+    if (!isUtf8(bytes)) {
         throw new Error("Non-UTF-8 Git paths are unsupported for workflow fingerprints");
     }
 
-    return result.stdout.toString("utf8");
+    return bytes.toString("utf8");
 }
 
-/** All code, not just visible diff text: staged/unstaged bytes and untracked contents (including symlink targets). */
-async function fingerprint(cwd: string): Promise<CodeFingerprint> {
+function fingerprintPaths(value: string): string[] {
+    if (value !== "" && !value.endsWith("\0")) {
+        throw new Error("Incomplete Git pathname list");
+    }
+
+    return value === "" ? [] : value.slice(0, -1).split("\0");
+}
+
+function requireContainedPath(backend: WorkspaceBackend, root: string, path: string): void {
+    const relative = backend.paths.relative(root, path);
+
+    if (
+        relative === ".." ||
+        relative.startsWith(`..${backend.paths.sep}`) ||
+        backend.paths.isAbsolute(relative)
+    ) {
+        throw new Error("Git pathname escapes the workspace root");
+    }
+}
+
+/** Physical files, not normalized Git blobs. This is bounded inspection, not an atomic snapshot. */
+async function fingerprint(backend: WorkspaceBackend): Promise<CodeFingerprint> {
     try {
-        const root = (await git(cwd, "rev-parse", "--show-toplevel")).trim();
-        const head = (await git(root, "rev-parse", "--verify", "HEAD")).trim();
-        const status = await git(
-            root,
+        const cwd = await backend.canonical(backend.cwd);
+        const work = backend.at(cwd);
+        const reported = await fingerprintGit(work, "rev-parse", "--show-toplevel");
+        const reportedRoot = reported.endsWith("\n") ? reported.slice(0, -1) : reported;
+
+        if (!backend.paths.isAbsolute(reportedRoot) || reportedRoot.includes("\0")) {
+            throw new Error("Git did not report an absolute workspace root");
+        }
+
+        const root = await backend.canonical(reportedRoot);
+
+        requireContainedPath(backend, root, cwd);
+        const repository = backend.at(root);
+        const head = (await fingerprintGit(repository, "rev-parse", "--verify", "HEAD")).trim();
+
+        if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head)) {
+            throw new Error("Git did not report a concrete HEAD commit");
+        }
+
+        const status = await fingerprintGit(
+            repository,
             "status",
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
             "--ignore-submodules=none",
         );
-        const modules = await git(
-            root,
+        const modules = await fingerprintGit(
+            repository,
             "status",
             "--porcelain=v2",
             "-z",
@@ -226,19 +215,60 @@ async function fingerprint(cwd: string): Promise<CodeFingerprint> {
             throw new Error("Changed or dirty submodules are unsupported for workflow readiness");
         }
 
-        const index = await git(root, "ls-files", "--stage", "-z");
-        const tracked = await git(root, "ls-files", "--cached", "--recurse-submodules", "-z");
-        const untracked = await git(root, "ls-files", "--others", "--exclude-standard", "-z");
-        const paths = [...new Set(`${tracked}${untracked}`.split("\0").filter(Boolean))].sort();
+        const index = await fingerprintGit(repository, "ls-files", "--stage", "-z");
+        const tracked = await fingerprintGit(
+            repository,
+            "ls-files",
+            "--cached",
+            "--recurse-submodules",
+            "-z",
+        );
+        const untracked = await fingerprintGit(
+            repository,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        );
+        const paths = [
+            ...new Set([...fingerprintPaths(tracked), ...fingerprintPaths(untracked)]),
+        ].sort();
+
+        if (paths.length > 50_000) {
+            throw new Error("Code exceeds the 50,000-path fingerprint limit");
+        }
+
         const hash = createHash("sha256");
 
-        hash.update(JSON.stringify([root, cwd, head, status, index]));
+        hash.update(JSON.stringify([backend.id, root, cwd, head, status, modules, index]));
         let size = 0;
 
         for (const path of paths) {
-            const file = join(root, path);
-            const info = await lstat(file).catch((error: NodeJS.ErrnoException) => {
-                if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+            if (
+                backend.paths.isAbsolute(path) ||
+                path
+                    .split("/")
+                    .some(
+                        (part) =>
+                            part === "" ||
+                            part === "." ||
+                            part === ".." ||
+                            part.toLowerCase() === ".git",
+                    )
+            ) {
+                throw new Error("Unsafe Git pathname");
+            }
+
+            const file = backend.paths.resolve(root, path);
+
+            requireContainedPath(backend, root, file);
+            requireContainedPath(
+                backend,
+                root,
+                await repository.canonicalWithMissingTail(backend.paths.dirname(file)),
+            );
+            const info = await repository.lstat(file).catch((error: unknown) => {
+                if (isMissingWorkspaceFile(error)) {
                     return undefined;
                 }
 
@@ -250,42 +280,51 @@ async function fingerprint(cwd: string): Promise<CodeFingerprint> {
                 continue;
             }
 
+            // Final symlinks contribute target bytes, but parents must never escape the checkout.
+            requireContainedPath(
+                backend,
+                root,
+                await repository.canonical(backend.paths.dirname(file)),
+            );
             size += info.size;
 
-            if (size > 64 * 1024 * 1024 || paths.length > 50_000) {
-                throw new Error("Code exceeds the 64 MiB / 50,000-path fingerprint limit");
+            if (!Number.isSafeInteger(info.size) || info.size < 0 || size > 64 * 1024 * 1024) {
+                throw new Error("Code exceeds the 64 MiB fingerprint limit");
             }
 
             hash.update(JSON.stringify([path, info.mode, info.size]));
+            let bytes: Buffer;
 
-            if (info.isSymbolicLink()) {
-                hash.update(await readlink(file, { encoding: "buffer" }));
-            } else if (info.isFile()) {
-                let read = 0;
-
-                for await (const chunk of createReadStream(file)) {
-                    read += chunk.length;
-
-                    if (read > info.size) {
-                        throw new Error("Code changed size during fingerprint inspection");
-                    }
-
-                    hash.update(chunk);
-                }
-
-                if (read !== info.size) {
-                    throw new Error("Code changed size during fingerprint inspection");
-                }
+            if (info.kind === "symlink") {
+                bytes = await repository.readlink(file);
+            } else if (info.kind === "file") {
+                requireContainedPath(backend, root, await repository.canonical(file));
+                bytes = await repository.readBytes(file, info.size);
+                requireContainedPath(backend, root, await repository.canonical(file));
             } else {
                 throw new Error("Unsupported tracked or untracked file type");
             }
+
+            const after = await repository.lstat(file);
+
+            if (
+                bytes.length !== info.size ||
+                after.kind !== info.kind ||
+                after.size !== info.size ||
+                after.mode !== info.mode ||
+                after.mtimeMs !== info.mtimeMs
+            ) {
+                throw new Error("Code changed during fingerprint inspection");
+            }
+
+            hash.update(bytes);
         }
 
         return { digest: hash.digest("hex"), cwd, head, status: status.slice(0, 4000) };
     } catch {
         throw new HttpError(
             409,
-            "Cannot fingerprint this checkout safely; use a supported OS sandbox and a Git checkout with a HEAD, at most 64 MiB of tracked/untracked files, and no dirty submodules",
+            "Cannot fingerprint this checkout safely; use a supported OS sandbox and a Git checkout with a HEAD, safe contained paths, at most 64 MiB of tracked/untracked files, and no dirty submodules",
         );
     }
 }
@@ -1032,8 +1071,14 @@ export class Handoffs {
     }
 
     /** Publication approvals bind the exact same checkout fingerprint as workflow completion. */
-    async fingerprint(id: ConversationId): Promise<string> {
-        return (await fingerprint(this.#app.cwdOf(this.#app.rootOf(id)))).digest;
+    async fingerprint(id: ConversationId, user?: User, ctx: Context = context): Promise<string> {
+        const root = this.#app.rootOf(id);
+        const backend =
+            user === undefined
+                ? workflowWorkspaceBackend(this.#app, root, ctx)
+                : userWorkspaceBackend(this.#app, root, ctx, user);
+
+        return (await fingerprint(backend)).digest;
     }
 
     projection(id: ConversationId, user?: User) {
@@ -1071,8 +1116,8 @@ export class Handoffs {
     receipts(id: ConversationId, supplied: User) {
         const user = this.#app.config.userById(supplied.id);
 
-        if (user === undefined) {
-            throw new HttpError(401, "Your access was removed");
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
         }
 
         this.#app.requireSee(user, id);
@@ -1097,8 +1142,8 @@ export class Handoffs {
     #human(id: ConversationId, supplied: User): User {
         const user = this.#app.config.userById(supplied.id);
 
-        if (user === undefined) {
-            throw new HttpError(401, "Your access was removed");
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
         }
 
         this.#app.requireSee(user, id);
@@ -1530,8 +1575,8 @@ export class Handoffs {
     async list(id: ConversationId, supplied: User, invocation?: TaskId) {
         const user = this.#app.config.userById(supplied.id);
 
-        if (user === undefined) {
-            throw new HttpError(401, "Your access was removed");
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
         }
 
         this.#app.requireSee(user, id);
@@ -1722,6 +1767,7 @@ export class Handoffs {
         accepted = false,
     ) {
         const user = this.#human(id, supplied);
+
         const doc = await tx.doc(HandoffsDoc);
         const sessions = await tx.doc(SessionsDoc);
         const meta = sessions.items[String(id)];
@@ -1956,6 +2002,7 @@ export class Handoffs {
             },
             meta: {
                 cwd,
+                ...(meta.location === undefined ? {} : { location: meta.location }),
                 title: initialTitle,
                 createdAt: now,
                 updatedAt: now,

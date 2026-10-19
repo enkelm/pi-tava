@@ -57,6 +57,7 @@ import {
 } from "./ui.js";
 import { useVisibleClock } from "./visible-clock.js";
 import { LessonCall, memoryAvailable } from "./sheets/memory.js";
+import { conversationLocation } from "./workspace-location.js";
 
 const REPORT = /^\[subagent (\S+) (answered|failed)([^\]]*)\]\s?([\s\S]*)$/;
 /** Where the next report starts, in a message of several that arrived together (`extensions/subagents.ts`). */
@@ -494,7 +495,7 @@ const MEMORY_WORDS = {
 };
 
 /** A call's line: its label (the tool, or a subagent's name) and what it acts on. */
-function stepWords(call) {
+function stepWords(call, location) {
     const args = call.args ?? {};
 
     switch (call.name) {
@@ -523,11 +524,14 @@ function stepWords(call) {
             return { label: "watch PR", subject: [args.action, args.pr].filter(Boolean).join(" ") };
 
         default: {
-            const described = describeCall(call);
+            const described = describeCall(call, location);
 
             // An extension's own words for its tool, or the tool's name.
             return {
-                label: described.own ? described.label : call.name,
+                label:
+                    described.own || (call.name === "bash" && location?.kind === "ssh")
+                        ? described.label
+                        : call.name,
                 subject: described.subject,
             };
         }
@@ -977,7 +981,7 @@ function ToolStep({
             ? (details?.conversationId ??
               view.subagents.find((agent) => agent.name === args.name)?.conversationId)
             : undefined;
-    const { label, subject } = stepWords(call);
+    const { label, subject } = stepWords(call, readOnly ? null : conversationLocation());
     // Counted from everything once it is loaded: a long write's lines, a long edit's whole diff.
     const said = readOnly
         ? null
@@ -1757,6 +1761,8 @@ function CommandEntry({ entry, readOnly = false }) {
 
 /** A command someone ran with `!` (or `!!`, which Pi does not see): what it printed, and how it ended. */
 function ShellEntry({ entry, readOnly = false }) {
+    const location = readOnly ? null : conversationLocation();
+    const destination = location?.kind === "ssh" ? `Bash · ${location.host} · ` : "";
     // A long command (a paste in it, say) shows its first lines until opened.
     const longCommand = entry.command.split("\n").length > 3 || entry.command.length > 240;
     const end =
@@ -1770,7 +1776,7 @@ function ShellEntry({ entry, readOnly = false }) {
         entry=${entry}
         readOnly=${readOnly}
         command=${`$ ${entry.command}`}
-        meta=${`${entry.name}${end ? ` · ${end}` : ""}${entry.context ? "" : " · not shown to Pi"}`}
+        meta=${`${destination}${entry.name}${end ? ` · ${end}` : ""}${entry.context ? "" : " · not shown to Pi"}`}
         failed=${Boolean(end)}
         longCommand=${longCommand}
     />`;
@@ -1816,6 +1822,7 @@ function toBottom(element) {
 
 /** `!` commands this tab started that have no entry yet: still running, or waiting for Pi to finish its turn. */
 function PendingShells({ conversationId, rows }) {
+    const location = conversationLocation();
     const pending = store.state.pendingShells.filter(
         (each) =>
             each.conversationId === conversationId &&
@@ -1828,7 +1835,7 @@ function PendingShells({ conversationId, rows }) {
             <div class="shell-card">
                 <div class="shell-head">
                     <span class="mono shell-command">$ ${each.command}</span>
-                    <span class="muted small"><${Spinner} /> running</span>
+                    <span class="muted small">${location?.kind === "ssh" ? `Bash · ${location.host} · ` : ""}<${Spinner} /> running</span>
                     <button
                         class="link small"
                         onClick=${() => attempt(() => actions.stopShell(each.taskId))}

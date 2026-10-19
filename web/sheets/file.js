@@ -8,6 +8,8 @@ import { highlightLines, langOf } from "../highlight.js";
 import { HtmlPreview } from "../rich.js";
 import { RunFrame, usePreviewRuntime } from "../run-frame.js";
 import { actions, canSteer, closeSheet, insertIntoComposer, notify, store } from "../store.js";
+import { conversationLocation } from "../workspace-location.js";
+import { observeSsh } from "../ssh-status.js";
 import {
     copyText,
     fileUrl,
@@ -50,7 +52,12 @@ function useLines(file, path) {
  * folder to browse, under a bar with its path and the viewer's buttons (copy, mention, preview). `line` scrolls to and
  * marks that line. `onOpen` opens an entry of a folder.
  */
-export function FileView({ path, line, onOpen = openFile, onLoad }) {
+export function FileView({ path, line, onOpen = openFile, onLoad, active = true }) {
+    const conversationId = store.state.conversationId;
+    const cwd = store.state.view.agent?.cwd ?? store.state.view.conversation?.cwd;
+    const reading = useRef(null);
+    const opened = useRef(null);
+    const source = JSON.stringify([conversationId, cwd, path]);
     const [file, setFile] = useState(null);
     const [error, setError] = useState(null);
     const [editing, setEditing] = useState(false);
@@ -70,14 +77,33 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
     );
 
     useEffect(() => {
+        if (!active) {
+            return;
+        }
+
+        const controller = new AbortController();
         let live = true;
 
+        reading.current = controller;
+
+        // Hiding a tile only abandons pending reads; a loaded viewer/editor keeps its content and draft.
+        if (opened.current === source) {
+            return () => {
+                reading.current?.abort();
+                reading.current = null;
+            };
+        }
+
+        opened.current = null;
         setFile(null);
         setEditing(false);
         setError(null);
-        actions.view(path).then(
+        observeSsh(conversationLocation(), () =>
+            actions.view(path, { signal: controller.signal }),
+        ).then(
             (each) => {
                 if (live) {
+                    opened.current = source;
                     setFile(each);
                     onLoad?.(each);
                 }
@@ -87,8 +113,10 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
 
         return () => {
             live = false;
+            reading.current?.abort();
+            reading.current = null;
         };
-    }, [path]);
+    }, [source, active]);
     useEffect(() => {
         setPreview(markdown && line === undefined);
         setRunning(false);
@@ -129,6 +157,7 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
             }
         </div>
         ${error && html`<p class="muted">${error}</p>`}
+        ${file?.editUnavailable && !editing && html`<p class="muted small" role="status">Quick edit unavailable: ${file.editUnavailable}</p>`}
         ${!file && !error && html`<${Loader} label="Opening" />`}
         ${
             file?.kind === "image" &&
@@ -176,14 +205,25 @@ export function FileView({ path, line, onOpen = openFile, onLoad }) {
             }}
             onCancel=${() => setEditing(false)}
             onReload=${async () => {
-                try {
-                    const latest = await actions.view(path);
+                reading.current?.abort();
+                const controller = new AbortController();
 
-                    setEditing(false);
-                    setFile(latest);
-                    onLoad?.(latest);
+                reading.current = controller;
+
+                try {
+                    const latest = await observeSsh(conversationLocation(), () =>
+                        actions.view(path, { signal: controller.signal }),
+                    );
+
+                    if (!controller.signal.aborted) {
+                        setEditing(false);
+                        setFile(latest);
+                        onLoad?.(latest);
+                    }
                 } catch (failure) {
-                    notify("error", failure.message);
+                    if (!controller.signal.aborted) {
+                        notify("error", failure.message);
+                    }
                 }
             }}
         />`

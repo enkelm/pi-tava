@@ -30,7 +30,7 @@ export const describersRevision = () => ownRevision;
  * A tool call in one line: an icon, a label, and what it acts on. Peek tiles describe calls this way too. `own` marks a
  * call an extension described.
  */
-export function describeCall(call) {
+export function describeCall(call, location) {
     const args = call.args ?? {};
 
     switch (call.name) {
@@ -45,7 +45,12 @@ export function describeCall(call) {
         case "edit":
             return { icon: "✎", label: "Edit", subject: args.path ?? "", mono: true };
         case "bash":
-            return { icon: ">_", label: "", subject: short(args.command, 140), mono: true };
+            return {
+                icon: ">_",
+                label: location?.kind === "ssh" ? `Bash · ${location.host}` : "",
+                subject: short(args.command, 140),
+                mono: true,
+            };
         case "artifact":
             return {
                 icon: "✦",

@@ -36,7 +36,7 @@ test("a session offers its folder's templates, and sending one sends it filled i
     const id = await newSession(app);
 
     assert.deepEqual(
-        app.promptTemplates(id).map((template) => template.name),
+        (await app.promptTemplates(id)).map((template) => template.name),
         ["fix", "tidy"],
     );
     const { submissionId } = await app.commands.submit(id, owner(app), {

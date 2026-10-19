@@ -88,18 +88,23 @@ function templatesIn(directory: string): PromptTemplate[] {
 }
 
 /**
- * The templates a session in `cwd` offers, first of each name only. `paths` are Pi's configured extra ones. `project`
- * false leaves out the project's own `.pi/prompts`, for a project Pi was told not to trust.
+ * The templates a session in `cwd` offers, first of each name only. `paths` are Pi's configured host-global extras.
+ * `project` false skips local `.pi/prompts`. Supplied trusted `projectTemplates` replace local project discovery,
+ * retaining global > project > extra-path precedence without ever reading a host-local namesake for an SSH cwd.
  */
 export function loadPromptTemplates(
     cwd: string,
     agentDir: string,
     paths: readonly string[],
-    { project = true }: { project?: boolean } = {},
+    {
+        project = true,
+        projectTemplates,
+    }: { project?: boolean; projectTemplates?: readonly PromptTemplate[] } = {},
 ): PromptTemplate[] {
     const found = [
         ...templatesIn(join(agentDir, "prompts")),
-        ...(project ? templatesIn(resolve(cwd, CONFIG_DIR_NAME, "prompts")) : []),
+        ...(projectTemplates ??
+            (project ? templatesIn(resolve(cwd, CONFIG_DIR_NAME, "prompts")) : [])),
     ];
 
     for (const raw of paths) {
@@ -222,8 +227,13 @@ export function expandPromptTemplate(
         : fillTemplate(template.content, parseArguments(match[2] ?? ""));
 }
 
-/** A skill Pi has in a session's folder (`skills.ts` finds them), to run as `/skill:name`. */
-export type SkillCommand = { name: string; description: string; path: string; baseDir: string };
+/** A skill command pins its source namespace: an SSH path is never a host filename, even when content is missing. */
+export type SkillCommand = {
+    name: string;
+    description: string;
+    path: string;
+    baseDir: string;
+} & ({ source: "host"; content?: never } | { source: "ssh"; content: string });
 
 /** `/skill:name request` with the skill's instructions, as Pi sends it; undefined when the text is not one. */
 export function expandSkillCommand(
@@ -237,16 +247,45 @@ export function expandSkillCommand(
         return undefined;
     }
 
+    let content: string;
+
+    if (skill.source === "ssh") {
+        if (typeof skill.content !== "string") {
+            throw new Error(
+                "SSH skill content is unavailable; no host-local file was substituted.",
+            );
+        }
+
+        content = skill.content;
+    } else if (skill.source === "host") {
+        try {
+            content = readFileSync(skill.path, "utf8");
+        } catch {
+            return undefined;
+        }
+    } else {
+        throw new Error("A skill command must identify its host or SSH source.");
+    }
+
     let body: string;
 
     try {
-        body = (parseFrontmatter(readFileSync(skill.path, "utf8")) as { body: string }).body.trim();
+        body = (parseFrontmatter(content) as { body: string }).body.trim();
     } catch {
         return undefined;
     }
 
+    const attribute = (text: string) =>
+        text
+            .replaceAll("&", "&amp;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll("\r", "&#13;")
+            .replaceAll("\n", "&#10;");
+
     // `unwrapSkill` takes this wrapper off again: change both together.
-    const block = `<skill name="${skill.name}" location="${skill.path}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+    const block = `<skill name="${attribute(skill.name)}" location="${attribute(skill.path)}">\nReferences are relative to ${attribute(skill.baseDir)}.\n\n${body}\n</skill>`;
     const request = (match![2] ?? "").trim();
 
     return request === "" ? block : `${block}\n\n${request}`;

@@ -23,7 +23,6 @@ import {
     navigate,
     notify,
     openSheet,
-    scoped,
     setUnread,
     store,
 } from "../store.js";
@@ -34,6 +33,8 @@ import { memoryAvailable, memoryHint, useMemory } from "./memory.js";
 import { defaultLabel, defaultsKept } from "./model.js";
 import { piSessionsAvailable } from "./pi-sessions.js";
 import { copyText, html, Icon, item, Sheet, shortPath } from "../ui.js";
+import { conversationLocation } from "../workspace-location.js";
+import { SshLogin } from "../ssh-login.js";
 
 // Key hints are for people with a keyboard: a touch screen has none.
 const touch = matchMedia("(pointer: coarse)").matches;
@@ -267,6 +268,11 @@ function MenuFrame({ title, children }) {
             return;
         }
 
+        // Password fields keep their editing keys; Tab still follows this menu's complete control order.
+        if (event.key !== "Tab" && event.target.closest?.(".ssh-login")) {
+            return;
+        }
+
         const items = [...host.current.querySelectorAll(".place, .list-item")];
         const active = document.activeElement;
         const index = items.indexOf(active);
@@ -274,7 +280,12 @@ function MenuFrame({ title, children }) {
 
         if (event.key === "Tab") {
             // Close stays reachable with Tab, but is not part of the menu's item navigation.
-            const controls = [...items, ...host.current.querySelectorAll(".sheet-head button")];
+            const controls = [
+                ...host.current.querySelectorAll(
+                    ".place, .list-item, .ssh-login input:not(:disabled), .ssh-login button:not(:disabled)",
+                ),
+                ...host.current.querySelectorAll(".sheet-head button"),
+            ];
             const at = controls.indexOf(active);
             const next =
                 at < 0
@@ -349,6 +360,7 @@ export function MenuSheet({ places = true }) {
     const conversation = view.conversation;
     const steer = canSteer();
     const session = conversation?.kind === "session";
+    const location = conversationLocation();
     const workItem =
         handoffsAvailable() &&
         store.state.sessions.find((each) => each.id === conversation?.id)?.workItemId;
@@ -361,6 +373,15 @@ export function MenuSheet({ places = true }) {
     return html`<${MenuFrame} title=${conversation?.title ?? "Menu"}>
         ${places && html`<${Places} />`}
         <div class="menu-session">
+            ${
+                location?.kind === "ssh" &&
+                html`<div class="workspace-details">
+                <strong>SSH · ${location.host}</strong>
+                <p class="mono">${view.agent?.cwd ?? conversation?.cwd}</p>
+                <p class="muted small">Files and commands run on this SSH host. Pi and conversation history stay on the Coop server.</p>
+                <${SshLogin} host=${location.host} />
+            </div>`
+            }
             ${
                 conversation &&
                 collab() &&
@@ -409,13 +430,15 @@ export function MenuSheet({ places = true }) {
                           conversation.worktree.branch,
                       )
                     : conversation &&
-                      steer &&
+                      me?.role === "owner" &&
                       driving &&
-                      !scoped() &&
                       item(
                           "Working directory",
                           () => openSheet({ type: "cwd", mode: "change" }),
-                          shortPath(view.agent?.cwd, server?.home),
+                          shortPath(
+                              view.agent?.cwd,
+                              location?.kind === "ssh" ? undefined : server?.home,
+                          ),
                       )
             }
             ${

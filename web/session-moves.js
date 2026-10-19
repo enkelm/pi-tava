@@ -1,21 +1,13 @@
 // Moving threads changes catalogue placement only; the server owns permissions and durable state.
 import { useLayoutEffect, useRef, useState } from "preact/hooks";
-import {
-    actions,
-    canSteer,
-    handoffsAvailable,
-    notify,
-    projectsAvailable,
-    scoped,
-    store,
-} from "./store.js";
+import { actions, handoffsAvailable, notify, projectsAvailable, store } from "./store.js";
 import { organizationTargets } from "./work-items.js";
 
 const DRAG_TYPE = "application/x-pi-coop-sessions";
 const inFlight = new Set();
 
 export function canMoveSessions() {
-    return projectsAvailable() && canSteer() && !scoped();
+    return projectsAvailable() && store.state.me?.role === "owner";
 }
 
 export function samePlacement(session, destination) {
@@ -24,6 +16,14 @@ export function samePlacement(session, destination) {
 
 /** Each independent thread or whole Work Item is one transaction; mixed selections report partial failures. */
 export async function moveSessions(ids, destination) {
+    if (!canMoveSessions()) {
+        return {
+            moved: [],
+            failed: ids,
+            error: "Only the owner can move threads between projects.",
+        };
+    }
+
     const targets = organizationTargets(ids, store.state.sessions, handoffsAvailable()).filter(
         ({ id }) => {
             const session = store.state.sessions.find((each) => each.id === id);

@@ -4511,6 +4511,63 @@ button.chip:active:not(:disabled):not(.on) {
     flex: none;
 }
 
+/* The same passive remote marker in pickers and sidebars: recent request evidence, not a live connection. */
+.remote-project-icon {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    width: 16px;
+    height: 16px;
+    color: var(--muted);
+    vertical-align: middle;
+}
+
+.remote-project-icon svg {
+    display: block;
+}
+
+.remote-project-status {
+    position: absolute;
+    right: -2px;
+    bottom: -1px;
+    width: 7px;
+    height: 7px;
+    border: 1.5px solid var(--bg);
+    border-radius: 50%;
+    background: var(--faint);
+}
+
+.remote-project-icon[data-status="checking"] .remote-project-status {
+    background: var(--warn);
+}
+
+.remote-project-icon[data-status="reachable"] .remote-project-status {
+    background: var(--ok);
+}
+
+.remote-project-icon[data-status="unavailable"] .remote-project-status {
+    background: var(--err);
+}
+
+.workspace-field,
+.workspace-field-options {
+    display: grid;
+    gap: 12px;
+}
+
+.ssh-password-options > summary {
+    padding: 10px 0;
+    cursor: pointer;
+    color: var(--muted);
+}
+
+.workspace-field-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .project-group-actions {
     display: flex;
     align-items: center;
@@ -6890,8 +6947,112 @@ button.chip:active:not(:disabled):not(.on) {
     gap: 0.25rem;
 }
 
+/* SSH extends the existing destination form, without a separate machine dashboard. */
+.workspace-location,
+.workspace-location > label {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 0.25rem;
+}
+
+.workspace-location {
+    gap: 0.65rem;
+}
+
+.workspace-location :is(input, select) {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    font-size: 16px;
+}
+
+.workspace-location p,
+.workspace-details p {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.workspace-host,
+.workspace-details {
+    padding: 0.65rem 0.85rem;
+    overflow-wrap: anywhere;
+}
+
+.workspace-host {
+    margin: 0;
+    font-size: 0.8rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.workspace-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.title-sub > .title-destination {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: start;
+    color: inherit;
+}
+
 .project-form .row input {
     min-width: 0;
+}
+
+/* Project grants keep their fixed layout in the stylesheet so themes can override it. */
+.gallery-tags.project-filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+    min-width: 0;
+    padding-block: 4px;
+    overscroll-behavior-x: contain;
+}
+
+.project-filters .gallery-tag {
+    flex: 0 0 auto;
+    min-height: 40px;
+    white-space: nowrap;
+}
+
+.person-project-access {
+    padding: 0 14px 14px;
+    min-width: 0;
+}
+
+.project-access {
+    min-width: 0;
+}
+
+.project-access .project-access-quick {
+    min-height: 40px;
+    overflow-wrap: anywhere;
+}
+
+.project-access .project-access-list {
+    max-height: 18rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.project-access .project-access-row {
+    min-height: 44px;
+    padding: 8px;
+    overflow-wrap: anywhere;
+}
+
+.project-access .project-access-name {
+    min-width: 0;
+}
+
+.project-access .project-access-meta {
+    display: block;
 }
 
 .project-choices {

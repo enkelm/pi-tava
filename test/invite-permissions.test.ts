@@ -78,13 +78,17 @@ test("HTTP invite input rejects unauthorized, malformed and ineligible local Pi 
         assert.equal((await request("invite", body)).status, 400, JSON.stringify(body));
     }
 
-    const granted = await request("invite", { role: "guest", continuePiSessions: true });
+    assert.equal(
+        (await request("invite", { role: "guest", continuePiSessions: true })).status,
+        400,
+    );
+    const issued = await request("invite", { role: "guest" });
 
-    assert.equal(granted.status, 200);
-    const result = await granted.json();
+    assert.equal(issued.status, 200);
+    const result = await issued.json();
 
-    assert.deepEqual(result.grant, { role: "guest", continuePiSessions: true });
-    assert.equal(auth.redeem(result.code, "Invited")!.user.continuePiSessions, true);
+    assert.deepEqual(result.grant, { role: "guest", projectAccess: {} });
+    assert.equal(canContinuePiSessions(auth.redeem(result.code, "Invited")!.user), false);
 
     const ordinary = await request(
         "invite",
@@ -92,11 +96,7 @@ test("HTTP invite input rejects unauthorized, malformed and ineligible local Pi 
         guest.token,
     );
 
-    assert.equal(ordinary.status, 200);
-    const ungranted = await ordinary.json();
-
-    assert.deepEqual(ungranted.grant, { role: "guest" });
-    assert.equal(auth.redeem(ungranted.code, "Friend")!.user.continuePiSessions, undefined);
+    assert.equal(ordinary.status, 403, "project and session invitations are owner-only");
 });
 
 test("the owner can grant and revoke local Pi access; scope and role changes clear it", async () => {

@@ -352,16 +352,31 @@ export class LinkedSessions implements LinkedSessionsApi {
             throw new HttpError(400, `The model ${spec} has no thinking level at or below ${cap}.`);
         }
 
+        const cwd = agent.cwd ?? app.cwdOf(source);
+        const location = app.locationOf(source);
         const problem = await app.providers.problem(model, true);
 
         if (problem !== undefined) {
             throw new HttpError(400, `The model ${spec} cannot be used now: ${problem}.`);
         }
 
-        const cwd = agent.cwd ?? app.cwdOf(source);
         const now = Date.now();
 
         return app.harness.commit(async (tx) => {
+            app.requireSee(user, source);
+            app.requireSteer(user);
+
+            if (app.config.userById(user.id)?.sessions !== undefined) {
+                throw new HttpError(
+                    403,
+                    "You were invited to one session and cannot start new ones.",
+                );
+            }
+
+            if (app.cwdOf(source) !== cwd || app.locationOf(source)?.host !== location?.host) {
+                throw new HttpError(409, "The source destination changed. Start a fresh request.");
+            }
+
             this.#requireUnmanaged(source);
             const receipt = recordOf(await tx.doc(LinkedSessionCallsDoc, source), token, now);
 
@@ -386,7 +401,11 @@ export class LinkedSessions implements LinkedSessionsApi {
                 agent: { ...agent, cwd, model, thinkingLevel: thinking },
                 meta: {
                     cwd,
+                    ...(location === undefined ? {} : { location }),
                     threadType: "chat",
+                    ...(sessions.items[String(source)]?.projectId === undefined
+                        ? {}
+                        : { projectId: sessions.items[String(source)]!.projectId }),
                     ...(sessions.items[String(source)]?.ownerOnly === true
                         ? { ownerOnly: true }
                         : {}),

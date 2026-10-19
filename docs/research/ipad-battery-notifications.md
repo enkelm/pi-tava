@@ -143,12 +143,12 @@ changing a payload alone is not proof that JavaScript no longer runs.
 
 Frontend helper executed actual `notify.js`/`sw.js` code against memory-only fake APIs:
 
-| Synthetic input | Observed calls |
-| --- | --- |
-| 1,000 registration callers | 1 registration |
-| 10,000 identical-input badge updates | 1 initial clear |
-| 1,000 new sessions arrays with the same count | No additional native badge calls |
-| 1,000 content-free pushes | 1,000 notification requests; 1,000 badge requests; no explicit fetches, timers, or client operations |
+| Synthetic input                               | Observed calls                                                                                       |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 1,000 registration callers                    | 1 registration                                                                                       |
+| 10,000 identical-input badge updates          | 1 initial clear                                                                                      |
+| 1,000 new sessions arrays with the same count | No additional native badge calls                                                                     |
+| 1,000 content-free pushes                     | 1,000 notification requests; 1,000 badge requests; no explicit fetches, timers, or client operations |
 
 Main thread ran `node --test test/push.test.ts`: **4 passed, 0 failed**. These tests use generated
 keys, fake fetch responses, and a temporary directory; they do not send live pushes or read the

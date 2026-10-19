@@ -12,13 +12,24 @@ const root = mkdtempSync(join(tmpdir(), "pi-invite-auth-"));
 
 after(() => rmSync(root, { recursive: true, force: true }));
 
-test("local Pi access is opt-in, persists on redemption and cannot be delegated by a guest", () => {
+test("legacy local Pi access persists but new project invitations cannot grant or delegate host history", () => {
     const directory = join(root, "grants");
     const config = new ConfigStore(directory);
     const auth = new Auth(config);
     const own = config.users.find((user) => user.role === "owner")!;
     const existing = config.addUser("Existing", "guest").user;
-    const granted = auth.createInvite(own, { role: "guest", continuePiSessions: true });
+    const granted = { code: "legacy-host-history" };
+
+    config.addInvite(granted.code, {
+        role: "guest",
+        continuePiSessions: true,
+        createdBy: own.id,
+        expiresAt: Date.now() + 60_000,
+    });
+    assert.throws(
+        () => auth.createInvite(own, { role: "guest", continuePiSessions: true }),
+        /project|history/i,
+    );
     const ordinary = auth.createInvite(own);
     const off = auth.createInvite(own, { role: "guest", continuePiSessions: false });
     const restarted = new ConfigStore(directory);
@@ -30,7 +41,7 @@ test("local Pi access is opt-in, persists on redemption and cannot be delegated 
         role: "guest",
         continuePiSessions: true,
     });
-    assert.deepEqual(afterRestart.invite(off.code), { role: "guest" });
+    assert.deepEqual(afterRestart.invite(off.code), { role: "guest", projectAccess: {} });
     const joined = afterRestart.redeem(granted.code, "Allowed")!;
 
     assert.equal(joined.user.continuePiSessions, true);
@@ -45,9 +56,10 @@ test("local Pi access is opt-in, persists on redemption and cannot be delegated 
         () => afterRestart.createInvite(joined.user, { role: "guest", continuePiSessions: true }),
         /owner/i,
     );
-    const onward = afterRestart.createInvite(joined.user, { role: "guest" });
-
-    assert.equal(afterRestart.redeem(onward.code, "Friend")!.user.continuePiSessions, undefined);
+    assert.throws(
+        () => afterRestart.createInvite(joined.user, { role: "guest" }),
+        /owner|invite|access/i,
+    );
     assert.equal(new ConfigStore(directory).userById(joined.user.id)!.continuePiSessions, true);
 });
 
@@ -65,7 +77,14 @@ test("Auth rejects grants to viewers or one session and rechecks the creator whe
         assert.throws(() => auth.createInvite(own, grant), /unrestricted|guest|steer/i);
     }
 
-    const granted = auth.createInvite(own, { role: "guest", continuePiSessions: true });
+    const granted = { code: "legacy-creator-grant" };
+
+    config.addInvite(granted.code, {
+        role: "guest",
+        continuePiSessions: true,
+        createdBy: own.id,
+        expiresAt: Date.now() + 60_000,
+    });
     const ordinary = auth.createInvite(own, { role: "guest" });
 
     // Simulate retained invites whose creator was downgraded by a configuration migration.
@@ -75,13 +94,13 @@ test("Auth rejects grants to viewers or one session and rechecks the creator whe
 
     assert.equal(restarted.redeem(granted.code, "No longer authorized"), undefined);
     assert.equal(restarted.invite(granted.code), undefined, "the invalid invite is spent");
-    assert.ok(restarted.redeem(ordinary.code, "Ordinary invite still works"));
+    assert.equal(restarted.redeem(ordinary.code, "Creator no longer owns access"), undefined);
 
     for (const creator of [
         config.addUser("Viewer", "viewer").user,
         config.addUser("Scoped", "guest", ["1"]).user,
     ]) {
-        assert.throws(() => auth.createInvite(creator), /invite|access/i);
+        assert.throws(() => auth.createInvite(creator), /owner/i);
     }
 
     // Redemption refuses malformed grants retained from older code, bypassing creation checks.

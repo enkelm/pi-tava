@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ConfigStore, Role, User } from "./config.ts";
 import { HttpError } from "./errors.ts";
+import { parseProjectAccess, type ProjectAccess } from "./project-access.ts";
 
 export const COOKIE = "pocket_auth";
 
@@ -83,7 +84,7 @@ export function clearAuthCookie(response: ServerResponse): void {
  */
 export type InviteGrant = (
     { role: Exclude<Role, "owner">; session?: string } | { role: "owner"; session?: never }
-) & { continuePiSessions?: boolean };
+) & { continuePiSessions?: boolean; projectAccess?: ProjectAccess };
 
 /** Invites live in `config.json` (by their codes' hashes), so one that lasts a day or a week outlives a restart. */
 export class Auth {
@@ -116,15 +117,20 @@ export class Auth {
     /** Rechecked at creation and redemption: a guest cannot pass on the owner's local-history grant. */
     #mayGrant(
         creator: User | undefined,
-        grant: { role: Role; session?: string; continuePiSessions?: boolean },
+        grant: {
+            role: Role;
+            session?: string;
+            continuePiSessions?: boolean;
+            projectAccess?: ProjectAccess;
+        },
     ): boolean {
         return (
             creator !== undefined &&
-            creator.role !== "viewer" &&
-            creator.sessions === undefined &&
-            (grant.role !== "owner" || creator.role === "owner") &&
+            creator.role === "owner" &&
             (grant.continuePiSessions !== true ||
-                (creator.role === "owner" && grant.role === "guest" && grant.session === undefined))
+                (grant.role === "guest" &&
+                    grant.session === undefined &&
+                    grant.projectAccess === undefined))
         );
     }
 
@@ -134,6 +140,12 @@ export class Auth {
         grant: InviteGrant = { role: "guest" },
         minutes: InviteMinutes = 15,
     ): { code: string; expiresAt: number; minutes: InviteMinutes } {
+        const creator = this.#config.userById(by.id);
+
+        if (creator?.tokenHash !== by.tokenHash || creator?.role !== "owner") {
+            throw new HttpError(403, "Only the owner can create invitations");
+        }
+
         if (
             grant.continuePiSessions !== undefined &&
             typeof grant.continuePiSessions !== "boolean"
@@ -148,12 +160,14 @@ export class Auth {
             throw new HttpError(400, "Only unrestricted steering guests can continue Pi sessions");
         }
 
-        if (!this.#mayGrant(this.#config.userById(by.id), grant)) {
-            throw new HttpError(
-                403,
-                "You may not create this invite. Only the owner may grant owner or local Pi session access.",
-            );
+        if (grant.continuePiSessions === true) {
+            throw new HttpError(400, "Project invitations cannot include host Pi history access");
         }
+
+        const projectAccess =
+            grant.role === "owner"
+                ? undefined
+                : parseProjectAccess(grant.projectAccess === undefined ? {} : grant.projectAccess);
 
         // Unambiguous characters, easy to type on a phone.
         const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
@@ -172,7 +186,7 @@ export class Auth {
             ...(grant.role !== "owner" && grant.session !== undefined
                 ? { session: grant.session }
                 : {}),
-            ...(grant.continuePiSessions === true ? { continuePiSessions: true } : {}),
+            ...(projectAccess === undefined ? {} : { projectAccess }),
             expiresAt,
             createdBy: by.id,
         });
@@ -202,6 +216,9 @@ export class Auth {
             ? { role: "owner" }
             : {
                   role: invite.role,
+                  ...(invite.projectAccess === undefined
+                      ? {}
+                      : { projectAccess: structuredClone(invite.projectAccess) }),
                   ...(invite.session === undefined ? {} : { session: invite.session }),
                   ...(invite.continuePiSessions === true ? { continuePiSessions: true } : {}),
               };
@@ -242,6 +259,7 @@ export class Auth {
             invite.role,
             invite.session === undefined ? undefined : [invite.session],
             invite.continuePiSessions === true ? true : undefined,
+            invite.projectAccess,
         );
     }
 }

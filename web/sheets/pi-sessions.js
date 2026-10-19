@@ -8,7 +8,10 @@ export const piSessionsAvailable = () => {
 
     return (
         user?.role === "owner" ||
-        (user?.role === "guest" && user.sessions === undefined && user.continuePiSessions === true)
+        (user?.role === "guest" &&
+            user.sessions === undefined &&
+            user.projectAccess === undefined &&
+            user.continuePiSessions === true)
     );
 };
 
@@ -237,6 +240,7 @@ export function ImportPanel({
     onBusyChange,
     onCreated,
 }) {
+    const allowed = piSessionsAvailable();
     const [mode, setMode] = useState("running");
     const [historyVisited, setHistoryVisited] = useState(false);
     const [listing, setListing] = useState(null);
@@ -299,6 +303,10 @@ export function ImportPanel({
     }, [initialPreview]);
 
     const refresh = async () => {
+        if (!piSessionsAvailable()) {
+            return;
+        }
+
         const turn = ++generation.current;
 
         setLoading(true);
@@ -322,10 +330,10 @@ export function ImportPanel({
     };
 
     useEffect(() => {
-        if (visible && mode === "running" && !preview && !busy) {
+        if (allowed && visible && mode === "running" && !preview && !busy) {
             refresh();
         }
-    }, [visible, mode, preview, busy]);
+    }, [allowed, visible, mode, preview, busy]);
 
     const selectSource = (source) => {
         if (busy || pending.current) {
@@ -362,7 +370,7 @@ export function ImportPanel({
     };
 
     const choose = async (session) => {
-        if (pending.current) {
+        if (!piSessionsAvailable() || pending.current) {
             return;
         }
 
@@ -392,7 +400,11 @@ export function ImportPanel({
     const submit = async (event) => {
         event.preventDefault();
 
-        if (pending.current || (preview && (!selected || !acknowledged))) {
+        if (
+            !piSessionsAvailable() ||
+            pending.current ||
+            (preview && (!selected || !acknowledged))
+        ) {
             return;
         }
 
@@ -454,6 +466,10 @@ export function ImportPanel({
             }
         }
     };
+
+    if (!allowed) {
+        return html`<p class="muted small">Local Pi history is not available with project-only access.</p>`;
+    }
 
     return html`
         ${

@@ -3,7 +3,7 @@
  * quick tunnel, or Tailscale), then it runs the server and the tunnel. The server restarts when the app asks (exit code
  * 75) or after a crash; the tunnel stays up across those restarts, so its address does not change.
  *
- *   pi-coop [--access local|lan|cloudflare|tailscale] [-y] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
+ *   pi-coop [--access local|lan|cloudflare|tailscale|tailscale-https] [-y] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -26,6 +26,7 @@ import {
     tailscaleAddress,
 } from "./access.ts";
 import { fail, parseArgs } from "./options.ts";
+import { loadTailscaleCertificate } from "../server/tailscale-https.ts";
 import {
     accent,
     bold,
@@ -47,6 +48,8 @@ import {
 
 const SERVER = fileURLToPath(new URL("../server/main.ts", import.meta.url));
 const RESTART_CODE = 75;
+const shutdown = new AbortController();
+let preparedTls: { hostname: string; address: string } | undefined;
 
 // ─── Options ────────────────────────────────────────────────────────────
 
@@ -147,6 +150,17 @@ function accessChoices(): { mode: AccessMode; choice: Choice }[] {
             },
         },
         {
+            mode: "tailscale-https",
+            choice: {
+                label: ACCESS_LABELS["tailscale-https"],
+                detail:
+                    tailnet === undefined
+                        ? "not connected on this machine"
+                        : "private HTTPS · certificate name is publicly logged",
+                disabled: tailnet === undefined,
+            },
+        },
+        {
             mode: "tailscale",
             choice:
                 tailnet === undefined
@@ -164,8 +178,8 @@ function accessChoices(): { mode: AccessMode; choice: Choice }[] {
 }
 
 /** Get `mode` ready to use: false, having said what is wrong, when it cannot be; the cloudflared to run for a tunnel. */
-async function prepareAccess(mode: AccessMode): Promise<boolean | string> {
-    if (mode === "tailscale" && tailscaleAddress() === undefined) {
+async function prepareAccess(mode: AccessMode, requestedHost?: string): Promise<boolean | string> {
+    if ((mode === "tailscale" || mode === "tailscale-https") && tailscaleAddress() === undefined) {
         log(yellow("  Tailscale is not connected on this machine. Connect it with: tailscale up"));
 
         return false;
@@ -173,6 +187,34 @@ async function prepareAccess(mode: AccessMode): Promise<boolean | string> {
 
     if (mode === "cloudflare") {
         return (await ensureCloudflared()) ?? false;
+    }
+
+    if (mode === "tailscale-https") {
+        log(
+            dim(
+                "  Preparing Tailscale HTTPS. Certificate issuance publicly logs this device’s .ts.net name.",
+            ),
+        );
+
+        try {
+            const certificate = await loadTailscaleCertificate({
+                signal: shutdown.signal,
+                ...(requestedHost === undefined ? {} : { host: requestedHost }),
+            });
+
+            preparedTls = { hostname: certificate.hostname, address: certificate.address };
+            certificate.key.fill(0);
+        } catch (error) {
+            if (!quitting) {
+                log(
+                    yellow(
+                        `  ${error instanceof Error ? error.message : "Tailscale HTTPS is unavailable."}`,
+                    ),
+                );
+            }
+
+            return false;
+        }
     }
 
     return true;
@@ -293,8 +335,15 @@ const loopback = (host: string) =>
 function appUrl(): string {
     const port = options.port;
 
-    if (state.mode === "cloudflare" && state.publicUrl !== undefined) {
+    if (
+        (state.mode === "cloudflare" || state.mode === "tailscale-https") &&
+        state.publicUrl !== undefined
+    ) {
         return state.publicUrl;
+    }
+
+    if (state.mode === "tailscale-https") {
+        return `https://${preparedTls?.hostname ?? state.host}:${port}`;
     }
 
     if (wildcard(state.host)) {
@@ -306,7 +355,7 @@ function appUrl(): string {
 
 /** The address a browser on this machine should open. */
 function localUrl(): string {
-    return wildcard(state.host) || loopback(state.host)
+    return state.mode !== "tailscale-https" && (wildcard(state.host) || loopback(state.host))
         ? `http://127.0.0.1:${options.port}`
         : appUrl();
 }
@@ -330,7 +379,9 @@ function modeNote(): string {
                 ? "tunnel not up yet"
                 : "public https link, new each launch";
         case "tailscale":
-            return "devices on your tailnet";
+            return "HTTP on your tailnet · password entry and phone notifications need HTTPS";
+        case "tailscale-https":
+            return "private HTTPS · SSH passwords and phone notifications";
         default:
             return "";
     }
@@ -353,7 +404,8 @@ function sendAccess(): void {
     const access = {
         mode: state.mode,
         label: modeLabel(),
-        ...(state.mode === "cloudflare" && state.publicUrl !== undefined
+        ...((state.mode === "cloudflare" || state.mode === "tailscale-https") &&
+        state.publicUrl !== undefined
             ? { url: state.publicUrl }
             : {}),
     };
@@ -437,10 +489,12 @@ function maybeShowPanel(): void {
 // ─── The server ─────────────────────────────────────────────────────────
 
 function startServer(first: boolean): void {
+    const host = state.host;
+    const https = state.mode === "tailscale-https";
     const args = [
         SERVER,
         "--host",
-        state.host,
+        host,
         "--port",
         String(options.port),
         "--cwd",
@@ -448,6 +502,10 @@ function startServer(first: boolean): void {
         "--data",
         options.data,
     ];
+
+    if (https) {
+        args.push("--tailscale-https");
+    }
 
     if (first && options.rotateToken) {
         args.push("--rotate-token");
@@ -462,13 +520,39 @@ function startServer(first: boolean): void {
     child = proc;
     pipeLines(proc.stdout, (line) => log(line));
     pipeLines(proc.stderr, (line) => log(line));
-    proc.on("message", (message: { type?: string; loginPath?: string }) => {
+    proc.on("message", (message: { type?: string; loginPath?: string; url?: string }) => {
         if (message?.type !== "ready" || child !== proc) {
             return;
         }
 
-        state.loginPath = message.loginPath;
         state.serverReady = true;
+
+        // Access may change while this child is still opening. Do not print a URL for a transport it never started.
+        if (host !== state.host || https !== (state.mode === "tailscale-https")) {
+            state.restartWhenReady = false;
+            restartServer();
+            state.serverReady = false;
+
+            return;
+        }
+
+        if (https) {
+            if (typeof message.url !== "string" || !message.url.startsWith("https://")) {
+                state.serverReady = false;
+                log(
+                    red(
+                        "  The server did not report an HTTPS address. Stopping instead of advertising an unverified link.",
+                    ),
+                );
+                void quit(1);
+
+                return;
+            }
+
+            state.publicUrl = message.url;
+        }
+
+        state.loginPath = message.loginPath;
         state.serverFailures = 0;
         const restarted = state.everReady;
 
@@ -647,16 +731,19 @@ async function stopTunnel(): Promise<void> {
 
 /** Switch to `mode`: start or stop the tunnel, and restart the server when it has to listen somewhere else. */
 async function applyAccess(mode: AccessMode, binary: string | undefined): Promise<void> {
+    const transportChanged = (state.mode === "tailscale-https") !== (mode === "tailscale-https");
+
     await stopTunnel();
     state.mode = mode;
     saveSettings(mode);
-    const host = bindHost(mode);
+    const host = mode === "tailscale-https" ? preparedTls!.address : bindHost(mode);
 
     state.panelPending = true;
 
-    if (host !== state.host) {
+    if (host !== state.host || transportChanged) {
         state.host = host;
         restartServer();
+        state.serverReady = false;
     } else {
         sendAccess();
     }
@@ -702,13 +789,13 @@ async function changeAccess(): Promise<void> {
             return;
         }
 
-        const binary = next === "cloudflare" ? await ensureCloudflared() : undefined;
+        const ready = await prepareAccess(next);
 
-        if (next === "cloudflare" && binary === undefined) {
+        if (ready === false || quitting) {
             return;
         }
 
-        await applyAccess(next, binary);
+        await applyAccess(next, typeof ready === "string" ? ready : undefined);
     } finally {
         release();
     }
@@ -717,13 +804,17 @@ async function changeAccess(): Promise<void> {
 let busyWithKey = false;
 
 function onRunKey(key: string): void {
+    if (key === "q" || key === "ctrl-c") {
+        void quit(0);
+
+        return;
+    }
+
     if (busyWithKey) {
         return;
     }
 
-    if (key === "q" || key === "ctrl-c") {
-        void quit(0);
-    } else if (key === "r") {
+    if (key === "r") {
         restartServer();
     } else if (key === "o" && state.loginPath !== undefined) {
         openInBrowser(`${localUrl()}${state.loginPath}`);
@@ -745,6 +836,7 @@ async function quit(code: number): Promise<void> {
     }
 
     quitting = true;
+    shutdown.abort();
     release();
     log(dim("  Stopping Pi Coop…"));
     await stopTunnel();
@@ -798,7 +890,7 @@ async function main(): Promise<void> {
             saved: settings.access,
             ask: interactive && !options.yes,
             menu: pickAccess,
-            prepare: prepareAccess,
+            prepare: (selected) => prepareAccess(selected, options.host),
         });
 
         if (chosen === "closed") {
@@ -819,7 +911,19 @@ async function main(): Promise<void> {
     }
 
     state.mode = mode;
-    state.host = options.host ?? (mode === "custom" ? "127.0.0.1" : bindHost(mode));
+    state.host =
+        options.host ??
+        (mode === "tailscale-https"
+            ? preparedTls!.address
+            : mode === "custom"
+              ? "127.0.0.1"
+              : bindHost(mode));
+
+    if (mode === "tailscale-https" && state.host !== preparedTls!.address) {
+        fail(
+            "Tailscale HTTPS must listen on this device’s Tailscale address. Remove --host or use its Tailscale IPv4 address.",
+        );
+    }
 
     if (mode !== "custom") {
         saveSettings(mode);

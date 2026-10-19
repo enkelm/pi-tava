@@ -1,11 +1,12 @@
 // People with access to this server, and invites for more.
 import { useEffect, useRef, useState } from "preact/hooks";
 import { Avatar } from "../avatar.js";
+import { ProjectAccessPicker } from "../project-access.js";
 import { actions, api, attempt, closeSheet, collab, notify, store } from "../store.js";
 import { copyText, html, Loader, Sheet, timeAgo } from "../ui.js";
 
 const ROLE_TEXT = {
-    guest: "Can steer Pi, which can run commands on this machine",
+    guest: "Can steer Pi in the projects you grant below",
     viewer: "Can read along, react, and chat, but not steer Pi",
 };
 
@@ -31,6 +32,14 @@ const cancelInvite = (invite) => {
     }
 };
 
+const projectAccessSnapshot = (access) =>
+    JSON.stringify({
+        ...(access?.all ? { all: true } : {}),
+        ...(access?.local ? { local: true } : {}),
+        ...(access?.hosts?.length ? { hosts: [...access.hosts].sort() } : {}),
+        ...(access?.projectIds?.length ? { projectIds: [...access.projectIds].sort() } : {}),
+    });
+
 export function InviteSheet({ session = null, initialAsOwner = false }) {
     const { view, me } = store.state;
     const here = view.conversation?.kind === "session" ? view.conversation : null;
@@ -39,22 +48,22 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
     // The owner's own other device: it signs in as the owner, not as someone new.
     const [asOwner, setAsOwner] = useState(initialAsOwner && me?.role === "owner");
     const [minutes, setMinutes] = useState(15);
-    const [continuePiSessions, setContinuePiSessions] = useState(false);
-    const canGrantPiSessions =
-        collab() && me?.role === "owner" && !asOwner && role === "guest" && !(only && here);
-    const grantPiSessions = canGrantPiSessions && continuePiSessions;
+    const [projectAccess, setProjectAccess] = useState({});
+    const grantProjectAccess = only && here ? {} : projectAccess;
+    const projectAccessKey = projectAccessSnapshot(grantProjectAccess);
     const [made, setMade] = useState(null);
     // The newest invite could not be made: the sheet offers to try again rather than wait for ever.
     const [failed, setFailed] = useState(false);
     // What the sheet says now: an invite shows only while it was made for exactly this.
-    const asked = JSON.stringify([asOwner, role, only, minutes, grantPiSessions]);
+    const asked = JSON.stringify([asOwner, role, only, minutes, projectAccessKey]);
     // Only the newest invite shows: one asked for before a change, answering late, must not stand for what the sheet says.
     const latest = useRef(0);
     // The invite the sheet last showed: a change to what it grants, or how long it lasts, ends it.
     const shown = useRef(null);
     // Closed (gone, or still sliding away): nothing more is made, and what was being made ends when it answers.
     const mounted = useRef(true);
-    const open = () => mounted.current && store.state.sheet?.type === "invite";
+    const open = () =>
+        mounted.current && store.state.me?.role === "owner" && store.state.sheet?.type === "invite";
     const create = ({ replacing = false } = {}) =>
         attempt(async () => {
             if (!open()) {
@@ -81,10 +90,10 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                           ? {
                                 role,
                                 ...(only && here ? { session: here.id } : {}),
-                                ...(grantPiSessions ? { continuePiSessions: true } : {}),
+                                projectAccess: grantProjectAccess,
                                 minutes,
                             }
-                          : { minutes },
+                          : { minutes, projectAccess: grantProjectAccess },
                 );
             } catch (error) {
                 if (ticket === latest.current) {
@@ -108,11 +117,24 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                 throw new Error("Restart Pi Coop to sign in another device as the owner.");
             }
 
-            if ((answer.grant?.continuePiSessions === true) !== grantPiSessions) {
+            if (!asOwner && answer.grant?.continuePiSessions === true) {
                 cancelInvite(answer);
                 setFailed(true);
 
-                throw new Error("Restart Pi Coop to update access to local Pi sessions.");
+                throw new Error("New invites cannot grant access to local Pi history.");
+            }
+
+            if (
+                !asOwner &&
+                (answer.grant?.projectAccess === undefined ||
+                    projectAccessSnapshot(answer.grant.projectAccess) !== projectAccessKey)
+            ) {
+                cancelInvite(answer);
+                setFailed(true);
+
+                throw new Error(
+                    "Restart Pi Coop to update project access before sharing an invite.",
+                );
             }
 
             shown.current = answer;
@@ -121,12 +143,7 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
 
     useEffect(() => {
         create({ replacing: true });
-    }, [role, only, asOwner, minutes, grantPiSessions]);
-    useEffect(() => {
-        if (!canGrantPiSessions) {
-            setContinuePiSessions(false);
-        }
-    }, [canGrantPiSessions]);
+    }, [role, only, asOwner, minutes, projectAccessKey, me?.role]);
     useEffect(
         () => () => {
             mounted.current = false;
@@ -139,14 +156,21 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
         made &&
         made.asked === asked &&
         (made.grant?.role === "owner") === asOwner &&
-        (made.grant?.continuePiSessions === true) === grantPiSessions
+        (asOwner || made.grant?.continuePiSessions !== true) &&
+        (asOwner || projectAccessSnapshot(made.grant?.projectAccess) === projectAccessKey)
             ? made
             : null;
-    const where = only && here ? `only “${here.title}”` : "every session";
+    const where = only && here ? `only “${here.title}”` : "only the projects granted above";
     // As long as the invite shown lasts (a server that does not say: 15 minutes), or, while one is made, as chosen.
     const lasting = LASTS.find(
         ([each]) => each === (invite ? (invite.minutes ?? 15) : minutes),
     )?.[2];
+
+    if (me?.role !== "owner") {
+        return html`<${Sheet} title="Invite someone" onClose=${closeSheet}>
+            <p class="muted">Only the owner can invite people or grant project access.</p>
+        <//>`;
+    }
 
     return html`<${Sheet} title="Invite someone" onClose=${closeSheet}>
         ${
@@ -182,7 +206,7 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                         </button>
                     </div>
                     <div class="muted small">
-                        ${ROLE_TEXT[role]}.${role === "guest" && only ? " Seeing one session in the app does not limit what Pi can reach on the machine." : ""}
+                        ${only && here && role === "guest" ? "Can steer Pi in this session" : ROLE_TEXT[role]}.
                     </div>
                 </div>
                 ${
@@ -195,7 +219,7 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                             aria-pressed=${!only}
                             onClick=${() => setOnly(false)}
                         >
-                            Every session
+                            Granted projects
                         </button>
                         <button
                             class=${only ? "on" : ""}
@@ -209,21 +233,9 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                 }`
         }
         ${
-            canGrantPiSessions &&
-            html`<div class="field">
-                <label class="check">
-                    <input
-                        type="checkbox"
-                        checked=${grantPiSessions}
-                        aria-describedby="invite-pi-sessions-help"
-                        onChange=${(event) => setContinuePiSessions(event.currentTarget.checked)}
-                    />
-                    Continue Pi sessions
-                </label>
-                <div class="muted small" id="invite-pi-sessions-help">
-                    They can read local Pi history and copy sessions into shared conversations.
-                </div>
-            </div>`
+            !asOwner &&
+            !(only && here) &&
+            html`<${ProjectAccessPicker} value=${projectAccess} onChange=${setProjectAccess} />`
         }
         ${
             !asOwner &&
@@ -343,9 +355,46 @@ function lastSeen(person) {
     return `seen ${timeAgo(person.lastSeen)}${timeAgo(person.lastSeen) === "now" ? "" : " ago"}`;
 }
 
-/** Everyone with access: who is online, when the others were last here, and (for the owner) what each may do. */
+/** Explicitly saving replaces legacy scope; opening this editor never changes a grant. */
+function PersonProjectAccess({ person, onClose }) {
+    const [access, setAccess] = useState(person.projectAccess ?? {});
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState("");
+
+    const save = async () => {
+        if (busy || store.state.me?.role !== "owner") {
+            return;
+        }
+
+        setBusy(true);
+        setError("");
+
+        try {
+            store.set({ users: await actions.setAccess(person.id, { projectAccess: access }) });
+            onClose();
+        } catch (failure) {
+            setError(failure.message ?? String(failure));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return html`<div class="field person-project-access">
+        <div class="label">Projects for ${person.name}</div>
+        ${person.projectAccess === undefined && html`<p class="muted small">Legacy access is unchanged until you save. Saving replaces it with the projects selected here.</p>`}
+        <${ProjectAccessPicker} value=${access} onChange=${setAccess} disabled=${busy} />
+        ${error && html`<p class="error" role="alert">${error}</p>`}
+        <div class="row">
+            <button class="button primary" disabled=${busy} onClick=${save}>${busy ? "Saving…" : "Save project access"}</button>
+            <button class="button" disabled=${busy} onClick=${onClose}>Cancel</button>
+        </div>
+    </div>`;
+}
+
+/** Everyone with access: who is online, when the others were last here, and what each may do. */
 export function PeopleList() {
     const { me, users, sessions } = store.state;
+    const [editingPerson, setEditingPerson] = useState(null);
     const owner = me?.role === "owner";
     const sessionTitle = (id) => sessions.find((each) => each.id === id)?.title ?? `session ${id}`;
     const ordered = [...users].sort(
@@ -361,7 +410,8 @@ export function PeopleList() {
         <div class="sheet-list">
             ${ordered.map(
                 (person) =>
-                    html`<div class="person-row" key=${person.id}>
+                    html`<div key=${person.id}>
+                    <div class="person-row">
                     <span class="people-here">
                         <${Avatar} person=${person} size=${32} />
                         <span
@@ -399,16 +449,17 @@ export function PeopleList() {
                             person.sessions &&
                             html`<button
                                 class="button small"
-                                title="Let them see every session"
+                                title=${person.projectAccess === undefined ? "Let them see every session" : "Remove the session restriction; project access still applies"}
                                 onClick=${() => change(person, { sessions: null })}
                             >
-                                All sessions
+                                ${person.projectAccess === undefined ? "All sessions" : "Use project access"}
                             </button>`
                         }
                         ${
                             collab() &&
                             person.role === "guest" &&
                             person.sessions === undefined &&
+                            person.projectAccess === undefined &&
                             html`<label
                                 class="check small"
                                 title="Can read local Pi history on this machine and copy sessions into shared conversations"
@@ -426,6 +477,11 @@ export function PeopleList() {
                             </label>`
                         }
                         <button
+                            class="button small"
+                            aria-expanded=${editingPerson === person.id}
+                            onClick=${() => setEditingPerson(editingPerson === person.id ? null : person.id)}
+                        >Projects</button>
+                        <button
                             class="button small ghost"
                             onClick=${() =>
                                 confirm(`Remove ${person.name}? Their devices are signed out.`) &&
@@ -442,6 +498,8 @@ export function PeopleList() {
                         </button>
                     </div>`
                     }
+                    </div>
+                    ${owner && person.role !== "owner" && editingPerson === person.id && html`<${PersonProjectAccess} person=${person} onClose=${() => setEditingPerson(null)} />`}
                 </div>`,
             )}
         </div>

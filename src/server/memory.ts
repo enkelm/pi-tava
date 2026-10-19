@@ -9,7 +9,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, posix, resolve } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
@@ -136,6 +136,16 @@ export class Memory {
         }
 
         const folder = cwd ?? app.cwdOf(conversationId);
+        const location = app.locationOf(conversationId);
+
+        if (location?.kind === "ssh") {
+            // SSH aliases are intentionally distinct identities. Never consult local Git, realpath, or trust for a
+            // remote path. Worktrees are folder-scoped in this first slice; no remote Git lookup is needed.
+            const path = posix.normalize(folder);
+            const key = `ssh:${JSON.stringify([location.host, path])}`;
+
+            return { key, name: named(`${location.host} · ${posix.basename(path) || path}`, key) };
+        }
 
         const now = this.#app.now();
         let cached = this.#projects.get(folder);

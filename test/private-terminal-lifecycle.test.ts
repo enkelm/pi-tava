@@ -75,11 +75,13 @@ registerHooks({
 
 const { terminalConnection, PrivateTerminal, syncTerminalTargets, disconnectPrivateTerminal } =
     await import(new URL("../web/private-terminal.js", import.meta.url).href);
+
 const flush = async () => {
     for (let i = 0; i < 4; i++) {
         await new Promise<void>((resolve) => setImmediate(resolve));
     }
 };
+
 const size = { cols: 80, rows: 24, cellWidth: 8, cellHeight: 20 };
 
 class Socket {
@@ -191,7 +193,11 @@ function project(socket = Socket.all.at(-1)!) {
     for (const request of socket.sent.filter(
         (frame) => frame.method === "client_shell.surface.set",
     )) {
-        socket.receive({ type: "response", requestId: request.requestId, response: { result: {} } });
+        socket.receive({
+            type: "response",
+            requestId: request.requestId,
+            response: { result: {} },
+        });
     }
 }
 
@@ -200,9 +206,7 @@ function listTarget() {
         instances: [
             {
                 id: "instance",
-                workspaces: [
-                    { tabs: [{ panes: [{ id: "opaque", nativeId: "pane" }] }] },
-                ],
+                workspaces: [{ tabs: [{ panes: [{ id: "opaque", nativeId: "pane" }] }] }],
             },
         ],
     });
@@ -246,7 +250,10 @@ class Component {
     }
 
     unmount = () => {
-        this.effects.splice(0).reverse().forEach((effect) => effect.stop?.());
+        this.effects
+            .splice(0)
+            .reverse()
+            .forEach((effect) => effect.stop?.());
     };
 }
 
@@ -289,7 +296,11 @@ test("hidden/pagehide abort terminal startup and fence late tickets until a real
     b.online();
     b.show();
     await connection.connect(size);
-    assert.equal(fixture.calls.length, 1, "departed pages cannot reopen via stray online/visible events");
+    assert.equal(
+        fixture.calls.length,
+        1,
+        "departed pages cannot reopen via stray online/visible events",
+    );
     b.window.dispatchEvent(new Event("pageshow"));
     assert.equal(available, 2, "pageshow resumes availability once");
 });
@@ -320,7 +331,11 @@ test("terminal transport closes in background and reconnects fresh without repla
     assert.notEqual(states.at(-1).inputEpoch, epoch);
     assert.deepEqual(Socket.all[1]!.sent, [], "the new socket never replays old input");
     first.receive({ type: "closed", reason: "late failure" });
-    assert.equal(states.at(-1).phase, "connected", "old socket callbacks cannot close the new epoch");
+    assert.equal(
+        states.at(-1).phase,
+        "connected",
+        "old socket callbacks cannot close the new epoch",
+    );
     b.offline();
     assert.equal(Socket.all[1]!.readyState, 3);
     b.online();
@@ -382,7 +397,11 @@ test("pooled foreground reuse survives one listener leaving; unused pools never 
     Socket.all[2]!.close();
     t.mock.timers.tick(30_000);
     await flush();
-    assert.equal(Socket.all.length, 3, "an unused foreground pool must not reconnect or resize a pane");
+    assert.equal(
+        Socket.all.length,
+        3,
+        "an unused foreground pool must not reconnect or resize a pane",
+    );
     const finalUnmount = await mount();
 
     b.cleanup.push(finalUnmount);
@@ -419,6 +438,7 @@ for (const stage of ["ticket", "socket", "welcome", "backoff"] as const) {
 
                       return { url: "/api/private-terminal?ticket=synthetic" };
                   };
+
         listTarget();
         const unmount = await mount();
 

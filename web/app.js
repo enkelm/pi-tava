@@ -61,6 +61,7 @@ import {
 import { prefs, setPrefs, startTheme } from "./theme.js";
 import { Transcript } from "./transcript.js";
 import { ThreadTypeTag } from "./thread-type.js";
+import { conversationLocation } from "./workspace-location.js";
 import { startTerminalRendererPrefetch } from "./terminal-renderer-assets.js";
 import {
     APPLE,
@@ -109,6 +110,8 @@ function Topbar() {
     const conversation = view.conversation;
     const artifacts = view.artifacts?.length ?? 0;
     const cwd = view.agent?.cwd ?? conversation?.cwd;
+    const location = conversationLocation();
+    const destination = location?.kind === "ssh" ? `SSH · ${location.host} · ${cwd ?? ""}` : null;
     const folder = String(cwd ?? "")
         .replace(/\/+$/, "")
         .split("/")
@@ -140,8 +143,8 @@ function Topbar() {
         <div class="title">
             <button
                 class="title-open"
-                aria-label=${`${title}${folder ? `, in ${folder}` : ""}: session menu`}
-                title=${cwd ? `${shortPath(cwd, server?.home)}\nSession menu` : "Session menu"}
+                aria-label=${`${title}${destination ? `, ${destination}` : folder ? `, in ${folder}` : ""}: session menu`}
+                title=${destination ?? (cwd ? `${shortPath(cwd, server?.home)}\nSession menu` : "Session menu")}
                 disabled=${!conversation}
                 onClick=${() => openSheet({ type: "menu" })}
             ></button>
@@ -151,6 +154,7 @@ function Topbar() {
                 ${conversation?.imported && html`<span class="muted" title="Copied from a saved Pi session; the original Pi was not stopped">Imported from Pi</span>`}
                 ${
                     folder &&
+                    !destination &&
                     html`<span
                         class="folder-mark"
                         style=${`--folder:${folderColor(cwd)}`}
@@ -163,8 +167,10 @@ function Topbar() {
                               subagent of ${conversation.parent?.title ?? "?"}
                           </span>`
                         : html`${
-                              folder &&
-                              html`<span class="title-folder" aria-hidden="true">${folder}</span>`
+                              destination
+                                  ? html`<span class="title-destination" aria-hidden="true">${destination}</span>`
+                                  : folder &&
+                                    html`<span class="title-folder" aria-hidden="true">${folder}</span>`
                           }
                           ${
                               branch &&

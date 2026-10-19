@@ -17,6 +17,13 @@ import {
 } from "../store.js";
 import { APPLE, html, Icon, Sheet, shortPath } from "../ui.js";
 import { piSessionsAvailable } from "./pi-sessions.js";
+import { SshLogin } from "../ssh-login.js";
+import { observeSsh } from "../ssh-status.js";
+import {
+    conversationLocation,
+    recentSshFolders,
+    rememberSshFolder,
+} from "../workspace-location.js";
 
 /** Whether hidden folders show: kept for the next time the picker opens. */
 const HIDDEN_KEY = "pocket.folderHidden";
@@ -128,15 +135,29 @@ export function CwdSheet({ mode }) {
 }
 
 /** Folder selection shared by New Session and Working directory. */
-export function FolderPicker({ mode, initialPath, onUse }) {
-    const { view, server, folderFavorites: favorites } = store.state;
+export function FolderPicker({
+    mode,
+    initialPath,
+    onUse,
+    onCancel = closeSheet,
+    location: requestedLocation,
+}) {
+    const { view, server, folderFavorites } = store.state;
     const changing = mode === "change";
+    const location =
+        requestedLocation === undefined && changing ? conversationLocation() : requestedLocation;
+    const host = location?.kind === "ssh" ? location.host : null;
+    const remote = host !== null;
+    const favorites = remote ? [] : folderFavorites;
     const initial =
         initialPath ??
-        (changing ? (view.agent?.cwd ?? server?.defaultCwd) : server?.defaultCwd) ??
+        (changing ? view.agent?.cwd : undefined) ??
+        (remote ? "~" : server?.defaultCwd) ??
         "~";
     const [listing, setListing] = useState(null);
     const [failed, setFailed] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const lastPath = useRef(initial);
     // The folder a click selected (mouse only): Open takes it over the one you are in.
     const [selected, setSelected] = useState(null);
     const [hidden, setHidden] = useState(() => localStorage.getItem(HIDDEN_KEY) === "1");
@@ -154,11 +175,13 @@ export function FolderPicker({ mode, initialPath, onUse }) {
     const root = useRef(null);
     const list = useRef(null);
     const crumbsBox = useRef(null);
-    // Only the latest read shows: a slow one answering after a later click is dropped.
+    // Only the latest read shows; superseded reads stop instead of just dropping their answer.
     const asked = useRef(0);
+    const reading = useRef(null);
+    const mounted = useRef(false);
     // Letters typed in the list jump to the folder they start; they add up for a moment.
     const typed = useRef({ text: "", at: 0 });
-    const home = listing?.home ?? server?.home;
+    const home = listing?.home ?? (remote ? undefined : server?.home);
     const folder = listing?.path ?? null;
     const dirs = listing?.dirs ?? [];
     const target = selected ?? folder;
@@ -166,15 +189,41 @@ export function FolderPicker({ mode, initialPath, onUse }) {
 
     /** Show a folder; `select`, a folder in it to select (the one stepped up from, with a mouse). */
     const load = (path, { showHidden = hidden, select = null } = {}) => {
+        if (!mounted.current) {
+            return Promise.resolve();
+        }
+
+        reading.current?.abort();
+        const controller = new AbortController();
         const ask = ++asked.current;
 
-        return api(`fs?path=${encodeURIComponent(path)}${showHidden ? "&hidden=1" : ""}`).then(
+        reading.current = controller;
+        lastPath.current = path;
+        setLoading(true);
+
+        if (remote && (!host.trim() || !(server?.sshWorkspaces >= 1))) {
+            setLoading(false);
+            setFailed(
+                "SSH workspaces are unavailable or no host was selected. Choose a configured SSH host.",
+            );
+
+            return Promise.resolve();
+        }
+
+        return observeSsh(location, () =>
+            api(
+                `fs?path=${encodeURIComponent(path)}${remote ? `&host=${encodeURIComponent(host)}` : ""}${showHidden ? "&hidden=1" : ""}`,
+                undefined,
+                { signal: controller.signal },
+            ),
+        ).then(
             (result) => {
                 if (ask !== asked.current) {
                     return;
                 }
 
                 setListing(result);
+                setLoading(false);
                 setFailed(null);
                 setSelected(touch ? null : select);
                 setMissing(null);
@@ -186,12 +235,14 @@ export function FolderPicker({ mode, initialPath, onUse }) {
                     return;
                 }
 
+                setLoading(false);
+
                 // A favorite that does not open, however, gets the banner, which can remove it.
-                if (notThere(error, path) || store.state.folderFavorites.includes(path)) {
+                if (notThere(error, path) || favorites.includes(path)) {
                     setMissing(path);
                     setMissingWhy(notThere(error, path) ? null : error.message);
                     setEditing(null);
-                } else if (listing) {
+                } else if (listing && !remote) {
                     notify("error", error.message);
                 } else {
                     setFailed(error.message);
@@ -201,8 +252,20 @@ export function FolderPicker({ mode, initialPath, onUse }) {
     };
 
     useEffect(() => {
+        mounted.current = true;
+        setListing(null);
+        setSelected(null);
+        setFailed(null);
+        setMissing(null);
         load(initial);
-    }, []);
+
+        return () => {
+            mounted.current = false;
+            asked.current++;
+            reading.current?.abort();
+            reading.current = null;
+        };
+    }, [host, initial, changing ? store.state.conversationId : null]);
 
     // A new folder shows from its top, or with the selected one in view; its path shows to its end. Keys go to the
     // list, with a mouse and keyboard.
@@ -239,7 +302,7 @@ export function FolderPicker({ mode, initialPath, onUse }) {
     /** Make a folder and go into it: Open starts there. */
     const make = async (path) => {
         try {
-            const made = await api("fs", { path });
+            const made = await api("fs", { path, location: location ?? null });
 
             await load(made.path);
         } catch (error) {
@@ -249,7 +312,13 @@ export function FolderPicker({ mode, initialPath, onUse }) {
 
     /** Start the session in the folder Open names (or a favorite's), or move this one there. */
     const use = async (path = target) => {
-        if (path === null || starting.current || (changing && path === view.agent?.cwd)) {
+        if (
+            path === null ||
+            loading ||
+            failed ||
+            starting.current ||
+            (changing && path === view.agent?.cwd)
+        ) {
             return;
         }
 
@@ -257,13 +326,18 @@ export function FolderPicker({ mode, initialPath, onUse }) {
         setBusy(true);
 
         try {
+            rememberSshFolder(location, path);
+
             if (onUse) {
                 onUse(path);
             } else if (changing) {
                 await actions.configure({ cwd: path });
                 closeSheet();
             } else {
-                const created = await actions.createSession(path, { worktree });
+                const created = await actions.createSession(path, {
+                    worktree,
+                    location: location ?? null,
+                });
 
                 navigate(created.id);
             }
@@ -275,7 +349,7 @@ export function FolderPicker({ mode, initialPath, onUse }) {
         }
     };
 
-    const mayStar = canSteer() && !scoped();
+    const mayStar = !remote && canSteer() && !scoped();
     const starred = target !== null && favorites.includes(target);
 
     /** Star or unstar a folder. The list changes when the server says it did, on every device. */
@@ -418,12 +492,18 @@ export function FolderPicker({ mode, initialPath, onUse }) {
     };
 
     const crumbs = folder === null ? [] : crumbsOf(folder, home);
-    const recent = (listing?.recent ?? []).filter((path) => !favorites.includes(path));
+    const recent = (
+        remote
+            ? recentSshFolders()
+                  .filter((item) => item.host === host)
+                  .map((item) => item.path)
+            : (listing?.recent ?? [])
+    ).filter((path) => !favorites.includes(path));
     const favoriteLabels = recentLabels(favorites, home);
     const labels = recentLabels(recent, home);
     const places = [
         ...(home ? [{ path: home, name: "Home", icon: "home" }] : []),
-        { path: "/", name: "Computer", icon: "monitor" },
+        { path: "/", name: remote ? host : "Computer", icon: "monitor" },
     ];
 
     const place = (path, name, icon, key = null) => html`<button
@@ -440,6 +520,18 @@ export function FolderPicker({ mode, initialPath, onUse }) {
     </button>`;
 
     return html`<div class="folder-picker" ref=${root}>
+        ${
+            remote &&
+            html`<p class="workspace-host mono" title=${host}>SSH · ${host}</p>
+                ${
+                    failed &&
+                    html`<${SshLogin}
+                    host=${host}
+                    disabled=${busy}
+                    onAuthenticated=${() => load(lastPath.current)}
+                />`
+                }`
+        }
         <div class="fp-bar">
             <button
                 type="button"
@@ -568,6 +660,7 @@ export function FolderPicker({ mode, initialPath, onUse }) {
                 ${recent.map((path, index) => place(path, labels[index], "folder"))}
                 ${
                     !changing &&
+                    !remote &&
                     piSessionsAvailable() &&
                     html`<button
                         type="button"
@@ -599,7 +692,13 @@ export function FolderPicker({ mode, initialPath, onUse }) {
                         }}
                     />`
                 }
-                ${failed && html`<p class="fp-note">${failed}</p>`}
+                ${
+                    failed &&
+                    html`<div class="fp-note" role="alert">
+                    <p>${failed}</p>
+                    <button class="button" type="button" disabled=${loading} onClick=${() => load(lastPath.current)}>Retry connection</button>
+                </div>`
+                }
                 ${!listing && !failed && html`<p class="fp-note">Opening…</p>`}
                 ${dirs.map(
                     (dir) => html`<button
@@ -673,12 +772,12 @@ export function FolderPicker({ mode, initialPath, onUse }) {
                 </label>
             </div>
             <div class="fp-buttons">
-                <button type="button" class="button" onClick=${closeSheet}>Cancel</button>
+                <button type="button" class="button" onClick=${onCancel}>Cancel</button>
                 <button
                     type="button"
                     class="button primary"
                     title=${touch ? undefined : "Ctrl+Enter"}
-                    disabled=${target === null || busy || here}
+                    disabled=${target === null || busy || loading || Boolean(failed) || here}
                     onClick=${() => use()}
                 >
                     ${here ? "Already here" : changing ? "Move here" : "Open"}

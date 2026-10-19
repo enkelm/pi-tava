@@ -81,7 +81,7 @@ function sameKey(subscription, publicKey) {
 /** Why this device cannot get notifications, or null when it can. */
 function blocker() {
     if (!isSecureContext) {
-        return "Notifications need a secure (https) address. Open Pi Coop through the Cloudflare Tunnel, or through tailscale serve, on this device.";
+        return "Notifications need HTTPS. Open Coop’s HTTPS address on this device.";
     }
 
     if (!supported) {

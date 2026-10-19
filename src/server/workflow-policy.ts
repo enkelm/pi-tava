@@ -12,12 +12,15 @@ import {
     type Result,
     type ShellExecOptions,
     type ShellExecResult,
+    type ExecutionEnv,
 } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { PocketApp } from "./app.ts";
+import type { User } from "./config.ts";
 import { describe, HttpError } from "./errors.ts";
 import { commandWords, readOnlyCommand } from "./extensions/plan.ts";
 import { requireResearch } from "./workflow-research.ts";
+import { sandboxProfile } from "./workflow-shell.ts";
 
 /** Apple's /usr/bin/git is an xcrun trampoline that needs writes/services even for reads. Use the actual binary. */
 export function workflowGitPath(): string | undefined {
@@ -65,8 +68,8 @@ const LOCAL_GIT_OPERATIONS = new Set([
     "worktree",
 ]);
 
-/** Recognize Git's operation, not a subcommand (stash push) or an option's value (-C push). */
-function gitPublication(args: readonly string[]): boolean {
+/** Locate Git's operation without mistaking a global option's value for it. Unknown options stay opaque. */
+function gitOperation(args: readonly string[]): number | undefined {
     for (let at = 0; at < args.length; at++) {
         const arg = args[at]!;
 
@@ -95,16 +98,149 @@ function gitPublication(args: readonly string[]): boolean {
             continue;
         } else if (arg.startsWith("-")) {
             // Do not guess how an unknown option consumes the remaining words.
-            return lexicalPublication(["git", ...args]);
+            return undefined;
         } else {
-            return (
-                ["push", "send-pack", "receive-pack"].includes(arg.toLowerCase()) ||
-                (!LOCAL_GIT_OPERATIONS.has(arg) && lexicalPublication(["git", ...args]))
-            );
+            return at;
         }
     }
 
-    return false;
+    return args.length;
+}
+
+/** Recognize Git's operation, not a subcommand (stash push) or an option's value (-C push). */
+function gitPublication(args: readonly string[]): boolean {
+    const at = gitOperation(args);
+    const operation = at === undefined ? undefined : args[at];
+
+    if (at === undefined) {
+        return lexicalPublication(["git", ...args]);
+    }
+
+    return (
+        operation !== undefined &&
+        (["push", "send-pack", "receive-pack"].includes(operation.toLowerCase()) ||
+            (!LOCAL_GIT_OPERATIONS.has(operation) && lexicalPublication(["git", ...args])))
+    );
+}
+
+function inspectionWords(words: readonly string[]): boolean {
+    // Normalize only the executable's path; operands remain separate, literal shell words.
+    return readOnlyCommand(
+        [basename(words[0] ?? ""), ...words.slice(1)]
+            .map((word) => `'${word.replaceAll("'", "'\\''")}'`)
+            .join(" "),
+    );
+}
+
+/** Non-editing commits have literal message operands; unknown option consumption stays opaque. */
+function commitInspectionWords(words: readonly string[]): readonly string[] | undefined {
+    if (!/^git(?:\.exe)?$/i.test(basename(words[0] ?? ""))) {
+        return undefined;
+    }
+
+    const operation = gitOperation(words.slice(1));
+
+    if (operation === undefined || words[operation + 1] !== "commit") {
+        return undefined;
+    }
+
+    const inspected = words.slice(0, operation + 2);
+
+    for (let at = operation + 2; at < words.length; at++) {
+        const word = words[at]!;
+
+        if (word === "--") {
+            inspected.push(...words.slice(at));
+            break;
+        }
+
+        if (word === "-m" || word === "--message") {
+            at++;
+        } else if (word.startsWith("--message=") || /^-m./s.test(word)) {
+            continue;
+        } else if (
+            word.startsWith("-") &&
+            ![
+                "-a",
+                "--all",
+                "-q",
+                "--quiet",
+                "--amend",
+                "--allow-empty",
+                "--allow-empty-message",
+                "--no-edit",
+                "-n",
+                "--no-verify",
+                "--no-gpg-sign",
+                "-s",
+                "--signoff",
+                "--no-signoff",
+                "--reset-author",
+            ].includes(word)
+        ) {
+            // Editors can execute the message itself. Unknown/combined/value-taking options
+            // also keep the original scan rather than guessing which operands they consume.
+            return undefined;
+        } else {
+            inspected.push(word);
+        }
+    }
+
+    return inspected;
+}
+
+/** A later interpreter could execute COMMIT_EDITMSG even without a pipe. Keep the whole list bounded. */
+function localIntegrationWords(words: readonly string[]): boolean {
+    if (inspectionWords(words)) {
+        return true;
+    }
+
+    if (!/^git(?:\.exe)?$/i.test(basename(words[0] ?? ""))) {
+        return false;
+    }
+
+    const args = words.slice(1);
+    const operation = gitOperation(args);
+
+    if (operation === undefined) {
+        return false;
+    }
+
+    for (let at = 0; at < operation; at++) {
+        if (["-C", "--git-dir", "--work-tree"].includes(args[at]!)) {
+            at++;
+        } else if (
+            !/^(?:-C.|--(?:git-dir|work-tree)=)/.test(args[at]!) &&
+            args[at] !== "--no-pager"
+        ) {
+            // Executable global configuration is not an inspection/integration continuation.
+            return false;
+        }
+    }
+
+    const action = args.slice(operation);
+
+    return (
+        inspectionWords(["git", ...action]) ||
+        commitInspectionWords(words) !== undefined ||
+        (action.length === 3 &&
+            action[0] === "merge" &&
+            action[1] === "--ff-only" &&
+            !action[2]!.startsWith("-"))
+    );
+}
+
+/** Only proven data positions are exempt. Quoting alone never makes a shell/config/script payload inert. */
+function publicationWords(
+    words: readonly string[],
+    searchData: boolean,
+    commitData: boolean,
+): readonly string[] {
+    if (["rg", "grep"].includes(basename(words[0] ?? "")) && searchData && inspectionWords(words)) {
+        return words.slice(0, 1);
+    }
+
+    return (commitData ? commitInspectionWords(words) : undefined) ?? words;
 }
 
 /** Bounded lexical inspection, not a shell interpreter or a filesystem jail for trusted programs. */
@@ -113,16 +249,28 @@ function shellPublication(command: string | readonly string[], depth = 0): boole
         return true;
     }
 
-    const commands =
-        typeof command === "string" ? commandWords(command.replace(/\\\r?\n/g, "")) : [command];
+    const normalized = typeof command === "string" ? command.replace(/\\\r?\n/g, "") : command;
+    const commands = typeof normalized === "string" ? commandWords(normalized) : [normalized];
 
     if (commands === undefined) {
         // Redirects, substitutions and other unsupported syntax keep the conservative refusal.
         return lexicalPublication(command);
     }
 
-    return commands.some((words) =>
-        words.some((word, at) => {
+    // A search feeding an interpreter is not inert. Without a full pipeline interpreter, exempt
+    // search operands only for a single invocation or a wholly verified inspection command list.
+    const searchData = commands.length === 1 || commands.every(inspectionWords);
+    // Git prints the subject in its commit summary: a pipe can turn that prose into executable input.
+    const commitData =
+        (commands.length === 1 || commands.every(localIntegrationWords)) &&
+        (typeof normalized !== "string" ||
+            commandWords(normalized, { pipelines: false }) !== undefined);
+
+    return commands.some((commandWords) => {
+        const words =
+            depth === 0 ? publicationWords(commandWords, searchData, commitData) : commandWords;
+
+        return words.some((word, at) => {
             const program = basename(word);
 
             if (/^(?:gh|git-(?:send|receive)-pack)(?:\.exe)?$/i.test(program)) {
@@ -141,8 +289,8 @@ function shellPublication(command: string | readonly string[], depth = 0): boole
             return [word, ...(value === undefined ? [] : [value])].some(
                 (nested) => /[\s'"\\;|&()<>{}]/.test(nested) && shellPublication(nested, depth + 1),
             );
-        }),
-    );
+        });
+    });
 }
 
 /** Unsupported shell syntax must not hide explicit publication behind quotes, escapes or wrappers. */
@@ -173,20 +321,6 @@ function lexicalPublication(command: string | readonly string[]): boolean {
                 .some((arg) => ["push", "send-pack", "receive-pack"].includes(arg.toLowerCase()))
         );
     });
-}
-
-function sandboxProfile(readOnly: boolean): string {
-    return [
-        "(version 1)",
-        "(allow default)",
-        "(deny network*)",
-        // Prevent delegation to unsandboxed local services such as automation/XPC brokers.
-        "(deny mach-lookup)",
-        "(deny appleevent-send)",
-        ...(readOnly
-            ? ["(deny file-write*)", '(allow file-write* (literal "/dev/null"))', "(deny signal)"]
-            : []),
-    ].join("\n");
 }
 
 const runFile = promisify(execFile);
@@ -346,17 +480,41 @@ export async function withWorkflowPublicationLock<T>(
     }
 }
 
-/** Re-evaluate identity, membership and steering rights, not the User object captured at admission. */
-export function requireWorkflowRequester(app: PocketApp, id: ConversationId): string {
-    const requester = app.attribution.requesterOf(id);
+export type WorkflowRequester = Pick<
+    User,
+    "id" | "tokenHash" | "role" | "sessions" | "projectAccess"
+>;
+
+/** Live identity: explicit human reads need visibility, while agent operations also need steering. */
+export function requireWorkflowRequester(
+    app: PocketApp,
+    id: ConversationId,
+    explicit?: WorkflowRequester,
+    readOnly = false,
+): string {
+    const requester = explicit?.id ?? app.attribution.requesterOf(id);
     const user = requester === undefined ? undefined : app.config.userById(requester);
 
-    if (user === undefined) {
-        throw new Error("Managed workflow execution requires a currently authorized requester.");
+    if (user === undefined || (explicit !== undefined && user.tokenHash !== explicit.tokenHash)) {
+        throw new Error(
+            "Workflow execution requires a currently authorized requester. Sign in again if access changed.",
+        );
     }
 
     app.requireSee(user, id);
-    app.requireSteer(user);
+
+    if (explicit === undefined || !readOnly) {
+        app.requireSteer(user);
+    }
+
+    if (
+        explicit !== undefined &&
+        (user.role !== explicit.role ||
+            JSON.stringify(user.sessions) !== JSON.stringify(explicit.sessions) ||
+            JSON.stringify(user.projectAccess) !== JSON.stringify(explicit.projectAccess))
+    ) {
+        throw new Error("The requester's authority changed. Start a fresh workspace request.");
+    }
 
     return user.id;
 }
@@ -373,6 +531,7 @@ export function createWorkflowHooks(app: PocketApp) {
 
                 try {
                     requireWorkflowRequester(app, id);
+
                     const args = call.arguments as Record<string, unknown>;
                     const readOnly =
                         app.handoffs.isReadOnly(id) || app.handoffs.profileUnavailable(id);
@@ -389,7 +548,7 @@ export function createWorkflowHooks(app: PocketApp) {
                         }
                     }
 
-                    if (["read", "bash", "codemode"].includes(call.name)) {
+                    if (["read", "host_skill", "bash", "codemode"].includes(call.name)) {
                         // Bash has an OS sandbox, including its arbitrary descendants. Nested codemode calls
                         // pass this hook independently; the script itself has no filesystem/network APIs.
                         return undefined;
@@ -459,6 +618,7 @@ export function createWorkflowHooks(app: PocketApp) {
                             "schedule",
                             "handoff",
                             "publication",
+                            "stage_upload",
                         ].includes(call.name)
                     ) {
                         return undefined;
@@ -484,182 +644,232 @@ export function createWorkflowHooks(app: PocketApp) {
  * active local writes and arbitrary trusted programs are not a complete hostile-code filesystem sandbox.
  * Other platforms need an equivalent OS sandbox before shell execution is enabled.
  */
-class WorkflowExecutionEnv extends NodeExecutionEnv {
-    readonly #app: PocketApp;
-    readonly #conversationId: ConversationId;
+export type ConfinedExec = (
+    readOnly: boolean,
+    command: string | readonly string[],
+    options: ShellExecOptions | undefined,
+    context: Context,
+) => Promise<Result<ShellExecResult, ExecutionError>>;
 
-    constructor(app: PocketApp, id: ConversationId, cwd: string) {
-        super({ cwd });
-        this.#app = app;
-        this.#conversationId = id;
-    }
+const mutations = new Set([
+    "writeFile",
+    "appendFile",
+    "truncateFile",
+    "flushFile",
+    "renameFile",
+    "createDir",
+    "remove",
+    "createTempDir",
+    "createTempFile",
+]);
 
-    async #write<T>(
-        path: string | undefined,
-        run: () => Promise<Result<T, FileError>>,
-    ): Promise<Result<T, FileError>> {
-        let release: () => void;
+/** One live policy boundary for host and SSH environments, including direct UI callers. */
+export function protectWorkflowEnv<T extends ExecutionEnv>(
+    app: PocketApp,
+    id: ConversationId,
+    env: T,
+    confinedExec: ConfinedExec,
+    requester?: WorkflowRequester,
+): T {
+    const identity =
+        requester === undefined
+            ? undefined
+            : {
+                  id: requester.id,
+                  tokenHash: requester.tokenHash,
+                  role: requester.role,
+                  sessions: requester.sessions?.slice(),
+                  projectAccess:
+                      requester.projectAccess === undefined
+                          ? undefined
+                          : {
+                                ...requester.projectAccess,
+                                hosts: requester.projectAccess.hosts?.slice(),
+                                projectIds: requester.projectAccess.projectIds?.slice(),
+                            },
+              };
 
-        try {
-            if (this.#app.handoffs.isManaged(this.#conversationId)) {
-                requireWorkflowRequester(this.#app, this.#conversationId);
+    return new Proxy(env, {
+        get(target, property) {
+            // The confined backend is an implementation capability, not another execution entry point.
+            if (property === "execConfined") {
+                return undefined;
             }
 
-            release = reserveWorkflowLocalWrite(this.#app, this.#conversationId);
-        } catch (error) {
-            return err(new FileError("permission_denied", describe(error), path));
-        }
+            const value = Reflect.get(target, property, target);
 
-        try {
-            return await run();
-        } finally {
-            release();
-        }
-    }
-
-    override async exec(
-        command: string | readonly string[],
-        options: ShellExecOptions | undefined,
-        context: Context,
-    ): Promise<Result<ShellExecResult, ExecutionError>> {
-        const app = this.#app;
-        const id = this.#conversationId;
-
-        if (!app.handoffs.isManaged(id)) {
-            return super.exec(command, options, context);
-        }
-
-        try {
-            requireWorkflowRequester(app, id);
-
-            if (!app.handoffs.isReadOnly(id) && !app.handoffs.profileUnavailable(id)) {
-                requireWorkflowLocalWrite(app, id);
+            if (typeof value !== "function") {
+                return value;
             }
-        } catch (error) {
-            return err(new ExecutionError("shell_unavailable", describe(error)));
-        }
 
-        if (shellPublication(command)) {
-            return err(
-                new ExecutionError(
-                    "shell_unavailable",
-                    "Direct Git push/send-pack/receive-pack and GitHub CLI commands are blocked in managed shell, including file remotes. Use pull for supported active-Pull reads, or publication for supported, individually human-approved mutations.",
-                ),
-            );
-        }
+            if (property === "cleanup") {
+                return value.bind(target);
+            }
 
-        const readOnly = app.handoffs.isReadOnly(id) || app.handoffs.profileUnavailable(id);
-        const text =
-            typeof command === "string"
-                ? command
-                : command.map((word) => `'${word.replaceAll("'", "'\\''")}'`).join(" ");
+            if (property === "exec") {
+                return async (
+                    command: string | readonly string[],
+                    options: ShellExecOptions | undefined,
+                    context: Context,
+                ) => {
+                    let release: (() => void) | undefined;
 
-        if (readOnly && !readOnlyCommand(text)) {
-            return err(
-                new ExecutionError(
-                    "shell_unavailable",
-                    "Read-only workflow shell permits only verified simple inspection commands. Process control, interpreters and arbitrary shell are blocked.",
-                ),
-            );
-        }
+                    try {
+                        const managed = app.handoffs.isManaged(id);
 
-        if (process.platform !== "darwin") {
-            return err(
-                new ExecutionError(
-                    "shell_unavailable",
-                    "Managed workflow shell is disabled on this platform until an OS sandbox is supported. It must not fall back to unrestricted execution.",
-                ),
-            );
-        }
+                        if (managed || identity !== undefined) {
+                            requireWorkflowRequester(app, id, identity);
+                        }
 
-        const profile = sandboxProfile(readOnly);
-        const argv =
-            typeof command === "string"
-                ? ["/bin/bash", "--noprofile", "--norc", "-c", command]
-                : [...command];
+                        if (!managed) {
+                            const result = await target.exec(command, options, context);
 
-        // A missing/rejected sandbox returns a failed result from NodeExecutionEnv. Never retry raw.
-        const git = workflowGitPath();
-        const path = options?.env?.PATH ?? process.env.PATH ?? "/usr/bin:/bin";
+                            if (identity !== undefined) {
+                                requireWorkflowRequester(app, id, identity);
+                            }
 
-        if (git !== undefined && (argv[0] === "git" || argv[0] === "/usr/bin/git")) {
-            argv[0] = git;
-        }
+                            return result;
+                        }
 
-        // The graph gate covers owned tasks; this reservation also covers direct env callers and
-        // remains held through the child's entire lifetime, not just its initial policy check.
-        const release = readOnly ? () => {} : reserveWorkflowLocalWrite(app, id);
+                        const readOnly =
+                            app.handoffs.isReadOnly(id) || app.handoffs.profileUnavailable(id);
 
-        try {
-            return await super.exec(
-                ["/usr/bin/sandbox-exec", "-p", profile, ...argv],
-                {
-                    ...options,
-                    env: {
-                        ...options?.env,
-                        PATH: git === undefined ? path : `${dirname(git)}:${path}`,
-                        GIT_OPTIONAL_LOCKS: "0",
-                    },
-                },
-                context,
-            );
-        } finally {
-            release();
-        }
-    }
+                        if (typeof command !== "string" && command.length === 0) {
+                            return err(new ExecutionError("spawn_error", "Empty command"));
+                        }
 
-    override async writeFile(path: string, content: string | Uint8Array, context: Context) {
-        return this.#write(path, () => super.writeFile(path, content, context));
-    }
+                        if (shellPublication(command)) {
+                            return err(
+                                new ExecutionError(
+                                    "shell_unavailable",
+                                    "Direct Git push/send-pack/receive-pack and GitHub CLI commands are blocked in managed shell, including file remotes. Use pull for supported active-Pull reads, or publication for supported, individually human-approved mutations.",
+                                ),
+                            );
+                        }
 
-    override async appendFile(path: string, content: string | Uint8Array, context: Context) {
-        return this.#write(path, () => super.appendFile(path, content, context));
-    }
+                        const text =
+                            typeof command === "string"
+                                ? command
+                                : command
+                                      .map((word) => `'${word.replaceAll("'", "'\\''")}'`)
+                                      .join(" ");
 
-    override async truncateFile(path: string, size: number, context: Context) {
-        return this.#write(path, () => super.truncateFile(path, size, context));
-    }
+                        if (readOnly && !readOnlyCommand(text)) {
+                            return err(
+                                new ExecutionError(
+                                    "shell_unavailable",
+                                    "Read-only workflow shell permits only verified simple inspection commands. Process control, interpreters and arbitrary shell are blocked.",
+                                ),
+                            );
+                        }
 
-    override async flushFile(path: string, context: Context) {
-        return this.#write(path, () => super.flushFile(path, context));
-    }
+                        if (!readOnly) {
+                            release = reserveWorkflowLocalWrite(app, id);
+                        }
 
-    override async renameFile(source: string, destination: string, context: Context) {
-        return this.#write(destination, () => super.renameFile(source, destination, context));
-    }
+                        const result = await confinedExec(readOnly, command, options, context);
 
-    override async createDir(
-        path: string,
-        options: { recursive?: boolean } | undefined,
-        context: Context,
-    ) {
-        return this.#write(path, () => super.createDir(path, options, context));
-    }
+                        requireWorkflowRequester(app, id, identity);
 
-    override async remove(
-        path: string,
-        options: { recursive?: boolean; force?: boolean } | undefined,
-        context: Context,
-    ) {
-        return this.#write(path, () => super.remove(path, options, context));
-    }
+                        return result;
+                    } catch (error) {
+                        return err(new ExecutionError("shell_unavailable", describe(error)));
+                    } finally {
+                        release?.();
+                    }
+                };
+            }
 
-    override async createTempDir(prefix: string | undefined, context: Context) {
-        return this.#write(undefined, () => super.createTempDir(prefix, context));
-    }
+            return async (...args: unknown[]) => {
+                let release: (() => void) | undefined;
 
-    override async createTempFile(
-        options: { prefix?: string; suffix?: string } | undefined,
-        context: Context,
-    ) {
-        return this.#write(undefined, () => super.createTempFile(options, context));
-    }
+                try {
+                    if (mutations.has(String(property))) {
+                        if (app.handoffs.isManaged(id) || identity !== undefined) {
+                            requireWorkflowRequester(app, id, identity);
+                        }
+
+                        release = reserveWorkflowLocalWrite(app, id);
+                    } else if (app.handoffs.isManaged(id) || identity !== undefined) {
+                        requireWorkflowRequester(app, id, identity, true);
+                    }
+
+                    const result = await Reflect.apply(value, target, args);
+
+                    if (app.handoffs.isManaged(id) || identity !== undefined) {
+                        requireWorkflowRequester(
+                            app,
+                            id,
+                            identity,
+                            !mutations.has(String(property)),
+                        );
+                    }
+
+                    return result;
+                } catch (error) {
+                    return err(new FileError("permission_denied", describe(error)));
+                } finally {
+                    release?.();
+                }
+            };
+        },
+    });
 }
 
 export function createWorkflowEnv(
     app: PocketApp,
     id: ConversationId,
     cwd: string,
+    requester?: WorkflowRequester,
 ): NodeExecutionEnv {
-    return new WorkflowExecutionEnv(app, id, cwd);
+    const env = new NodeExecutionEnv({ cwd });
+
+    return protectWorkflowEnv(
+        app,
+        id,
+        env,
+        async (readOnly, command, options, context) => {
+            if (process.platform !== "darwin") {
+                return err(
+                    new ExecutionError(
+                        "shell_unavailable",
+                        "Managed workflow shell is disabled on this platform until an OS sandbox is supported. It must not fall back to unrestricted execution.",
+                    ),
+                );
+            }
+
+            const argv =
+                typeof command === "string"
+                    ? ["/bin/bash", "--noprofile", "--norc", "-c", command]
+                    : [...command];
+            const git = workflowGitPath();
+            const path = options?.env?.PATH ?? process.env.PATH ?? "/usr/bin:/bin";
+
+            if (git !== undefined && (argv[0] === "git" || argv[0] === "/usr/bin/git")) {
+                argv[0] = git;
+            }
+
+            // Requested environment is installed only after seatbelt, never in its native loader.
+            const workloadEnv = {
+                ...options?.env,
+                PATH: git === undefined ? path : `${dirname(git)}:${path}`,
+                GIT_OPTIONAL_LOCKS: "0",
+            };
+
+            return env.exec(
+                [
+                    "/usr/bin/sandbox-exec",
+                    "-p",
+                    sandboxProfile(readOnly),
+                    "/usr/bin/env",
+                    ...(options?.inheritEnv === false ? ["-i"] : []),
+                    ...Object.entries(workloadEnv).map(([key, value]) => `${key}=${value}`),
+                    ...argv,
+                ],
+                { ...options, env: undefined, inheritEnv: true },
+                context,
+            );
+        },
+        requester,
+    );
 }

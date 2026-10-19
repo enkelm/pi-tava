@@ -159,14 +159,17 @@ export function terminalConnection(id, changed, lifecycle = {}) {
 
     const offline = () => drop("Offline. Reconnecting when online; input is never replayed.", true);
     const online = visibility;
+
     const pagehide = () => {
         departed = true;
         drop("Terminal paused when leaving this page.", true);
     };
+
     const pageshow = () => {
         departed = false;
         visibility();
     };
+
     const unsubscribe = store.subscribe(() => {
         if (owner() !== who) {
             drop("Private access ended.");

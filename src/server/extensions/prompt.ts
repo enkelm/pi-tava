@@ -12,9 +12,16 @@ import {
     getDocsPath,
     loadProjectContextFiles,
 } from "@earendil-works/pi-coding-agent";
-import { defineExtension, type PromptInput, section } from "@earendil-works/pi-durable";
+import { Type } from "@earendil-works/pi-ai";
+import { defineExtension, defineTool, type PromptInput, section } from "@earendil-works/pi-durable";
 import { APP_ROOT } from "../config.ts";
 import type { PocketHost } from "../host.ts";
+import {
+    hostInstructions,
+    readHostSkill,
+    RemoteContext,
+    type ContextFile,
+} from "../remote-context.ts";
 
 const PREAMBLE = `You are Pi, a coding agent running inside Pi Coop: a durable, multiplayer web app built on Pi Durable. People talk to you from a browser, often a phone, and several people can share one conversation. When more than one person uses this server, each message starts with [from: Name].
 
@@ -53,11 +60,61 @@ type Resources = {
 };
 
 export default function createPrompt(host: PocketHost) {
+    // Bind while installing: an older live host must reject this replacement, not install render closures that fail.
+    const projectResources = host.projectResources.bind(host);
+
     // Context files and skills load once per directory, and again when the copy is older than STALE_MS, or Pi's trust
     // store changed since: a project trusted now has skills it did not have, from the next request on. Only answers to
     // "trust this project?" show at once; other changes (a new skill, Pi's defaultProjectTrust) wait for STALE_MS, or
     // a request more (the app reads Pi's settings again in the background as often).
     const resources = new Map<string, Resources>();
+    const remoteContext = new RemoteContext();
+    const renderFiles = (files: ContextFile[]) =>
+        files
+            .map(
+                (file) =>
+                    `<file path="${host.text.defang(file.path).replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">\n${host.text.defang(file.content.trim())}\n</file>`,
+            )
+            .join("\n\n");
+    const remoteOf = (input: PromptInput) => host.workspace(input.conversationId);
+    const hostSkill = defineTool({
+        name: "host_skill",
+        description:
+            "Read a registered host-global skill or a relative text resource inside it. For SSH threads only; this reads on the Coop host, not the SSH machine. Never executes or stages scripts. Maximum 50KB per resource and 2000 lines per reply.",
+        parameters: Type.Object({
+            name: Type.String({ description: "Registered host-global skill name" }),
+            resource: Type.Optional(
+                Type.String({
+                    description: "Resource path relative to the skill directory; omit for SKILL.md",
+                }),
+            ),
+            offset: Type.Optional(Type.Integer({ minimum: 1 })),
+            limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })),
+        }),
+        replay: "safe",
+        execute: async (args, api) => {
+            if (host.workspace(api.conversationId).location?.kind !== "ssh") {
+                throw new Error("host_skill is for SSH workspaces; use read for local skills.");
+            }
+
+            const text = await readHostSkill(
+                host.globalSkills(),
+                args.name,
+                args.resource,
+                args.offset,
+                args.limit,
+            );
+
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Host-global skill resource (not a remote file):\n${text}`,
+                    },
+                ],
+            };
+        },
+    });
 
     const trustChanged = () => {
         try {
@@ -109,15 +166,119 @@ export default function createPrompt(host: PocketHost) {
 
     return defineExtension({
         name: "pocket-prompt",
+        tools: [hostSkill],
         sections: [
             section("preamble", () => PREAMBLE, { tag: false }),
-            section("guidelines", () => GUIDELINES),
-            section("pocket_docs", () => docs(host.dataDir)),
-            section("project_context", (input) => load(cwdOf(input)).context),
-            section("skills", (input) => load(cwdOf(input)).skills, { tag: false }),
+            section("guidelines", (input) =>
+                remoteOf(input).location?.kind === "ssh"
+                    ? `${GUIDELINES}\n- In this SSH thread, attached files and inline image URLs are host-local. Before a remote script needs an attachment, call stage_upload(path) with its host upload path and use the returned remote temporary path. It copies one attached file from this thread's upload directory; the source remains on the host. Do not automatically replay an uncertain stage_upload. It does not stage host scripts or global skill resources. Do not treat remote image paths as host attachments; remote-generated image attachment handling is unsupported in this first slice.`
+                    : GUIDELINES,
+            ),
+            section("pocket_docs", (input) =>
+                remoteOf(input).location?.kind === "ssh"
+                    ? "Pi Coop and provider configuration live on the Coop host, not this SSH machine. Remote read/bash cannot directly access host documentation or uploads. Use stage_upload(path) to copy an attached file to the remote before a remote script needs it; the original remains host-local. Host scripts and global skill resources cannot be staged by this tool. Use a local thread for host app documentation. Do not copy provider credentials or whole host settings directories to the remote."
+                    : docs(host.dataDir),
+            ),
+            section("project_context", async (input, context) => {
+                const workspace = remoteOf(input);
+
+                if (workspace.location?.kind !== "ssh") {
+                    return load(cwdOf(input)).context;
+                }
+
+                const blocks: string[] = [];
+
+                try {
+                    const global = renderFiles(await hostInstructions(host.agentDir));
+
+                    if (global !== "") {
+                        blocks.push(`Host-global instructions:\n${global}`);
+                    }
+                } catch (error) {
+                    blocks.push(
+                        `Host-global instructions unavailable: ${host.text.defang(String(error))}`,
+                    );
+                }
+
+                try {
+                    blocks.push(
+                        renderFiles(await remoteContext.load(workspace.env, cwdOf(input), context)),
+                    );
+                } catch (error) {
+                    blocks.push(
+                        `SSH project instructions unavailable: ${host.text.defang(String(error))}. No local project context was substituted. Retry on a later request after fixing the connection.`,
+                    );
+                }
+
+                return blocks.filter(Boolean).join("\n\n");
+            }),
+            section(
+                "skills",
+                async (input, context) => {
+                    const workspace = remoteOf(input);
+
+                    if (workspace.location?.kind !== "ssh") {
+                        return load(cwdOf(input)).skills;
+                    }
+
+                    const blocks: string[] = [];
+                    let global: ReturnType<PocketHost["globalSkills"]> = [];
+                    let remote: ReturnType<PocketHost["globalSkills"]> = [];
+
+                    try {
+                        // Deliberately independent of SSH discovery: connection loss cannot hide host-global skills.
+                        global = host.globalSkills();
+                    } catch (error) {
+                        blocks.push(
+                            `Host-global skills unavailable: ${host.text.defang(String(error))}`,
+                        );
+                    }
+
+                    try {
+                        const loaded = await projectResources(input.conversationId, context);
+
+                        remote = loaded.skills.filter(
+                            (skill) =>
+                                skill.sourceInfo.source === workspace.env.id &&
+                                skill.sourceInfo.scope === "project",
+                        );
+                    } catch (error) {
+                        blocks.push(
+                            `SSH project skills unavailable: ${host.text.defang(String(error))}. No host-local project namesakes were substituted. Host-global skills below remain host resources, not replacement project resources. Retry after fixing the connection.`,
+                        );
+                    }
+
+                    const text = formatSkillsForPrompt(remote, "read").trim();
+
+                    if (text !== "") {
+                        blocks.push(
+                            `Trusted remote project skills (paths are on this SSH machine):\n${text}`,
+                        );
+                    }
+
+                    // Remote project names win, including skills that allow only explicit slash invocation.
+                    const remoteNames = new Set(remote.map((skill) => skill.name));
+                    const visibleGlobal = global.filter(
+                        (skill) => !skill.disableModelInvocation && !remoteNames.has(skill.name),
+                    );
+
+                    blocks.push(
+                        `Host-global skills: read them with host_skill(name), and relative resources with host_skill(name, resource). Their paths are on the Coop host, not the remote; never pass host paths to remote read/bash. Host skill scripts cannot be run or staged remotely by host_skill.\n\n${visibleGlobal.map((skill) => `- ${host.text.defang(skill.name)}: ${host.text.defang(skill.description)}`).join("\n")}`,
+                    );
+
+                    return blocks.join("\n\n");
+                },
+                { tag: false },
+            ),
             section("environment", (input) => {
                 // The date only, so the prompt stays cache-friendly through the day.
                 const today = new Date().toISOString().slice(0, 10);
+
+                const workspace = remoteOf(input);
+
+                if (workspace.location?.kind === "ssh") {
+                    return `Working directory: ${cwdOf(input)}\nLocation: SSH · ${host.text.defang(workspace.location.host)}\nPlatform: remote POSIX; bash required (remote OS not detected).\nAll agents, subagents, model calls and history run on the Coop host. Files and bash target this one SSH workspace; host paths are not remote paths. No local fallback or automatic replay of uncertain remote mutations.\nToday: ${today}`;
+                }
 
                 return `Working directory: ${cwdOf(input)}\nPlatform: ${process.platform}\nToday: ${today}`;
             }),

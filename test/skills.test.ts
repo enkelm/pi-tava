@@ -219,13 +219,10 @@ test("a session lists them as /skill: commands and in its system prompt", async 
     const app = await started();
     const id = await newSession(app, project);
 
-    assert.deepEqual(
-        app
-            .skillCommands(id)
-            .map((each) => each.name)
-            .sort(),
-        ["everywhere", "here"],
-    );
+    assert.deepEqual((await app.skillCommands(id)).map((each) => each.name).sort(), [
+        "everywhere",
+        "here",
+    ]);
     await say(app, id, "hello");
     assert.match(prompt, /<name>everywhere<\/name>/);
     assert.match(prompt, /<name>here<\/name>/);
@@ -328,7 +325,7 @@ test("the owner answers through the API, a guest cannot, and Pi has the skills f
     try {
         await say(app, id, "first");
         assert.doesNotMatch(prompt, /<name>waiting<\/name>/);
-        assert.ok(!app.skillCommands(id).some((each) => each.name === "waiting"));
+        assert.ok(!(await app.skillCommands(id)).some((each) => each.name === "waiting"));
 
         const asked = await call(app.config.ownerToken);
 
@@ -353,7 +350,7 @@ test("the owner answers through the API, a guest cannot, and Pi has the skills f
             [{ trusted: true, ask: false }],
         );
         assert.equal(new ProjectTrustStore(process.env.PI_CODING_AGENT_DIR!).get(project), true);
-        assert.ok(app.skillCommands(id).some((each) => each.name === "waiting"));
+        assert.ok((await app.skillCommands(id)).some((each) => each.name === "waiting"));
         // At once, not when the prompt's copy of the skills grows stale.
         await say(app, id, "second");
         assert.match(prompt, /<name>waiting<\/name>/);
@@ -381,12 +378,15 @@ test("the app reads Pi's settings: its default trust, and its skill paths", asyn
 
     try {
         const id = await newSession(other, project);
-        const commands = other.skillCommands(id).map((each) => each.name);
+        const commands = (await other.skillCommands(id)).map((each) => each.name);
 
         assert.ok(commands.includes("by-default"), "trusted by defaultProjectTrust");
         assert.ok(commands.includes("from-pi-settings"), "found through Pi's skill paths");
         assert.deepEqual(
-            [other.projectTrust(id, owner(other))].map(({ trusted, ask }) => ({ trusted, ask })),
+            [await other.projectTrust(id, owner(other))].map(({ trusted, ask }) => ({
+                trusted,
+                ask,
+            })),
             [{ trusted: true, ask: false }],
         );
     } finally {
@@ -403,11 +403,11 @@ test("a project told Don't trust offers none of its own .pi/prompts, as it loads
     mkdirSync(join(folder, ".pi", "prompts"), { recursive: true });
     writeFileSync(join(folder, ".pi", "prompts", "release-notes.md"), "Write the release notes.\n");
     const id = await newSession(on, folder);
-    const offered = () => on.promptTemplates(id).map((each) => each.name);
+    const offered = async () => (await on.promptTemplates(id)).map((each) => each.name);
 
-    assert.ok(offered().includes("release-notes"), "undecided: offered, as before");
-    on.setProjectTrust(id, owner(on), "distrust");
-    assert.ok(!offered().includes("release-notes"), "Don't trust: not offered");
-    on.setProjectTrust(id, owner(on), "trust");
-    assert.ok(offered().includes("release-notes"), "trusted: offered");
+    assert.ok((await offered()).includes("release-notes"), "undecided: offered, as before");
+    await on.setProjectTrust(id, owner(on), "distrust");
+    assert.ok(!(await offered()).includes("release-notes"), "Don't trust: not offered");
+    await on.setProjectTrust(id, owner(on), "trust");
+    assert.ok((await offered()).includes("release-notes"), "trusted: offered");
 });

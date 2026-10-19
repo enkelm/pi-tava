@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ThreadType } from "./workflow-docs.ts";
+import type { RemoteProjectTrustDecision } from "./remote-project-resources.ts";
+import type { ProjectAccess } from "./project-access.ts";
 
 /** The repository root: `web/`, `src/`, and `node_modules/` live here. */
 export const APP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -24,8 +26,10 @@ export interface User {
     tokenHash: string;
     createdAt: number;
     lastSeen?: number;
-    /** Conversation ids of the only sessions this person may open; absent means every session. */
+    /** Session-only allowlist, when present; takes precedence over project selectors. */
     sessions?: string[];
+    /** Owner-authored project grants. Absent retains legacy scope; new collaborator invites always include a grant. */
+    projectAccess?: ProjectAccess;
     /** Owner-granted access to local Pi history; effective only for unrestricted steering guests. */
     continuePiSessions?: true;
     /**
@@ -41,7 +45,10 @@ export interface User {
 export function canContinuePiSessions(user: User): boolean {
     return (
         user.role === "owner" ||
-        (user.role === "guest" && user.sessions === undefined && user.continuePiSessions === true)
+        (user.role === "guest" &&
+            user.sessions === undefined &&
+            user.projectAccess === undefined &&
+            user.continuePiSessions === true)
     );
 }
 
@@ -49,9 +56,10 @@ export function canContinuePiSessions(user: User): boolean {
 export interface StoredInvite {
     codeHash: string;
     role: Role;
-    /** The one session it is for; absent means every session. Never set for an owner invite. */
+    /** Optional session-only invitation; otherwise project grants apply. Never set for an owner invite. */
     session?: string;
-    /** Owner-granted access to local Pi history; never for viewers or a single session. */
+    projectAccess?: ProjectAccess;
+    /** Retained legacy history grants only; new project invitations cannot grant host Pi history. */
     continuePiSessions?: true;
     expiresAt: number;
     /** Who made it: it works only while they may still invite. */
@@ -125,6 +133,8 @@ interface PocketConfig {
     providerPackages?: ProviderPackageState;
     /** Owner-edited, app-wide role instructions. Missing roles use their bundled defaults. */
     agentPrompts?: Partial<Record<ThreadType, string>>;
+    /** Owner choices for canonical SSH resource roots; never remote credentials or settings. */
+    remoteProjectTrust?: RemoteProjectTrustDecision[];
 }
 
 /** Who may allow a risky tool call: anyone who can steer, or (for guests) only someone other than who asked. */
@@ -307,6 +317,38 @@ export class ConfigStore {
         }
     }
 
+    get remoteProjectTrust(): readonly RemoteProjectTrustDecision[] {
+        const decisions = this.#config.remoteProjectTrust ?? [];
+
+        if (!Array.isArray(decisions)) {
+            throw new Error("The host's remote project trust choices cannot be read.");
+        }
+
+        return decisions.map((entry) => ({ ...entry }));
+    }
+
+    set remoteProjectTrust(decisions: readonly RemoteProjectTrustDecision[]) {
+        if (decisions.length > 2048) {
+            throw new Error("Remote project trust is limited to 2048 explicit choices.");
+        }
+
+        const previous = this.#config.remoteProjectTrust;
+
+        this.#config.remoteProjectTrust = decisions.map(({ filesystem, path, trusted }) => ({
+            filesystem,
+            path,
+            trusted,
+        }));
+
+        try {
+            this.save();
+        } catch (error) {
+            this.#config.remoteProjectTrust = previous;
+
+            throw error;
+        }
+    }
+
     get disabledExtensions(): readonly string[] {
         return this.#config.disabledExtensions ?? [];
     }
@@ -370,6 +412,7 @@ export class ConfigStore {
         role: Role,
         sessions?: string[],
         continuePiSessions?: true,
+        projectAccess?: ProjectAccess,
     ): { user: User; token: string } {
         const token = newToken();
         const user: User = {
@@ -379,7 +422,13 @@ export class ConfigStore {
             tokenHash: hashToken(token),
             createdAt: Date.now(),
             ...(sessions === undefined ? {} : { sessions: [...sessions] }),
-            ...(role === "guest" && sessions === undefined && continuePiSessions === true
+            ...(role === "owner" || projectAccess === undefined
+                ? {}
+                : { projectAccess: structuredClone(projectAccess) }),
+            ...(role === "guest" &&
+            sessions === undefined &&
+            projectAccess === undefined &&
+            continuePiSessions === true
                 ? { continuePiSessions: true as const }
                 : {}),
         };
@@ -399,6 +448,7 @@ export class ConfigStore {
                 | "lastSeen"
                 | "role"
                 | "sessions"
+                | "projectAccess"
                 | "tunnel"
                 | "budget"
                 | "continuePiSessions"
@@ -420,6 +470,10 @@ export class ConfigStore {
             delete patch.sessions;
         }
 
+        if ("projectAccess" in patch && user.role === "owner") {
+            delete patch.projectAccess;
+        }
+
         if ("budget" in patch && user.role === "owner") {
             delete patch.budget;
         }
@@ -437,6 +491,7 @@ export class ConfigStore {
         if (
             user.role !== "guest" ||
             user.sessions !== undefined ||
+            user.projectAccess !== undefined ||
             user.continuePiSessions !== true
         ) {
             delete user.continuePiSessions;

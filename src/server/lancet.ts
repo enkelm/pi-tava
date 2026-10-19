@@ -59,7 +59,8 @@ export interface ToolJudgement {
 }
 
 const SHELL_TOOLS = new Set(["bash"]);
-const FILE_TOOLS = new Set(["write", "edit"]);
+// Staging is a write capability; guard its explicit host-upload source path before any transfer.
+const FILE_TOOLS = new Set(["write", "edit", "stage_upload"]);
 
 export class LancetGuard {
     readonly directory: string | undefined;

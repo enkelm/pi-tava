@@ -15,14 +15,21 @@ import { networkInterfaces } from "node:os";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 
-export type AccessMode = "local" | "lan" | "cloudflare" | "tailscale";
-export const ACCESS_MODES: readonly AccessMode[] = ["local", "lan", "cloudflare", "tailscale"];
+export type AccessMode = "local" | "lan" | "cloudflare" | "tailscale" | "tailscale-https";
+export const ACCESS_MODES: readonly AccessMode[] = [
+    "local",
+    "lan",
+    "cloudflare",
+    "tailscale",
+    "tailscale-https",
+];
 
 export const ACCESS_LABELS: Record<AccessMode, string> = {
     local: "This device only",
     lan: "Local network",
     cloudflare: "Cloudflare Tunnel",
-    tailscale: "Tailscale",
+    tailscale: "Tailscale (HTTP)",
+    "tailscale-https": "Tailscale (HTTPS)",
 };
 
 export function isAccessMode(value: string | undefined): value is AccessMode {
@@ -68,7 +75,7 @@ export function bindHost(mode: AccessMode): string {
         return "0.0.0.0";
     }
 
-    if (mode === "tailscale") {
+    if (mode === "tailscale" || mode === "tailscale-https") {
         return tailscaleAddress() ?? "127.0.0.1";
     }
 

@@ -22,7 +22,7 @@ import { ShellRequestsDoc } from "./docs.ts";
 import { SHELL_ENTRY, type ShellData } from "./entry-format.ts";
 import { HttpError } from "./errors.ts";
 import { ownRequest } from "./requests.ts";
-import { createWorkflowEnv, requireWorkflowLocalWrite } from "./workflow-policy.ts";
+import { requireWorkflowLocalWrite } from "./workflow-policy.ts";
 
 const TASK = "pocket.shell";
 /** How long a command may run. */
@@ -103,9 +103,7 @@ export class Shell {
                             this.#app.requireSee(user, id);
                             this.#app.requireSteer(user);
                             requireWorkflowLocalWrite(this.#app, id);
-                            const env = this.#app.handoffs.isManaged(id)
-                                ? createWorkflowEnv(this.#app, id, this.#app.cwdOf(id))
-                                : await runtime.env(context);
+                            const env = this.#app.envFor(id, user);
 
                             data = await this.#run(task.input, taskId, env, context);
                         } catch (error) {

@@ -244,14 +244,17 @@ export function createHandoffState(pocket) {
     }
 
     const resume = () => observe(pocket.session());
+
     const hide = () => {
         pageHidden = true;
         resume();
     };
+
     const show = () => {
         pageHidden = false;
         resume();
     };
+
     const stop = pocket.onSessionChange(observe);
 
     document.addEventListener("visibilitychange", resume);

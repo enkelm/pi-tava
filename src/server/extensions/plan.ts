@@ -21,7 +21,7 @@ import { BUILT_IN_TOOLS } from "../reload.ts";
 const PLANNING = `Plan mode is on. Read and explore, then propose a plan; change nothing yet. You can use read, artifact, the browser to look at pages (not to click, type, or run scripts in them), and bash for simple read-only commands such as ls, cat, grep, find, and git status/log/diff/show, without redirects, globs, variables, or command substitution, and tools marked read-only. Writing, editing, other commands, and subagents are blocked until a person approves the plan. You may inspect handoff status and execute a human-requested handoff without approving implementation; its normal authority and transition checks still apply. Otherwise end your answer with the plan as a short numbered list.`;
 
 /** Tools that change nothing, or whose own calls are checked one by one (codemode). */
-const ALWAYS_ALLOWED = new Set(["read", "artifact", "codemode"]);
+const ALWAYS_ALLOWED = new Set(["read", "host_skill", "artifact", "codemode"]);
 /** What the browser may do in plan mode: look at pages, not act on them. */
 const BROWSER_LOOKS = new Set([
     "navigate",
@@ -156,8 +156,12 @@ const READERS: Readonly<Record<string, ArgsCheck>> = {
  * The simple commands of a command line, as words: split at `|`, `||`, `&&`, `;`, and new lines, with quotes and
  * backslashes resolved the way bash does. Undefined for anything that is more than plain words: redirects,
  * substitutions, variables, globs, subshells, background jobs, line continuations, or an unfinished quote.
+ * Callers that cannot treat pipeline input as data may also refuse single pipes (not logical `||`).
  */
-export function commandWords(command: string): string[][] | undefined {
+export function commandWords(
+    command: string,
+    options: { pipelines?: boolean } = {},
+): string[][] | undefined {
     const commands: string[][] = [[]];
     let word: string | undefined;
     let quote: "'" | '"' | undefined;
@@ -217,6 +221,10 @@ export function commandWords(command: string): string[][] | undefined {
         } else if (char === "\n" || char === ";") {
             endCommand();
         } else if (char === "|" || char === "&") {
+            if (char === "|" && next !== "|" && options.pipelines === false) {
+                return undefined;
+            }
+
             // A single `&` sends a job to the background.
             if (char === "&" && next !== "&") {
                 return undefined;

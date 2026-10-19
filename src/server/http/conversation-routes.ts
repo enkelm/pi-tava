@@ -4,13 +4,15 @@ import { createWriteStream, rmSync } from "node:fs";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
 import type { CommentReview, ResolveReview } from "../reviews.ts";
-import { serveImage, TYPES } from "./assets.ts";
+import { serveImage, sniffImage, TYPES } from "./assets.ts";
 import { extensionRoute } from "./extension-routes.ts";
-import { type ApiRequest, json, readJson, send } from "./io.ts";
+import { type ApiRequest, json, readJson, send, withReadContext } from "./io.ts";
 
 const MAX_UPLOAD = 50 * 1024 * 1024;
 
@@ -35,6 +37,19 @@ export async function conversationRoutes(
     id: ConversationId,
     parts: string[],
 ): Promise<void> {
+    if ((api.request.method ?? "GET") === "GET") {
+        return withReadContext(api, (context) => dispatchConversation(api, id, parts, context));
+    }
+
+    return dispatchConversation(api, id, parts, BACKGROUND_CONTEXT);
+}
+
+async function dispatchConversation(
+    api: ApiRequest,
+    id: ConversationId,
+    parts: string[],
+    context: Context,
+): Promise<void> {
     const { app, request, response, url, user } = api;
     const method = request.method ?? "GET";
     const [, , third, fourth] = parts;
@@ -57,12 +72,12 @@ export async function conversationRoutes(
         }
 
         if (fourth === "changes" && method === "GET") {
-            return json(response, 200, await app.reviews.changes(id, user));
+            return json(response, 200, await app.reviews.changes(id, user, context));
         }
 
         if (fourth === "diff" && method === "GET") {
             return json(response, 200, {
-                diff: await app.reviews.diff(id, user, url.searchParams.get("path") ?? ""),
+                diff: await app.reviews.diff(id, user, url.searchParams.get("path") ?? "", context),
             });
         }
 
@@ -70,7 +85,7 @@ export async function conversationRoutes(
             return json(
                 response,
                 200,
-                await app.reviews.context(id, user, url.searchParams.get("path") ?? ""),
+                await app.reviews.context(id, user, url.searchParams.get("path") ?? "", context),
             );
         }
 
@@ -388,7 +403,7 @@ export async function conversationRoutes(
 
     // Whether Pi trusts the session's project, which its own skills wait for; only the owner answers.
     if (third === "trust" && method === "GET") {
-        return json(response, 200, app.projectTrust(id, user));
+        return json(response, 200, await app.projectTrust(id, user));
     }
 
     if (third === "trust" && method === "POST") {
@@ -402,7 +417,7 @@ export async function conversationRoutes(
             throw new HttpError(400, "choice must be trust, trust-parent, or distrust");
         }
 
-        return json(response, 200, app.setProjectTrust(id, user, body.choice));
+        return json(response, 200, await app.setProjectTrust(id, user, body.choice));
     }
 
     if (third === "fork" && method === "POST") {
@@ -453,6 +468,27 @@ export async function conversationRoutes(
             throw new HttpError(400, "path is required");
         }
 
+        if (app.locationOf(id) !== undefined) {
+            const upload = app.workspace.hostUploadFile(id, requested);
+
+            if (upload !== undefined) {
+                return serveImage(request, response, upload);
+            }
+
+            const bytes = await app.workspace.imageBytes(id, user, requested, context);
+            const type = sniffImage(bytes.subarray(0, 1024));
+
+            if (type === undefined) {
+                throw new HttpError(415, "That file is not an image");
+            }
+
+            return send(response, 200, bytes, type, {
+                "cache-control": "private, no-store",
+                "content-security-policy":
+                    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:",
+            });
+        }
+
         return serveImage(request, response, app.workspace.conversationFile(user, id, requested));
     }
 
@@ -475,14 +511,14 @@ export async function conversationRoutes(
     }
 
     if (third === "changes" && fourth === undefined && method === "GET") {
-        return json(response, 200, await app.workspace.changes(id, user));
+        return json(response, 200, await app.workspace.changes(id, user, context));
     }
 
     if (third === "changes" && fourth === "diff" && method === "GET") {
         return send(
             response,
             200,
-            await app.workspace.changeDiff(id, user, url.searchParams.get("path") ?? ""),
+            await app.workspace.changeDiff(id, user, url.searchParams.get("path") ?? "", context),
             "text/plain; charset=utf-8",
         );
     }
@@ -490,7 +526,7 @@ export async function conversationRoutes(
     // The folder's files for `@` mentions. A browser that has the newest list says so with `since` and gets only
     // that; a whole list goes compressed when the browser takes it so.
     if (third === "files" && method === "GET") {
-        const listing = await app.workspace.fileList(id, user);
+        const listing = await app.workspace.fileList(id, user, context);
 
         if (url.searchParams.get("since") === listing.version) {
             return json(response, 200, { version: listing.version, same: true });
@@ -508,12 +544,14 @@ export async function conversationRoutes(
 
     // Prompt templates and skills, for the message box's slash commands.
     if (third === "prompts" && method === "GET") {
-        const templates = app.promptTemplates(id).map(({ name, description, argumentHint }) => ({
-            name,
-            description,
-            ...(argumentHint === undefined ? {} : { argumentHint }),
-        }));
-        const skills = app.skillCommands(id).map(({ name, description }) => ({
+        const templates = (await app.promptTemplates(id, user)).map(
+            ({ name, description, argumentHint }) => ({
+                name,
+                description,
+                ...(argumentHint === undefined ? {} : { argumentHint }),
+            }),
+        );
+        const skills = (await app.skillCommands(id, user)).map(({ name, description }) => ({
             name: `skill:${name}`,
             description,
             argumentHint: "[what to do]",
@@ -530,7 +568,7 @@ export async function conversationRoutes(
             throw new HttpError(400, "path is required");
         }
 
-        return json(response, 200, await app.workspace.viewFile(id, user, requested));
+        return json(response, 200, await app.workspace.viewFile(id, user, requested, context));
     }
 
     if (third === "edit" && method === "POST") {
@@ -548,6 +586,10 @@ export async function conversationRoutes(
     }
 
     if (third === "lsp" && method === "POST") {
+        if (app.locationOf(id) !== undefined) {
+            throw new HttpError(409, "Language services are not available for SSH workspaces.");
+        }
+
         return json(response, 200, await app.languages.handle(id, user, await readJson(request)));
     }
 

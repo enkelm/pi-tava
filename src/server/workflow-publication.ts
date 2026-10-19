@@ -15,6 +15,19 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import type { PocketApp } from "./app.ts";
 import type { ApprovalAnswer } from "./host.ts";
+import { WorkspaceBackend } from "./workspace-backend.ts";
+import type { WorkspaceLocation } from "./workspace-location.ts";
+import {
+    GH_VALUES,
+    publicationBodies,
+    publicationRemoteInputs,
+    requireHostTransport,
+    stagePublication,
+    stagePublicationBodies,
+    hostExternalEnvironment,
+    hostPublicationAuth,
+    type WorkflowBackendFactory,
+} from "./workflow-host-stage.ts";
 import { DecisionsDoc } from "./docs.ts";
 import { HandoffsDoc, type HandoffsData } from "./workflow-docs.ts";
 import {
@@ -28,6 +41,9 @@ export type PublicationReceipt = {
     id: string;
     command: string[];
     cwd: string;
+    location?: WorkspaceLocation;
+    sourceCommit?: string;
+    bodyFiles?: { path: string; sha256: string; bytes: number }[];
     fingerprint: string;
     requester: string;
     approver: string;
@@ -82,45 +98,7 @@ const GH_SWITCHES = new Set([
     "--delete-last",
     "--yes",
 ]);
-const GH_VALUES = new Set([
-    "--title",
-    "-t",
-    "--body",
-    "-b",
-    "--body-file",
-    "-F",
-    "--repo",
-    "-R",
-    "--base",
-    "-B",
-    "--head",
-    "-H",
-    "--assignee",
-    "-a",
-    "--reviewer",
-    "-r",
-    "--label",
-    "-l",
-    "--milestone",
-    "-m",
-    "--project",
-    "-p",
-    "--add-assignee",
-    "--remove-assignee",
-    "--add-reviewer",
-    "--remove-reviewer",
-    "--add-label",
-    "--remove-label",
-    "--add-project",
-    "--remove-project",
-    "--state",
-    "--search",
-    "--limit",
-    "--author",
-    "--reason",
-    "--match-head-commit",
-    "--json",
-]);
+
 const GIT_SWITCHES = new Set([
     "--atomic",
     "--dry-run",
@@ -211,7 +189,7 @@ function validateCommand(command: readonly string[]): void {
             continue;
         }
 
-        if (!GH_VALUES.has(flag!) || flag === "--body-file" || flag === "-F") {
+        if (!GH_VALUES.has(flag!)) {
             throw new Error(
                 `Unsupported gh option: ${arg}. Interactive editor, browser and shell operations are not permitted.`,
             );
@@ -310,8 +288,16 @@ async function inspectGit(
     program: string,
     args: string[],
     context: Context,
+    backend?: WorkspaceBackend,
 ): Promise<string> {
-    const output = await safeWorkflowGit(cwd, args, context, { program, maxBytes: MAX_FILE });
+    const output =
+        backend === undefined
+            ? await safeWorkflowGit(cwd, args, context, { program, maxBytes: MAX_FILE })
+            : await backend.gitBytes(cwd, args, {
+                  offline: true,
+                  readOnly: true,
+                  maxBuffer: MAX_FILE,
+              });
 
     if (!isUtf8(output)) {
         throw new Error("Non-UTF-8 Git inspection output is unsupported for publication.");
@@ -326,6 +312,7 @@ async function requirePublicationSource(
     command: readonly string[],
     landedHead: string,
     context: Context,
+    backend?: WorkspaceBackend,
 ): Promise<void> {
     let source: string | undefined;
 
@@ -354,10 +341,16 @@ async function requirePublicationSource(
         return;
     }
 
-    const cwd = await realpath(app.cwdOf(id));
+    const cwd = await publicationCwd(app, id, backend);
     const git = await executable("git");
     const commit = (
-        await inspectGit(cwd, git, ["rev-parse", "--verify", `${source}^{commit}`], context)
+        await inspectGit(
+            cwd,
+            git,
+            ["rev-parse", "--verify", `${source}^{commit}`],
+            context,
+            backend,
+        )
     ).trim();
 
     if (commit !== landedHead) {
@@ -374,9 +367,52 @@ async function pinCommand(
     program: string,
     landedHead: string,
     context: Context,
+    backend?: WorkspaceBackend,
 ): Promise<string[]> {
     if (requested[0] !== "git") {
-        await requirePublicationSource(app, id, requested, landedHead, context);
+        if (backend !== undefined) {
+            const options = new Set<string>();
+            let items = 0;
+
+            for (let i = 3; i < requested.length; i++) {
+                const [flag, inline] = requested[i]!.split(/=(.*)/s);
+
+                if (GH_VALUES.has(flag!)) {
+                    options.add(flag!);
+
+                    if (inline === undefined) {
+                        i++;
+                    }
+                } else if (!flag!.startsWith("-")) {
+                    items++;
+                }
+            }
+
+            if (requested.includes("--delete-branch")) {
+                throw new Error(
+                    "SSH host-side gh publication does not support --delete-branch because local branch deletion cannot be applied to the remote workspace safely. Delete remote workspace branches explicitly offline.",
+                );
+            }
+
+            if (!["create", "list", "status"].includes(requested[2]!) && items !== 1) {
+                throw new Error(
+                    "SSH host-side gh operations require one explicit numeric item ID; implicit current-branch targeting is unsupported.",
+                );
+            }
+
+            if (
+                requested[1] === "pr" &&
+                requested[2] === "create" &&
+                !options.has("--base") &&
+                !options.has("-B")
+            ) {
+                throw new Error(
+                    "SSH host-side PR creation requires explicit --base; remote branch configuration is not executed or copied to the host.",
+                );
+            }
+        }
+
+        await requirePublicationSource(app, id, requested, landedHead, context, backend);
         const pinned = [...requested];
 
         for (let i = 3; i < pinned.length; i++) {
@@ -401,12 +437,18 @@ async function pinCommand(
         return pinned;
     }
 
-    const cwd = await realpath(app.cwdOf(id));
+    const cwd = await publicationCwd(app, id, backend);
     const targets = requested.slice(2).filter((arg) => !arg.startsWith("-"));
     const remote = targets[0]!;
     const [source, destination] = targets[1]!.split(":");
     const commit = (
-        await inspectGit(cwd, program, ["rev-parse", "--verify", `${source}^{commit}`], context)
+        await inspectGit(
+            cwd,
+            program,
+            ["rev-parse", "--verify", `${source}^{commit}`],
+            context,
+            backend,
+        )
     ).trim();
 
     if (commit !== landedHead) {
@@ -416,7 +458,13 @@ async function pinCommand(
     }
 
     const url = (
-        await inspectGit(cwd, program, ["remote", "get-url", "--push", "--all", remote], context)
+        await inspectGit(
+            cwd,
+            program,
+            ["remote", "get-url", "--push", "--all", remote],
+            context,
+            backend,
+        )
     ).trim();
 
     if (
@@ -443,13 +491,17 @@ async function pinCommand(
     }
 
     const effective = (
-        await inspectGit(cwd, program, ["ls-remote", "--get-url", url], context)
+        await inspectGit(cwd, program, ["ls-remote", "--get-url", url], context, backend)
     ).trim();
 
     if (effective !== url) {
         throw new Error(
             "The resolved push URL would be rewritten again by Git configuration. Remove that ambiguity before publication.",
         );
+    }
+
+    if (backend !== undefined) {
+        requireHostTransport(url);
     }
 
     return [
@@ -467,8 +519,9 @@ async function checkpoint(
     command: readonly string[],
     program: string,
     context: Context,
+    backend?: WorkspaceBackend,
 ): Promise<string> {
-    const cwd = await realpath(app.cwdOf(id));
+    const cwd = await publicationCwd(app, id, backend);
     const hash = createHash("sha256").update(
         JSON.stringify({ command, cwd, program, fingerprint: await app.handoffs.fingerprint(id) }),
     );
@@ -476,7 +529,13 @@ async function checkpoint(
     hash.update(await hashFile(program, 256 * 1024 * 1024));
 
     // Git configuration and push hooks are executable publication inputs, usually outside the tracked tree.
-    if (command[0] === "git") {
+    if (backend !== undefined) {
+        hash.update(await publicationRemoteInputs(backend));
+
+        if (command[0] === "git") {
+            hash.update((await hostPublicationAuth(context)).fingerprint);
+        }
+    } else if (command[0] === "git") {
         const config = await inspectGit(
             cwd,
             program,
@@ -501,7 +560,21 @@ async function checkpoint(
         }
     }
 
+    const source = backend ?? WorkspaceBackend.local(cwd);
+
+    for (const body of await publicationBodies(source, command)) {
+        hash.update(JSON.stringify({ path: body.path, index: body.index, sha256: body.sha256 }));
+    }
+
     return hash.digest("hex");
+}
+
+async function publicationCwd(
+    app: PocketApp,
+    id: ConversationId,
+    backend?: WorkspaceBackend,
+): Promise<string> {
+    return backend === undefined ? realpath(app.cwdOf(id)) : backend.canonical(app.cwdOf(id));
 }
 
 /** Human selection of Publish must follow Land; action approval pins the actual clean checkout. */
@@ -510,6 +583,7 @@ async function publishHead(
     root: ConversationId,
     handoffs: Readonly<HandoffsData> | undefined,
     context: Context,
+    backend?: WorkspaceBackend,
 ): Promise<string> {
     const inbound = Object.values(handoffs?.handoffs ?? {}).find(
         (handoff) => handoff.targetThreadId === Number(root),
@@ -523,14 +597,17 @@ async function publishHead(
         throw new Error("Publication requires a human-selected Publish handoff from Land.");
     }
 
-    const cwd = await realpath(app.cwdOf(root));
+    const cwd = await publicationCwd(app, root, backend);
     const git = await executable("git");
-    const head = (await inspectGit(cwd, git, ["rev-parse", "--verify", "HEAD"], context)).trim();
+    const head = (
+        await inspectGit(cwd, git, ["rev-parse", "--verify", "HEAD"], context, backend)
+    ).trim();
     const dirty = await inspectGit(
         cwd,
         git,
         ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
         context,
+        backend,
     );
 
     if (!/^[0-9a-f]{40,64}$/.test(head) || dirty !== "") {
@@ -627,7 +704,7 @@ function result(text: string) {
 }
 
 /** Register in pocket-core, never in a disableable extension. */
-export function createPublicationTool(app: PocketApp) {
+export function createPublicationTool(app: PocketApp, backendFor?: WorkflowBackendFactory) {
     return defineTool({
         name: "publication",
         description:
@@ -678,11 +755,21 @@ export function createPublicationTool(app: PocketApp) {
                 );
             }
 
+            const location = app.locationOf(id);
+
+            if (location !== undefined && backendFor === undefined) {
+                throw new Error(
+                    "SSH publication requires a destination-bound offline backend; no host-local fallback.",
+                );
+            }
+
+            const backend = location === undefined ? undefined : await backendFor!(id, context);
             const landedHead = await publishHead(
                 app,
                 root,
                 await api.snapshot(HandoffsDoc, context),
                 context,
+                backend,
             );
             const landedFingerprint = await app.handoffs.fingerprint(id);
 
@@ -691,7 +778,7 @@ export function createPublicationTool(app: PocketApp) {
             }
 
             validateCommand(args.command);
-            await requirePublicationSource(app, id, args.command, landedHead, context);
+            await requirePublicationSource(app, id, args.command, landedHead, context, backend);
 
             if (
                 (await publicationReceipts(app, api, context)).some(
@@ -704,10 +791,31 @@ export function createPublicationTool(app: PocketApp) {
             }
 
             const program = await executable(args.command[0]!);
-            const cwd = await realpath(app.cwdOf(id));
-            const command = await pinCommand(app, id, args.command, program, landedHead, context);
-            const fingerprint = await checkpoint(app, id, command, program, context);
-            const subject = JSON.stringify({ command, cwd, fingerprint });
+            const cwd = await publicationCwd(app, id, backend);
+            const command = await pinCommand(
+                app,
+                id,
+                args.command,
+                program,
+                landedHead,
+                context,
+                backend,
+            );
+            const fingerprint = await checkpoint(app, id, command, program, context, backend);
+            const bodies = await publicationBodies(backend ?? WorkspaceBackend.local(cwd), command);
+            const bodyFiles = bodies.map(({ path, sha256, bytes }) => ({
+                path,
+                sha256,
+                bytes: bytes.length,
+            }));
+            const subject = JSON.stringify({
+                command,
+                cwd,
+                location,
+                sourceCommit: landedHead,
+                fingerprint,
+                bodyFiles,
+            });
             let answer = await api.memo<ApprovalAnswer>("workflow.publication.approval", context);
 
             if (answer === undefined) {
@@ -757,98 +865,155 @@ export function createPublicationTool(app: PocketApp) {
 
             return withWorkflowPublicationLock(app, id, async () => {
                 requirePublisher(app, id, requester);
-                await requirePublicationSource(app, id, args.command!, landedHead, context);
+                await requirePublicationSource(
+                    app,
+                    id,
+                    args.command!,
+                    landedHead,
+                    context,
+                    backend,
+                );
 
                 if (
                     approved?.subject !== subject ||
                     approved.requester !== requester ||
                     JSON.stringify(
-                        await pinCommand(app, id, args.command!, program, landedHead, context),
+                        await pinCommand(
+                            app,
+                            id,
+                            args.command!,
+                            program,
+                            landedHead,
+                            context,
+                            backend,
+                        ),
                     ) !== JSON.stringify(command) ||
                     (await app.handoffs.fingerprint(id)) !== landedFingerprint ||
-                    (await checkpoint(app, id, command, program, context)) !== fingerprint ||
-                    (await realpath(app.cwdOf(id))) !== cwd
+                    (await checkpoint(app, id, command, program, context, backend)) !==
+                        fingerprint ||
+                    (await publicationCwd(app, id, backend)) !== cwd ||
+                    JSON.stringify(app.locationOf(id)) !== JSON.stringify(location)
                 ) {
                     throw new Error(
                         "Publication content, cwd or requester changed after approval. No external operation ran; request fresh approval.",
                     );
                 }
 
-                // This invocation-bound transaction is the durable external-side-effect fence, before raw exec.
-                const roots = await publicationRoots(app, api, context);
+                // Snapshot acquisition is still offline and precedes the external-side-effect fence.
+                // Stage exact approved body bytes, never a host lookup of a remote source filename.
+                const staged =
+                    backend !== undefined
+                        ? await stagePublication(
+                              backend.at(cwd),
+                              landedHead,
+                              command,
+                              bodies,
+                              context,
+                              command[0] === "git" ? await hostPublicationAuth(context) : undefined,
+                          )
+                        : bodies.length > 0
+                          ? await stagePublicationBodies(command, bodies)
+                          : undefined;
 
-                await api.commit(async (tx) => {
-                    const history = await Promise.all(
-                        roots.map((each) => tx.doc(PublicationsDoc, each)),
-                    );
-                    const state = await tx.doc(PublicationsDoc, root);
-                    const handoffs = await tx.doc(HandoffsDoc);
-
-                    requirePublisher(app, id, requester);
-                    approverOf(app, id, answer, approver);
-
+                try {
                     if (
-                        (await publishHead(app, root, handoffs, context)) !== landedHead ||
-                        (await app.handoffs.fingerprint(id)) !== landedFingerprint ||
-                        history.some((saved) =>
-                            Object.values(saved.receipts).some(
-                                (receipt) => receipt.state === "executing",
-                            ),
-                        )
+                        (await checkpoint(app, id, command, program, context, backend)) !==
+                        fingerprint
                     ) {
                         throw new Error(
-                            "Publication eligibility changed or another operation is uncertain.",
+                            "Publication inputs changed during offline staging; request fresh approval. No external operation ran.",
                         );
                     }
 
-                    state.receipts[receiptId] = {
-                        id: receiptId,
-                        command,
-                        cwd,
-                        fingerprint,
-                        requester,
-                        approver,
-                        approvedAt: Date.now(),
-                        reason: args.reason!,
-                        state: "executing",
-                    };
-                }, context);
+                    // This invocation-bound transaction is the durable external-side-effect fence, before raw exec.
+                    const roots = await publicationRoots(app, api, context);
 
-                const env = new NodeExecutionEnv({ cwd });
-                const execution = await env.exec(
-                    [program, ...command.slice(1)],
-                    {
-                        timeout: 600,
-                        env: { GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" },
-                        onOutput: (text) => api.output(text),
-                        window: api.outputWindow,
-                    },
-                    context,
-                );
+                    await api.commit(async (tx) => {
+                        const history = await Promise.all(
+                            roots.map((each) => tx.doc(PublicationsDoc, each)),
+                        );
+                        const state = await tx.doc(PublicationsDoc, root);
+                        const handoffs = await tx.doc(HandoffsDoc);
 
-                if (!execution.ok) {
-                    // Even spawn/timeout/abort errors are conservative: no automatic retry or agent-written outcome.
-                    throw new Error(
-                        `Publication receipt ${receiptId} is uncertain: ${execution.error.message}. Use human-approved resolve before attempting again.`,
+                        requirePublisher(app, id, requester);
+                        approverOf(app, id, answer, approver);
+
+                        if (
+                            (await publishHead(app, root, handoffs, context, backend)) !==
+                                landedHead ||
+                            (await app.handoffs.fingerprint(id)) !== landedFingerprint ||
+                            history.some((saved) =>
+                                Object.values(saved.receipts).some(
+                                    (receipt) => receipt.state === "executing",
+                                ),
+                            )
+                        ) {
+                            throw new Error(
+                                "Publication eligibility changed or another operation is uncertain.",
+                            );
+                        }
+
+                        state.receipts[receiptId] = {
+                            id: receiptId,
+                            command,
+                            cwd,
+                            ...(location === undefined ? {} : { location }),
+                            sourceCommit: landedHead,
+                            ...(bodyFiles.length === 0 ? {} : { bodyFiles }),
+                            fingerprint,
+                            requester,
+                            approver,
+                            approvedAt: Date.now(),
+                            reason: args.reason!,
+                            state: "executing",
+                        };
+                    }, context);
+
+                    const executionCwd =
+                        staged !== undefined && "cwd" in staged && typeof staged.cwd === "string"
+                            ? staged.cwd
+                            : cwd;
+                    const executionCommand = staged?.command ?? command;
+                    const env = new NodeExecutionEnv({ cwd: executionCwd });
+                    const execution = await env.exec(
+                        [program, ...executionCommand.slice(1)],
+                        {
+                            timeout: 600,
+                            ...(backend === undefined
+                                ? { env: { GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" } }
+                                : { inheritEnv: false, env: hostExternalEnvironment() }),
+                            onOutput: (text) => api.output(text),
+                            window: api.outputWindow,
+                        },
+                        context,
                     );
-                }
 
-                await api.commit(async (tx) => {
-                    const receipt = (await tx.doc(PublicationsDoc, root)).receipts[receiptId]!;
-
-                    if (execution.value.exitCode === 0) {
-                        receipt.state = "completed";
+                    if (!execution.ok) {
+                        // Even spawn/timeout/abort errors are conservative: no automatic retry or agent-written outcome.
+                        throw new Error(
+                            `Publication receipt ${receiptId} is uncertain: ${execution.error.message}. Use human-approved resolve before attempting again.`,
+                        );
                     }
 
-                    receipt.exitCode = execution.value.exitCode;
-                }, context);
+                    await api.commit(async (tx) => {
+                        const receipt = (await tx.doc(PublicationsDoc, root)).receipts[receiptId]!;
 
-                return {
-                    ...result(
-                        `Publication receipt ${receiptId}: command exited ${execution.value.exitCode}. ${execution.value.exitCode === 0 ? "External operation finished." : "This receipt remains uncertain: remote changes may already exist. Obtain human-approved resolve before any retry or handoff. Local hook fixes can still run offline."}`,
-                    ),
-                    isError: execution.value.exitCode !== 0,
-                };
+                        if (execution.value.exitCode === 0) {
+                            receipt.state = "completed";
+                        }
+
+                        receipt.exitCode = execution.value.exitCode;
+                    }, context);
+
+                    return {
+                        ...result(
+                            `Publication receipt ${receiptId}: command exited ${execution.value.exitCode}. ${execution.value.exitCode === 0 ? "External operation finished." : "This receipt remains uncertain: remote changes may already exist. Obtain human-approved resolve before any retry or handoff. Local hook fixes can still run offline."}`,
+                        ),
+                        isError: execution.value.exitCode !== 0,
+                    };
+                } finally {
+                    await staged?.cleanup();
+                }
             });
         },
     });
