@@ -55,6 +55,7 @@ import {
     splitAttachments,
     Thumb,
 } from "./ui.js";
+import { useVisibleClock } from "./visible-clock.js";
 import { LessonCall, memoryAvailable } from "./sheets/memory.js";
 
 const REPORT = /^\[subagent (\S+) (answered|failed)([^\]]*)\]\s?([\s\S]*)$/;
@@ -1130,17 +1131,7 @@ function keep(map, key, value) {
  * showed, or shows nothing.
  */
 function GroupTime({ id, start, end, live }) {
-    const [, tick] = useState(0);
-
-    useEffect(() => {
-        if (!live) {
-            return;
-        }
-
-        const timer = setInterval(() => tick((n) => n + 1), 1000);
-
-        return () => clearInterval(timer);
-    }, [live]);
+    useVisibleClock(live);
 
     if (start === undefined) {
         return null;
@@ -2337,11 +2328,7 @@ function LiveLine({ live, approvals, start, entries, conversationId }) {
     /** Where the line was on screen as the thought above it opened or closed, to keep it there. */
     const was = useRef(null);
 
-    useEffect(() => {
-        const timer = setInterval(() => tick((n) => n + 1), 1000);
-
-        return () => clearInterval(timer);
-    }, []);
+    useVisibleClock(true);
 
     const thinking = prefs().showThinking === true;
     const open = thinking && !thinkingFolded.has(conversationId);

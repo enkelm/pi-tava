@@ -69,6 +69,9 @@ export const SIDEBAR = [
             ["docs/map.md", "Project map"],
             ["docs/architecture.md", "Architecture"],
             ["docs/features.md", "Features"],
+            ["docs/research/ipad-idle-battery.md", "iPad idle-work audit"],
+            ["docs/research/ipad-battery-renderer.md", "iPad renderer investigation"],
+            ["docs/research/ipad-battery-notifications.md", "iPad notification investigation"],
         ],
     },
 ];

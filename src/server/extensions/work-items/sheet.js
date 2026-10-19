@@ -31,19 +31,33 @@ export function createHandoffSheet(pocket, state) {
     const { html, h, useEffect, useLayoutEffect, useRef, useState, Loader, AgentProfileTag } =
         pocket;
 
-    function Picker({ id, opening, userId, session, close, isOpen }) {
+    function Picker({
+        id,
+        opening,
+        userId,
+        session,
+        scope,
+        activity,
+        revision,
+        status,
+        close,
+        isOpen,
+    }) {
         const draftKey = `pocket.handoffDraft.${userId}.${id}`;
         const [draft, setDraft] = useState(() => readDraft(draftKey, pocket));
         const [direction, setDirection] = useState(false);
-        const [data, setData] = useState(null);
+        const data = status.error ? null : status.data;
         const [loading, setLoading] = useState(true);
         const [busy, setBusy] = useState(false);
         const [error, setError] = useState("");
         const [retry, setRetry] = useState(0);
+        const waiting = loading || (!data && status.loading);
+        const visibleError = status.error || error;
         const mounted = useRef(false);
         const submitting = useRef(false);
         const field = useRef(null);
         const next = useRef(null);
+        const readKey = useRef(null);
 
         useLayoutEffect(() => {
             mounted.current = true;
@@ -53,30 +67,42 @@ export function createHandoffSheet(pocket, state) {
             };
         }, []);
 
+        useEffect(() => state.watchPicker(id), [id]);
+
         useEffect(() => {
             let stopped = false;
+            const key = JSON.stringify([id, opening, userId, retry]);
+            const fresh = readKey.current !== key;
 
+            readKey.current = key;
             setLoading(true);
             setError("");
-            state.refresh(id).then(
-                (value) => {
-                    if (!stopped && state.isCurrent(userId, id)) {
-                        setData(value);
-                        setLoading(false);
-                    }
-                },
-                (failure) => {
-                    if (!stopped && state.isCurrent(userId, id)) {
-                        setError(failure.message);
-                        setLoading(false);
-                    }
-                },
-            );
+
+            if (!activity.paused) {
+                // Open/Refresh asks for fresh options. Return joins the service's resumed read,
+                // including a fast response cached before this passive effect gets to run.
+                const request = fresh ? state.refresh(id) : state.read(id);
+
+                request.then(
+                    (value) => {
+                        if (value !== null && !stopped && state.isCurrent(userId, id)) {
+                            setLoading(false);
+                        }
+                    },
+                    () => {
+                        if (!stopped && state.isCurrent(userId, id)) {
+                            // The shared status owns read errors, including routine polls and
+                            // their recovery. Local errors belong to submission only.
+                            setLoading(false);
+                        }
+                    },
+                );
+            }
 
             return () => {
                 stopped = true;
             };
-        }, [id, opening, userId, retry]);
+        }, [id, opening, userId, retry, scope, activity, revision]);
 
         useEffect(() => {
             if (direction) {
@@ -195,17 +221,17 @@ export function createHandoffSheet(pocket, state) {
 
         // Escape, scrim, drag and browser Back stay available even during a slow submit.
         return html`<div class="handoff-picker">
-            ${loading && html`<${Loader} label="Loading handoff options" />`}
+            ${waiting && html`<${Loader} label="Loading handoff options" />`}
             ${
-                !loading &&
+                !waiting &&
                 !data &&
                 html`
-                <p class="handoff-error" role="alert">${error}</p>
+                <p class="handoff-error" role="alert">${visibleError}</p>
                 <button class="button" onClick=${() => setRetry((each) => each + 1)}>Retry</button>
             `
             }
             ${
-                !loading &&
+                !waiting &&
                 data &&
                 html`<form class="handoff-form" onSubmit=${save}>
                 ${
@@ -298,7 +324,7 @@ export function createHandoffSheet(pocket, state) {
                     </p>
                 `
                 }
-                ${error && html`<p class="handoff-error" role="alert">${error}</p>`}
+                ${visibleError && html`<p class="handoff-error" role="alert">${visibleError}</p>`}
                 <div class="handoff-form-actions">
                     <button
                         class="button"
@@ -320,7 +346,7 @@ export function createHandoffSheet(pocket, state) {
     }
 
     function HandoffSheet({ close, isOpen, id, opening }) {
-        const { session } = state.useContext();
+        const { session, scope, activity, revision, status } = state.useContext();
 
         if (!session.me || !session.canSteer || session.id !== id) {
             return null;
@@ -332,6 +358,10 @@ export function createHandoffSheet(pocket, state) {
             opening,
             userId: session.me.id,
             session,
+            scope,
+            activity,
+            revision,
+            status,
             close,
             isOpen,
         });

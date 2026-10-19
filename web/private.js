@@ -71,16 +71,23 @@ function snapshots(path, interval) {
     let request = null;
     let timer;
     let epoch = 0;
+    let departed = false;
     const listeners = new Set();
+    const available = () => awake() && !departed;
     const emit = () => listeners.forEach((listener) => listener(state));
-    const eligible = () => listeners.size > 0 && owner() !== null && awake();
+    const update = (next) => {
+        if (next.data !== state.data || next.error !== state.error || next.paused !== state.paused) {
+            state = next;
+            emit();
+        }
+    };
+    const eligible = () => listeners.size > 0 && owner() !== null && available();
 
     const reset = () => {
         epoch++;
         clearTimeout(timer);
         request?.abort();
-        state = { data: null, error: "", paused: !awake() };
-        emit();
+        update({ data: null, error: "", paused: !available() });
     };
 
     const refresh = async () => {
@@ -101,8 +108,14 @@ function snapshots(path, interval) {
             const data = await readPrivate(path, controller.signal);
 
             if (turn === epoch && who === owner() && eligible()) {
-                state = { data, error: "", paused: false };
-                emit();
+                // A retained snapshot keeps its capture time. Still read/revalidate every time:
+                // revision alone omits status, journal, model and prompt/import permissions.
+                const same =
+                    state.data &&
+                    JSON.stringify({ ...state.data, capturedAt: undefined }) ===
+                        JSON.stringify({ ...data, capturedAt: undefined });
+
+                update({ data: same ? state.data : data, error: "", paused: false });
             }
         } catch (error) {
             if (turn !== epoch || who !== owner() || !eligible()) {
@@ -119,13 +132,12 @@ function snapshots(path, interval) {
             }
 
             // Do not keep showing a previous pane's contents after an unavailable response.
-            state = {
+            update({
                 data: null,
                 error:
                     error.name === "AbortError" ? "Herdr did not answer in time." : error.message,
                 paused: false,
-            };
-            emit();
+            });
         } finally {
             clearTimeout(timeout);
             request = null;
@@ -137,15 +149,27 @@ function snapshots(path, interval) {
     };
 
     const wake = () => {
-        if (!awake()) {
+        if (!available()) {
             epoch++;
             clearTimeout(timer);
             request?.abort();
         }
 
-        state = { ...state, paused: !awake() };
-        emit();
+        update({ ...state, paused: !available() });
         refresh();
+    };
+    const hide = () => {
+        departed = true;
+        wake();
+    };
+    const show = () => {
+        departed = false;
+
+        if (listeners.size === 0) {
+            window.removeEventListener("pageshow", show);
+        }
+
+        wake();
     };
 
     const resource = {
@@ -160,7 +184,9 @@ function snapshots(path, interval) {
                 document.addEventListener("visibilitychange", wake);
                 window.addEventListener("online", wake);
                 window.addEventListener("offline", wake);
-                refresh();
+                window.addEventListener("pagehide", hide);
+                window.addEventListener("pageshow", show);
+                wake();
             }
 
             return () => {
@@ -172,6 +198,13 @@ function snapshots(path, interval) {
                     document.removeEventListener("visibilitychange", wake);
                     window.removeEventListener("online", wake);
                     window.removeEventListener("offline", wake);
+                    window.removeEventListener("pagehide", hide);
+
+                    // Release a departed resource's latch even if return happens without a view.
+                    // A remount before that return must remain paused, not open a fresh request.
+                    if (!departed) {
+                        window.removeEventListener("pageshow", show);
+                    }
                 }
             };
         },

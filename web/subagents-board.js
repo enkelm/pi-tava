@@ -19,6 +19,7 @@ import {
     unresolved,
 } from "./subagents.js";
 import { html, Icon, timeAgo } from "./ui.js";
+import { useVisibleClock } from "./visible-clock.js";
 
 /** The states, most urgent first: the order of the bar, the legend, the squares, and the sessions' summaries. */
 const STATES = ["waiting", "failed", "working", "stopped", "done"];
@@ -431,7 +432,6 @@ export function SubagentsBoard() {
     const [query, setQuery] = useState("");
     const [selected, setSelected] = useState(null);
     const [hovered, setHovered] = useState(null);
-    const [, tick] = useState(0);
     const box = useRef(null);
     const agents = boardAgents ?? [];
     const titles = new Map(sessions.map((session) => [session.id, session.title ?? "New session"]));
@@ -494,16 +494,7 @@ export function SubagentsBoard() {
         }
     }, [grid.length > 0]);
 
-    // Elapsed times tick while one works.
-    useEffect(() => {
-        if (!working) {
-            return;
-        }
-
-        const timer = setInterval(() => tick((count) => count + 1), 1000);
-
-        return () => clearInterval(timer);
-    }, [working]);
+    useVisibleClock(working);
 
     // The arrows move between squares, wrapping from row to row; Enter opens the one selected; Esc closes the board.
     const keys = useRef(null);

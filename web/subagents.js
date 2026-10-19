@@ -2,12 +2,13 @@
 // report on its way to Pi, and after they finish until it is put away. Folded, one line: how many work and how many
 // are done, and what the newest one does. Unfolded, a row each: what it was asked, what it does this moment (its peek,
 // as tiles have), for how long, whether its report is on its way, Stop, and a tap to open it.
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useRef } from "preact/hooks";
 import { describeCall } from "./calls.js";
 import { useOnScreen } from "./peeks.js";
 import { fromServer } from "./seen.js";
 import { api, attempt, canSteer, navigate, openSheet, store } from "./store.js";
 import { html, Icon, Spinner, timeAgo } from "./ui.js";
+import { useVisibleClock } from "./visible-clock.js";
 
 /**
  * When each session's bar was put away, in this browser, as the newest thing its subagents did then (the server's clock,
@@ -193,7 +194,6 @@ function Held({ why }) {
 /** The bar, while it shows: its hooks watch its rows for peeks, and tick the elapsed times. */
 function Bar({ agents, active, open, held }) {
     const box = useRef(null);
-    const [, rerender] = useState(0);
     const count = (status) => agents.filter((agent) => stateOf(agent) === status).length;
     const working = agents.filter((agent) => agent.busy);
     const lead = ordered(working)[0];
@@ -208,16 +208,7 @@ function Bar({ agents, active, open, held }) {
 
     // The rows' and the folded line's peeks: what each working subagent does now.
     useOnScreen(box);
-    // Elapsed times tick while one works.
-    useEffect(() => {
-        if (working.length === 0) {
-            return;
-        }
-
-        const timer = setInterval(() => rerender((count) => count + 1), 1000);
-
-        return () => clearInterval(timer);
-    }, [working.length]);
+    useVisibleClock(working.length > 0);
 
     // What the button says, the newest one's work too: the label stands for everything in it.
     const label = `Subagents: ${summary}${lead && !open ? `. ${lead.name}: ${nowDoing(lead)}` : ""}`;

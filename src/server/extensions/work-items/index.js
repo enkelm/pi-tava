@@ -18,7 +18,7 @@ export default function setup(pocket) {
         title: "Choose next thread",
         component: createHandoffSheet(pocket, state),
     });
-    pocket.inputCommand({
+    const commandSpec = {
         id: "handoff",
         name: "handoff",
         description: "Choose the next thread and add instructions",
@@ -47,7 +47,9 @@ export default function setup(pocket) {
             };
 
             try {
-                const data = await state.read(source.id);
+                // Routing is explicit demand: a checkout or driver can change without a
+                // public session revision. Never offer roles from a settled context cache.
+                const data = await state.refresh(source.id);
 
                 if (!data || !current()) {
                     return [];
@@ -74,5 +76,10 @@ export default function setup(pocket) {
                     : [];
             }
         },
-    });
+    };
+    const command = pocket.inputCommand(commandSpec);
+
+    // The composer retains rendered hints until its contribution changes. Replace only on a
+    // semantic invalidation, never on request completion (which would create a refresh loop).
+    state.onInvalidate(() => command.update({ suggest: (...args) => commandSpec.suggest(...args) }));
 }

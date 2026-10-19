@@ -101,7 +101,7 @@ export function syncTerminalTargets(data) {
     }
 }
 
-/** Transport only. Hidden pages retain the latest bounded frame but never paint or send input. */
+/** Transport only. Hidden/offline/departed pages release sockets; input is never replayed. */
 export function terminalConnection(id, changed, lifecycle = {}) {
     const who = owner();
     const diagnostics = terminalDiagnostics();
@@ -111,19 +111,21 @@ export function terminalConnection(id, changed, lifecycle = {}) {
     let request = null;
     let generation = 0;
     let disposed = false;
+    let departed = false;
     let deadline;
     const authorized = () => !disposed && who !== null && who === owner();
+    const available = () => awake() && !departed;
 
     const emit = (next, force = false) => {
         state = next;
-        diagnostics.state({ ...next, paused: !awake() });
+        diagnostics.state({ ...next, paused: !available() });
 
-        if (awake() || force) {
+        if (available() || force) {
             changed({
                 ...state,
-                paused: !awake(),
-                surface: awake() ? state.surface : null,
-                images: awake() ? state.images : [],
+                paused: !available(),
+                surface: available() ? state.surface : null,
+                images: available() ? state.images : [],
             });
         }
     };
@@ -145,16 +147,26 @@ export function terminalConnection(id, changed, lifecycle = {}) {
     };
 
     const visibility = () => {
-        emit(state, true);
+        if (!available()) {
+            drop("Terminal paused in the background; input is never replayed.", true);
 
-        if (awake()) {
-            lifecycle.available?.();
+            return;
         }
+
+        emit(state, true);
+        lifecycle.available?.();
     };
 
     const offline = () => drop("Offline. Reconnecting when online; input is never replayed.", true);
-    const online = () => lifecycle.available?.();
-    const pagehide = () => drop("Disconnected when leaving this page.");
+    const online = visibility;
+    const pagehide = () => {
+        departed = true;
+        drop("Terminal paused when leaving this page.", true);
+    };
+    const pageshow = () => {
+        departed = false;
+        visibility();
+    };
     const unsubscribe = store.subscribe(() => {
         if (owner() !== who) {
             drop("Private access ended.");
@@ -166,6 +178,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
     window.addEventListener("offline", offline);
     window.addEventListener("online", online);
     window.addEventListener("pagehide", pagehide);
+    window.addEventListener("pageshow", pageshow);
 
     return {
         diagnosticsView(view) {
@@ -191,7 +204,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
             target = next;
         },
         async connect(size) {
-            if (!authorized() || !awake() || request || socket) {
+            if (!authorized() || !available() || request || socket) {
                 return;
             }
 
@@ -422,7 +435,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
         send(frame) {
             if (
                 !authorized() ||
-                !awake() ||
+                !available() ||
                 !state.bootId ||
                 state.phase !== "connected" ||
                 socket?.readyState !== 1
@@ -458,6 +471,7 @@ export function terminalConnection(id, changed, lifecycle = {}) {
             window.removeEventListener("offline", offline);
             window.removeEventListener("online", online);
             window.removeEventListener("pagehide", pagehide);
+            window.removeEventListener("pageshow", pageshow);
             diagnostics.clear();
         },
     };
@@ -600,8 +614,10 @@ function acquire(instanceId, id, nativeId) {
         entry.retry = () => {
             if (
                 !entry.desired ||
+                !entry.listeners.size ||
                 !entry.size ||
                 !awake() ||
+                entry.state.paused ||
                 entry.timer ||
                 entry.state.phase === "connecting" ||
                 entry.state.phase === "connected"
@@ -634,7 +650,7 @@ function acquire(instanceId, id, nativeId) {
             entry.timer = setTimeout(() => {
                 entry.timer = null;
 
-                if (!entry.desired || !awake()) {
+                if (!entry.desired || !entry.listeners.size || !awake() || entry.state.paused) {
                     return;
                 }
 
@@ -674,6 +690,8 @@ function acquire(instanceId, id, nativeId) {
                 entry.notify(entry.raw);
             },
             closed: (_reason, retryable) => {
+                clearTimeout(entry.timer);
+                entry.timer = null;
                 clearTimeout(entry.interestPending?.timeout);
                 entry.interestPending = null;
                 entry.interestAck = null;
@@ -1328,6 +1346,19 @@ export function PrivateTerminal({
 
         return () => {
             entry.listeners.delete(setState);
+
+            if (!entry.listeners.size) {
+                clearTimeout(entry.timer);
+                entry.timer = null;
+
+                if (
+                    entry.state.phase === "connecting" ||
+                    (entry.state.phase === "connected" && !entry.state.snapshot)
+                ) {
+                    entry.connection.close("Terminal closed before connecting.");
+                }
+            }
+
             entry.surfaceInterest();
             publish();
             retained.current = null;
@@ -1795,7 +1826,7 @@ export function PrivateTerminal({
                     <p>Herdr’s default prefix is Ctrl+B, then c for a new tab, v to split right, minus to split down, z to zoom, n/p to switch tabs, and x to close a pane with confirmation. Repeat the prefix to send it to the terminal; Escape cancels. Published Herdr [keys] bindings and advertised command bindings replace the corresponding daemon defaults where supported.</p>
                     <p>Browsers may reserve Cmd+T, Cmd+W, Cmd+1–9 and Cmd+L. We handle them only when delivered, without inventing replacement shortcuts. GPUI-local keybinding files, native windows, worktree management and native search dialogs are not mirrored. Clipboard writes and links always need your action.</p>
                     ${keymap.unsupported && html`<p>Some published bindings use unsupported TOML or key syntax. Supported bindings and defaults remain available; unsupported bindings are not forwarded as commands.</p>`}
-                    <p>Chat and hidden pages keep the connection. Surface streaming pauses after Herdr acknowledges the request; local painting and input pause immediately. Offline connections retry with fresh snapshots and bounded backoff. Input is never queued or replayed. Disconnect stops automatic reconnection until Reconnect or reopening Terminal.</p>
+                    <p>Chat keeps an existing connection while this app is visible. Surface streaming pauses after Herdr acknowledges the request. Hidden or offline pages close the connection immediately; returning reconnects only an open Terminal view, with a fresh snapshot and no replayed input. Disconnect stops automatic reconnection until Reconnect or reopening Terminal.</p>
                 </div>
             </details>
         </div>`;

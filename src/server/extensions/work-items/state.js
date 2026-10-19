@@ -15,9 +15,25 @@ function refreshKey(session) {
     return JSON.stringify([
         scopeOf(session),
         session.busy,
-        source?.workflow,
-        source?.activeThreadId,
-        source?.archived,
+        session.conversation?.threadType,
+        session.conversation?.cwd,
+        session.sessions
+            .filter(
+                (each) =>
+                    each.id === session.id ||
+                    (source?.workItemId && each.workItemId === source.workItemId),
+            )
+            .map((each) => [
+                each.id,
+                each.threadType,
+                each.workItemId,
+                each.activeThreadId,
+                each.archived,
+                each.busy,
+                each.waiting,
+                each.workflow,
+            ])
+            .sort(([left], [right]) => left - right),
         session.profiles,
     ]);
 }
@@ -31,19 +47,30 @@ export function createHandoffState(pocket) {
     let controller = null;
     let timer = null;
     let lastRefreshKey = null;
+    let pageHidden = false;
     let disposed = false;
+    let activity = { paused: false };
+    let revision = {};
     const subscribers = new Set();
+    const invalidators = new Set();
+    const pickers = new Set();
+    const context = () => ({ session, status, scope, activity, revision });
 
     const publish = () => {
-        const value = { session, status };
+        const value = context();
 
         for (const subscriber of subscribers) {
             subscriber(value);
         }
     };
 
+    const available = () =>
+        !disposed &&
+        !pageHidden &&
+        document.visibilityState !== "hidden" &&
+        navigator.onLine !== false;
     const matches = (expected) =>
-        !disposed && scope === expected && scopeOf(pocket.session()) === expected.key;
+        available() && scope === expected && scopeOf(pocket.session()) === expected.key;
 
     function refresh(id) {
         const current = pocket.session();
@@ -57,38 +84,56 @@ export function createHandoffState(pocket) {
         }
 
         const expected = scope;
-        const stop = new AbortController();
 
-        controller = stop;
-        status = { ...status, loading: true, error: "" };
+        // A failed verification's cache must not become actionable merely because retry began.
+        status = { data: status.error ? null : status.data, loading: true, error: "" };
         publish();
 
         const request = Promise.resolve()
-            .then(() =>
-                matches(expected)
-                    ? pocket.sessionApi(id, "handoffs", undefined, { signal: stop.signal })
-                    : null,
-            )
-            .then(
-                (data) => {
-                    if (!matches(expected)) {
-                        return null;
-                    }
+            .then(async () => {
+                while (matches(expected)) {
+                    const reading = revision;
+                    const stop = new AbortController();
 
-                    status = { data, loading: false, error: "" };
-                    publish();
+                    controller = stop;
 
-                    return data;
-                },
-                (failure) => {
-                    if (matches(expected)) {
+                    try {
+                        const data = await pocket.sessionApi(id, "handoffs", undefined, {
+                            signal: stop.signal,
+                        });
+
+                        if (!matches(expected)) {
+                            return null;
+                        }
+
+                        if (reading !== revision) {
+                            // Context changed during the read: never resolve hints or the picker
+                            // with its old options. Coalesce changes into one serialized follow-up.
+                            continue;
+                        }
+
+                        status = { data, loading: false, error: "" };
+                        publish();
+
+                        return data;
+                    } catch (failure) {
+                        if (!matches(expected)) {
+                            return null;
+                        }
+
+                        if (reading !== revision) {
+                            continue;
+                        }
+
                         status = { ...status, loading: false, error: failure.message };
                         publish();
-                    }
 
-                    throw failure;
-                },
-            )
+                        throw failure;
+                    }
+                }
+
+                return null;
+            })
             .finally(() => {
                 if (pending === request) {
                     pending = null;
@@ -100,6 +145,42 @@ export function createHandoffState(pocket) {
 
         return request;
     }
+
+    function syncTimer() {
+        const demanded = [...pickers].some((picker) => picker.id === session.id);
+
+        if (!available() || scope.key === null || !demanded) {
+            clearInterval(timer);
+            timer = null;
+        } else if (timer === null) {
+            timer = setInterval(() => refresh(session.id).catch(() => {}), 10_000);
+        }
+    }
+
+    // Controls stay mounted, so only an actual picker opening admits periodic eligibility reads.
+    function watchPicker(id) {
+        const picker = { id };
+
+        pickers.add(picker);
+        syncTimer();
+
+        return () => {
+            pickers.delete(picker);
+            syncTimer();
+        };
+    }
+
+    function onInvalidate(listener) {
+        invalidators.add(listener);
+
+        return () => invalidators.delete(listener);
+    }
+
+    const invalidateHints = () => {
+        for (const listener of invalidators) {
+            listener();
+        }
+    };
 
     function observe(value) {
         if (disposed) {
@@ -117,32 +198,75 @@ export function createHandoffState(pocket) {
             status = emptyStatus();
         }
 
+        const paused = !available();
+        const activityChanged = activity.paused !== paused;
+
+        if (activityChanged) {
+            // Identity records a suspension even if the UI batches hide and return together.
+            activity = { paused };
+        }
+
+        if (paused) {
+            clearInterval(timer);
+            timer = null;
+            lastRefreshKey = null;
+            // Late responses stay fenced even if this source becomes visible before they settle.
+            scope = { key };
+            controller?.abort();
+            controller = null;
+            pending = null;
+            status = { ...status, loading: false };
+
+            if (activityChanged) {
+                invalidateHints();
+            }
+
+            publish();
+
+            return;
+        }
+
         const nextRefreshKey = refreshKey(session);
 
         if (nextRefreshKey !== lastRefreshKey) {
             lastRefreshKey = nextRefreshKey;
-            clearInterval(timer);
-            timer = null;
+            revision = {};
+            status = { ...emptyStatus(), loading: key !== null };
+            invalidateHints();
 
             if (key !== null) {
                 refresh(session.id).catch(() => {});
-                timer = setInterval(() => refresh(session.id).catch(() => {}), 10_000);
             }
         }
 
+        syncTimer();
         publish();
     }
 
+    const resume = () => observe(pocket.session());
+    const hide = () => {
+        pageHidden = true;
+        resume();
+    };
+    const show = () => {
+        pageHidden = false;
+        resume();
+    };
     const stop = pocket.onSessionChange(observe);
 
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("online", resume);
+    window.addEventListener("offline", resume);
+    window.addEventListener("pagehide", hide);
+    window.addEventListener("pageshow", show);
     observe(pocket.session());
 
     function useContext() {
-        const [value, setValue] = pocket.useState(() => ({ session, status }));
+        const [value, setValue] = pocket.useState(context);
 
         pocket.useEffect(() => {
             subscribers.add(setValue);
-            setValue({ session, status });
+            setValue(context());
 
             return () => subscribers.delete(setValue);
         }, []);
@@ -175,14 +299,21 @@ export function createHandoffState(pocket) {
     function dispose() {
         disposed = true;
         stop();
+        document.removeEventListener("visibilitychange", resume);
+        window.removeEventListener("online", resume);
+        window.removeEventListener("offline", resume);
+        window.removeEventListener("pagehide", hide);
+        window.removeEventListener("pageshow", show);
         clearInterval(timer);
         controller?.abort();
         subscribers.clear();
+        invalidators.clear();
+        pickers.clear();
         pending = null;
         status = emptyStatus();
     }
 
-    return { useContext, read, refresh, isCurrent, dispose };
+    return { useContext, read, refresh, watchPicker, onInvalidate, isCurrent, dispose };
 }
 
 export function profileName(profiles, id) {

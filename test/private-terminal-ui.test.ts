@@ -1607,7 +1607,7 @@ test(
                 "an old delayed Blob read cannot paste into a fresh connection with the same boot and pane",
             );
 
-            // Acknowledgements, not optimistic local toggles, govern surface activity.
+            // Backgrounding closes transport; the fresh connection still requires surface acknowledgement.
             await page.evaluate(
                 `window.fixtureHoldInterest = true; Object.defineProperty(document, 'visibilityState', {configurable:true, value:'hidden'}); document.dispatchEvent(new Event('visibilitychange'));`,
             );
@@ -1617,8 +1617,8 @@ test(
             );
             assert.equal(
                 await value(page, "window.fixtureSockets[1].closed"),
-                false,
-                "hidden page keeps transport",
+                true,
+                "hidden page releases transport even without pagehide",
             );
             const hiddenReads = reads.length;
 
@@ -1641,34 +1641,37 @@ test(
                 "hidden page cannot send new input",
             );
             await page.evaluate(
-                `Object.defineProperty(document, 'visibilityState', {configurable:true, value:'visible'}); document.dispatchEvent(new Event('visibilitychange')); window.fixtureSockets[1].receive({type:'response',requestId:'unrelated',response:{result:{}}});`,
+                `Object.defineProperty(document, 'visibilityState', {configurable:true, value:'visible'}); document.dispatchEvent(new Event('visibilitychange'));`,
+            );
+            await until(
+                () => value(page, "window.fixtureSockets.length === 3"),
+                "visible Terminal reconnects with a new ticket",
+            );
+            await page.evaluate(`const ws = window.fixtureSockets[2];
+                ws.receive({type:'connected',welcome:{methods:['client_shell.surface.set']}});
+                ws.receive({type:'snapshot',snapshot:${JSON.stringify(snapshot)}});
+                ws.receive({type:'surface',surface:window.fixtureSurface});`);
+            await page.evaluate(
+                `window.fixtureSockets[1].receive({type:'response',requestId:'old',response:{result:{}}}); window.fixtureSockets[2].receive({type:'response',requestId:'unrelated',response:{result:{}}});`,
             );
             assert.equal(
                 await value(page, `!!document.querySelector('.terminal-grid-interaction')`),
                 false,
-                "unrelated responses do not activate painting",
-            );
-            await page.evaluate(
-                `const ws = window.fixtureSockets[1]; const pause = ws.sent.filter(frame => frame.method === 'client_shell.surface.set').at(-1); ws.receive({type:'response',requestId:pause.requestId,response:{result:{}}});`,
+                "old and unrelated responses cannot activate the fresh connection",
             );
             assert.equal(
                 await value(
                     page,
-                    `window.fixtureSockets[1].sent.filter(frame => frame.method === 'client_shell.surface.set').at(-1).params.active`,
+                    `window.fixtureSockets[2].sent.some(frame => ['input','popup-input','clipboard-image'].includes(frame.type))`,
                 ),
-                true,
-                "reactivation follows pause acknowledgement",
-            );
-            assert.equal(
-                await value(page, `!!document.querySelector('.terminal-grid-interaction')`),
                 false,
-                "reactivation awaits its own acknowledgement",
+                "returning from background never replays input",
             );
             await page.evaluate(
-                `const ws = window.fixtureSockets[1]; const activate = ws.sent.filter(frame => frame.method === 'client_shell.surface.set').at(-1); ws.receive({type:'surface',surface:window.fixtureSurface}); ws.receive({type:'response',requestId:activate.requestId,response:{result:{}}}); window.fixtureHoldInterest=false;`,
+                `const ws = window.fixtureSockets[2]; const activate = ws.sent.filter(frame => frame.method === 'client_shell.surface.set').at(-1); ws.receive({type:'response',requestId:activate.requestId,response:{result:{}}}); ws.receive({type:'surface',surface:window.fixtureSurface}); window.fixtureHoldInterest=false;`,
             );
             await ready(page);
-            assert.equal(requests.length, 2, "visibility changes do not create a new helper");
+            assert.equal(requests.length, 3, "return creates one fresh helper");
 
             await click(page, ".private-disconnect");
             await present(page, ".private-connect");
@@ -1677,10 +1680,10 @@ test(
                 `window.dispatchEvent(new Event('online')); document.dispatchEvent(new Event('visibilitychange'));`,
             );
             await new Promise((resolve) => setTimeout(resolve, 650));
-            assert.equal(requests.length, 2, "explicit Disconnect suppresses automatic reconnect");
+            assert.equal(requests.length, 3, "explicit Disconnect suppresses automatic reconnect");
             await click(page, ".private-connect");
             await until(
-                () => value(page, "window.fixtureSockets.length === 3"),
+                () => value(page, "window.fixtureSockets.length === 4"),
                 "explicit Reconnect",
             );
             await frames(page);
@@ -1694,12 +1697,12 @@ test(
                 () => requests.some((request) => request.path.endsWith("/import-preview")),
                 "import preview with terminal attached",
             );
-            assert.equal(await value(page, "window.fixtureSockets[2].closed"), false);
-            assert.equal(await value(page, "window.fixtureSockets.length"), 3);
+            assert.equal(await value(page, "window.fixtureSockets[3].closed"), false);
+            assert.equal(await value(page, "window.fixtureSockets.length"), 4);
             assert.deepEqual(await value(page, "window.fixtureImportConfirmations"), []);
             assert.equal(
                 requests.filter((request) => request.path.endsWith("/terminal")).length,
-                3,
+                4,
                 "import neither detaches nor reconnects the terminal",
             );
             assert.equal(
@@ -1715,14 +1718,14 @@ test(
                     ),
                 "import refusal is shown truthfully",
             );
-            assert.equal(await value(page, "window.fixtureSockets[2].closed"), false);
+            assert.equal(await value(page, "window.fixtureSockets[3].closed"), false);
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.navigate(`${base}/private/opaque-agent`);
             await present(page, "#private-prompt");
             const mobileStart = requests.length;
 
-            assert.equal(mobileStart, 4, "mobile agent defaults to Chat without attaching");
+            assert.equal(mobileStart, 5, "mobile agent defaults to Chat without attaching");
             assert.equal(
                 await value(page, "document.documentElement.scrollWidth <= innerWidth"),
                 true,
