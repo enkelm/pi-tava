@@ -122,29 +122,36 @@ diff; `false` requires none. Core inspects the checkout outside its Durable tran
 the exclusive writer lock and rechecks the declaration at final admission.
 
 Workflow and profile IDs must start with `<module>:` and end in a 1–64 character local ID (letters,
-digits, `.`, `_`, `-`). Only the bundled Work Items module can register its legacy IDs, including
-`chat`, `worker` and `publish`; disabling it does not free those names. References must be within the
-same definition. Definitions allow at most 64 profiles and 512 unique transitions. Prompts allow
-32,000 characters. Unknown fields, duplicate identities, accessors and malformed data are refused.
+digits, `.`, `_`, `-`). The application's WorkItems catalog owns the legacy built-in IDs, including
+`chat`, `worker` and `publish`; extensions cannot register them, and pausing execution does not free
+those names. References must be within the same definition. Definitions allow at most 64 profiles
+and 512 unique transitions. Prompts allow 32,000 characters. Unknown fields, duplicate identities, accessors and malformed data are refused.
 
 Registrations are copied and frozen, staged with the module, and installed only after successful
 validation and extension installation. Failed or superseded reloads keep the previous version.
 Turning the module off removes new choices, not stored profile identities, histories, receipts or
 write restrictions. Unknown/missing managed profiles get an unavailable-role prompt and cannot mutate
 work; they never become unrestricted Chats. The explicit stored `chat` identity retains its original
-core capabilities and a minimal Chat profile, so disabling Work Items does not disable Agent Teams.
-Owner prompt overrides remain stored and take effect again when that profile returns.
+core capabilities and Chat profile independently of optional declarations, so ordinary Chat and Agent
+Teams do not require Work Items. Owner prompt overrides remain stored and take effect again when
+that profile returns. The first-party **Work Item execution** pause does not unload declarations or
+pause independently registered namespaced profiles.
 
 Profiles and transitions do not grant tools, network access, publication approval, model choices or
 write ownership. Core retains those checks and all durable transfer/recovery tasks. Use
 [`host.sessions`](host.md#sessions) for a tool to request a handoff. Source and browser target the
 same current API; there is no older-host compatibility branch.
 
-The built-in `src/server/extensions/work-items.ts` is a complete consumer. Its `work-items/` browser
-folder owns picker, controls, argument hints and styling through public interfaces. It registers
-scoped `GET handoffs` and `POST work-item` routes backed by the authenticated request's transfer
-services. Generic Settings/sidebar presentation, durable input and transfer recovery remain in core;
-registration grants no access to internal browser imports, app-wide routes or DOM patching.
+First-party Work Items now uses the application-owned catalog in `src/server/work-item-profiles.ts`,
+not an optional `web.workflow` declaration. Its browser assets live in `src/server/work-items/browser/`;
+core registers `src/server/work-items` with client entry `browser`, preserving `/x/work-items/…` URLs.
+There is no first-party Work Items entry or source module under `src/server/extensions/`. The
+controls intentionally reuse generic public presentation infrastructure for compatibility. Core keeps
+the existing scoped `GET handoffs` and `POST work-item` routes backed by request-bound WorkItems
+operations. These public mechanisms
+remain available to extensions; promotion removes no public member. Generic Settings/sidebar
+presentation, durable input and transfer recovery remain in core. Registration grants no access to
+internal browser imports, app-wide routes or DOM patching.
 
 ### `AgentProfile`
 

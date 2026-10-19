@@ -270,7 +270,7 @@ test("mandatory core denies team tools and nested codemode without disabling ord
 
     assert.equal(linked.length, 1);
     assert.equal(linked[0]?.threadType, "chat");
-    assert.equal(f.app.handoffs.isManaged(linked[0]!.id as ConversationId), false);
+    assert.equal(f.app.workItems.isManaged(linked[0]!.id as ConversationId), false);
 });
 
 test("mandatory core checks stop resumed predecessor tools and codemode; cached env and workspace cannot write", async () => {
@@ -1483,7 +1483,7 @@ test(
             f.handoff(publisher, "pull", reopened),
             /Reconcile uncertain publication actions/,
         );
-        assert.equal(reopened.handoffs.isReadOnly(publisher), false);
+        assert.equal(reopened.workItems.isReadOnly(publisher), false);
         assert.equal(readFileSync(trace, "utf8"), "attempt\n");
         const resolving = f.send(
             publisher,

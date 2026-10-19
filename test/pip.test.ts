@@ -192,7 +192,7 @@ test("new and legacy PiP roots stay Chats across restart without losing tools or
                     );
                 };
 
-                assert.equal(isolated.handoffs.isManaged(id), false);
+                assert.equal(isolated.workItems.isManaged(id), false);
                 await exerciseTools("before");
                 const controls: { id: ConversationId; expected: ThreadType }[] = [];
 
@@ -240,7 +240,7 @@ test("new and legacy PiP roots stay Chats across restart without losing tools or
                 isolated = await openApp(scriptedModel(route), data);
                 assert.equal(await isolated.pip.ensure(owner(isolated)), id);
                 assert.equal(isolated.sessionMeta(id)?.threadType, "chat");
-                assert.equal(isolated.handoffs.isManaged(id), false);
+                assert.equal(isolated.workItems.isManaged(id), false);
                 const stored = await isolated.harness.snapshot(SessionsDoc, context);
 
                 assert.equal(
@@ -266,7 +266,7 @@ test("new and legacy PiP roots stay Chats across restart without losing tools or
                         isolated = await openApp(scriptedModel(route), data);
                         assert.equal(await isolated.pip.ensure(owner(isolated)), id);
                         assert.equal(isolated.sessionMeta(id)?.threadType, kind);
-                        assert.equal(isolated.handoffs.isManaged(id), kind !== "chat");
+                        assert.equal(isolated.workItems.isManaged(id), kind !== "chat");
                     }
 
                     // Chat classification is not a blanket PiP exemption from real workflow authority.
@@ -283,13 +283,13 @@ test("new and legacy PiP roots stay Chats across restart without losing tools or
                             createdAt: 100,
                         };
                     }, context);
-                    assert.equal(isolated.handoffs.isManaged(id), true);
+                    assert.equal(isolated.workItems.isManaged(id), true);
                     await isolated.harness.commit(async (tx) => {
                         delete (await tx.doc(SessionsDoc)).items[String(id)]!.workItemId;
                         (await tx.doc(WorkflowDoc, id)).readOnly = true;
                     }, context);
-                    assert.equal(isolated.handoffs.isManaged(id), true);
-                    assert.throws(() => isolated.handoffs.requireWritable(id), /read-only/);
+                    assert.equal(isolated.workItems.isManaged(id), true);
+                    assert.throws(() => isolated.workItems.requireWritable(id), /read-only/);
                 }
             } finally {
                 await isolated.close();

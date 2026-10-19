@@ -125,8 +125,7 @@ import { createStageUploadTool } from "./ssh-uploads.ts";
 import { LanguageServices } from "./language-services.ts";
 import { Reviews } from "./reviews.ts";
 import { Projects } from "./projects.ts";
-import { Handoffs } from "./handoffs.ts";
-import type { AgentProfile } from "./session-workflows.ts";
+import { WorkItems } from "./work-items.ts";
 import { HandoffsDoc, WorkflowDoc } from "./workflow-docs.ts";
 import { createWorkflowEnv, createWorkflowHooks } from "./workflow-policy.ts";
 import { createPublicationTool } from "./workflow-publication.ts";
@@ -136,17 +135,6 @@ import { PI_PROVIDERS_FILE, ProviderPackages } from "./provider-packages.ts";
 import { ProviderExtensions } from "./provider-extensions.ts";
 
 const context = BACKGROUND_CONTEXT;
-// Ordinary Chat predates optional workflows. Only this explicit stored identity retains its core
-// capabilities without a contribution; an unknown or missing managed profile never falls back to it.
-const ORDINARY_CHAT: AgentProfile = Object.freeze({
-    id: "chat",
-    icon: "chat",
-    name: "Chat",
-    description: "Questions, exploration and bounded tasks.",
-    title: "Chat",
-    starter: true,
-    prompt: "You are the Chat agent for this thread. Help with the person's requested question or bounded task. Match validation to its risk, respect explicit limits, report the result and wait for the human. Ordinary Chat capabilities remain unchanged.",
-});
 
 /** How other devices reach this server, as reported by the launcher (`bin/pi-coop.js`). */
 export type AccessInfo = {
@@ -306,23 +294,7 @@ export class PocketApp {
     readonly collab = new Collab(this);
     readonly reviews = new Reviews(this);
     readonly projects = new Projects(this);
-    readonly handoffs = new Handoffs(this);
-
-    agentProfile(id: string): AgentProfile | undefined {
-        return this.webs.profile(id) ?? (id === "chat" ? ORDINARY_CHAT : undefined);
-    }
-
-    defaultStarter(): string | undefined {
-        return this.agentProfiles().find((profile) => profile.starter && profile.id !== "chat")?.id;
-    }
-
-    agentProfiles(): AgentProfile[] {
-        const profiles = this.webs.profiles();
-
-        return profiles.some((profile) => profile.id === "chat")
-            ? profiles
-            : [ORDINARY_CHAT, ...profiles];
-    }
+    readonly workItems = new WorkItems(this);
 
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
@@ -415,7 +387,7 @@ export class PocketApp {
         this.#log = options.log ?? ((line) => console.log(line));
         this.browsers = new Browsers({
             dataDir: options.dataDir,
-            researchReader: (id) => this.handoffs.isManaged(id as ConversationId),
+            researchReader: (id) => this.workItems.isManaged(id as ConversationId),
             ...(options.browser === undefined ? {} : { executable: options.browser }),
             log: (line) => this.#log(line),
             load: async (id) =>
@@ -590,16 +562,16 @@ export class PocketApp {
                     ),
                     createResearchTool(this),
                     createStageUploadTool(this),
+                    this.workItems.tool,
                 ],
                 tasks: [
                     ResendTask,
                     this.shell.task,
                     this.commands.followTask,
                     this.extensionCommands.task,
-                    this.handoffs.task,
-                    this.handoffs.summaryTask,
+                    ...this.workItems.tasks,
                 ],
-                sections: this.handoffs.sections,
+                sections: this.workItems.sections,
                 hooks: createWorkflowHooks(this),
             }),
         );
@@ -628,7 +600,7 @@ export class PocketApp {
             onLimitsChanged: (listener) => this.spend.onLimitsChanged(listener),
             sessions: Object.freeze<PocketHost["sessions"]>({
                 linked: this.linkedSessions,
-                handoff: (request, api, ctx) => this.handoffs.invoke(request, api, ctx),
+                handoff: (request, api, ctx) => this.workItems.invoke(request, api, ctx),
             }),
             schedules: this.schedules,
             goals: this.goals,
@@ -675,6 +647,7 @@ export class PocketApp {
             this.#log(`The extension gallery could not check its updates: ${describe(error)}`);
         });
         await this.#themeDefaultStillHere();
+        this.workItems.installWeb();
         await this.loader.loadAll();
 
         const storage = await openNodeSqliteStorage(join(this.dataDir, "pocket.sqlite"));
@@ -814,7 +787,7 @@ export class PocketApp {
         } while (cursor !== undefined);
 
         await this.attribution.repair(unrecorded);
-        await this.handoffs.recover(storage);
+        await this.workItems.recover();
 
         return conversations;
     }
@@ -979,10 +952,10 @@ export class PocketApp {
         } else if (kind === MemoryDoc.definition.kind) {
             this.memory.committed();
         } else if (kind === HandoffsDoc.definition.kind) {
-            this.handoffs.committed(change.value);
+            this.workItems.committed(change.value);
             sessionsChanged = true;
         } else if (kind === WorkflowDoc.definition.kind && id !== undefined) {
-            this.handoffs.workflowCommitted(id, change.value);
+            this.workItems.workflowCommitted(id, change.value);
             sessionsChanged = true;
         } else if (kind === ProjectsDoc.definition.kind) {
             this.projects.committed(change.value);
@@ -1994,7 +1967,7 @@ export class PocketApp {
                 extensions: this.loader.extensionNames(),
                 // The browser modules this person's tabs load (`extension-ui.js`), each with the tools its module
                 // installs: the only ones whose calls it may describe (`pocket.toolCall`).
-                ui: this.#browserModules(user),
+                ui: this.webs.clients(user),
                 // The commands this person may run: viewers none, guests the ones for conversations.
                 extensionCommands: this.webs
                     .commands()
@@ -2017,19 +1990,21 @@ export class PocketApp {
                 localReviews: 2,
                 // Durable project organization and independently typed threads.
                 projects: 1,
+                workItems: 1,
+                workItemsEnabled: this.workItems.enabled,
                 sshWorkspaces: 1,
                 sshPasswords: 1,
                 hostName: hostname(),
-                agentProfiles: this.agentProfiles().map(
-                    ({ id, name, description, title, starter, icon }) => ({
+                agentProfiles: this.workItems
+                    .profiles()
+                    .map(({ id, name, description, title, starter, icon }) => ({
                         id,
                         name,
                         description,
                         title,
                         starter: starter === true,
                         ...(icon === undefined ? {} : { icon }),
-                    }),
-                ),
+                    })),
                 // Owner-editable system instructions for the built-in thread agents.
                 agentSettings: 1,
                 // Owner-managed, restart-only Pi provider package compatibility.
@@ -2055,21 +2030,6 @@ export class PocketApp {
             // Every theme folder, for Appearance and for the look this tab uses (`theme.js`).
             themes: this.themes.list(user.role === "owner"),
         };
-    }
-
-    #browserModules(user: User) {
-        const tools = new Map(
-            this.loader
-                .list()
-                .map((each) => [
-                    each.file.replace(/\.ts$/, ""),
-                    each.extensions.flatMap((extension) => extension.tools),
-                ]),
-        );
-
-        return this.webs
-            .clients(user)
-            .map((each) => ({ ...each, tools: tools.get(each.module) ?? [] }));
     }
 
     /** A tab's hello: what everyone gets, and the id of its own connection, which its peek lists name. */
@@ -2187,7 +2147,7 @@ export class PocketApp {
                     ...(meta.worktree === undefined ? {} : { worktree: meta.worktree }),
                     ...linkage,
                     threadType: meta.threadType ?? "worker",
-                    ...this.handoffs.projection(Number(id) as ConversationId, user),
+                    ...this.workItems.projection(Number(id) as ConversationId, user),
                     busy,
                     waiting: waiting.has(id),
                     ...(endedAt === undefined ? {} : { endedAt }),
@@ -2264,7 +2224,7 @@ export class PocketApp {
             archived: meta?.archived === true,
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
-            workflow: this.handoffs.projection(room.id).workflow,
+            workflow: this.workItems.projection(room.id).workflow,
             ...(meta === undefined
                 ? {}
                 : {
@@ -2896,6 +2856,35 @@ export class PocketApp {
             guard: await this.guard.status(),
             ...(owner ? { dropIns: join(this.dataDir, "extensions") } : {}),
         };
+    }
+
+    /** Native owner setting: profiles and controls stay installed while managed execution is paused. */
+    async setWorkItemsEnabled(supplied: User, enabled: unknown): Promise<void> {
+        const user = this.config.userById(supplied.id);
+
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
+        }
+
+        if (user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can pause or resume Work Item execution");
+        }
+
+        if (typeof enabled !== "boolean") {
+            throw new HttpError(400, "workItemsEnabled must be a boolean");
+        }
+
+        this.config.workItemsEnabled = enabled;
+        this.scheduleSessions();
+
+        for (const pending of this.#rooms.values()) {
+            void pending.then(
+                (room) => room.schedule(),
+                () => {},
+            );
+        }
+
+        await this.#refreshClients();
     }
 
     /** Turn an extension module on or off for every session, now and after restarts. */

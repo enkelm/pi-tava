@@ -239,7 +239,7 @@ test("SSH fingerprints bind the remote namespace and physical bytes; handoffs ke
             );
         }
 
-        const fingerprint = () => app.handoffs.fingerprint(id, owner(app), context);
+        const fingerprint = () => app.workItems.fingerprint(id, owner(app), context);
         let previous = await fingerprint();
 
         assert.equal(await fingerprint(), previous);
@@ -352,16 +352,16 @@ test("SSH fingerprints bind the remote namespace and physical bytes; handoffs ke
         await assert.rejects(fingerprint(), /Cannot fingerprint this checkout safely/);
         env.fail = false;
         await assert.rejects(
-            app.handoffs.fingerprint(id, { ...owner(app), tokenHash: "stale" }),
+            app.workItems.fingerprint(id, { ...owner(app), tokenHash: "stale" }),
             /authorized requester/,
         );
-        const list = await app.handoffs.list(id, owner(app));
+        const list = await app.workItems.list(id, owner(app));
 
         assert.ok(
             list.options.some((option) => option.targetType === "researcher" && option.enabled),
         );
         await withWorkflowPublicationLock(app, id, async () => {
-            const busy = await app.handoffs.list(id, owner(app));
+            const busy = await app.workItems.list(id, owner(app));
 
             assert.ok(busy.options.every((option) => !option.enabled));
         });
@@ -375,7 +375,7 @@ test("SSH fingerprints bind the remote namespace and physical bytes; handoffs ke
             kind: "ssh",
             host: "fixture-b",
         });
-        assert.equal(app.handoffs.isReadOnly(id), true);
+        assert.equal(app.workItems.isReadOnly(id), true);
         await assert.rejects(
             executeHandoff(app, id, "researcher"),
             /read-only|active|writer|Continue/i,

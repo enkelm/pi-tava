@@ -59,7 +59,7 @@ async function dispatchConversation(
     }
 
     if (third === "transfers" && fourth === undefined && method === "GET") {
-        return json(response, 200, app.handoffs.receipts(id, user));
+        return json(response, 200, app.workItems.receipts(id, user));
     }
 
     if (third === "reviews") {

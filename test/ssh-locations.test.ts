@@ -201,7 +201,7 @@ test("SSH Worker creation writes remotely and honors later read-only workflow st
     const env = app.envFor(id, person);
 
     assert.equal(app.sessionMeta(id)?.threadType, "worker");
-    assert.equal(app.handoffs.isManaged(id), true);
+    assert.equal(app.workItems.isManaged(id), true);
     assert.deepEqual(app.locationOf(id), location);
     const path = `${remoteCwd}/managed.txt`;
 

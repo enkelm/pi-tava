@@ -1,9 +1,9 @@
-// App-wide system instructions for the built-in thread agents, editable only by the owner.
+// Native Work Item execution and app-wide agent instructions, editable only by the owner.
 import { Fragment } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, store } from "../store.js";
 import { ThreadTypeTag } from "../thread-type.js";
-import { html, Icon, Loader } from "../ui.js";
+import { html, Icon, Loader, Switch } from "../ui.js";
 
 function AgentPrompt({ agent, maxLength }) {
     const [savedPrompt, setSavedPrompt] = useState(agent.prompt);
@@ -168,6 +168,49 @@ function AgentPrompt({ agent, maxLength }) {
     </form>`;
 }
 
+function WorkItemExecution() {
+    const enabled = store.state.server?.workItemsEnabled;
+    const [busy, setBusy] = useState(false);
+    const [problem, setProblem] = useState(null);
+
+    const change = async () => {
+        if (busy || store.state.me?.role !== "owner") {
+            return;
+        }
+
+        setBusy(true);
+        setProblem(null);
+
+        try {
+            await api("agents", { workItemsEnabled: !enabled });
+        } catch (error) {
+            setProblem(error.message);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    if (typeof enabled !== "boolean") {
+        return null;
+    }
+
+    return html`<div class="setting">
+        <div class="grow">
+            <div class="small">Work Item execution</div>
+            <div class="muted small">
+                ${busy ? "Saving…" : enabled ? "Enabled." : "Paused."} Pausing blocks new handoffs and managed writes, without hiding profiles or history. Ordinary Chat and Agent Teams remain available.
+            </div>
+            ${problem && html`<div class="error-box" role="alert">${problem} Reload the page to check whether the change was saved.</div>`}
+        </div>
+        <${Switch}
+            on=${enabled}
+            disabled=${busy}
+            label=${`Work Item execution: ${enabled ? "enabled" : "paused"}`}
+            onChange=${change}
+        />
+    </div>`;
+}
+
 export function AgentsSettings() {
     const owner = store.state.me?.role === "owner";
     const supported = store.state.server?.agentSettings >= 1;
@@ -201,7 +244,7 @@ export function AgentsSettings() {
     }, [owner, supported]);
 
     if (!owner) {
-        return html`<p class="muted small">Only the owner can view and edit app-wide agent prompts.</p>`;
+        return html`<p class="muted small">Only the owner can manage Work Item execution and app-wide agent prompts.</p>`;
     }
 
     if (!supported) {
@@ -211,6 +254,7 @@ export function AgentsSettings() {
     }
 
     return html`<${Fragment}>
+        <${WorkItemExecution} />
         <p class="muted small">
             These role-specific system prompts apply to every thread of that type, including delegated helpers, on the next model request. Shared instructions, safety rules and runtime permissions stay in effect. Session instructions remain separate.
         </p>

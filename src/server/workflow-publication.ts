@@ -523,7 +523,7 @@ async function checkpoint(
 ): Promise<string> {
     const cwd = await publicationCwd(app, id, backend);
     const hash = createHash("sha256").update(
-        JSON.stringify({ command, cwd, program, fingerprint: await app.handoffs.fingerprint(id) }),
+        JSON.stringify({ command, cwd, program, fingerprint: await app.workItems.fingerprint(id) }),
     );
 
     hash.update(await hashFile(program, 256 * 1024 * 1024));
@@ -622,9 +622,9 @@ async function publishHead(
 function requirePublisher(app: PocketApp, id: ConversationId, expectedRequester?: string): string {
     const requester = requireWorkflowRequester(app, id);
 
-    app.handoffs.requireWritable(id);
+    app.workItems.requireWritable(id);
 
-    if (!app.handoffs.isManaged(id) || app.sessionMeta(app.rootOf(id))?.threadType !== "publish") {
+    if (!app.workItems.isManaged(id) || app.sessionMeta(app.rootOf(id))?.threadType !== "publish") {
         throw new Error(
             "Only the current active Publish workflow may execute publication operations.",
         );
@@ -771,7 +771,7 @@ export function createPublicationTool(app: PocketApp, backendFor?: WorkflowBacke
                 context,
                 backend,
             );
-            const landedFingerprint = await app.handoffs.fingerprint(id);
+            const landedFingerprint = await app.workItems.fingerprint(id);
 
             if (args.command === undefined) {
                 throw new Error("Give the exact publication argv command.");
@@ -888,7 +888,7 @@ export function createPublicationTool(app: PocketApp, backendFor?: WorkflowBacke
                             backend,
                         ),
                     ) !== JSON.stringify(command) ||
-                    (await app.handoffs.fingerprint(id)) !== landedFingerprint ||
+                    (await app.workItems.fingerprint(id)) !== landedFingerprint ||
                     (await checkpoint(app, id, command, program, context, backend)) !==
                         fingerprint ||
                     (await publicationCwd(app, id, backend)) !== cwd ||
@@ -941,7 +941,7 @@ export function createPublicationTool(app: PocketApp, backendFor?: WorkflowBacke
                         if (
                             (await publishHead(app, root, handoffs, context, backend)) !==
                                 landedHead ||
-                            (await app.handoffs.fingerprint(id)) !== landedFingerprint ||
+                            (await app.workItems.fingerprint(id)) !== landedFingerprint ||
                             history.some((saved) =>
                                 Object.values(saved.receipts).some(
                                     (receipt) => receipt.state === "executing",

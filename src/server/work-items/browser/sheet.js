@@ -115,7 +115,8 @@ export function createHandoffSheet(pocket, state) {
         const source = session.sessions.find((each) => each.id === id);
         const options = data?.options ?? [];
         const selected = options.find((each) => keyOf(each) === draft.choice);
-        const readOnly = source?.workflow?.readOnly || data?.workflow?.readOnly;
+        const paused = source?.workflow?.paused || data?.workflow?.paused;
+        const readOnly = source?.workflow?.readOnly || data?.workflow?.readOnly || paused;
         const blockingReasons = new Map();
 
         for (const option of options) {
@@ -226,121 +227,149 @@ export function createHandoffSheet(pocket, state) {
                 !waiting &&
                 !data &&
                 html`
-                <p class="handoff-error" role="alert">${visibleError}</p>
-                <button class="button" onClick=${() => setRetry((each) => each + 1)}>Retry</button>
-            `
+                    <p class="handoff-error" role="alert">${visibleError}</p>
+                    <button class="button" onClick=${() => setRetry((each) => each + 1)}>
+                        Retry
+                    </button>
+                `
             }
             ${
                 !waiting &&
                 data &&
                 html`<form class="handoff-form" onSubmit=${save}>
-                ${
-                    !direction
-                        ? html`
-                    <p class="muted small">Choose the next role, then add any instructions before sending.</p>
+                    ${paused && html`<p class="handoff-warning small" role="status">Work Item execution is paused. Ask the owner to resume it.</p>`}
                     ${
-                        sharedReasons.length > 0 &&
-                        html`<div class="handoff-warning small" role="status">
-                            ${sharedReasons.map((reason, index) => html`<p id=${reasonId(index)}>${reason}</p>`)}
-                        </div>`
+                        !direction
+                            ? html`
+                                  <p class="muted small">
+                                      Choose the next role, then add any instructions before
+                                      sending.
+                                  </p>
+                                  ${
+                                      sharedReasons.length > 0 &&
+                                      html`<div class="handoff-warning small" role="status">
+                                          ${sharedReasons.map((reason, index) => html`<p id=${reasonId(index)}>${reason}</p>`)}
+                                      </div>`
+                                  }
+                                  ${GROUPS.map((group) => {
+                                      const choices = options.filter(
+                                          (each) => each.relationship === group.relationship,
+                                      );
+
+                                      if (choices.length === 0) {
+                                          return null;
+                                      }
+
+                                      return html`<fieldset aria-label=${group.label}>
+                                          <legend class="handoff-label">${group.label}</legend>
+                                          ${
+                                              group.relationship === "new-work" &&
+                                              html`
+                                                  <p class="muted small">
+                                                      Start separate work linked to this Work Item.
+                                                  </p>
+                                              `
+                                          }
+                                          <div class="handoff-options">
+                                              ${choices.map((each) => {
+                                                  const disabled = !each.enabled || readOnly;
+                                                  const sharedIndex = disabled
+                                                      ? sharedReasons.indexOf(each.reason)
+                                                      : -1;
+
+                                                  return html`<label
+                                                      class=${`handoff-option ${disabled ? "disabled" : ""}`}
+                                                  >
+                                                      <input
+                                                          type="radio"
+                                                          name="handoff-option"
+                                                          value=${keyOf(each)}
+                                                          checked=${draft.choice === keyOf(each)}
+                                                          disabled=${disabled}
+                                                          aria-describedby=${sharedIndex >= 0 ? reasonId(sharedIndex) : undefined}
+                                                          onChange=${() => update({ choice: keyOf(each) })}
+                                                      />
+                                                      <span class="handoff-option-profile">
+                                                          <${AgentProfileTag}
+                                                              profile=${each.targetType}
+                                                              iconOnly=${true}
+                                                          />
+                                                      </span>
+                                                      <span class="handoff-option-copy">
+                                                          <strong
+                                                              >${`Start ${profileName(session.profiles, each.targetType)}`}</strong
+                                                          >
+                                                          ${each.reason && sharedIndex < 0 && html`<span class="small muted">${each.reason}</span>`}
+                                                      </span>
+                                                  </label>`;
+                                              })}
+                                          </div>
+                                      </fieldset>`;
+                                  })}
+                                  ${
+                                      options.length === 0 &&
+                                      html`
+                                          <p class="muted small">
+                                              No handoff options are available. Open the active
+                                              thread to continue.
+                                          </p>
+                                      `
+                                  }
+                              `
+                            : html`
+                                  <div class="handoff-destination">
+                                      ${selected && html`<${AgentProfileTag} profile=${selected.targetType} />`}
+                                      <span class="small muted"
+                                          >${selected?.relationship === "new-work" ? "New Work Item" : "Same Work Item"}</span
+                                      >
+                                  </div>
+                                  <div class="handoff-field">
+                                      <label class="handoff-label" for="handoff-direction"
+                                          >What should the next agent focus on? (optional)</label
+                                      >
+                                      <textarea
+                                          id="handoff-direction"
+                                          ref=${field}
+                                          rows="5"
+                                          maxlength=${MAX_DIRECTION}
+                                          value=${draft.instructions}
+                                          disabled=${busy}
+                                          aria-describedby="handoff-send-hint"
+                                          onInput=${(event) => update({ instructions: event.currentTarget.value })}
+                                      ></textarea>
+                                  </div>
+                                  <p id="handoff-send-hint" class="muted small" role="status">
+                                      ${
+                                          busy
+                                              ? "Sending request… You can close this popup; sending continues."
+                                              : "The popup closes when your request is accepted. You can keep browsing while the agent prepares the handoff."
+                                      }
+                                  </p>
+                              `
                     }
-                    ${GROUPS.map((group) => {
-                        const choices = options.filter(
-                            (each) => each.relationship === group.relationship,
-                        );
-
-                        if (choices.length === 0) {
-                            return null;
-                        }
-
-                        return html`<fieldset aria-label=${group.label}>
-                            <legend class="handoff-label">${group.label}</legend>
-                            ${
-                                group.relationship === "new-work" &&
-                                html`
-                                <p class="muted small">Start separate work linked to this Work Item.</p>
-                            `
-                            }
-                            <div class="handoff-options">
-                                ${choices.map((each) => {
-                                    const disabled = !each.enabled || readOnly;
-                                    const sharedIndex = disabled
-                                        ? sharedReasons.indexOf(each.reason)
-                                        : -1;
-
-                                    return html`<label class=${`handoff-option ${disabled ? "disabled" : ""}`}>
-                                        <input
-                                            type="radio"
-                                            name="handoff-option"
-                                            value=${keyOf(each)}
-                                            checked=${draft.choice === keyOf(each)}
-                                            disabled=${disabled}
-                                            aria-describedby=${sharedIndex >= 0 ? reasonId(sharedIndex) : undefined}
-                                            onChange=${() => update({ choice: keyOf(each) })}
-                                        />
-                                        <span class="handoff-option-profile">
-                                            <${AgentProfileTag} profile=${each.targetType} iconOnly=${true} />
-                                        </span>
-                                        <span class="handoff-option-copy">
-                                            <strong>Start ${profileName(session.profiles, each.targetType)}</strong>
-                                            ${each.reason && sharedIndex < 0 && html`<span class="small muted">${each.reason}</span>`}
-                                        </span>
-                                    </label>`;
-                                })}
-                            </div>
-                        </fieldset>`;
-                    })}
-                    ${
-                        options.length === 0 &&
-                        html`
-                        <p class="muted small">No handoff options are available. Open the active thread to continue.</p>
-                    `
-                    }
-                `
-                        : html`
-                    <div class="handoff-destination">
-                        ${selected && html`<${AgentProfileTag} profile=${selected.targetType} />`}
-                        <span class="small muted">${selected?.relationship === "new-work" ? "New Work Item" : "Same Work Item"}</span>
-                    </div>
-                    <div class="handoff-field">
-                        <label class="handoff-label" for="handoff-direction">What should the next agent focus on? (optional)</label>
-                        <textarea
-                            id="handoff-direction"
-                            ref=${field}
-                            rows="5"
-                            maxlength=${MAX_DIRECTION}
-                            value=${draft.instructions}
+                    ${visibleError && html`<p class="handoff-error" role="alert">${visibleError}</p>`}
+                    <div class="handoff-form-actions">
+                        <button
+                            class="button"
+                            type="button"
                             disabled=${busy}
-                            aria-describedby="handoff-send-hint"
-                            onInput=${(event) => update({ instructions: event.currentTarget.value })}
-                        ></textarea>
+                            onClick=${() => (direction ? setDirection(false) : setRetry((each) => each + 1))}
+                        >
+                            ${direction ? "Back" : "Refresh options"}
+                        </button>
+                        <button class="button" type="button" onClick=${close}>
+                            ${busy ? "Close" : "Cancel"}
+                        </button>
+                        <button
+                            ref=${next}
+                            class="button primary"
+                            type="submit"
+                            disabled=${busy || !valid}
+                        >
+                            ${busy ? "Sending…" : direction ? "Start thread" : "Next"}
+                        </button>
                     </div>
-                    <p id="handoff-send-hint" class="muted small" role="status">
-                        ${
-                            busy
-                                ? "Sending request… You can close this popup; sending continues."
-                                : "The popup closes when your request is accepted. You can keep browsing while the agent prepares the handoff."
-                        }
-                    </p>
-                `
-                }
-                ${visibleError && html`<p class="handoff-error" role="alert">${visibleError}</p>`}
-                <div class="handoff-form-actions">
-                    <button
-                        class="button"
-                        type="button"
-                        disabled=${busy}
-                        onClick=${() => (direction ? setDirection(false) : setRetry((each) => each + 1))}
-                    >${direction ? "Back" : "Refresh options"}</button>
-                    <button class="button" type="button" onClick=${close}>${busy ? "Close" : "Cancel"}</button>
-                    <button
-                        ref=${next}
-                        class="button primary"
-                        type="submit"
-                        disabled=${busy || !valid}
-                    >${busy ? "Sending…" : direction ? "Start thread" : "Next"}</button>
-                </div>
-            </form>`
+                </form>`
             }
         </div>`;
     }

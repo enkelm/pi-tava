@@ -40,9 +40,11 @@ and `"view"` also permits its viewers, including session invitees. Core mutation
 steering/driving checks. Static browser code can separately opt into conversation access with
 `web.client(entry, { access: "conversation" })`; loading assets grants no data or mutation rights.
 
-Work Items registers scoped `GET handoffs` and `POST work-item`. Core `GET /api/c/:id/transfers` is
-not an extension route: it passively finds only the current person's accepted outgoing receipts from
-that exact source, even when Work Items is disabled. It cannot start or retry model work.
+Core registers WorkItems' first-party presentation on the retained scoped `GET handoffs` and
+`POST work-item` routes in the `work-items` namespace. The execution pause does not unload these
+routes. Core `GET /api/c/:id/transfers` is not an extension route: it passively finds only the current
+person's accepted outgoing receipts from that exact source, even while execution is paused. It cannot
+start or retry model work.
 
 ## The request
 

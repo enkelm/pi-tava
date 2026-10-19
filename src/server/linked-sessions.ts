@@ -101,7 +101,7 @@ export class LinkedSessions implements LinkedSessionsApi {
 
     /** Independent teams are not managed-workflow delegation, even for the active writer. */
     #requireUnmanaged(...ids: ConversationId[]): void {
-        if (ids.some((id) => this.#app.handoffs.isManaged(id))) {
+        if (ids.some((id) => this.#app.workItems.isManaged(id))) {
             throw new HttpError(403, "Linked sessions are not supported in managed workflows.");
         }
     }

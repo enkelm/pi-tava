@@ -62,6 +62,7 @@ export function createControls(pocket, state) {
             ...data?.workflow,
             readOnly: Boolean(sourceSession?.workflow?.readOnly || data?.workflow?.readOnly),
             preparing: Boolean(sourceSession?.workflow?.preparing || data?.workflow?.preparing),
+            paused: Boolean(sourceSession?.workflow?.paused || data?.workflow?.paused),
         };
         const item = data?.workItem;
         const active = sessions.find(
@@ -87,14 +88,18 @@ export function createControls(pocket, state) {
               ? "Agent profile unavailable"
               : workflow.readOnly
                 ? "Read-only workspace"
-                : "Workflow status";
+                : workflow.paused
+                  ? "Work Item execution paused"
+                  : "Workflow status";
         const description = workflow.preparing
             ? "Preparing handoff summary… · wait for the new thread to open"
             : workflow.profileAvailable === false
               ? "Agent profile unavailable · enable its workflow extension before continuing work"
               : workflow.readOnly
                 ? "Read-only workspace · ask questions here; only the active thread can make changes"
-                : `${WORKFLOW_LABELS[workflow.status] ?? "Active"}${workflow.readyForPublish ? " · ready to publish, not approval to deliver" : type === "publish" ? " · each external action needs human approval" : type === "land" ? " · local integration only" : ""}`;
+                : workflow.paused
+                  ? "Work Item execution paused · ask the owner to resume it; reading and discussion remain available"
+                  : `${WORKFLOW_LABELS[workflow.status] ?? "Active"}${workflow.readyForPublish ? " · ready to publish, not approval to deliver" : type === "publish" ? " · each external action needs human approval" : type === "land" ? " · local integration only" : ""}`;
         const tooltip = [description, workflow.summary].filter(Boolean).join("\n");
         const icon = workflow.readOnly
             ? "shield"

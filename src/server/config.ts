@@ -131,6 +131,8 @@ interface PocketConfig {
      */
     subagentModels?: string[];
     providerPackages?: ProviderPackageState;
+    /** Native Work Item execution setting. Absent preserves the legacy Work Items disabled choice. */
+    workItemsEnabled?: boolean;
     /** Owner-edited, app-wide role instructions. Missing roles use their bundled defaults. */
     agentPrompts?: Partial<Record<ThreadType, string>>;
     /** Owner choices for canonical SSH resource roots; never remote credentials or settings. */
@@ -294,6 +296,29 @@ export class ConfigStore {
             this.save();
         } catch (error) {
             this.#config.providerPackages = previous;
+
+            throw error;
+        }
+    }
+
+    get workItemsEnabled(): boolean {
+        if (this.#config.workItemsEnabled !== undefined) {
+            return this.#config.workItemsEnabled === true;
+        }
+
+        // Migration input only: an earlier disabled installation must not silently resume work.
+        return this.extensionChoice("work-items.ts") !== false;
+    }
+
+    set workItemsEnabled(enabled: boolean) {
+        const previous = this.#config.workItemsEnabled;
+
+        this.#config.workItemsEnabled = enabled;
+
+        try {
+            this.save();
+        } catch (error) {
+            this.#config.workItemsEnabled = previous;
 
             throw error;
         }

@@ -401,7 +401,7 @@ function publicationKey(app: PocketApp, id: ConversationId): string {
 
 /** Local writers cannot race an exclusive workflow operation's final checks and execution. */
 export function requireWorkflowLocalWrite(app: PocketApp, id: ConversationId): void {
-    app.handoffs.requireWritable(id);
+    app.workItems.requireWritable(id);
 
     if (publicationLocks.get(app)?.has(publicationKey(app, id))) {
         throw new HttpError(
@@ -525,7 +525,7 @@ export function createWorkflowHooks(app: PocketApp) {
             beforeTool: (call, api) => {
                 const id = api.conversationId;
 
-                if (!app.handoffs.isManaged(id)) {
+                if (!app.workItems.isManaged(id)) {
                     return undefined;
                 }
 
@@ -533,10 +533,9 @@ export function createWorkflowHooks(app: PocketApp) {
                     requireWorkflowRequester(app, id);
 
                     const args = call.arguments as Record<string, unknown>;
-                    const readOnly =
-                        app.handoffs.isReadOnly(id) || app.handoffs.profileUnavailable(id);
+                    const readOnly = app.workItems.executionBlocked(id);
 
-                    if (app.handoffs.isPreparing(id)) {
+                    if (app.workItems.isPreparing(id)) {
                         return {
                             block: "The human requested a handoff summary only. Reply with the summary; do not call tools or change workflow.",
                         };
@@ -715,7 +714,7 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                     let release: (() => void) | undefined;
 
                     try {
-                        const managed = app.handoffs.isManaged(id);
+                        const managed = app.workItems.isManaged(id);
 
                         if (managed || identity !== undefined) {
                             requireWorkflowRequester(app, id, identity);
@@ -731,8 +730,7 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                             return result;
                         }
 
-                        const readOnly =
-                            app.handoffs.isReadOnly(id) || app.handoffs.profileUnavailable(id);
+                        const readOnly = app.workItems.executionBlocked(id);
 
                         if (typeof command !== "string" && command.length === 0) {
                             return err(new ExecutionError("spawn_error", "Empty command"));
@@ -785,18 +783,18 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
 
                 try {
                     if (mutations.has(String(property))) {
-                        if (app.handoffs.isManaged(id) || identity !== undefined) {
+                        if (app.workItems.isManaged(id) || identity !== undefined) {
                             requireWorkflowRequester(app, id, identity);
                         }
 
                         release = reserveWorkflowLocalWrite(app, id);
-                    } else if (app.handoffs.isManaged(id) || identity !== undefined) {
+                    } else if (app.workItems.isManaged(id) || identity !== undefined) {
                         requireWorkflowRequester(app, id, identity, true);
                     }
 
                     const result = await Reflect.apply(value, target, args);
 
-                    if (app.handoffs.isManaged(id) || identity !== undefined) {
+                    if (app.workItems.isManaged(id) || identity !== undefined) {
                         requireWorkflowRequester(
                             app,
                             id,

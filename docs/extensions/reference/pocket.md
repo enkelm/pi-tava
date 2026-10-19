@@ -346,8 +346,8 @@ Core retains steering, driving, spend and conversation checks.
 It resolves on durable acceptance with `{ submissionId, requestId, handoffRequestKey? }`, not when
 an agent answers or a successor exists. The receipt's request ID is the server-owned input identity;
 `handoffRequestKey` is an opaque correlation, not authority. Core owns passive acknowledgement and
-transfer lookup and initiating-tab navigation, even when Work Items is off. Do not add another
-send/recovery journal, transfer poller, automatic resubmission or handoff-version flag.
+transfer lookup and initiating-tab navigation, even while Work Item execution is paused. Do not add
+another send/recovery journal, transfer poller, automatic resubmission or handoff-version flag.
 
 ### `on`
 
@@ -826,8 +826,12 @@ Fields are read-only metadata, not execution or mutation authority.
 Since 0.15.0 · Experimental
 
 Display-only `status` (`"active"`, `"review-complete"`, `"landed"`, `"published"` or `"needs-review"`),
-`readOnly`, `managed`, `preparing`, `profileAvailable`, optional `summary` and optional
-`readyForPublish`. Historical status values do not grant handoff, write or publication permission.
+`readOnly`, `managed`, `preparing`, `profileAvailable`, optional `paused`, optional `summary` and
+optional `readyForPublish`. The optional field `readonly paused?: boolean` reports the owner's
+first-party Work Item execution pause for this thread. A paused thread can still have
+`profileAvailable: true`: its profile and instructions remain installed, but execution is paused.
+Neither an absent/false pause flag nor historical status values grant handoff, write or publication
+permission.
 
 ### `AgentProfileMetadata`
 

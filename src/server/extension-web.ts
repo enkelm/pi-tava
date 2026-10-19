@@ -704,16 +704,17 @@ export class ExtensionWebs {
             : { route: best.route, part, params: best.params };
     }
 
-    /** The browser modules someone's tabs load: each module's name, title, and address. */
+    /** The browser modules someone's tabs load, with the tools committed by the same registering owner. */
     clients(
         user: Pick<User, "role" | "sessions">,
-    ): { module: string; title: string; url: string }[] {
+    ): { module: string; title: string; url: string; tools: readonly string[] }[] {
         return [...this.#parts.values()]
             .filter((part) => part.client !== undefined && mayUseClient(user, part.client.access))
             .map((part) => ({
                 module: part.module,
                 title: part.title,
                 url: `/x/${part.module}/${part.client!.rev}/${part.client!.entry}`,
+                tools: [...part.tools],
             }));
     }
 

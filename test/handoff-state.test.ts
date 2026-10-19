@@ -6,10 +6,10 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 
 const { createHandoffState } = await import(
-    new URL("../src/server/extensions/work-items/state.js", import.meta.url).href
+    new URL("../src/server/work-items/browser/state.js", import.meta.url).href
 );
 const { default: setup } = await import(
-    new URL("../src/server/extensions/work-items/index.js", import.meta.url).href
+    new URL("../src/server/work-items/browser/index.js", import.meta.url).href
 );
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 const makeSession = () => ({

@@ -123,7 +123,7 @@ test("projects have opaque identity, direct thread membership and independent ty
     }
 
     assert.equal(
-        app.agentProfile("researcher")?.icon,
+        app.workItems.profile("researcher")?.icon,
         "brain",
         "Researcher advertises its brain icon to every UI surface",
     );
@@ -516,14 +516,14 @@ test("whole Work Item placement is owner-only and rejects non-driver members ato
     const beforeGroups = await app.harness.snapshot(HandoffsDoc, context);
 
     await assert.rejects(
-        app.handoffs.updateWorkItem(next, full, { projectId: otherProjectId, archived: true }),
+        app.workItems.updateWorkItem(next, full, { projectId: otherProjectId, archived: true }),
         status(403),
     );
     assert.deepEqual(await app.harness.snapshot(SessionsDoc, context), beforeSessions);
     assert.deepEqual(await app.harness.snapshot(HandoffsDoc, context), beforeGroups);
     await app.collab.turns(first.id, owner(app), { action: "handover", to: full.id });
     await assert.rejects(
-        app.handoffs.updateWorkItem(next, owner(app), {
+        app.workItems.updateWorkItem(next, owner(app), {
             projectId: otherProjectId,
             archived: true,
         }),
@@ -542,7 +542,7 @@ test("whole Work Item placement is owner-only and rejects non-driver members ato
     );
     assert.deepEqual(await app.harness.snapshot(SessionsDoc, context), hiddenSessions);
     assert.deepEqual(await app.harness.snapshot(HandoffsDoc, context), beforeGroups);
-    await app.handoffs.updateWorkItem(next, owner(app), {
+    await app.workItems.updateWorkItem(next, owner(app), {
         projectId: otherProjectId,
         archived: true,
     });
@@ -553,8 +553,8 @@ test("whole Work Item placement is owner-only and rejects non-driver members ato
         assert.equal(app.cwdOf(id), work);
     }
 
-    assert.equal((await app.handoffs.list(next, owner(app))).workItem?.projectId, otherProjectId);
-    await app.handoffs.updateWorkItem(next, owner(app), { projectId: null, archived: false });
+    assert.equal((await app.workItems.list(next, owner(app))).workItem?.projectId, otherProjectId);
+    await app.workItems.updateWorkItem(next, owner(app), { projectId: null, archived: false });
     assert.equal(app.sessionMeta(first.id)?.projectId, undefined);
     assert.equal(app.sessionMeta(next)?.projectId, undefined);
     assert.equal(app.sessionMeta(first.id)?.archived, false);

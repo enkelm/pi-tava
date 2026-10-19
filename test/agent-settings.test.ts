@@ -16,7 +16,7 @@ let app: App;
 let handler: ReturnType<typeof createHandler>;
 
 type Agent = { type: string; name: string; prompt: string; defaultPrompt: string };
-type Settings = { agents: Agent[]; maxPromptLength: number };
+type Settings = { agents: Agent[]; maxPromptLength: number; workItemsEnabled: boolean };
 
 before(async () => {
     app = await openApp(scriptedModel(), data);
@@ -95,18 +95,59 @@ test("only the owner can read or change app-wide agent prompts", async () => {
     );
     assert.equal((await request("", undefined, null)).status, 401);
     assert.equal((await request("/worker", payload, app.config.ownerToken, false)).status, 403);
+    assert.equal(
+        (await request("", { workItemsEnabled: false }, app.config.ownerToken, false)).status,
+        403,
+    );
 
     for (const role of ["guest", "viewer"] as const) {
         const { token } = app.config.addUser(role, role);
 
         assert.equal((await request("", undefined, token)).status, 403);
         assert.equal((await request("/worker", payload, token)).status, 403);
+        assert.equal((await request("", { workItemsEnabled: false }, token)).status, 403);
     }
 
     assert.equal(
         (await settings()).agents.find((agent) => agent.type === "worker")!.prompt,
         worker.prompt,
     );
+});
+
+test("Work Item execution is a native durable Agents setting, not an Extensions control", async () => {
+    assert.equal((await settings()).workItemsEnabled, true);
+    assert.equal((await request("", { workItemsEnabled: false })).status, 200);
+    assert.equal((await settings()).workItemsEnabled, false);
+    assert.equal((await app.hello(owner(app))).server.workItemsEnabled, false);
+    assert.equal(
+        (await app.extensions(owner(app))).modules.some(
+            (module) => module.file === "work-items.ts",
+        ),
+        false,
+    );
+    await assert.rejects(
+        app.setExtensionEnabled(owner(app), "work-items.ts", true),
+        /no extension module/i,
+    );
+
+    for (const body of [
+        null,
+        {},
+        [],
+        { workItemsEnabled: null },
+        { workItemsEnabled: "false" },
+        { workItemsEnabled: 0 },
+    ]) {
+        assert.equal((await request("", body)).status, 400);
+        assert.equal((await settings()).workItemsEnabled, false);
+    }
+
+    await app.close();
+    app = await openApp(scriptedModel(), data);
+    handler = createHandler({ app, listen: { host: "127.0.0.1", port: 0 }, restart: () => {} });
+    assert.equal((await settings()).workItemsEnabled, false);
+    assert.equal((await request("", { workItemsEnabled: true })).status, 200);
+    assert.equal((await settings()).workItemsEnabled, true);
 });
 
 test("edits persist, reject stale tabs and invalid prompts, and restore bundled defaults", async () => {

@@ -72,7 +72,7 @@ export class Workspace {
             headIn(backend.cwd, {
                 backend,
                 timeoutMs: 5000,
-                offline: () => this.#app.handoffs.isManaged(id),
+                offline: () => this.#app.workItems.isManaged(id),
             }),
         );
     }
@@ -152,7 +152,7 @@ export class Workspace {
 
         const result = await branchesIn(cwd, {
             backend,
-            offline: () => this.#app.handoffs.isManaged(id),
+            offline: () => this.#app.workItems.isManaged(id),
         }).catch((error: unknown) => {
             throw new HttpError(409, describe(error));
         });
@@ -188,7 +188,7 @@ export class Workspace {
         await this.#app.requireDriver(id, user);
         requireWorkflowLocalWrite(this.#app, id);
 
-        if (this.#app.handoffs.isManaged(id)) {
+        if (this.#app.workItems.isManaged(id)) {
             throw new HttpError(
                 409,
                 "Switch branches through managed offline bash, so Git child hooks cannot access the network.",
@@ -685,7 +685,7 @@ export class Workspace {
                         let editable = false;
                         let editUnavailable: string | undefined;
                         const view = await remoteView(env, file, context, async () => {
-                            if (this.#app.handoffs.isReadOnly(id)) {
+                            if (this.#app.workItems.executionBlocked(id)) {
                                 editUnavailable = "This workflow is read-only.";
 
                                 return undefined;
@@ -700,11 +700,11 @@ export class Workspace {
                                     backend,
                                     root,
                                     file,
-                                    offline: this.#app.handoffs.isManaged(id),
+                                    offline: this.#app.workItems.isManaged(id),
                                 });
 
                                 await this.#remoteEditProtection(backend, snapshot.path, path);
-                                editable = !this.#app.handoffs.isReadOnly(id);
+                                editable = !this.#app.workItems.executionBlocked(id);
                                 editUnavailable = editable
                                     ? undefined
                                     : "This workflow is read-only.";
@@ -769,7 +769,9 @@ export class Workspace {
                     const info = lstatSync(canonical);
 
                     editable =
-                        info.isFile() && info.nlink === 1 && !this.#app.handoffs.isReadOnly(id);
+                        info.isFile() &&
+                        info.nlink === 1 &&
+                        !this.#app.workItems.executionBlocked(id);
                 } catch {
                     // Read access does not grant quick-edit access, including for the owner.
                 }
@@ -893,7 +895,7 @@ export class Workspace {
 
             remoteSavedFile = file;
 
-            return { backend, root, file, offline: this.#app.handoffs.isManaged(id) };
+            return { backend, root, file, offline: this.#app.workItems.isManaged(id) };
         };
 
         const authorize = async () => {
@@ -950,7 +952,7 @@ export class Workspace {
         await this.#app.requireDriver(id, user);
         requireWorkflowLocalWrite(this.#app, id);
 
-        if (this.#app.handoffs.isManaged(id)) {
+        if (this.#app.workItems.isManaged(id)) {
             throw new HttpError(
                 409,
                 "Undo changes through managed offline bash, so Git child hooks cannot access the network.",
@@ -1004,7 +1006,7 @@ export class Workspace {
                     backend.cwd,
                     await this.#app.transcripts.allEntries(id, false),
                     onlyHere,
-                    { backend, offline: () => this.#app.handoffs.isManaged(id) },
+                    { backend, offline: () => this.#app.workItems.isManaged(id) },
                 ),
             ),
         );
@@ -1044,7 +1046,7 @@ export class Workspace {
                     user.sessions !== undefined || user.projectAccess !== undefined,
                     {
                         backend,
-                        offline: () => this.#app.handoffs.isManaged(id),
+                        offline: () => this.#app.workItems.isManaged(id),
                     },
                 ),
             );

@@ -228,9 +228,9 @@ function externalEnvironment(): Record<string, string> {
 function requirePull(app: PocketApp, id: ConversationId, expectedRequester?: string): string {
     const requester = requireWorkflowRequester(app, id);
 
-    app.handoffs.requireWritable(id);
+    app.workItems.requireWritable(id);
 
-    if (!app.handoffs.isManaged(id) || app.sessionMeta(app.rootOf(id))?.threadType !== "pull") {
+    if (!app.workItems.isManaged(id) || app.sessionMeta(app.rootOf(id))?.threadType !== "pull") {
         throw new Error("Only the current active Pull workflow may perform external reads.");
     }
 
@@ -563,7 +563,7 @@ export function createPullTool(app: PocketApp, backendFor?: WorkflowBackendFacto
                     // Refuse before even inspecting Git until independent work is quiescent; the
                     // invoking run and exact incoming brief already placed into it are not writers.
                     await api.commit(
-                        (tx) => app.handoffs.requireFetchIdle(tx, api.conversationId, api.taskId),
+                        (tx) => app.workItems.requireFetchIdle(tx, api.conversationId, api.taskId),
                         context,
                     );
 

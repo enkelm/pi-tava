@@ -57,3 +57,45 @@ Each member in the reference has its own Since line. These parts came together:
 | Scoped routes and static conversation browser access           | 0.15.0 |
 | Browser session metadata, controls, input hints and submission | 0.15.0 |
 | Logical-opening `SheetProps.isOpen`                            | 0.15.0 |
+
+## 0.15.0 WorkItems consolidation notes (unreleased)
+
+This change is scheduled for the next minor release. It changes first-party availability and the
+location of Work Item execution controls and migration of the saved disabled choice; it is not a
+patch-level public-interface removal. These
+notes cover the consolidation only.
+
+### For extension authors
+
+#### Added
+
+- Optional read-only [`SessionWorkflowMetadata.paused`](pocket.md#sessionworkflowmetadata) distinguishes an execution pause from an unavailable profile. The metadata remains experimental.
+
+#### Changed
+
+- First-party Work Items is application-owned through `app.workItems`, not an optional extension. Built-in roles and transitions stay declarative; Projects and Commands use its lifecycle, filtered view and whole-item organization. The private Handoffs engine retains durable transfer/recovery contracts. See [architecture](../../architecture.md#cross-thread-handoffs).
+- Work Items is no longer listed or controlled in Extensions. Native Settings → **Agents** owns **Work Item execution** pause/resume through additive `workItemsEnabled`. The legacy disabled `work-items.ts` choice is read-only migration input only when the native field is absent, so existing disabled installations stay paused on upgrade. Explicit native changes persist `workItemsEnabled`; the extension-enablement endpoint cannot change WorkItems. Owner-only `POST /api/agents` accepts `{ workItemsEnabled: boolean }`, with effective state in `GET /api/agents` and `hello` metadata. Profiles and controls remain visible, but non-Chat built-in starters, new built-in handoffs and managed effects are blocked. Accepted recovery retains its durable path without bypassing that pause. Ordinary ungrouped Chat, Agent Teams and namespaced third-party workflow declarations remain independent. See [availability](../../handoffs.md#availability-and-execution-pause).
+- [`web.workflow`](web.md#workflow), [`host.sessions.handoff`](host.md#sessionshandoff), scoped routes, static conversation access, browser controls and input hints remain public. Browser assets moved to `src/server/work-items/browser/`, registered by core from `src/server/work-items` with client entry `browser`. No first-party Work Items entry or source module remains under `src/server/extensions/`. The first-party `work-items` route/asset namespace is retained, including `/x/work-items/…` and the scoped route URLs; controls intentionally reuse generic public presentation infrastructure for compatibility. Stable built-in IDs and owner prompt overrides are preserved; unknown managed profiles remain fail-closed. See [core or extension](../policies/core-or-extension.md#first-party-work-items).
+
+#### Deprecated
+
+None by this consolidation.
+
+#### Removed
+
+No public members. `pocketApi` remains 1.
+
+#### Reserved names
+
+No new names. Existing built-in profile, module and tool reservations remain in force, including
+`work-items` and `handoff`; pausing execution does not free them.
+
+#### Security
+
+No authority policy is relaxed. Single-writer retirement, live access/idleness checks, offline
+execution and individual publication approvals remain mandatory. Grouping grants no access;
+hidden members block whole-item mutations.
+
+#### Packages
+
+No pinned package changes for this consolidation.

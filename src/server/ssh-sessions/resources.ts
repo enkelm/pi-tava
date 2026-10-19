@@ -62,7 +62,7 @@ export class SshResources {
                 backend,
                 root,
                 file,
-                offline: id !== undefined && this.#app.handoffs.isManaged(id),
+                offline: id !== undefined && this.#app.workItems.isManaged(id),
             });
 
             return snapshot.bytes;

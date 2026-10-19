@@ -329,7 +329,7 @@ test("normal slash/freeform/English inputs execute with exact human direction an
         assert.ok("handoffRequestKey" in accepted);
         assert.equal(accepted.handoffRequestKey, record.requestKey);
         assert.equal(app.sessions().length, count + 1);
-        assert.equal(app.handoffs.isReadOnly(id), true);
+        assert.equal(app.workItems.isReadOnly(id), true);
         assert.equal(app.sessionMeta(cid(record.targetThreadId))?.threadType, row.kind);
         assert.equal((await sourceUsers(id)).length, 1, "no app-authored source summary turn");
         assert.equal(
@@ -410,7 +410,7 @@ test("a human-requested handoff executes through the plan hook without approving
     assert.ok(record);
     assert.equal(record.targetType, "researcher");
     assert.equal((await app.harness.snapshot(PlanDoc, id, context))?.on, true);
-    assert.equal(app.handoffs.isReadOnly(id), true);
+    assert.equal(app.workItems.isReadOnly(id), true);
     await delivered(cid(record.targetThreadId));
 });
 
@@ -422,9 +422,9 @@ test("an interrupted tool response replays its committed receipt after a disposa
     const scenario = script(body, [start()]);
     const lostResponse = gate();
     let transferred = false;
-    const invoke = app.handoffs.invoke.bind(app.handoffs);
+    const invoke = app.workItems.invoke.bind(app.workItems);
 
-    t.mock.method(app.handoffs, "invoke", async (...args: Parameters<typeof invoke>) => {
+    t.mock.method(app.workItems, "invoke", async (...args: Parameters<typeof invoke>) => {
         const result = await invoke(...args);
 
         if (args[0].action === "start") {
@@ -472,7 +472,7 @@ test("ambiguous requests can ask follow-ups without creating intent or a success
 
     assert.equal(scenario.results.length, 0);
     assert.equal((await records(id)).length, 0);
-    assert.equal(app.handoffs.isReadOnly(id), false);
+    assert.equal(app.workItems.isReadOnly(id), false);
     assert.equal((await sourceUsers(id)).length, 1);
 });
 
@@ -510,7 +510,7 @@ test("explicit route mismatches and malformed route prefixes refuse without rese
         assert.equal(scenario.results[0]!.isError, true);
         assert.match(scenario.results[0]!.text, expected);
         assert.equal((await records(id)).length, 0);
-        assert.equal(app.handoffs.isReadOnly(id), false);
+        assert.equal(app.workItems.isReadOnly(id), false);
     }
 });
 
@@ -549,7 +549,7 @@ test("the handoff tool accepts a registered maximum-length namespaced destinatio
         const [receipt] = await records(id);
 
         assert.equal(receipt!.targetType, target);
-        assert.equal(app.handoffs.isReadOnly(id), true);
+        assert.equal(app.workItems.isReadOnly(id), true);
     } finally {
         await app.setExtensionEnabled(owner(app), `${module}.ts`, false);
     }
@@ -632,7 +632,7 @@ test("human-created schedules cannot grant handoff authority through their ownRe
             ),
             false,
         );
-        assert.equal(scheduledApp.handoffs.isReadOnly(id), false);
+        assert.equal(scheduledApp.workItems.isReadOnly(id), false);
         const sent = await scheduledApp.harness.commit(
             (tx) => tx.submissionByRequest(id, `u:${person.id}:schedule-${schedule.taskId}-0`),
             context,
@@ -677,7 +677,7 @@ test("busy delegated writers block tool activation without stopping their work",
 
     await until(async () => {
         try {
-            await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
+            await app.harness.commit((tx) => app.workItems.requireIdle(tx, id), context);
 
             return true;
         } catch {
@@ -790,7 +790,7 @@ test("Review activation reads the current diff again rather than trusting an ear
     assert.equal(scenario.results[1]!.isError, true);
     assert.match(scenario.results[1]!.text, /no current Pi diff/);
     assert.equal((await records(id)).length, 0);
-    assert.equal(app.handoffs.isReadOnly(id), false);
+    assert.equal(app.workItems.isReadOnly(id), false);
 });
 
 test("the final Review diff inspection holds the writer lock and rechecks revoked steering rights", async (t) => {
@@ -825,7 +825,7 @@ test("the final Review diff inspection holds the writer lock and rechecks revoke
         assert.equal(scenario.results[0]!.isError, true);
         assert.match(scenario.results[0]!.text, /not steer/);
         assert.equal((await records(id)).length, 0);
-        assert.equal(app.handoffs.isReadOnly(id), false);
+        assert.equal(app.workItems.isReadOnly(id), false);
     } finally {
         hold.release();
     }

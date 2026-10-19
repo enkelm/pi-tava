@@ -176,12 +176,12 @@ test("conversation extension admission is rechecked after an asynchronous body a
 
 test("scoped service results cannot be published after their requester loses access", async (t) => {
     const guest = app.config.addUser("Removed during read", "guest", [String(visible)]);
-    const original = app.handoffs.list.bind(app.handoffs);
+    const original = app.workItems.list.bind(app.workItems);
     const read = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
 
     // Hold only delivery of the real service result, after its genuine core read completes.
-    t.mock.method(app.handoffs, "list", async (...args: Parameters<typeof original>) => {
+    t.mock.method(app.workItems, "list", async (...args: Parameters<typeof original>) => {
         const result = await original(...args);
 
         read.resolve();
@@ -256,14 +256,30 @@ test("superseded handoff and milestone routes cannot create work; passive transf
         404,
     );
     assert.equal(app.sessions().length, count);
-    await app.setExtensionEnabled(owner(app), "work-items.ts", false);
+    const { id: paused } = await app.commands.createSession(owner(app), {
+        cwd: app.cwdOf(visible),
+        threadType: "worker",
+    });
+
+    await app.setWorkItemsEnabled(owner(app), false);
 
     try {
         const response = await call(`/api/c/${visible}/transfers`, app.config.ownerToken).done;
 
         assert.equal(response.status, 200, response.output);
         assert.deepEqual(JSON.parse(response.output), { transfers: [] });
+        const viewer = app.config.addUser("Paused work reader", "viewer", [String(paused)]);
+        const status = await call(`/api/c/${paused}/x/work-items/handoffs`, viewer.token).done;
+
+        assert.equal(status.status, 200, status.output);
+        assert.equal(JSON.parse(status.output).workflow.profileAvailable, true);
+        assert.equal(JSON.parse(status.output).workflow.paused, true);
+        assert.deepEqual(JSON.parse(status.output).options, []);
+        const client = app.webs.clients(viewer.user).find((each) => each.module === "work-items");
+
+        assert.ok(client, "core browser controls remain available to scoped readers while paused");
+        assert.equal((await call(client.url, viewer.token).done).status, 200);
     } finally {
-        await app.setExtensionEnabled(owner(app), "work-items.ts", true);
+        await app.setWorkItemsEnabled(owner(app), true);
     }
 });

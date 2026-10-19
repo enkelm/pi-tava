@@ -170,7 +170,7 @@ async function handoff(
     await until(
         async () =>
             !app.isBusy(id) &&
-            (await app.handoffs.list(id, owner(app))).handoffs.some(
+            (await app.workItems.list(id, owner(app))).handoffs.some(
                 (record) => record.targetThreadId === created.id && record.delivery === "delivered",
             ),
         `${type} role delivered`,
@@ -308,7 +308,7 @@ test("Worker can research and a starter or mid-work Researcher reports evidence 
     );
     assert.match(investigating.thread_role!, /Report the findings and wait for the human/i);
     assert.equal(app.sessionMeta(researcher)?.workItemId, app.sessionMeta(worker)?.workItemId);
-    assert.equal((await app.handoffs.list(researcher, owner(app))).workflow.status, "active");
+    assert.equal((await app.workItems.list(researcher, owner(app))).workflow.status, "active");
     const implementation = await handoff(researcher, "worker");
     const applying = await probe(implementation);
 
@@ -316,7 +316,7 @@ test("Worker can research and a starter or mid-work Researcher reports evidence 
         applying,
         roles.find((expected) => expected.type === "worker")!,
     );
-    assert.equal((await app.handoffs.list(implementation, owner(app))).workflow.status, "active");
+    assert.equal((await app.workItems.list(implementation, owner(app))).workflow.status, "active");
 });
 
 test("handoff successors, delegated helpers and retired threads retain the right system role across restart", async () => {

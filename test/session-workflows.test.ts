@@ -1,6 +1,6 @@
-// Authoring gate: the real app owns unload/restart safety and durable accepted-intent completion.
-// Regressions: removing a workflow removes mandatory gates, unknown profiles become Chat, or accepted
-// summaries/couriers lose their core tasks. Existing workflow tests do not cross module disposal.
+// Authoring gate: the real app owns execution-pause/restart safety and durable accepted-intent completion.
+// Regressions: promotion silently resumes disabled work, visible profiles reopen managed writes, unknown
+// profiles become Chat, or accepted summaries/couriers lose recovery. External graph tests own disposal.
 // Historical profile/accepted-intent fixtures are seeded; current handoffs and all tool results are real.
 import {
     type App,
@@ -21,7 +21,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import type { ConversationId } from "@earendil-works/pi-durable";
+import { AgentDoc, type ConversationId, type Tx } from "@earendil-works/pi-durable";
 import { SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
 import { TITLE_PROMPT } from "../src/server/titles.ts";
 import { HandoffsDoc } from "../src/server/workflow-docs.ts";
@@ -36,7 +36,9 @@ type Result = { text: string; isError: boolean };
 type Scenario = {
     summaryCalls: number;
     courierCalls: number;
+    titleCalls: number;
     summaryGate?: Gate;
+    titleGate?: Gate;
     planned: Map<string, Call>;
     results: Map<string, Result>;
     roles: Map<string, string>;
@@ -74,6 +76,7 @@ async function fixture() {
     const state: Scenario = {
         summaryCalls: 0,
         courierCalls: 0,
+        titleCalls: 0,
         planned: new Map(),
         results: new Map(),
         roles: new Map(),
@@ -89,6 +92,9 @@ async function fixture() {
                 : lastText({ messages: [lastUser] }).text.replace(/^\[from:[^\]]+\]\s*/, "");
 
         if (last.role === "user" && last.text.startsWith(TITLE_PROMPT)) {
+            state.titleCalls++;
+            await state.titleGate?.promise;
+
             return fauxAssistantMessage("Preserve workflow unload safety");
         }
 
@@ -171,7 +177,7 @@ async function fixture() {
         }
 
         if (last.role === "toolResult") {
-            const message = input.messages.at(-1)!;
+            const message = input.messages.findLast((message) => message.role === "toolResult")!;
 
             state.results.set(original, {
                 text: last.text,
@@ -197,10 +203,10 @@ async function restart(f: Fixture) {
     apps.add(f.app);
 }
 
-async function worker(f: Fixture) {
+async function worker(f: Fixture, threadType: "worker" | "chat" = "worker") {
     const { id } = await f.app.commands.createSession(owner(f.app), {
         cwd: f.cwd,
-        threadType: "worker",
+        threadType,
         title: "Workflow lifecycle fixture",
     });
 
@@ -245,7 +251,7 @@ async function userEntries(f: Fixture, id: ConversationId) {
     return entries.items.filter((entry) => entry.kind === "pi.user");
 }
 
-test("disabling Work Items retains retired and active execution gates, including nested writes", async () => {
+test("pausing Work Items retains profiles but fences cached and nested writes and starter admission", async () => {
     const f = await fixture();
     const source = await worker(f);
     const cachedSource = f.app.envFor(source);
@@ -258,7 +264,37 @@ test("disabling Work Items retains retired and active execution gates, including
     const cachedActive = f.app.envFor(active);
 
     assert.equal((await cachedActive.writeFile("active.txt", "original", context)).ok, true);
-    await f.app.setExtensionEnabled(owner(f.app), "work-items.ts", false);
+    const prepared = f.app.projects.prepare(owner(f.app), { threadType: "worker" });
+
+    await f.app.setWorkItemsEnabled(owner(f.app), false);
+    assert.equal(f.app.workItems.profile("researcher")?.starter, false);
+    assert.equal(f.app.workItems.profile("chat")?.starter, true);
+    assert.equal(
+        (await f.app.workItems.list(active, owner(f.app))).workflow.profileAvailable,
+        true,
+    );
+    assert.equal((await f.app.workItems.list(active, owner(f.app))).workflow.paused, true);
+    assert.throws(
+        () => f.app.projects.prepare(owner(f.app), { threadType: "worker" }),
+        /available starter/,
+    );
+    await assert.rejects(
+        f.app.harness.commit((tx) => f.app.projects.place(tx, prepared), context),
+        /available starter/,
+    );
+    const refusedHandoff = await execute(f, active, {
+        name: "handoff",
+        args: {
+            action: "start",
+            targetType: "worker",
+            relationship: "same-work",
+            summary: "No fresh transfer while paused.",
+        },
+    });
+
+    assert.equal(refusedHandoff.result.isError, true);
+    assert.match(refusedHandoff.result.text, /paused/i);
+    assert.equal(f.app.sessions().length, 2);
 
     for (const [id, env, path] of [
         [source, cachedSource, "retired.txt"],
@@ -267,7 +303,7 @@ test("disabling Work Items retains retired and active execution gates, including
         const direct = await env.writeFile(path, "forbidden direct write", context);
 
         assert.equal(direct.ok, false);
-        assert.match(!direct.ok ? direct.error.message : "", /profile.*unavailable/i);
+        assert.match(!direct.ok ? direct.error.message : "", /paused/i);
         // Refused before spawning. This non-repository fixture has no network target even on regression.
         const shell = await env.exec(["git", "push", "origin", "HEAD"], undefined, context);
 
@@ -285,7 +321,7 @@ test("disabling Work Items retains retired and active execution gates, including
         assert.equal(readFileSync(join(f.cwd, path), "utf8"), "original");
     }
 
-    await f.app.setExtensionEnabled(owner(f.app), "work-items.ts", true);
+    await f.app.setWorkItemsEnabled(owner(f.app), true);
     const retired = await cachedSource.writeFile("retired.txt", "still forbidden", context);
 
     assert.equal(retired.ok, false);
@@ -296,6 +332,131 @@ test("disabling Work Items retains retired and active execution gates, including
     );
     assert.equal(readFileSync(join(f.cwd, "retired.txt"), "utf8"), "original");
     assert.equal(readFileSync(join(f.cwd, "active.txt"), "utf8"), "resumed active work");
+});
+
+// These pauses happen after initial admission, not before invoking the tool. The transaction and
+// destination model are real; only the timing of one storage read / naming response is controlled.
+for (const threadType of ["worker", "chat"] as const) {
+    test(`a pause during fresh ${threadType} transfer setup rolls back its successor and receipt`, async (t) => {
+        const f = await fixture();
+        const source = await worker(f, threadType);
+        const hold = gate();
+        let held = false;
+        const invoke = f.app.workItems.invoke.bind(f.app.workItems);
+
+        t.after(() => hold.release());
+        t.mock.method(
+            f.app.workItems,
+            "invoke",
+            (...[request, api, ctx]: Parameters<typeof invoke>) =>
+                invoke(
+                    request,
+                    {
+                        ...api,
+                        commit: (change, context) =>
+                            api.commit(
+                                (tx) =>
+                                    change(
+                                        new Proxy(tx, {
+                                            get(target, key) {
+                                                if (key === "doc") {
+                                                    return async (
+                                                        ...args: Parameters<Tx["doc"]>
+                                                    ) => {
+                                                        const result = await target.doc(...args);
+
+                                                        if (
+                                                            args[0].definition.kind ===
+                                                                AgentDoc.definition.kind &&
+                                                            !held
+                                                        ) {
+                                                            held = true;
+                                                            await hold.promise;
+                                                        }
+
+                                                        return result;
+                                                    };
+                                                }
+
+                                                const value = Reflect.get(target, key, target);
+
+                                                return typeof value === "function"
+                                                    ? value.bind(target)
+                                                    : value;
+                                            },
+                                        }),
+                                    ),
+                                context,
+                            ),
+                    },
+                    ctx,
+                ),
+        );
+        const executing = execute(f, source, {
+            name: "handoff",
+            args: {
+                action: "start",
+                targetType: "researcher",
+                relationship: "same-work",
+                summary: "Pause before publishing a fresh successor.",
+            },
+        });
+
+        try {
+            await until(() => held, "transfer reaches setup after edge admission");
+            await f.app.setWorkItemsEnabled(owner(f.app), false);
+        } finally {
+            hold.release();
+        }
+
+        const { result } = await executing;
+
+        assert.equal(result.isError, true, result.text);
+        assert.match(result.text, /paused|not available from the current thread state/i);
+        assert.equal(f.app.sessions().length, 1);
+        assert.equal(f.app.workItems.isReadOnly(source), false);
+        const saved = await f.app.harness.snapshot(HandoffsDoc, context);
+
+        assert.deepEqual(saved?.handoffs ?? {}, {});
+        assert.deepEqual(saved?.requests ?? {}, {});
+        assert.deepEqual(saved?.workItems ?? {}, {});
+    });
+}
+
+test("a pause during destination naming blocks a fresh courier rather than starting its model", async () => {
+    const f = await fixture();
+    const source = await worker(f);
+    const titlesBefore = f.state.titleCalls;
+    const hold = gate();
+
+    f.state.titleGate = hold;
+    const transfer = await executeHandoff(f.app, source, "researcher");
+
+    try {
+        await until(
+            () => f.state.titleCalls > titlesBefore,
+            "destination naming reaches its model",
+        );
+        await f.app.setWorkItemsEnabled(owner(f.app), false);
+    } finally {
+        hold.release();
+    }
+
+    await until(async () => {
+        const record = (await f.app.harness.snapshot(HandoffsDoc, context))?.handoffs[
+            transfer.handoffId
+        ];
+
+        return record?.delivery === "blocked" || record?.delivery === "delivered";
+    }, "courier settles after naming");
+    const record = (await f.app.harness.snapshot(HandoffsDoc, context))?.handoffs[
+        transfer.handoffId
+    ];
+
+    assert.equal(record?.delivery, "blocked");
+    assert.equal(f.state.courierCalls, 0);
+    assert.deepEqual(await userEntries(f, transfer.id as ConversationId), []);
+    assert.equal(f.app.workItems.isReadOnly(source), true);
 });
 
 test("an unknown persisted profile stays unavailable rather than becoming Chat across restart", async () => {
@@ -335,129 +496,177 @@ test("an unknown persisted profile stays unavailable rather than becoming Chat a
 
 // Persisted acceptance is historical input, not a new admission path. The registered summary task
 // must resume it across restart/unload, keep summary-only isolation and atomically create its one successor.
-test("an already-accepted summary resumes across module disable and restart with one transfer and delivery", async () => {
-    const f = await fixture();
-    const source = await worker(f);
-    const hold = gate();
-    const instructions = "Keep this exact human direction through unload and restart.";
-    const hash = (value: unknown) =>
-        createHash("sha256").update(JSON.stringify(value)).digest("hex");
-    const key = hash([owner(f.app).id, Number(source), "previously-accepted-summary"]);
-    const input = hash(["researcher", "same-work", null, instructions]);
+for (const resumeBeforeSummary of [false, true]) {
+    test(`an accepted summary survives saved pause/restart with one transfer (${resumeBeforeSummary ? "resume delivery" : "hold delivery"})`, async () => {
+        const f = await fixture();
+        const source = await worker(f);
+        const hold = gate();
+        const instructions = "Keep this exact human direction through unload and restart.";
+        const hash = (value: unknown) =>
+            createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        const key = hash([owner(f.app).id, Number(source), "previously-accepted-summary"]);
+        const input = hash(["researcher", "same-work", null, instructions]);
 
-    f.state.summaryGate = hold;
-    const taskId = await f.app.harness.commit(async (tx) => {
-        const taskId = await tx.createTask(
-            f.app.handoffs.summaryTask,
-            { key },
-            {
-                conversationId: source,
-                ownership: { kind: "conversation" },
-                background: true,
-            },
+        f.state.summaryGate = hold;
+        const taskId = await f.app.harness.commit(async (tx) => {
+            const taskId = await tx.createTask(
+                f.app.workItems.tasks[1],
+                { key },
+                {
+                    conversationId: source,
+                    ownership: { kind: "conversation" },
+                    background: true,
+                },
+            );
+            const doc = await tx.doc(HandoffsDoc);
+
+            doc.pending ??= {};
+            doc.pending[key] = {
+                sourceThreadId: Number(source),
+                targetType: "researcher",
+                relationship: "same-work",
+                requestedBy: owner(f.app).id,
+                input,
+                instructions,
+                targetTitle: "Accepted research",
+                taskId: Number(taskId),
+                attempt: 0,
+                status: "pending",
+            };
+
+            return taskId;
+        }, context);
+
+        await until(() => f.state.summaryCalls === 1, "stored summary task reaches its model");
+        await f.app.setWorkItemsEnabled(owner(f.app), false);
+        assert.equal(f.app.workItems.isPreparing(source), true);
+        assert.equal(f.app.workItems.profile("researcher")?.starter, false);
+        await restart(f);
+        assert.equal(
+            f.app.workItems.enabled,
+            false,
+            "saved disabled choice remains a pause at startup",
         );
-        const doc = await tx.doc(HandoffsDoc);
+        assert.equal(f.app.workItems.profile("researcher")?.starter, false);
+        const hello = await f.app.hello(owner(f.app));
 
-        doc.pending ??= {};
-        doc.pending[key] = {
-            sourceThreadId: Number(source),
-            targetType: "researcher",
-            relationship: "same-work",
-            requestedBy: owner(f.app).id,
-            input,
-            instructions,
-            targetTitle: "Accepted research",
-            taskId: Number(taskId),
-            attempt: 0,
-            status: "pending",
-        };
+        assert.equal(hello.server.workItems, 1);
+        assert.ok(hello.server.ui.some((client) => client.module === "work-items"));
+        assert.equal(f.app.workItems.isPreparing(source), true);
+        assert.equal(
+            (await f.app.envFor(source).writeFile("forbidden-unloaded.txt", "bad", context)).ok,
+            false,
+        );
 
-        return taskId;
-    }, context);
+        if (resumeBeforeSummary) {
+            await f.app.setWorkItemsEnabled(owner(f.app), true);
+        }
 
-    await until(() => f.state.summaryCalls === 1, "stored summary task reaches its model");
-    await f.app.setExtensionEnabled(owner(f.app), "work-items.ts", false);
-    assert.equal(f.app.handoffs.isPreparing(source), true);
-    assert.equal(f.app.agentProfile("researcher"), undefined);
-    await restart(f);
-    assert.equal(f.app.agentProfile("researcher"), undefined);
-    assert.equal(f.app.handoffs.isPreparing(source), true);
-    assert.equal(
-        (await f.app.envFor(source).writeFile("forbidden-unloaded.txt", "bad", context)).ok,
-        false,
-    );
-    await f.app.setExtensionEnabled(owner(f.app), "work-items.ts", true);
-    hold.release();
-    const settled = await f.app.harness.waitForTask(taskId, context);
-    const outcome = settled.state.outcome;
+        hold.release();
+        const settled = await f.app.harness.waitForTask(taskId, context);
+        const outcome = settled.state.outcome;
 
-    assert.ok(outcome.status === "completed" && outcome.result !== null);
-    const transfer = outcome.result;
-    const target = transfer.id as ConversationId;
+        assert.ok(outcome.status === "completed" && outcome.result !== null);
+        const transfer = outcome.result;
+        const target = transfer.id as ConversationId;
 
-    await delivered(f, transfer.handoffId);
-    const saved = await f.app.harness.snapshot(HandoffsDoc, context);
+        if (resumeBeforeSummary) {
+            await delivered(f, transfer.handoffId);
+        } else {
+            await until(
+                async () =>
+                    (await f.app.harness.snapshot(HandoffsDoc, context))?.handoffs[
+                        transfer.handoffId
+                    ]?.delivery === "blocked",
+                "pause blocks new courier execution",
+            );
+        }
 
-    assert.equal(saved?.pending?.[key]?.status, "completed");
-    assert.equal(saved?.requests[key]?.id, Number(target));
-    assert.equal(saved?.handoffs[transfer.handoffId]?.instructions, instructions);
-    assert.equal(
-        Object.values(saved?.handoffs ?? {}).filter(
-            (record) => record.sourceThreadId === Number(source),
-        ).length,
-        1,
-    );
-    assert.equal(f.app.sessions().length, 2);
-    assert.equal(f.state.courierCalls, 1);
-    const sourceEntries = await (
-        await f.app.conversation(source)
-    ).entries({ order: "ascending" }, 200, undefined, context);
-    const refused = sourceEntries.items.filter((entry) => entry.kind === "pi.tool-result");
+        const expectedDeliveries = resumeBeforeSummary ? 1 : 0;
+        const saved = await f.app.harness.snapshot(HandoffsDoc, context);
 
-    assert.equal(
-        refused.length,
-        3,
-        "each summary-time tool attempt reaches the real refusal boundary",
-    );
-    assert.ok(
-        refused.every((entry) => {
-            const message = entry.model?.[0];
+        assert.equal(saved?.pending?.[key]?.status, "completed");
+        assert.equal(saved?.requests[key]?.id, Number(target));
+        assert.equal(saved?.handoffs[transfer.handoffId]?.instructions, instructions);
+        assert.equal(
+            Object.values(saved?.handoffs ?? {}).filter(
+                (record) => record.sourceThreadId === Number(source),
+            ).length,
+            1,
+        );
+        assert.equal(f.app.sessions().length, 2);
+        assert.equal(f.state.courierCalls, expectedDeliveries);
+        const sourceEntries = await (
+            await f.app.conversation(source)
+        ).entries({ order: "ascending" }, 200, undefined, context);
+        const refused = sourceEntries.items.filter((entry) => entry.kind === "pi.tool-result");
 
-            return message?.role === "toolResult" && message.isError === true;
-        }),
-    );
-    assert.equal(existsSync(join(f.cwd, "forbidden-summary.txt")), false);
-    assert.equal(
-        (await f.app.harness.snapshot(SubagentsDoc, source, context))?.agents.forbidden,
-        undefined,
-    );
-    assert.equal(
-        (await userEntries(f, source)).filter((entry) =>
-            lastText({ messages: entry.model ?? [] }).text.includes("The human has requested a "),
-        ).length,
-        1,
-    );
-    assert.equal((await userEntries(f, target)).length, 1);
-    const receipts = f.app.handoffs.receipts(source, owner(f.app));
+        assert.equal(
+            refused.length,
+            3,
+            "each summary-time tool attempt reaches the real refusal boundary",
+        );
+        assert.ok(
+            refused.every((entry) => {
+                const message = entry.model?.[0];
 
-    await f.app.setExtensionEnabled(owner(f.app), "work-items.ts", false);
-    await restart(f);
-    assert.deepEqual(f.app.handoffs.receipts(source, owner(f.app)), receipts);
-    assert.equal(f.app.sessions().length, 2);
-    assert.equal(f.state.courierCalls, 1, "completed delivery never runs again on restart");
-    await f.app.setExtensionEnabled(owner(f.app), "work-items.ts", true);
-    assert.equal((await f.app.envFor(target).writeFile("active.txt", "resumed", context)).ok, true);
-    const retired = await f.app.envFor(source).writeFile("never-created.txt", "forbidden", context);
+                return message?.role === "toolResult" && message.isError === true;
+            }),
+        );
+        assert.equal(existsSync(join(f.cwd, "forbidden-summary.txt")), false);
+        assert.equal(
+            (await f.app.harness.snapshot(SubagentsDoc, source, context))?.agents.forbidden,
+            undefined,
+        );
+        assert.equal(
+            (await userEntries(f, source)).filter((entry) =>
+                lastText({ messages: entry.model ?? [] }).text.includes(
+                    "The human has requested a ",
+                ),
+            ).length,
+            1,
+        );
+        assert.equal((await userEntries(f, target)).length, expectedDeliveries);
+        const receipts = f.app.workItems.receipts(source, owner(f.app));
 
-    assert.equal(retired.ok, false);
-    assert.match(!retired.ok ? retired.error.message : "", /read-only/i);
-});
+        await f.app.setWorkItemsEnabled(owner(f.app), false);
+        await restart(f);
+        assert.deepEqual(f.app.workItems.receipts(source, owner(f.app)), receipts);
+        assert.equal(f.app.sessions().length, 2);
+        assert.equal(
+            f.state.courierCalls,
+            expectedDeliveries,
+            "restart neither repeats delivery nor resumes a blocked courier",
+        );
+        await f.app.setWorkItemsEnabled(owner(f.app), true);
+        assert.equal(
+            f.state.courierCalls,
+            expectedDeliveries,
+            "resume does not automatically retry a blocked courier",
+        );
+
+        if (!resumeBeforeSummary) {
+            // A blocked courier placed no human input. Resume work through a real authorized request.
+            await say(f.app, target, "Resume this work after the saved pause.");
+        }
+
+        const resumed = await f.app.envFor(target).writeFile("active.txt", "resumed", context);
+
+        assert.equal(resumed.ok, true, resumed.ok ? "" : resumed.error.message);
+        const retired = await f.app
+            .envFor(source)
+            .writeFile("never-created.txt", "forbidden", context);
+
+        assert.equal(retired.ok, false);
+        assert.match(!retired.ok ? retired.error.message : "", /read-only/i);
+    });
+}
 
 // Work Items must not become a hidden dependency of the separate Agent Teams extension.
 test("ordinary Chat teams keep working with Work Items disabled", async () => {
     const f = await fixture();
 
-    await f.app.setExtensionEnabled(owner(f.app), "work-items.ts", false);
+    await f.app.setWorkItemsEnabled(owner(f.app), false);
     await f.app.setExtensionEnabled(owner(f.app), "agent-teams.ts", true);
     const { id } = await f.app.commands.createSession(owner(f.app), {
         cwd: f.cwd,
@@ -477,7 +686,7 @@ test("ordinary Chat teams keep working with Work Items disabled", async () => {
 
     assert.equal(linked.length, 1);
     assert.equal(linked[0]!.threadType, "chat");
-    assert.equal((await f.app.handoffs.list(id, owner(f.app))).options.length, 0);
+    assert.equal((await f.app.workItems.list(id, owner(f.app))).options.length, 0);
     assert.equal((await f.app.envFor(id).writeFile("chat.txt", "ordinary Chat", context)).ok, true);
     assert.equal(readFileSync(join(f.cwd, "chat.txt"), "utf8"), "ordinary Chat");
 });

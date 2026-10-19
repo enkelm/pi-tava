@@ -63,7 +63,7 @@ export function workspaceAuthorization(
         }
 
         if (write) {
-            app.handoffs.requireWritable(id);
+            app.workItems.requireWritable(id);
         }
     };
 }

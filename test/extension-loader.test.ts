@@ -2,7 +2,7 @@
 // never finishes, and who hears about it all.
 import { cleanUp, root, until } from "./helpers.ts";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { createRegistry } from "@earendil-works/pi-durable";
@@ -368,7 +368,7 @@ test("a superseded async workflow load never exposes or restores its staged prof
     }
 });
 
-test("workflow registration rejects reserved identities while the built-in is off and rejects privilege or dangling data", async () => {
+test("external workflows cannot claim core identities or unload core presentation through a shadow file", async () => {
     const { builtIn, dropIn, choices, loader, webs } = setUp();
     const trusted = {
         id: "work-items",
@@ -434,7 +434,13 @@ test("workflow registration rejects reserved identities while the built-in is of
 
     try {
         choices.set("work-items.ts", false);
+        // Core owns this route, independently of either extension folder and the old disabled choice.
+        const core = webs.stage("work-items.ts", builtIn, "Work Items", true);
+
+        core.web.route("GET", "v", () => ({ v: 7 }));
+        webs.commit(core.part);
         writeFileSync(join(builtIn, "work-items.ts"), workflowModule(trusted));
+        writeFileSync(join(dropIn, "work-items.ts"), workflowModule(trusted));
         writeFileSync(join(dropIn, "plugin.ts"), workflowModule(definition));
         await loader.loadAll();
         assert.equal(webs.profile("worker"), undefined);
@@ -451,11 +457,13 @@ test("workflow registration rejects reserved identities while the built-in is of
             );
         }
 
-        // The same reserved IDs do work through the trusted built-in path, not merely a coincidental load failure.
         choices.set("work-items.ts", true);
-        await loader.apply("work-items.ts");
-        assert.equal(webs.profile("worker")?.prompt, "Built-in playbook");
-        assert.equal(webs.workflowFor("worker")?.id, "work-items");
+        await assert.rejects(loader.apply("work-items.ts"), /no extension module/i);
+        loader.watch();
+        rmSync(join(dropIn, "work-items.ts"));
+        // A removal must cross the real filesystem watcher and its 300ms save/rename debounce.
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        assert.deepEqual(answer(webs, "work-items"), { v: 7 });
     } finally {
         await loader.close();
     }

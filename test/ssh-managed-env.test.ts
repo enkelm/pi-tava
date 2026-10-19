@@ -168,7 +168,7 @@ test("cached SSH environment uses live workflow authority, inspection mode and i
         let finish: (() => void) | undefined;
 
         patches.push(mock.method(app.attribution, "requesterOf", () => requester));
-        patches.push(mock.method(app.handoffs, "isReadOnly", () => readOnly));
+        patches.push(mock.method(app.workItems, "isReadOnly", () => readOnly));
         patches.push(
             mock.method(f.env, "execConfined", async (inspection: boolean) => {
                 calls++;
@@ -253,7 +253,7 @@ test("cached SSH environment uses live workflow authority, inspection mode and i
             assert.equal((await env.writeFile("locked", "no", context)).ok, false);
         });
         // A still-cached wrapper follows live Chat semantics; ordinary execution is not confined.
-        patches.push(mock.method(app.handoffs, "isManaged", () => false));
+        patches.push(mock.method(app.workItems, "isManaged", () => false));
         patches.push(mock.method(f.env, "exec", async () => ok({ exitCode: 9 })));
         assert.equal(getOrThrow(await env.exec("ordinary chat", undefined, context)).exitCode, 9);
     } finally {

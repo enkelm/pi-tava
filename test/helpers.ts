@@ -15,7 +15,7 @@ import { type ConversationId, UsageDoc } from "@earendil-works/pi-durable";
 import type { Attachment } from "../src/server/commands.ts";
 import type { User } from "../src/server/config.ts";
 import type { Client } from "../src/server/room.ts";
-import type { HandoffResult } from "../src/server/handoffs.ts";
+import type { HandoffResult } from "../src/server/work-items.ts";
 import type { Relationship } from "../src/server/workflow-docs.ts";
 
 export const context = BACKGROUND_CONTEXT;

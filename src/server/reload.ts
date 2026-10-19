@@ -43,7 +43,6 @@ let imports = 0;
 /** Built-in extension modules, in install order. Other `.ts` files in the directory load after them, by name. */
 const ORDER = [
     "prompt.ts",
-    "work-items.ts",
     "artifacts.ts",
     "browser.ts",
     "subagents.ts",
@@ -58,12 +57,12 @@ const ORDER = [
     "triggers.ts",
     "gallery.ts",
 ];
-/** Core-backed modules listed by the app, not imported or hot-reloaded from either folder. */
-const RESTART_ONLY_MODULE_FILES = new Set(["pi-providers.ts"]);
+/** Application-owned names, never imported, unloaded or hot-reloaded from either extension folder. */
+const CORE_MODULE_FILES = new Set(["pi-providers.ts", "work-items.ts"]);
 
 /** The built-in modules' names (their files' without `.ts`): a drop-in with one of them is never loaded. */
 export const BUILT_IN_MODULES: ReadonlySet<string> = new Set(
-    [...ORDER, ...RESTART_ONLY_MODULE_FILES].map((file) => file.replace(/\.ts$/, "")),
+    [...ORDER, ...CORE_MODULE_FILES].map((file) => file.replace(/\.ts$/, "")),
 );
 /** Modules the app cannot work without: always on. */
 const REQUIRED = new Set(["prompt.ts"]);
@@ -71,7 +70,6 @@ const REQUIRED = new Set(["prompt.ts"]);
 const OFF_BY_DEFAULT = new Set(["guard.ts", "agent-teams.ts"]);
 const TITLES: Record<string, string> = {
     "prompt.ts": "System prompt",
-    "work-items.ts": "Work Items and agent profiles",
     "artifacts.ts": "Artifacts",
     "browser.ts": "Browser",
     "subagents.ts": "Subagents",
@@ -344,9 +342,7 @@ export class ExtensionLoader {
 
     /** Every module, built-in ones first in install order. A drop-in with a built-in's name is left out. */
     #modules(): Module[] {
-        const present = moduleFiles(this.#builtIn).filter(
-            (file) => !RESTART_ONLY_MODULE_FILES.has(file),
-        );
+        const present = moduleFiles(this.#builtIn).filter((file) => !CORE_MODULE_FILES.has(file));
         const builtIn = [
             ...ORDER.filter((file) => present.includes(file)),
             ...present.filter((file) => !ORDER.includes(file)).sort(),
@@ -360,7 +356,7 @@ export class ExtensionLoader {
                 source: "built-in" as const,
             })),
             ...dropIns
-                .filter((file) => !builtIn.includes(file) && !RESTART_ONLY_MODULE_FILES.has(file))
+                .filter((file) => !builtIn.includes(file) && !CORE_MODULE_FILES.has(file))
                 .map((file) => ({ file, directory: this.#dropIn!, source: "drop-in" as const })),
         ];
     }
@@ -375,7 +371,7 @@ export class ExtensionLoader {
             return;
         }
 
-        const builtIn = [...moduleFiles(this.#builtIn), ...RESTART_ONLY_MODULE_FILES];
+        const builtIn = [...moduleFiles(this.#builtIn), ...CORE_MODULE_FILES];
 
         for (const file of moduleFiles(this.#dropIn)) {
             if (!builtIn.includes(file) || this.#clashes.has(file)) {
@@ -894,6 +890,10 @@ export class ExtensionLoader {
 
     /** After a module's file changed: take away a drop-in that is gone, or load the new version of one that is on. */
     #settle(file: string, directory: string): void {
+        if (CORE_MODULE_FILES.has(file)) {
+            return;
+        }
+
         const module = this.#module(file);
 
         // Gone from the folder its version came from (or from both folders): that version goes, and a load of it still

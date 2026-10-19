@@ -613,7 +613,7 @@ test(
                     await until(() => app.isBusy(originId), "ordinary reply is held");
                     await fill(page, composer, "/handoff ");
                     await present(page, `${commandRows}[aria-disabled="true"]`);
-                    const unavailable = (await app.handoffs.list(originId, user)).options.find(
+                    const unavailable = (await app.workItems.list(originId, user)).options.find(
                         (option) =>
                             option.targetType === "researcher" &&
                             option.relationship === "same-work",
@@ -675,7 +675,7 @@ test(
                     );
                     assert.equal(app.sessions().length, 1, "clarification creates no thread");
                     assert.equal(
-                        (await app.handoffs.list(originId, user)).workflow.preparing,
+                        (await app.workItems.list(originId, user)).workflow.preparing,
                         false,
                     );
                     const otherTab = await browsers.open(2);

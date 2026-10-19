@@ -633,8 +633,8 @@ export class Commands {
             throw new HttpError(404, "This session has no worktree");
         }
 
-        app.handoffs.requireWritable(id);
-        const members = app.handoffs.members(id);
+        app.workItems.requireWritable(id);
+        const members = app.workItems.members(id);
         const memberIds = new Set(members.map(Number));
 
         if (app.sessionMeta(id)?.workItemId !== undefined && force === true) {
@@ -646,7 +646,7 @@ export class Commands {
         }
 
         if (members.length > 1) {
-            await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
+            await app.harness.commit((tx) => app.workItems.requireIdle(tx, id), context);
         }
 
         const backend = userWorkspaceBackend(app, id, context, user);
@@ -677,7 +677,7 @@ export class Commands {
             );
         }
 
-        const policy = { offline: () => app.handoffs.isManaged(id), backend };
+        const policy = { offline: () => app.workItems.isManaged(id), backend };
         const moves: { id: ConversationId; cwd: string }[] = [];
 
         for (const each of members.flatMap((member) => app.conversationsOf(member))) {
@@ -832,28 +832,10 @@ export class Commands {
         }
 
         await app.harness.commit(async (tx) => {
-            const sessions = await tx.doc(SessionsDoc);
-            const meta = sessions.items[String(id)];
-
-            if (meta === undefined) {
-                throw new HttpError(404, "Not a session");
-            }
-
-            // A rename moves the session up the list. Archiving does not: brought back, or undone, it returns to where it was.
-            if (patch.title !== undefined) {
-                meta.title = oneLine(patch.title) || undefined;
-                meta.updatedAt = Date.now();
-            }
-
-            if (patch.archived !== undefined) {
-                if (meta.workItemId !== undefined) {
-                    await app.handoffs.archive(tx, id, user, patch.archived);
-                } else {
-                    meta.archived = patch.archived;
-                }
-            }
-
-            await app.handoffs.organization(tx);
+            await app.workItems.updateSession(tx, id, user, {
+                ...(patch.title === undefined ? {} : { title: oneLine(patch.title) }),
+                ...(patch.archived === undefined ? {} : { archived: patch.archived }),
+            });
         }, context);
         const title = patch.title === undefined ? undefined : oneLine(patch.title);
 
@@ -934,7 +916,7 @@ export class Commands {
         const conversation = await app.conversation(id);
         const typed = request.text.trim();
 
-        if (app.handoffs.isPreparing(id)) {
+        if (app.workItems.isPreparing(id)) {
             throw new HttpError(
                 409,
                 "Wait for the requested handoff summary before sending more work",
@@ -1343,11 +1325,11 @@ export class Commands {
         app.requireSee(user, id);
         app.requireSteer(user);
         const conversation = await app.conversation(id);
-        const busy = app.isBusy(id) || app.handoffs.isPreparing(id);
+        const busy = app.isBusy(id) || app.workItems.isPreparing(id);
 
         // Stop withdraws what waits in the queue, subagents' reports too: a person meant them gone.
         await this.#discardReports(id);
-        await app.handoffs.abortSummary(id, user);
+        await app.workItems.abortSummary(id, user);
         void conversation
             .abort(context)
             .catch((error: unknown) => app.notice("error", `Abort failed: ${describe(error)}`, id));
@@ -1528,7 +1510,7 @@ export class Commands {
         optionalText(request.cwd, "cwd");
 
         if (request.cwd !== undefined) {
-            app.handoffs.requireWritable(id);
+            app.workItems.requireWritable(id);
 
             if (app.sessionMeta(app.rootOf(id))?.workItemId !== undefined) {
                 throw new HttpError(
@@ -2164,7 +2146,7 @@ export class Commands {
 
         app.requireSee(user, id);
         app.requireSteer(user);
-        app.handoffs.requireWritable(id);
+        app.workItems.requireWritable(id);
 
         if (app.sessionMeta(app.rootOf(id))?.workItemId !== undefined) {
             throw new HttpError(
@@ -2215,7 +2197,7 @@ export class Commands {
             title,
             (place) => this.#fork(id, user, { ...branch, title, sourceTitle, place }),
             {
-                offline: () => app.handoffs.isManaged(id),
+                offline: () => app.workItems.isManaged(id),
                 backend: branch.worktree ? userWorkspaceBackend(app, id, context, user) : undefined,
             },
         );

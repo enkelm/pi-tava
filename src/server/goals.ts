@@ -102,7 +102,7 @@ export class Goals {
 
     /** Summary-only requests and retired writers must not run checks or consume goal attempts. */
     mayCheck(id: ConversationId): boolean {
-        return !this.#app.handoffs.isPreparing(id) && !this.#app.handoffs.isReadOnly(id);
+        return !this.#app.workItems.isPreparing(id) && !this.#app.workItems.executionBlocked(id);
     }
 
     /** Whether Pi may take another round toward the goal: not past a spend limit. When not, the session is told why. */

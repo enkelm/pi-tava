@@ -247,7 +247,7 @@ export class Reviews {
 
         const root = await git(folder, ["rev-parse", "--show-toplevel"], {
             backend,
-            offline: () => this.#app.handoffs.isManaged(id),
+            offline: () => this.#app.workItems.isManaged(id),
         }).then(record, (error: unknown) => {
             if (backend.remote && (!(error instanceof GitError) || error.exitCode !== 128)) {
                 throw error;
@@ -313,7 +313,7 @@ export class Reviews {
         const entries = await this.#app.transcripts.allEntries(id, false);
         const changes = await changesIn(scope.cwd, entries, true, {
             backend: scope.backend,
-            offline: () => this.#app.handoffs.isManaged(id),
+            offline: () => this.#app.workItems.isManaged(id),
         });
 
         await this.#guard(id, user, scope);
@@ -383,7 +383,7 @@ export class Reviews {
 
             const diff = await diffOf(scope.cwd, path, true, {
                 backend: scope.backend,
-                offline: () => this.#app.handoffs.isManaged(id),
+                offline: () => this.#app.workItems.isManaged(id),
                 checkRoot(root) {
                     if (root !== scope.root) {
                         throw new HttpError(
@@ -463,7 +463,7 @@ export class Reviews {
                     backend,
                     root: scope.folder,
                     file,
-                    offline: this.#app.handoffs.isManaged(id),
+                    offline: this.#app.workItems.isManaged(id),
                 });
                 const text = decodeText(snapshot.bytes);
 

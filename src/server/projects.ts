@@ -10,10 +10,9 @@ import {
     ProjectsDoc,
     type SessionMeta,
     SessionsDoc,
-    TurnsDoc,
 } from "./docs.ts";
 import { HttpError } from "./errors.ts";
-import { HandoffsDoc, type ThreadType } from "./workflow-docs.ts";
+import type { ThreadType } from "./workflow-docs.ts";
 import { parseWorkspaceLocation, type WorkspaceLocation } from "./workspace-location.ts";
 import { projectGranted } from "./project-access.ts";
 
@@ -154,15 +153,6 @@ export class Projects {
         }
 
         return user;
-    }
-
-    #see(user: User, id: ConversationId, meta: SessionMeta): void {
-        this.#app.requireSee(user, id);
-
-        // Also enforce this transaction's catalogue rather than trusting an earlier cached flag.
-        if (meta.ownerOnly === true && user.role !== "owner") {
-            throw new HttpError(404, "This session is not shared with you.");
-        }
     }
 
     canAccess(supplied: User, id: string): boolean {
@@ -350,7 +340,9 @@ export class Projects {
 
     /** Validate before worktree creation without creating a conversation. */
     prepare(supplied: User, request: SelectProject): ProjectSelection {
-        const prepared = Object.freeze(selection(this.#doc, request, this.#app.defaultStarter()));
+        const prepared = Object.freeze(
+            selection(this.#doc, request, this.#app.workItems.defaultStarter()),
+        );
         const user = this.#creator(supplied, prepared);
 
         this.#requireStarter(prepared.threadType);
@@ -360,7 +352,7 @@ export class Projects {
     }
 
     #requireStarter(type: string): void {
-        if (this.#app.agentProfile(type)?.starter !== true) {
+        if (this.#app.workItems.profile(type)?.starter !== true) {
             throw new HttpError(
                 400,
                 "Choose an available starter profile; other profiles require a human handoff",
@@ -424,62 +416,21 @@ export class Projects {
     ): Promise<void> {
         const doc = await tx.doc(ProjectsDoc);
         const sessions = await tx.doc(SessionsDoc);
-        const turns = await tx.doc(TurnsDoc, this.#app.rootOf(id));
         const current = this.#editor(supplied);
         const meta = sessions.items[String(id)];
-        const groups = await tx.doc(HandoffsDoc);
-        const group =
-            meta?.workItemId === undefined ? undefined : groups.workItems[meta.workItemId];
-        const members = group?.threadIds ?? [Number(id)];
 
         if (meta === undefined) {
             throw new HttpError(404, "No such session");
         }
 
-        for (const memberId of members) {
-            const member = sessions.items[String(memberId)];
+        const projectId =
+            request.projectId === undefined
+                ? undefined
+                : (selection(doc, {
+                      projectId: optionalId(request.projectId, "projectId") ?? null,
+                      threadType: meta.threadType ?? "worker",
+                  }).projectId ?? null);
 
-            if (member === undefined) {
-                throw new HttpError(409, "Work item membership is incomplete");
-            }
-
-            this.#see(current, memberId as ConversationId, member);
-            const memberTurns = await tx.doc(TurnsDoc, memberId as ConversationId);
-
-            if (memberTurns.on && memberTurns.driver !== current.id) {
-                throw new HttpError(
-                    409,
-                    "Take the wheel in every work-item member before moving it",
-                );
-            }
-        }
-
-        if (turns.on && turns.driver !== current.id) {
-            throw new HttpError(409, "Take turns is on: take the wheel before moving this thread");
-        }
-
-        if (request.projectId === undefined) {
-            return;
-        }
-
-        const chosen = selection(doc, {
-            projectId: optionalId(request.projectId, "projectId") ?? null,
-            threadType: meta.threadType ?? "worker",
-        });
-
-        for (const memberId of members) {
-            const member = sessions.items[String(memberId)]!;
-
-            if (chosen.projectId === undefined) {
-                delete member.projectId;
-            } else {
-                member.projectId = chosen.projectId;
-            }
-
-            member.threadType ??= "worker";
-            member.updatedAt = Date.now();
-        }
-
-        await this.#app.handoffs.organization(tx);
+        await this.#app.workItems.assignProject(tx, id, current, projectId);
     }
 }

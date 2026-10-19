@@ -22,10 +22,10 @@ const MAX_BYTES = 128 * 1024 * 1024;
 export function requireResearch(app: PocketApp, id: ConversationId): string {
     const requester = requireWorkflowRequester(app, id);
 
-    app.handoffs.requireWritable(id);
+    app.workItems.requireWritable(id);
 
     if (
-        !app.handoffs.isManaged(id) ||
+        !app.workItems.isManaged(id) ||
         !ROLES.has(app.sessionMeta(app.rootOf(id))?.threadType ?? "worker")
     ) {
         throw new Error(
@@ -33,7 +33,7 @@ export function requireResearch(app: PocketApp, id: ConversationId): string {
         );
     }
 
-    if (!["active", "needs-review"].includes(app.handoffs.projection(id).workflow.status)) {
+    if (!["active", "needs-review"].includes(app.workItems.projection(id).workflow.status)) {
         throw new Error("This research workflow is no longer active.");
     }
 

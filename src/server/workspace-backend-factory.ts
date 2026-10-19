@@ -54,7 +54,7 @@ function backend(
         remote: false,
         context,
         authorize,
-        managed: () => app.handoffs.isManaged(id),
+        managed: () => app.workItems.isManaged(id),
         ...(exclusive ? {} : { reserveWrite: writerReservation(app, id) }),
     });
 }

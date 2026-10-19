@@ -921,7 +921,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
         if (first === "agents" && third === undefined) {
             requireOwner(user);
             const prompts = app.config.agentPrompts;
-            const roles = app.agentProfiles().map(({ id, name, description, prompt }) => ({
+            const roles = app.workItems.profiles().map(({ id, name, description, prompt }) => ({
                 type: id,
                 name,
                 description,
@@ -938,8 +938,17 @@ export function createApi(options: HttpOptions, auth: Auth) {
             if (second === undefined && method === "GET") {
                 return json(response, 200, {
                     agents: roles.map(settings),
+                    workItemsEnabled: app.workItems.enabled,
                     maxPromptLength: MAX_AGENT_PROMPT_LENGTH,
                 });
+            }
+
+            if (second === undefined && method === "POST") {
+                const body = await readJson<{ workItemsEnabled?: unknown } | null>(request);
+
+                await app.setWorkItemsEnabled(user, body?.workItemsEnabled);
+
+                return json(response, 200, { workItemsEnabled: app.workItems.enabled });
             }
 
             if (agent !== undefined && method === "POST") {
@@ -969,7 +978,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
                     );
                 }
 
-                if (app.agentProfile(agent.type)?.prompt !== agent.defaultPrompt) {
+                if (app.workItems.profile(agent.type)?.prompt !== agent.defaultPrompt) {
                     throw new HttpError(
                         409,
                         "This agent profile changed or became unavailable; reopen Settings",

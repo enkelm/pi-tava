@@ -1,5 +1,6 @@
-/** Default profile text and labels for the Work Items extension. */
-import type { ThreadType } from "../workflow-docs.ts";
+/** First-party Work Item profiles and declarative transition graph. */
+import { validateWorkflow, type SessionWorkflowTransition } from "./session-workflows.ts";
+import type { ThreadType } from "./workflow-docs.ts";
 
 export const AGENT_ROLES: { type: ThreadType; name: string; description: string }[] = [
     { type: "chat", name: "Chat", description: "Questions, exploration and bounded tasks." },
@@ -103,3 +104,79 @@ Working loop:
 3. Inspect each action's receipt. Interrupted or failed effects may already have happened remotely: stop and ask for human reconciliation of uncertain receipts before retrying or continuing. Content drift needs fresh approval and honest reporting, not a claim that an old checkpoint still applies.
 Stopping point: report concrete PR/ticket/delivery outcomes and remaining limitations, then wait for the human. Keep this loop focused on delivery rather than implementation or a new independent review.`,
 };
+
+const titles: Record<string, string> = {
+    chat: "Chat",
+    researcher: "Focused research",
+    worker: "Implementation",
+    reviewer: "Review",
+    "follow-up": "Follow-up work",
+    pull: "Pull upstream",
+    land: "Land local work",
+    publish: "Publish",
+};
+const icons: Record<string, string> = {
+    chat: "chat",
+    worker: "bot",
+    researcher: "brain",
+    reviewer: "search",
+    "follow-up": "pencil",
+    pull: "reload",
+    land: "fork",
+    publish: "external",
+};
+const next: Record<string, string[]> = {
+    chat: ["worker", "researcher"],
+    worker: ["reviewer", "researcher"],
+    reviewer: ["follow-up", "worker", "land", "researcher"],
+    researcher: ["worker", "follow-up"],
+    "follow-up": ["land", "worker"],
+    pull: ["worker", "researcher", "follow-up"],
+    land: ["publish", "worker", "follow-up"],
+    publish: [],
+};
+
+export const WORK_ITEM_WORKFLOW = (() => {
+    const transitions: SessionWorkflowTransition[] = [];
+
+    for (const { type } of AGENT_ROLES) {
+        const same = new Set([...next[type]!, "pull", "land"]);
+
+        same.delete(type);
+
+        for (const to of same) {
+            transitions.push({
+                from: type,
+                to,
+                relationship: "same-work",
+                ...(to === "follow-up" ? { historyAny: ["reviewer", "pull"] } : {}),
+                ...(to === "land" && !next[type]!.includes("land")
+                    ? { historyAny: ["reviewer"] }
+                    : {}),
+                ...(type === "worker" && to === "reviewer" ? { currentDiff: true } : {}),
+            });
+        }
+
+        for (const to of ["worker", "researcher", "pull"]) {
+            transitions.push({ from: type, to, relationship: "new-work" });
+        }
+    }
+
+    return validateWorkflow(
+        "work-items",
+        {
+            id: "work-items",
+            profiles: AGENT_ROLES.map(({ type, name, description }) => ({
+                id: type,
+                name,
+                description,
+                prompt: DEFAULT_AGENT_PROMPTS[type]!,
+                title: titles[type]!,
+                icon: icons[type]!,
+                starter: ["chat", "worker", "researcher", "pull"].includes(type),
+            })),
+            transitions,
+        },
+        true,
+    );
+})();

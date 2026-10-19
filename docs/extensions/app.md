@@ -26,9 +26,10 @@ export default function createUsage(_host: Host, web: Web) {
 What a module adds to the app goes by the name of its file. For example, `server-status.ts` has the name `server-status`. Its routes are at `/api/x/server-status/`, and its browser module at `/x/server-status/`.
 
 Browser assets may opt into `access: "conversation"` so scoped invitees can load static code. This
-grants no app-wide route access or access to other sessions. The bundled Work Items module uses
-this mode with public session controls, hints and scoped transfer-service routes; normal human
-submission and accepted-transfer recovery remain in core.
+grants no app-wide route access or access to other sessions. Application-owned WorkItems retains
+this mode for its first-party browser presentation, with public session controls, hints and scoped
+routes. Core registers that presentation independently of optional modules; its execution pause does
+not unload assets or routes. Normal human submission and accepted-transfer recovery remain in core.
 
 File names are different across the drop-in folder and the built-in modules, so these addresses never collide. A module that adds to the app must have a name of letters, digits, `-`, and `_`, that starts with a letter or a digit, up to a [length](reference/limits.md#names).
 

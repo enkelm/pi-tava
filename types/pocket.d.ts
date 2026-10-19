@@ -1062,6 +1062,8 @@ export interface SessionWorkflowMetadata {
     readonly managed: boolean;
     readonly preparing: boolean;
     readonly profileAvailable: boolean;
+    /** The owner paused first-party managed execution; the profile remains available. */
+    readonly paused?: boolean;
     readonly summary?: string;
     readonly readyForPublish?: boolean;
 }

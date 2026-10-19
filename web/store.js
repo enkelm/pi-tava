@@ -337,8 +337,7 @@ export function workspaceOrder(state = store.state) {
 export const collab = () => (store.state.server?.collab ?? 0) >= 2;
 /** Project organization is unavailable until the server has restarted with this capability. */
 export const projectsAvailable = () => (store.state.server?.projects ?? 0) >= 1;
-export const handoffsAvailable = () =>
-    store.state.server?.ui?.some((module) => module.module === "work-items") === true;
+export const handoffsAvailable = () => store.state.server?.workItems >= 1;
 /** Viewers read and chat; they never steer Pi. */
 export const canSteer = () => store.state.me?.role !== "viewer";
 

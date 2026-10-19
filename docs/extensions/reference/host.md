@@ -215,7 +215,9 @@ readonly sessions: SessionServices;
 Since 0.15.0 · Experimental
 
 Shared session machinery for workflow extensions. `sessions.linked` is the sole linked-peer entry
-point. Agent Teams and Work Items are sibling consumers, not dependencies of each other.
+point. Agent Teams and application-owned WorkItems are sibling consumers, not dependencies of each
+other. WorkItems is no longer an optional extension; this public session interface remains available
+to extensions.
 
 #### `sessions.handoff`
 
@@ -246,9 +248,10 @@ handoff authority. Missing or unavailable transitions reject, never substitute a
 
 The operation retains access, driving, spend, idleness, writer reservations and atomic transfer
 checks. A committed receipt can be recovered after source retirement. Core retains summary and delivery
-tasks solely to recover already-accepted data, including when Work Items is disabled; there is no
-public summary-first admission or retry API. See [Handoffs](../../handoffs.md) and
-[`web.workflow`](web.md#workflow).
+tasks solely to recover already-accepted data, including while first-party Work Item execution is
+paused; recovery does not bypass the pause on new managed effects. Namespaced workflow declarations
+retain their independent lifecycle. There is no public summary-first admission or retry API.
+See [Handoffs](../../handoffs.md) and [`web.workflow`](web.md#workflow).
 
 ## Linked sessions
 

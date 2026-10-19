@@ -187,7 +187,7 @@ async function fixture(t: TestContext) {
         await until(
             async () =>
                 !app.isBusy(next) &&
-                (await app.handoffs.list(next, owner(app))).handoffs.some(
+                (await app.workItems.list(next, owner(app))).handoffs.some(
                     (record) =>
                         record.targetThreadId === created.id && record.delivery === "delivered",
                 ),

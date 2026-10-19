@@ -428,7 +428,7 @@ test("trusted workflow staging works inside the publication lock without bypassi
         sessionMeta: () => ({ workItemId: "fixture-item" }),
         locationOf: () => ({ kind: "ssh", host: "fixture-host" }),
         cwdOf: () => f.root,
-        handoffs: {
+        workItems: {
             isManaged: () => true,
             requireWritable: () => {
                 if (retired) {
@@ -475,7 +475,7 @@ test("trusted workflow staging works inside the publication lock without bypassi
     const localApp = {
         ...app,
         locationOf: () => undefined,
-        handoffs: { ...app.handoffs, isManaged: () => false },
+        workItems: { ...app.workItems, isManaged: () => false },
     } as unknown as PocketApp;
     const localUser = userWorkspaceBackend(localApp, id, BACKGROUND_CONTEXT, user);
 

@@ -380,8 +380,8 @@ test("managed roots and managed linked peers cannot start or receive team work, 
 
     await manage(child);
     assert.equal(app.sessionMeta(child)?.threadType, "chat");
-    assert.equal(app.handoffs.isManaged(id), false);
-    assert.equal(app.handoffs.isManaged(child), true);
+    assert.equal(app.workItems.isManaged(id), false);
+    assert.equal(app.workItems.isManaged(child), true);
     await assert.rejects(send(id, address), /managed workflows/);
     await assert.rejects(send(id, address, "before-management"), /managed workflows/);
     await assert.rejects(start(id, key), /managed workflows/);

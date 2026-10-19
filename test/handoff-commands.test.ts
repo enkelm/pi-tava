@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const modulePath: string = "../src/server/extensions/work-items/commands.js";
+const modulePath: string = "../src/server/work-items/browser/commands.js";
 const { suggestHandoffs } = await import(modulePath);
 const options = [
     { targetType: "researcher", relationship: "same-work", enabled: true },

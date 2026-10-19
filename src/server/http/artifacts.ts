@@ -120,7 +120,7 @@ export async function artifact(
 
             app.requireSee(user, id);
 
-            if (app.handoffs.isManaged(id)) {
+            if (app.workItems.isManaged(id)) {
                 throw new HttpError(403, "Runnable previews are disabled in managed workflows");
             }
         }
@@ -141,7 +141,7 @@ export async function artifact(
 
     app.requireSee(user, conversationId(conv));
 
-    if (app.handoffs.isManaged(conversationId(conv))) {
+    if (app.workItems.isManaged(conversationId(conv))) {
         throw new HttpError(403, "Executable artifacts are disabled in managed workflows");
     }
 

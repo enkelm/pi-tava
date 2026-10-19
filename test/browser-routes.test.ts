@@ -146,7 +146,7 @@ async function retire(id: ConversationId) {
 }
 
 async function assertExclusiveBlocked(id: ConversationId) {
-    const listed = await app.handoffs.list(id, owner(app));
+    const listed = await app.workItems.list(id, owner(app));
 
     assert.ok(listed.options.length > 0);
     assert.ok(
@@ -160,7 +160,7 @@ async function assertExclusiveBlocked(id: ConversationId) {
         }),
         /Local workflow writes are still executing/,
     );
-    assert.deepEqual((await app.handoffs.list(id, owner(app))).handoffs, []);
+    assert.deepEqual((await app.workItems.list(id, owner(app))).handoffs, []);
 }
 
 // Authoring gate: delayed transport can outlive its source. Existing browser tests dispatch immediately;

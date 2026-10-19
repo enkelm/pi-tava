@@ -181,7 +181,7 @@ function start(
 
 async function delivered(id: ConversationId) {
     await until(async () => {
-        const list = await app.handoffs.list(id, owner(app));
+        const list = await app.workItems.list(id, owner(app));
 
         return (
             !app.isBusy(id) &&
@@ -190,7 +190,7 @@ async function delivered(id: ConversationId) {
             )
         );
     }, "handoff delivery and answer");
-    await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
+    await app.harness.commit((tx) => app.workItems.requireIdle(tx, id), context);
 }
 
 // Both inputs reach the model, but only genuine human input receives human handoff correlation.
@@ -416,7 +416,7 @@ test("handoff quiescence rejects stranded reports but allows delivered and expli
                     assert.equal(receipt, undefined, "the pending batch has never been admitted");
                     await assert.rejects(
                         isolated.harness.commit(
-                            (tx) => isolated.handoffs.requireIdle(tx, id),
+                            (tx) => isolated.workItems.requireIdle(tx, id),
                             context,
                         ),
                         /pending subagent reports/,
@@ -456,7 +456,7 @@ test("handoff quiescence rejects stranded reports but allows delivered and expli
                 }
 
                 await isolated.harness.commit(
-                    (tx) => isolated.handoffs.requireIdle(tx, id),
+                    (tx) => isolated.workItems.requireIdle(tx, id),
                     context,
                 );
             } finally {
@@ -563,7 +563,7 @@ test("state policy offers only permitted edges; Review needs Changes, not a comp
             }
         }
 
-        const list = await app.handoffs.list(id, owner(app));
+        const list = await app.workItems.list(id, owner(app));
 
         assert.deepEqual(
             list.options
@@ -592,7 +592,7 @@ test("state policy offers only permitted edges; Review needs Changes, not a comp
 
     changes = unchanged;
     assert.equal(
-        (await app.handoffs.list(worker, owner(app))).options.some(
+        (await app.workItems.list(worker, owner(app))).options.some(
             (option) => option.targetType === "reviewer",
         ),
         false,
@@ -601,7 +601,7 @@ test("state policy offers only permitted edges; Review needs Changes, not a comp
     assert.equal(app.sessions().length, count);
     changes = { files: [], piOnly: [{ path: "committed-by-pi.ts", entryId: 123 }], more: 0 };
     assert.equal(
-        (await app.handoffs.list(worker, owner(app))).options.some(
+        (await app.workItems.list(worker, owner(app))).options.some(
             (option) => option.targetType === "reviewer",
         ),
         false,
@@ -640,7 +640,7 @@ test("history permits Land globally and Follow-up after Review or Pull without r
         state.recommendations = [{ targetType: "worker", relationship: "same-work" }];
     }, context);
     const research = await move(reviewer, "researcher", "history-research");
-    const choices = await app.handoffs.list(research, owner(app));
+    const choices = await app.workItems.list(research, owner(app));
 
     assert.deepEqual(
         choices.options
@@ -655,12 +655,12 @@ test("history permits Land globally and Follow-up after Review or Pull without r
     const repair = await move(publishedPull, "follow-up", "history-repair");
     const landedAgain = await move(repair, "land", "history-reland");
 
-    assert.equal((await app.handoffs.list(landedAgain, owner(app))).workflow.status, "active");
+    assert.equal((await app.workItems.list(landedAgain, owner(app))).workflow.status, "active");
     const pull = await source("pull");
     const pulledRepair = await move(pull, "follow-up", "pull-repair");
 
     assert.equal(
-        (await app.handoffs.list(pulledRepair, owner(app))).options.some(
+        (await app.workItems.list(pulledRepair, owner(app))).options.some(
             (option) => option.targetType === "land",
         ),
         true,
@@ -675,7 +675,7 @@ test("history permits Land globally and Follow-up after Review or Pull without r
     const newWorker = await move(landedAgain, "worker", "fresh-item", "new-work");
 
     assert.equal(
-        (await app.handoffs.list(newWorker, owner(app))).options.some(
+        (await app.workItems.list(newWorker, owner(app))).options.some(
             (option) =>
                 option.relationship === "same-work" &&
                 ["land", "follow-up"].includes(option.targetType),
@@ -736,7 +736,7 @@ test("agent handoff rejects obsolete proposals, milestones and recommendations",
     assert.equal(state?.status ?? "active", "active");
     assert.equal(state?.externalReview, undefined);
     assert.equal(state?.summary, undefined);
-    assert.equal(app.handoffs.isReadOnly(id), false);
+    assert.equal(app.workItems.isReadOnly(id), false);
 });
 
 test("a handoff retires the source until goal without running checks or consuming attempts", async (t) => {
@@ -782,7 +782,7 @@ test("handoff grouping preserves scoped and owner-only visibility", async () => 
     assert.equal(app.cwdOf(next), work);
     assert.equal(app.attribution.requesterOf(next), scoped.user.id);
     const limited = app.config.addUser("Only successor", "guest", [String(next)]).user;
-    const projected = await app.handoffs.list(next, limited);
+    const projected = await app.workItems.list(next, limited);
 
     assert.equal(projected.workItem?.title, "Work item");
     assert.deepEqual(projected.workItem?.threadIds, [Number(next)]);
@@ -790,7 +790,7 @@ test("handoff grouping preserves scoped and owner-only visibility", async () => 
     assert.deepEqual(projected.handoffs, []);
     assert.equal("accessFrom" in app.sessions(limited)[0]!, false);
     await assert.rejects(
-        app.handoffs.updateWorkItem(next, limited, { archived: true }),
+        app.workItems.updateWorkItem(next, limited, { archived: true }),
         status(404),
     );
     const hidden = await source();
@@ -828,7 +828,7 @@ test("input receipt lookup is passive, human-bound and available after a success
     );
 
     assert.ok(record);
-    assert.equal(app.handoffs.isReadOnly(id), true);
+    assert.equal(app.workItems.isReadOnly(id), true);
     const recovered = await http(id, path);
 
     assert.equal(recovered.status, 200, recovered.output);
@@ -861,7 +861,7 @@ test("transfer receipts expose only the current person's visible exact-source tr
     assert.ok(child);
     await until(async () => {
         try {
-            await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
+            await app.harness.commit((tx) => app.workItems.requireIdle(tx, id), context);
 
             return true;
         } catch {
@@ -887,15 +887,15 @@ test("transfer receipts expose only the current person's visible exact-source tr
     const other = app.config.addUser("Other transfer requester", "guest").user;
     const outside = app.config.addUser("Hidden transfer source", "guest", ["999999"]).user;
 
-    assert.deepEqual(app.handoffs.receipts(id, owner(app)), expected);
-    assert.deepEqual(app.handoffs.receipts(id, other), { transfers: [] });
-    assert.deepEqual(app.handoffs.receipts(target, owner(app)), { transfers: [] });
+    assert.deepEqual(app.workItems.receipts(id, owner(app)), expected);
+    assert.deepEqual(app.workItems.receipts(id, other), { transfers: [] });
+    assert.deepEqual(app.workItems.receipts(target, owner(app)), { transfers: [] });
     assert.deepEqual(
-        app.handoffs.receipts(child, owner(app)),
+        app.workItems.receipts(child, owner(app)),
         { transfers: [] },
         "a helper ID does not alias its root's outgoing receipts",
     );
-    assert.throws(() => app.handoffs.receipts(id, outside), status(404));
+    assert.throws(() => app.workItems.receipts(id, outside), status(404));
     const otherSource = await source();
     const otherTransfer = await executeHandoff(app, otherSource, "researcher", { user: other });
     const otherTarget = cid(otherTransfer.id);
@@ -916,30 +916,30 @@ test("transfer receipts expose only the current person's visible exact-source tr
 
     app.config.updateUser(other.id, { role: "viewer" });
     assert.deepEqual(
-        app.handoffs.receipts(otherSource, other),
+        app.workItems.receipts(otherSource, other),
         own,
         "lookup needs no steering rights",
     );
     await app.harness.commit(async (tx) => {
         (await tx.doc(SessionsDoc)).items[String(otherTarget)]!.ownerOnly = true;
     }, context);
-    assert.deepEqual(app.handoffs.receipts(otherSource, other), { transfers: [] });
+    assert.deepEqual(app.workItems.receipts(otherSource, other), { transfers: [] });
     await app.harness.commit(async (tx) => {
         delete (await tx.doc(SessionsDoc)).items[String(otherTarget)]!.ownerOnly;
     }, context);
-    await app.setExtensionEnabled(owner(app), "work-items.ts", false);
+    await app.setWorkItemsEnabled(owner(app), false);
 
     try {
         await withWorkflowPublicationLock(app, otherTarget, async () => {
-            assert.deepEqual(app.handoffs.receipts(id, owner(app)), expected);
-            assert.deepEqual(app.handoffs.receipts(otherSource, other), own);
+            assert.deepEqual(app.workItems.receipts(id, owner(app)), expected);
+            assert.deepEqual(app.workItems.receipts(otherSource, other), own);
         });
     } finally {
-        await app.setExtensionEnabled(owner(app), "work-items.ts", true);
+        await app.setWorkItemsEnabled(owner(app), true);
     }
 
     app.config.removeUser(other.id);
-    assert.throws(() => app.handoffs.receipts(otherSource, other), status(401));
+    assert.throws(() => app.workItems.receipts(otherSource, other), status(401));
 });
 
 test("descendant writers and unresolved publications block human handoff without stopping work", async (t) => {
@@ -964,7 +964,7 @@ test("descendant writers and unresolved publications block human handoff without
         assert.equal(app.sessions().length, count);
         assert.equal(app.isBusy(child), true);
         assert.ok(
-            (await app.handoffs.list(id, owner(app))).options.every((option) => !option.enabled),
+            (await app.workItems.list(id, owner(app))).options.every((option) => !option.enabled),
         );
     } finally {
         childGate.release();
@@ -973,7 +973,7 @@ test("descendant writers and unresolved publications block human handoff without
 
     await until(async () => {
         try {
-            await app.harness.commit((tx) => app.handoffs.requireIdle(tx, id), context);
+            await app.harness.commit((tx) => app.workItems.requireIdle(tx, id), context);
 
             return true;
         } catch {
@@ -1010,7 +1010,7 @@ test("descendant writers and unresolved publications block human handoff without
     const child = (await app.harness.snapshot(SubagentsDoc, id, context))!.agents.writer!
         .conversationId;
 
-    assert.equal(app.handoffs.isReadOnly(child), true);
+    assert.equal(app.workItems.isReadOnly(child), true);
     assert.equal(
         (await app.envFor(child).writeFile("forbidden-child.txt", "bad", context)).ok,
         false,
@@ -1045,7 +1045,7 @@ test("successor names from received summary, bills once and resumes its courier 
         "destination title commits before courier answer",
     );
     assert.equal(app.sessionMeta(next)?.title, title);
-    assert.equal((await app.handoffs.list(next, owner(app))).workItem?.title, title);
+    assert.equal((await app.workItems.list(next, owner(app))).workItem?.title, title);
     assert.equal(titlePrompts.length, titlesBefore + 1);
     assert.match(titlePrompts.at(-1)!, /Original ask: repair retry delivery/);
     assert.match(titlePrompts.at(-1)!, /Deferred: Chromium unavailable/);
@@ -1057,9 +1057,9 @@ test("successor names from received summary, bills once and resumes its courier 
         titleUsage,
         "naming usage is committed before the destination's first assistant answer",
     );
-    assert.equal(app.handoffs.isReadOnly(id), true);
-    assert.equal(app.handoffs.isReadOnly(next), false);
-    const receipts = app.handoffs.receipts(id, owner(app));
+    assert.equal(app.workItems.isReadOnly(id), true);
+    assert.equal(app.workItems.isReadOnly(next), false);
+    const receipts = app.workItems.receipts(id, owner(app));
 
     await app.close();
     courierGate.release();
@@ -1070,7 +1070,7 @@ test("successor names from received summary, bills once and resumes its courier 
     const count = app.sessions().length;
 
     await withWorkflowPublicationLock(app, next, async () => {
-        assert.deepEqual(app.handoffs.receipts(id, owner(app)), receipts);
+        assert.deepEqual(app.workItems.receipts(id, owner(app)), receipts);
     });
     assert.deepEqual(await app.harness.snapshot(UsageDoc, next, context), settledLedger);
     assert.equal(titlePrompts.length, titlesBefore + 1, "recovery does not name or bill twice");
@@ -1116,7 +1116,7 @@ test("successor names from received summary, bills once and resumes its courier 
 
     const blockedTarget = cid(blocked.id);
 
-    await app.harness.commit((tx) => app.handoffs.requireIdle(tx, blockedTarget), context);
+    await app.harness.commit((tx) => app.workItems.requireIdle(tx, blockedTarget), context);
     const tasksBeforeLookup = (
         await app.harness.commit(
             (tx) => tx.scanTasks({ conversationId: blockedTarget }, 100),
@@ -1126,7 +1126,7 @@ test("successor names from received summary, bills once and resumes its courier 
     const callsBeforeLookup = model.state.callCount;
 
     assert.equal(revoked, true);
-    const lookup = app.handoffs.receipts(blockedSource, requester);
+    const lookup = app.workItems.receipts(blockedSource, requester);
 
     assert.deepEqual(
         lookup.transfers.map(({ sourceThreadId, targetThreadId }) => ({
@@ -1183,12 +1183,12 @@ test("same-work organization is atomic, new-work starts independent history and 
     const id = await source("pull");
     const repair = await move(id, "follow-up", "group-repair");
     const worker = await move(repair, "worker", "group-worker");
-    const item = (await app.handoffs.list(worker, owner(app))).workItem!;
+    const item = (await app.workItems.list(worker, owner(app))).workItem!;
     const created = await start(worker, "worker", "new-worker-item", "new-work");
     const next = cid(created.id);
 
     await delivered(next);
-    const nextItem = (await app.handoffs.list(next, owner(app))).workItem!;
+    const nextItem = (await app.workItems.list(next, owner(app))).workItem!;
     const doc = await app.harness.snapshot(HandoffsDoc, context);
 
     assert.notEqual(item.id, nextItem.id);
@@ -1212,21 +1212,21 @@ test("same-work organization is atomic, new-work starts independent history and 
     assert.equal(app.sessionMeta(next)?.archived, undefined);
     await app.commands.updateSession(id, owner(app), { archived: false, title: "Renamed origin" });
     assert.ok([id, repair, worker].every((member) => app.sessionMeta(member)?.archived !== true));
-    assert.equal((await app.handoffs.list(repair, owner(app))).workItem?.title, "Renamed origin");
+    assert.equal((await app.workItems.list(repair, owner(app))).workItem?.title, "Renamed origin");
     await app.close();
     app = await openApp(model, data);
     const count = app.sessions().length;
-    const receipts = app.handoffs.receipts(id, owner(app));
+    const receipts = app.workItems.receipts(id, owner(app));
 
     assert.equal(receipts.transfers.length, 1);
     assert.equal(receipts.transfers[0]?.targetThreadId, Number(repair));
     assert.equal(app.sessions().length, count);
-    assert.equal(app.handoffs.isReadOnly(id), true);
-    assert.equal(app.handoffs.isReadOnly(repair), true);
-    assert.equal(app.handoffs.isReadOnly(worker), true);
-    assert.equal(app.handoffs.isReadOnly(next), false);
+    assert.equal(app.workItems.isReadOnly(id), true);
+    assert.equal(app.workItems.isReadOnly(repair), true);
+    assert.equal(app.workItems.isReadOnly(worker), true);
+    assert.equal(app.workItems.isReadOnly(next), false);
     assert.deepEqual(
-        (await app.handoffs.list(worker, owner(app))).workItem?.threadIds,
+        (await app.workItems.list(worker, owner(app))).workItem?.threadIds,
         item.threadIds,
     );
 });
@@ -1268,11 +1268,11 @@ test("Git fingerprint inspection contains configured filters and binds physical 
     const id = await source("worker", cwd);
 
     writeFileSync(join(cwd, "code.txt"), "changedA\n");
-    const first = await app.handoffs.fingerprint(id, owner(app));
+    const first = await app.workItems.fingerprint(id, owner(app));
 
     writeFileSync(join(cwd, "code.txt"), "changedB\n");
     assert.notEqual(
-        await app.handoffs.fingerprint(id, owner(app)),
+        await app.workItems.fingerprint(id, owner(app)),
         first,
         "equal-length tracked bytes cannot alias through configured clean normalization",
     );
@@ -1345,7 +1345,7 @@ test("a namespaced workflow creates typed starters and enforces declared dirty a
         });
         assert.equal(app.sessionMeta(id)?.threadType, "custom-flow:start");
         assert.deepEqual(
-            (await app.handoffs.list(id, owner(app))).options.map((option) => option.targetType),
+            (await app.workItems.list(id, owner(app))).options.map((option) => option.targetType),
             ["custom-flow:clean"],
         );
         await assert.rejects(
@@ -1354,7 +1354,7 @@ test("a namespaced workflow creates typed starters and enforces declared dirty a
         );
         changes = changed;
         assert.deepEqual(
-            (await app.handoffs.list(id, owner(app))).options.map((option) => option.targetType),
+            (await app.workItems.list(id, owner(app))).options.map((option) => option.targetType),
             ["custom-flow:dirty"],
         );
         await assert.rejects(
@@ -1365,7 +1365,7 @@ test("a namespaced workflow creates typed starters and enforces declared dirty a
 
         assert.equal(app.sessionMeta(target)?.threadType, "custom-flow:dirty");
         assert.equal(app.sessionMeta(target)?.workItemId, app.sessionMeta(id)?.workItemId);
-        assert.equal(app.handoffs.isReadOnly(id), true);
+        assert.equal(app.workItems.isReadOnly(id), true);
         const fresh = await app.commands.createSession(owner(app), {
             cwd: work,
             threadType: "custom-flow:start",
@@ -1378,7 +1378,7 @@ test("a namespaced workflow creates typed starters and enforces declared dirty a
         const clean = await move(fresh.id, "custom-flow:clean", "custom-clean-accepted");
 
         assert.equal(app.sessionMeta(clean)?.threadType, "custom-flow:clean");
-        await app.setExtensionEnabled(owner(app), "work-items.ts", false);
+        await app.setWorkItemsEnabled(owner(app), false);
 
         try {
             const project = await app.projects.create(owner(app), {
@@ -1390,7 +1390,7 @@ test("a namespaced workflow creates typed starters and enforces declared dirty a
 
             assert.equal(app.sessionMeta(initial.id)?.threadType, "custom-flow:start");
         } finally {
-            await app.setExtensionEnabled(owner(app), "work-items.ts", true);
+            await app.setWorkItemsEnabled(owner(app), true);
         }
     } finally {
         await app.setExtensionEnabled(owner(app), "custom-flow.ts", false);

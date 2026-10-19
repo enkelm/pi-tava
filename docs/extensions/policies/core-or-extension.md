@@ -4,7 +4,7 @@ This page tells where a change goes: into Pi Pocket's core, or into an extension
 
 ## Terms
 
-- **Core** is the code that Pi Pocket keeps for all people and all extensions. It is the server (`src/server/`, but not `src/server/extensions/`), the app (`web/`), and the interfaces that extensions use: `host`, `web`, and `pocket`.
+- **Core** is the code that Pi Coop keeps for all people and all extensions. It includes application-owned server modules, browser presentation and the interfaces that extensions use: `host`, `web`, and `pocket`. Optional extension modules live under `src/server/extensions/`. First-party Work Items has no entry or source module there; its browser assets live in `src/server/work-items/browser/`.
 - An **extension** is a module that Pi Pocket loads through its extension loader. The owner can turn each one off in **Menu → Extensions**, except the system prompt (`prompt.ts`). There are three types:
     - A **built-in extension** is a module in `src/server/extensions/`. It comes with Pi Pocket.
     - A **gallery extension** is a drop-in that its author keeps in their own repository. The gallery lists it ([gallery-review.md](gallery-review.md)).
@@ -30,9 +30,9 @@ Ask these questions in this order. The first "yes" gives the answer.
 
 ### A feature with two parts
 
-- **C7. Split it. Put the mechanism in core, and the workflow in an extension.**\
+- **C7. Split optional features. Put the mechanism in core, and the optional workflow in an extension.**\
   _Reason:_ other extensions can then use the mechanism, and people can turn the workflow off.
-- **C8. Do not add a setting to core for one workflow. Write an extension.**\
+- **C8. Do not add a setting to core for one optional workflow. Write an extension.**\
   _Reason:_ all people see each setting in core, and the maintainers must keep it.
 - **C9. Do not copy a core check into an extension. Use it through `host` or `web`, or ask for an extension point.**\
   _Reason:_ a copy does not change when core fixes the check.
@@ -51,6 +51,13 @@ Ask these questions in this order. The first "yes" gives the answer.
   _Reason:_ the module then shows that the public API is sufficient, and it can move to the gallery later.
 
 ## Examples from Pi Pocket
+
+### First-party Work Items
+
+- **Core: `app.workItems`.** WorkItems owns the built-in catalog/graph, lifecycle, membership, active-writer ownership, permission-filtered work views and whole-item organization. Its private Handoffs engine keeps durable transfer admission, tasks, recovery and transactions. Projects, Commands and the handoff tool consume that interface.
+- **Why:** these are application-wide ownership, stored-state and access rules (C1, C2, C5), not a team's optional process. Consolidating them avoids making callers reconstruct membership and writer authority. The default roles remain declarative; alternative namespaced `web.workflow` declarations remain extension-owned. Ordinary Chat and Agent Teams do not require Work Item membership.
+- **The product change is explicit.** Work Items is no longer unloadable or listed in Extensions. Native Settings → **Agents** owns execution pause/resume through additive `workItemsEnabled`. The old disabled `work-items.ts` choice is read-only migration input when the native field is absent, preserving existing disabled installations without implicit unpause. Explicit native changes persist the new field; extension-enablement controls cannot mutate WorkItems. Profiles and controls stay visible while paused, but new built-in handoffs and managed effects remain blocked. Accepted recovery retains its durable path, without granting execution authority. See [the contract](../../handoffs.md#availability-and-execution-pause).
+- **Public interfaces stay public.** Core intentionally reuses the generic public route/browser presentation infrastructure for compatibility without making first-party lifecycle optional. Promotion does not remove `host.sessions.handoff`, `web.workflow`, scoped routes or browser controls. Any later change to those interfaces must follow [API stability](api-stability.md); this product-contract change belongs in a minor release, not a patch.
 
 ### Linked sessions and Agent Teams
 
@@ -112,7 +119,7 @@ A maintainer answers with one of these:
 
 ### Rules for extension points
 
-- **C15. Each new extension point has a user when it ships:** a built-in extension, a gallery extension, or a tested example in [docs/examples/](../../examples/). `host.sessions.linked` and `pocket.toolCall` serve Agent Teams, and `web.command` serves the clock example. Work Items consumes `web.workflow`, scoped routes and the public browser session controls/input hints.\
+- **C15. Each new extension point has a user when it ships:** a built-in extension, a gallery extension, or a tested example in [docs/examples/](../../examples/). `host.sessions.linked` and `pocket.toolCall` serve Agent Teams, and `web.command` serves the clock example. The session/workflow interfaces originally shipped with Work Items; its promotion to core retains those public contracts and the shared scoped-route/browser mechanisms.\
   _Reason:_ an interface with no user is a guess, and a wrong guess becomes a public API that Pi Pocket must keep.
 
 ## Pull requests

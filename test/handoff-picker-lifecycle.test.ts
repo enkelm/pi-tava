@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 
 const { createHandoffState } = await import(
-    new URL("../src/server/extensions/work-items/state.js", import.meta.url).href
+    new URL("../src/server/work-items/browser/state.js", import.meta.url).href
 );
 const { createHandoffSheet } = await import(
-    new URL("../src/server/extensions/work-items/sheet.js", import.meta.url).href
+    new URL("../src/server/work-items/browser/sheet.js", import.meta.url).href
 );
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -135,7 +135,7 @@ function fixture(t: TestContext) {
         canSteer: true,
         busy: false,
         conversation: { kind: "session" },
-        sessions: [{ id: 1, workflow: { readOnly: false } }],
+        sessions: [{ id: 1, workflow: { readOnly: false, paused: false } }],
         profiles: [{ id: "reviewer", name: "Reviewer" }],
     };
     const observers = new Set<(value: typeof session) => void>();
@@ -362,6 +362,10 @@ function fixture(t: TestContext) {
             session = { ...session, me: { ...session.me, role } };
             observers.forEach((listener) => listener(session));
         },
+        changePaused(paused: boolean) {
+            session = { ...session, sessions: [{ id: 1, workflow: { readOnly: false, paused } }] };
+            observers.forEach((listener) => listener(session));
+        },
         changeBusy(busy: boolean) {
             session = { ...session, busy };
             observers.forEach((listener) => listener(session));
@@ -498,6 +502,33 @@ test("resume preserves an edited direction draft and its submission identity", a
         "resume cannot replace draft/request identity",
     );
     assert.equal(f.requests.length, 2, "resume shares the service's fresh read");
+});
+
+// A live execution pause can arrive before the outstanding eligibility response. The actual sheet
+// must not submit its cached enabled choice, and must preserve the selected draft for explicit resume.
+test("a live execution pause fences a cached enabled choice without losing the draft", async (t) => {
+    const f = fixture(t);
+
+    await f.settle();
+    await f.respond(0);
+    f.choose();
+    const saved = [...f.storage];
+
+    assert.equal(f.find("button", "Next")[0]!.props.disabled, false);
+    f.changePaused(true);
+    await f.settle();
+    // The server read can have completed just before the pause; live metadata must still fence it.
+    await f.respond(1, eligibility());
+    assert.equal(f.find("button", "Next")[0]!.props.disabled, true);
+    assert.match(f.text(), /execution is paused/i);
+    await f.find("form")[0]!.props.onSubmit({ preventDefault() {} });
+    f.commit();
+    assert.equal(
+        f.find("button", "Next").length,
+        1,
+        "the cached choice cannot advance to submission",
+    );
+    assert.deepEqual([...f.storage], saved);
 });
 
 test("routine polling does not refocus Next or block the selected choice", async (t) => {

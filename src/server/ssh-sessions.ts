@@ -236,7 +236,7 @@ export class SshSessions {
             },
             confinedExec: (command, options, ctx, readOnly) =>
                 tracked.execConfined(readOnly, command, options, ctx),
-            managed: () => this.#app.handoffs.isManaged(id),
+            managed: () => this.#app.workItems.isManaged(id),
             ...(exclusive ? {} : { reserveWrite: writerReservation(this.#app, id) }),
         });
 

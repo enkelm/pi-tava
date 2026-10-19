@@ -133,10 +133,10 @@ export async function extensionRoute(
 
             const session: SessionRequestServices = Object.freeze({
                 transfers: Object.freeze({
-                    status: () => operation((person) => app.handoffs.list(conversationId, person)),
+                    status: () => operation((person) => app.workItems.list(conversationId, person)),
                     updateGroup: (patch: Readonly<Record<string, unknown>>) =>
                         operation((person) =>
-                            app.handoffs.updateWorkItem(conversationId, person, patch),
+                            app.workItems.updateWorkItem(conversationId, person, patch),
                         ),
                 }),
             });
