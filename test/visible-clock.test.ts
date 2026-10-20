@@ -55,6 +55,7 @@ const stubs: Record<string, string> = {
     "./browser.js": inert(["browserAvailable", "setBrowserOpen"]),
     "./calls.js": `${inert(["describeCall"])} export const describersRevision = 0;`,
     "./diff.js": inert(["DiffBlock"]),
+    "./review-comments.js": inert(["DiffComments"]),
     "./linked-sessions.js": inert(["LinkedSessions"]),
     "./seen.js": "export const fromServer = value => value;",
     "./rich.js": inert(["Highlighted"]),
@@ -75,6 +76,7 @@ const stubs: Record<string, string> = {
             "navigate",
             "notify",
             "openSheet",
+            "revealReviewThread",
         ])}
         export const TRANSCRIPT_ROWS = 100;
     `,

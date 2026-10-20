@@ -187,6 +187,63 @@ test("hidden pages stop live transports and resume once with fresh state", async
                 assert.equal(polls.length, 2, "a visible poll acknowledges its first batch");
             }
 
+            if (mode === "stream") {
+                await t.test(
+                    "chat deltas replace native status without duplicating, reordering or renotifying",
+                    () => {
+                        const stream = streams[0]!;
+
+                        store.set({ users: [{ id: "owner", name: "Owner", role: "owner" }] });
+                        const human = {
+                            id: "question",
+                            userId: "owner",
+                            name: "Owner",
+                            text: "@PiP help",
+                            at: 1,
+                            pip: { status: "queued" },
+                        };
+
+                        stream.emit("chat", { conversationId: 1, full: true, messages: [human] });
+                        stream.emit("chat", {
+                            conversationId: 1,
+                            messages: [{ ...human, pip: { status: "working" } }],
+                        });
+                        assert.equal(store.state.chat[0].pip.status, "working");
+                        stream.emit("chat", {
+                            conversationId: 1,
+                            messages: [
+                                {
+                                    id: "reply",
+                                    userId: "pip",
+                                    name: "PiP",
+                                    text: "A shared answer",
+                                    at: 2,
+                                    service: "pip",
+                                },
+                                { ...human, pip: { status: "answered", replyId: "reply" } },
+                            ],
+                        });
+                        assert.deepEqual(
+                            store.state.chat.map((message: { id: string }) => message.id),
+                            ["question", "reply"],
+                        );
+                        assert.equal(store.state.chat[0].pip.status, "answered");
+                        const notices = store.state.notices.length;
+
+                        stream.emit("chat", {
+                            conversationId: 1,
+                            messages: [{ ...human, pip: { status: "answered", replyId: "reply" } }],
+                        });
+                        assert.equal(store.state.notices.length, notices);
+                        stream.emit("chat", {
+                            conversationId: 2,
+                            messages: [{ ...human, pip: { status: "failed" } }],
+                        });
+                        assert.equal(store.state.chat[0].pip.status, "answered");
+                    },
+                );
+            }
+
             document.visibilityState = "hidden";
             document.dispatchEvent(new Event("visibilitychange"));
             assert.ok(

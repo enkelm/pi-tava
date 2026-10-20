@@ -20,15 +20,15 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import type { ConversationId, TaskId } from "@earendil-works/pi-durable";
+import { AgentDoc, type ConversationId, type TaskId } from "@earendil-works/pi-durable";
 import type { User } from "../src/server/config.ts";
 import { AuthorsDoc, type PrWatch, ScheduleDoc, SessionsDoc } from "../src/server/docs.ts";
-import { prWatchLine, repoWatchLine } from "../src/server/extensions/pip.ts";
+import { prWatchLine, repoWatchLine } from "../src/server/pip/private-agent.ts";
 import { quoted } from "../src/server/fence.ts";
 import { PIP_EXTENSION, SESSION_CLOSE, SESSION_OPEN } from "../src/server/pip.ts";
 import { HandoffsDoc, type ThreadType, WorkflowDoc } from "../src/server/workflow-docs.ts";
@@ -150,6 +150,9 @@ test("PiP is made once, for the owner, and stays out of the session list", async
     const guest = app.config.addUser("Guest", "guest").user;
 
     await assert.rejects(app.pip.ensure(guest), /owner/);
+    await assert.rejects(app.pip.ensure({ ...guest, role: "owner" }), /owner/);
+    assert.equal(app.pip.available({ ...guest, role: "owner" }), false);
+    assert.equal(app.pip.available({ ...guest, id: "removed-owner", role: "owner" }), false);
     assert.equal(app.pip.state(guest), null);
     assert.equal((await app.hello(owner(app))).server.pip, true);
     assert.equal((await app.hello(guest)).server.pip, false);
@@ -238,7 +241,10 @@ test("new and legacy PiP roots stay Chats across restart without losing tools or
 
                 await isolated.close();
                 isolated = await openApp(scriptedModel(route), data);
-                assert.equal(await isolated.pip.ensure(owner(isolated)), id);
+                // Existing stored private selections work before the panel calls ensure/tune on recovery.
+                const recoveredAgent = await (await isolated.conversation(id)).agent(context);
+
+                assert.ok(recoveredAgent.tools.some((tool) => tool.name === "sessions"));
                 assert.equal(isolated.sessionMeta(id)?.threadType, "chat");
                 assert.equal(isolated.workItems.isManaged(id), false);
                 const stored = await isolated.harness.snapshot(SessionsDoc, context);
@@ -295,6 +301,70 @@ test("new and legacy PiP roots stay Chats across restart without losing tools or
                 await isolated.close();
             }
         });
+    }
+});
+
+test("paused startup stops pending private work without unloading its stored tools or importing legacy PiP modules", async () => {
+    const data = join(root, "pip-paused-recovery");
+    let requests = 0;
+    const pending = scriptedModel(() => {
+        requests++;
+
+        return fauxAssistantMessage([fauxText("Still thinking about it. ".repeat(3000))]);
+    });
+    let isolated = await openApp(pending, data);
+
+    try {
+        const me = owner(isolated);
+        const id = await isolated.pip.ensure(me);
+
+        await isolated.commands.configure(id, me, {
+            model: { provider: "faux", modelId: "faux-2" },
+            thinkingLevel: "off",
+        });
+        const before = await isolated.harness.snapshot(AgentDoc, id, context);
+
+        await isolated.commands.submit(id, me, { text: "Think it through", requestId: "pending" });
+        await until(() => requests === 1 && isolated.isBusy(id), "the pending private generation");
+        await isolated.close();
+        // Reproduce a saved pause with unfinished work, without the setter first aborting that work.
+        // This is the disposable app's native config store, never a live-data file edit.
+        isolated.config.pipEnabled = false;
+        writeFileSync(
+            join(data, "extensions", "pip.ts"),
+            'throw new Error("A legacy PiP drop-in must never load");\n',
+        );
+        isolated = await openApp(pending, data);
+
+        assert.equal(isolated.pip.available(owner(isolated)), false);
+        await until(() => !isolated.isBusy(id), "startup to stop the pending private run");
+        assert.equal(requests, 1, "recovery made no provider request while paused");
+        assert.equal(isolated.pip.idOf(me.id), id);
+        assert.deepEqual(await isolated.harness.snapshot(AgentDoc, id, context), before);
+        const agent = await (await isolated.conversation(id)).agent(context);
+
+        assert.ok(
+            agent.tools.some((tool) => tool.name === "sessions"),
+            "recovery kept private tools",
+        );
+        assert.ok(!isolated.loader.list().some((module) => module.file === "pip.ts"));
+        assert.ok(!isolated.loader.extensionNames().includes(PIP_EXTENSION));
+        await assert.rejects(isolated.loader.reload("pip.ts"), /no extension module/);
+        await assert.rejects(
+            isolated.setExtensionEnabled(owner(isolated), "pip.ts", true),
+            /no extension module/,
+        );
+        await assert.rejects(isolated.pip.read(id, Number(id)), /PiP is turned off/);
+        await assert.rejects(
+            isolated.commands.submit(id, owner(isolated), { text: "No", requestId: "paused" }),
+            /PiP is turned off/,
+        );
+        await isolated.setPipEnabled(owner(isolated), true);
+        assert.equal(await isolated.pip.ensure(owner(isolated)), id);
+        assert.deepEqual(await isolated.harness.snapshot(AgentDoc, id, context), before);
+        assert.equal(requests, 1, "resuming does not replay the stopped input");
+    } finally {
+        await isolated.close();
     }
 });
 
@@ -648,12 +718,20 @@ test("PiP works in its person's own checkouts only, and takes a clone once it is
     // The owner's own checkout is used; a guest's, of another repository, is not.
     const mine = join(root, "checkouts", "mine");
     const theirs = join(root, "checkouts", "guestclaim");
-    const guest = app.config.addUser("Gina", "guest").user;
 
     checkout(mine, "acme/mine");
     checkout(theirs, "acme/guestclaim");
+    const { id: projectId } = await app.projects.create(me, {
+        name: "Guest checkout",
+        cwd: theirs,
+        requestId: "pip-guest-checkout",
+    });
+    const guest = app.config.addUser("Gina", "guest", undefined, undefined, {
+        projectIds: [projectId],
+    }).user;
+
     await app.commands.createSession(me, { cwd: mine });
-    await app.commands.createSession(guest, { cwd: theirs });
+    await app.commands.createSession(guest, { projectId });
     assert.equal(await app.pip.checkout(id, "acme/mine"), realpathSync(mine));
     assert.equal(clones("acme/mine"), 0);
     assert.equal(await app.pip.checkout(id, "acme/guestclaim"), join(repos, "guestclaim"));
@@ -755,7 +833,7 @@ test("PiP's own schedules wait while PiP is off, and go out once it is back", as
     const woken = async () => (await said(id)).filter((line) => line.includes("wake up")).length;
 
     app.schedules.holdMs = 100;
-    await app.setExtensionEnabled(me, "pip.ts", false);
+    await app.setPipEnabled(me, false);
     // Due in a moment: written as `add` writes it, which takes times in minutes.
     await app.harness.commit(async (tx) => {
         const taskId = await tx.createTask(
@@ -780,7 +858,7 @@ test("PiP's own schedules wait while PiP is off, and go out once it is back", as
     assert.equal((await items()).length, 1, "it waits, kept");
     assert.ok(!app.isBusy(id));
 
-    await app.setExtensionEnabled(me, "pip.ts", true);
+    await app.setPipEnabled(me, true);
     await until(async () => (await woken()) > 0, "the schedule once PiP is back", 10_000);
     await until(async () => (await items()).length === 0, "the schedule done");
     await until(() => !app.isBusy(id), "PiP at rest");
@@ -800,13 +878,13 @@ test("a follow's report waits while PiP is off, and comes once it is back", asyn
     await say(app, id, `read ${String(session)}`);
     await say(app, id, `send ${String(session)} a sleepy job`);
     await until(() => app.isBusy(session), "the session at work");
-    await app.setExtensionEnabled(me, "pip.ts", false);
+    await app.setPipEnabled(me, false);
     await until(() => !app.isBusy(session), "the session's run over", 10_000);
     await new Promise((resolve) => setTimeout(resolve, 1000));
     assert.equal(await reports(), 0, "no report, and no run without PiP's rules, while PiP is off");
     assert.ok(!app.isBusy(id));
 
-    await app.setExtensionEnabled(me, "pip.ts", true);
+    await app.setPipEnabled(me, true);
     await until(async () => (await reports()) > 0, "the report once PiP is back", 10_000);
     await until(() => !app.isBusy(id), "PiP at rest");
     assert.equal(await reports(), 1, "one report");

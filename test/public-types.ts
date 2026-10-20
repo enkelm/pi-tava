@@ -43,7 +43,6 @@ import type {
  */
 type Internal =
     | "pip"
-    | "pipCompaction"
     | "gallery"
     | "watches"
     | "repoWatches"

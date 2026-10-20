@@ -509,7 +509,6 @@ test("the owner turns extensions off and on, the guard follows its switch, and t
             "guard.ts",
             "codemode.ts",
             "memory.ts",
-            "pip.ts",
             "triggers.ts",
             "gallery.ts",
         ],
@@ -731,7 +730,7 @@ test("people chat beside Pi: presence, one post per request, and the chat surviv
 
     assert.deepEqual(history(stored?.messages), [
         modelSwitch,
-        { kind: undefined, userId: guest.user.id, name: "Alex", text: "hi team" },
+        { kind: undefined, userId: guest.user.id, name: "Alex", text: "  hi team" },
     ]);
 });
 

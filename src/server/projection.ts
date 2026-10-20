@@ -19,6 +19,7 @@ import {
     splitAttachments,
 } from "./entry-format.ts";
 import type { StreamTiming } from "./timing.ts";
+import type { PipDiffComment } from "./docs.ts";
 
 /** Shortest first-to-last-token window, in ms, that reads as a genuine stream rather than one buffered flush. */
 const MIN_STREAM_WINDOW_MS = 250;
@@ -54,6 +55,7 @@ export type ClientEntry =
           model?: string;
           provider?: string;
           at?: number;
+          diffComments?: PipDiffComment[];
       }
     | {
           id: number;
@@ -127,6 +129,55 @@ function textOfContent(content: unknown): string {
             part.type === "text" && typeof part.text === "string" ? [part.text] : [],
         )
         .join("\n");
+}
+
+/** Only the app-owned, bounded public reference fields leave the immutable answer. */
+function projectDiffComments(value: unknown): PipDiffComment[] | undefined {
+    if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
+        return undefined;
+    }
+
+    const comments: PipDiffComment[] = [];
+
+    for (const item of value) {
+        if (
+            item === null ||
+            typeof item !== "object" ||
+            !Number.isSafeInteger(item.conversationId) ||
+            item.conversationId < 1 ||
+            typeof item.threadId !== "string" ||
+            item.threadId.length > 160 ||
+            typeof item.commentId !== "string" ||
+            item.commentId.length > 160 ||
+            typeof item.path !== "string" ||
+            item.path.length > 4096 ||
+            (item.side !== "old" && item.side !== "new") ||
+            !Number.isSafeInteger(item.line) ||
+            item.line < 1 ||
+            item.line > 10_000_000 ||
+            (item.startLine !== undefined &&
+                (!Number.isSafeInteger(item.startLine) ||
+                    item.startLine < 1 ||
+                    item.startLine > item.line ||
+                    item.line - item.startLine >= 100)) ||
+            typeof item.text !== "string"
+        ) {
+            return undefined;
+        }
+
+        comments.push({
+            conversationId: item.conversationId,
+            threadId: item.threadId,
+            commentId: item.commentId,
+            path: item.path,
+            side: item.side,
+            line: item.line,
+            ...(item.startLine === undefined ? {} : { startLine: item.startLine }),
+            text: item.text.replace(/\s+/g, " ").slice(0, 280),
+        });
+    }
+
+    return comments;
 }
 
 function countImages(content: unknown): number {
@@ -238,6 +289,12 @@ function projectDetails(details: unknown, full: boolean): unknown {
 
     const record = details as Record<string, unknown>;
 
+    if ("pipDiffComment" in record) {
+        const comments = projectDiffComments([record.pipDiffComment]);
+
+        return comments === undefined ? undefined : { pipDiffComment: comments[0] };
+    }
+
     if (typeof record.diff === "string") {
         const { patch: _patch, ...rest } = record;
 
@@ -338,6 +395,11 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
 
             const error =
                 typeof message?.errorMessage === "string" ? message.errorMessage : undefined;
+            const diffComments =
+                entry.byTaskId !== undefined &&
+                (entry.data as { imported?: boolean } | undefined)?.imported !== true
+                    ? projectDiffComments(message?.pocketDiffComments)
+                    : undefined;
 
             return {
                 id,
@@ -347,6 +409,7 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
                 ...(error === undefined ? {} : { error }),
                 ...(typeof message?.model === "string" ? { model: message.model } : {}),
                 ...(typeof message?.provider === "string" ? { provider: message.provider } : {}),
+                ...(diffComments === undefined ? {} : { diffComments }),
                 ...madeAt(message),
             };
         }

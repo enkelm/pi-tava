@@ -1,14 +1,28 @@
 /**
  * What Pi costs, and limits on it. A conversation's spend is its `pi.usage` total; a session's is its own and its
- * subagents'. Spend is also counted per person: work goes to whoever asked for it, the person Pi works for there when
- * the work's usage is committed. The owner can limit a session or a person. Past a limit, new messages are refused,
+ * subagents'. Auxiliary requests add their own receipt-backed usage to the source and immutable requester, without
+ * changing pi.usage or the main agent's attribution. Ordinary work goes to the person Pi works for when its usage
+ * is committed. The owner can limit a session or a person. Past a limit, new messages are refused,
  * and a run that crosses it is stopped; the model request that crossed it still counts.
  */
+import { createHash } from "node:crypto";
+import type { Usage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type ConversationId, UsageDoc, type UsageState } from "@earendil-works/pi-durable";
+import {
+    type ConversationId,
+    UsageDoc,
+    type UsageState,
+    type Tx,
+} from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
-import { SessionsDoc, SpendDoc } from "./docs.ts";
+import {
+    AuxiliaryUsageDoc,
+    AuxiliaryUsageReceiptDoc,
+    type AuxiliaryUsageRecord,
+    SessionsDoc,
+    SpendDoc,
+} from "./docs.ts";
 import { describe, HttpError } from "./errors.ts";
 import { usageCost } from "./projection.ts";
 
@@ -27,6 +41,16 @@ export type SpendSummary = {
     people: { id: string; name: string; spent: number; budget?: number }[];
 };
 
+/** Internal model runners supply the real immutable requester/source and actual response model. */
+export type AuxiliaryUsage = {
+    receiptId: string;
+    requesterId: string;
+    sourceConversationId: ConversationId;
+    provider: string;
+    model: string;
+    usage: Usage;
+};
+
 export class Spend {
     readonly #app: PocketApp;
     /** Each conversation's spend so far. */
@@ -35,6 +59,11 @@ export class Spend {
     readonly #owed = new Map<ConversationId, Map<string, number>>();
     /** What `SpendDoc` says each person spent, as of the last count. */
     #people: Record<string, number> = {};
+    #auxiliary: { sources: Record<string, number>; people: Record<string, number> } = {
+        sources: {},
+        people: {},
+    };
+    #unsubscribeAuxiliary = () => {};
     /** Runs being stopped for a limit, until they end: each is stopped, and announced, once. */
     readonly #stopping = new Set<ConversationId>();
     #timer: NodeJS.Timeout | undefined;
@@ -52,6 +81,31 @@ export class Spend {
      */
     async load(ids: readonly ConversationId[]): Promise<void> {
         const harness = this.#app.harness;
+
+        this.#auxiliary = (await harness.snapshot(AuxiliaryUsageDoc, context)) ?? {
+            sources: {},
+            people: {},
+        };
+        this.#unsubscribeAuxiliary();
+        this.#unsubscribeAuxiliary = harness.subscribeCommits((publication) => {
+            for (const change of publication.changes) {
+                if (
+                    change.type === "document" &&
+                    change.record.kind === AuxiliaryUsageDoc.definition.kind
+                ) {
+                    this.#auxiliary = (change.value as {
+                        sources: Record<string, number>;
+                        people: Record<string, number>;
+                    } | null) ?? {
+                        sources: {},
+                        people: {},
+                    };
+                    this.#stopOverLimit();
+                    this.#app.refreshViews();
+                    this.#app.scheduleSessions();
+                }
+            }
+        });
 
         for (const id of ids) {
             this.#costs.set(id, usageCost(await harness.snapshot(UsageDoc, id, context)));
@@ -82,6 +136,45 @@ export class Spend {
         }
 
         await this.#count();
+    }
+
+    /**
+     * Record a completed auxiliary request in its caller's transaction. Does not grant generation or
+     * discussion authority. Receipt identity is source-scoped; conflicting reuse is an error. No
+     * pi.usage or mutable conversation requester is involved, including during startup reconciliation.
+     */
+    async recordAuxiliaryUsage(tx: Tx, input: AuxiliaryUsage): Promise<void> {
+        const record = auxiliaryRecord(input);
+        const key = createHash("sha256")
+            .update(JSON.stringify([record.sourceConversationId, record.receiptId]))
+            .digest("hex");
+        const receipt = await tx.doc(AuxiliaryUsageReceiptDoc, key, null);
+
+        if (receipt.record !== undefined) {
+            if (JSON.stringify(receipt.record) !== JSON.stringify(record)) {
+                throw new Error("Auxiliary usage receipt already records a different response");
+            }
+
+            return;
+        }
+
+        if ((await tx.conversation(input.sourceConversationId)) === undefined) {
+            throw new Error("Auxiliary usage source conversation does not exist");
+        }
+
+        const totals = await tx.doc(AuxiliaryUsageDoc);
+        const source = String(record.sourceConversationId);
+        const cost = record.usage.cost.total;
+        const sourceTotal = (totals.sources[source] ?? 0) + cost;
+        const personTotal = (totals.people[record.requesterId] ?? 0) + cost;
+
+        if (!Number.isFinite(sourceTotal) || !Number.isFinite(personTotal)) {
+            throw new Error("Auxiliary usage total exceeds the supported amount");
+        }
+
+        totals.sources[source] = sourceTotal;
+        totals.people[record.requesterId] = personTotal;
+        receipt.record = record;
     }
 
     /** Enable budget aborts only after startup is ready; accounting itself does not request progress. */
@@ -176,7 +269,7 @@ export class Spend {
     sessionSpent(root: ConversationId): number {
         let spent = 0;
 
-        for (const [id, cost] of this.#costs) {
+        for (const [id, cost] of this.#allCosts()) {
             if (this.#app.rootOf(id) === root) {
                 spent += cost;
             }
@@ -209,7 +302,7 @@ export class Spend {
     #teamSpent(top: ConversationId): number {
         let spent = 0;
 
-        for (const [id, cost] of this.#costs) {
+        for (const [id, cost] of this.#allCosts()) {
             if (this.teamRoot(this.#app.rootOf(id)) === top) {
                 spent += cost;
             }
@@ -227,7 +320,7 @@ export class Spend {
     }
 
     personSpent(userId: string): number {
-        return this.#people[userId] ?? 0;
+        return (this.#people[userId] ?? 0) + (this.#auxiliary.people[userId] ?? 0);
     }
 
     /** The limit work in a conversation reached when `userId` pays for it: the session's, or theirs. */
@@ -405,7 +498,7 @@ export class Spend {
         // Each session's spend, its subagents' with it, in one pass over every conversation.
         const byRoot = new Map<ConversationId, number>();
 
-        for (const [id, cost] of this.#costs) {
+        for (const [id, cost] of this.#allCosts()) {
             const root = app.rootOf(id);
 
             byRoot.set(root, (byRoot.get(root) ?? 0) + cost);
@@ -445,7 +538,7 @@ export class Spend {
                 spent: this.personSpent(person.id),
                 ...(person.budget === undefined ? {} : { budget: person.budget }),
             }));
-        const total = [...this.#costs.values()].reduce((sum, cost) => sum + cost, 0);
+        const total = [...this.#allCosts().values()].reduce((sum, cost) => sum + cost, 0);
 
         return {
             ...(owner ? { total } : {}),
@@ -454,7 +547,21 @@ export class Spend {
         };
     }
 
+    /** Combine dollar totals only for views and limits, never for ordinary payer reconciliation. */
+    #allCosts(): Map<ConversationId, number> {
+        const costs = new Map(this.#costs);
+
+        for (const [source, cost] of Object.entries(this.#auxiliary.sources)) {
+            const id = Number(source) as ConversationId;
+
+            costs.set(id, (costs.get(id) ?? 0) + cost);
+        }
+
+        return costs;
+    }
+
     close(): void {
+        this.#unsubscribeAuxiliary();
         clearTimeout(this.#timer);
         this.#limits.clear();
     }
@@ -477,4 +584,63 @@ function budgetOf(value: unknown): number | undefined {
     }
 
     return Math.round(value * 100) / 100;
+}
+
+/** Normalize provider usage to bounded known fields before persisting it. */
+function auxiliaryRecord(input: AuxiliaryUsage): AuxiliaryUsageRecord {
+    for (const [field, value, max] of [
+        ["receiptId", input.receiptId, 1024],
+        ["requesterId", input.requesterId, 256],
+        ["provider", input.provider, 256],
+        ["model", input.model, 1024],
+    ] as const) {
+        if (
+            typeof value !== "string" ||
+            !value.trim() ||
+            value.length > max ||
+            value.includes("\0")
+        ) {
+            throw new Error(`Invalid auxiliary usage ${field}`);
+        }
+    }
+
+    if (!Number.isSafeInteger(input.sourceConversationId) || input.sourceConversationId <= 0) {
+        throw new Error("Invalid auxiliary usage source conversation");
+    }
+
+    const count = (value: number): number => {
+        if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+            throw new Error("Auxiliary usage counts and costs must be finite and nonnegative");
+        }
+
+        return value;
+    };
+
+    const usage = input.usage;
+
+    return {
+        receiptId: input.receiptId,
+        requesterId: input.requesterId,
+        sourceConversationId: Number(input.sourceConversationId),
+        provider: input.provider,
+        model: input.model,
+        usage: {
+            input: count(usage.input),
+            output: count(usage.output),
+            cacheRead: count(usage.cacheRead),
+            cacheWrite: count(usage.cacheWrite),
+            ...(usage.cacheWrite1h === undefined
+                ? {}
+                : { cacheWrite1h: count(usage.cacheWrite1h) }),
+            ...(usage.reasoning === undefined ? {} : { reasoning: count(usage.reasoning) }),
+            totalTokens: count(usage.totalTokens),
+            cost: {
+                input: count(usage.cost.input),
+                output: count(usage.cost.output),
+                cacheRead: count(usage.cost.cacheRead),
+                cacheWrite: count(usage.cost.cacheWrite),
+                total: count(usage.cost.total),
+            },
+        },
+    };
 }

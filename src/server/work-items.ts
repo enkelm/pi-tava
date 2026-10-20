@@ -378,6 +378,25 @@ export class WorkItems {
         };
     }
 
+    /** Passive work context, without handoff eligibility probes, Git reads or execution admission. */
+    context(id: ConversationId, supplied: User) {
+        const user = this.#app.config.userById(supplied.id);
+
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
+        }
+
+        this.#app.requireSee(user, id);
+        const meta = this.#app.sessionMeta(this.#app.rootOf(id));
+        const item =
+            meta?.workItemId === undefined ? undefined : this.#doc.workItems[meta.workItemId];
+
+        return {
+            ...this.projection(id, user),
+            ...(item === undefined ? {} : { workItem: this.#publicItem(item, user) }),
+        };
+    }
+
     /** Passive navigation receipts: only this current person's outgoing transfers from this exact thread. */
     receipts(id: ConversationId, supplied: User) {
         const user = this.#app.config.userById(supplied.id);

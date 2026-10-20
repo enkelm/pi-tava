@@ -9,12 +9,14 @@ import { AppearanceSettings } from "./appearance.js";
 import { BrowserSettings } from "./browser-profiles.js";
 import { ExtensionsSettings } from "./extensions.js";
 import { ProvidersSettings } from "./providers.js";
+import { PipSettings } from "./pip.js";
 import { SpendSettings } from "./spend.js";
 
 const TABS = [
     { id: "appearance", label: "Appearance", icon: "palette", body: AppearanceSettings },
     { id: "providers", label: "Providers", icon: "key", body: ProvidersSettings },
     { id: "agents", label: "Agents", icon: "bot", body: AgentsSettings },
+    { id: "pip", label: "PiP", icon: "pip", body: PipSettings },
     { id: "notifications", label: "Notifications", icon: "bell", body: NotificationsSettings },
     { id: "browser", label: "Browser", icon: "globe", body: BrowserSettings },
     { id: "extensions", label: "Extensions & safety", icon: "shield", body: ExtensionsSettings },

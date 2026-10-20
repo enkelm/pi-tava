@@ -409,16 +409,20 @@ export class Room {
 
     setDoc(kind: string, value: Record<string, unknown> | null): void {
         if (kind === ChatDoc.definition.kind) {
-            // Chat goes out on its own: new messages only, without resending the view.
+            // Chat has its own delta stream: new messages and native status replacements, never the full view.
             const messages = [...((value?.messages as ChatMessage[]) ?? [])];
-            const known = new Set(this.chat.map((message) => message.id));
-            const added = messages.filter((message) => !known.has(message.id));
+            const known = new Map(
+                this.chat.map((message) => [message.id, JSON.stringify(message)]),
+            );
+            const changed = messages.filter(
+                (message) => known.get(message.id) !== JSON.stringify(message),
+            );
 
             this.chat = messages;
 
-            if (added.length > 0) {
+            if (changed.length > 0) {
                 for (const client of this.clients) {
-                    client.send("chat", { conversationId: this.id, messages: added });
+                    client.send("chat", { conversationId: this.id, messages: changed });
                 }
             }
 

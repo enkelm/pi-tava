@@ -59,6 +59,20 @@ export function describeCall(call, location) {
                 mono: false,
             };
 
+        case "review_comment": {
+            const range =
+                args.line === undefined
+                    ? ""
+                    : `:${args.startLine === undefined ? args.line : `${args.startLine}–${args.line}`}`;
+
+            return {
+                icon: "✎",
+                label: args.action === "inspect" ? "Inspect review diff" : "Post diff comment",
+                subject: `${args.path ?? ""}${range}`,
+                mono: true,
+            };
+        }
+
         case "codemode": {
             // The first line that does something: not the options line, a comment, or blank.
             const line = String(args.code ?? "")

@@ -943,6 +943,100 @@ test(
 );
 
 test(
+    "PiP settings pick independent models and nested Back keeps the settings page open",
+    real,
+    async () => {
+        // HTTP model independence belongs to pip-settings.test.ts. This owns routing the real picker
+        // to each setting (not the open coding thread), mobile fit, and its separate Back layer.
+        await fresh();
+        await tap(row(first));
+        await tap('.topbar [aria-label="Menu"]');
+        await page.evaluate(`
+            [...document.querySelectorAll('.sheet .list-item')].find((each) => each.querySelector('span')?.textContent === 'Settings').click();
+        `);
+        await tap("#settings-tab-pip");
+        await until(
+            async () =>
+                inPage<boolean>(`
+            return JSON.stringify(document.querySelector('[aria-label="Choose Collaborator model"]') !== null);
+        `),
+            "PiP settings loaded",
+        );
+        await reach({ sheet: "settings", layers: 2 }, "PiP is a top-level settings category");
+        await tap('[aria-label="Choose Collaborator model"]');
+        await until(
+            async () => (await where()).layers === 3,
+            "collaborator picker has its own Back layer",
+        );
+        await tap('[aria-label="Collaborator model"] [role="option"][title^="faux/faux-2 "]');
+        await until(
+            () => app.config.pipCollaborator?.choice.modelId === "faux-2",
+            "collaborator selection saved",
+        );
+        await reach({ sheet: "settings", layers: 2 }, "model selection returns to PiP settings");
+        const person = app.config.users.find((user) => user.role === "owner")!;
+
+        assert.equal(
+            app.pip.idOf(person.id),
+            undefined,
+            "collaborator picker does not open private chat",
+        );
+        assert.equal(
+            (await app.agentState(first))?.model?.modelId,
+            "faux-1",
+            "the coding thread behind settings is untouched",
+        );
+        await tap('[aria-label="Choose PiP chats model"]');
+        await tap('[aria-label="PiP chats model"] [role="option"][title^="faux/faux-vision "]');
+        await until(async () => {
+            const id = app.pip.idOf(person.id);
+
+            return id !== undefined && (await app.agentState(id))?.model?.modelId === "faux-vision";
+        }, "private model selection saved");
+        await reach({ sheet: "settings", layers: 2 }, "private selection closes only the picker");
+        assert.equal(app.config.pipCollaborator?.choice.modelId, "faux-2");
+        assert.equal((await app.agentState(first))?.model?.modelId, "faux-1");
+        assert.equal(
+            await inPage<boolean>(`
+            const panel = document.querySelector('#settings-panel-pip');
+
+            return JSON.stringify(panel.scrollWidth <= panel.clientWidth);
+        `),
+            true,
+            "PiP settings fit a phone without horizontal scrolling",
+        );
+        await tap('[aria-label="Choose Collaborator model"]');
+        await until(async () => (await where()).layers === 3, "reopened collaborator picker");
+        await page.press("Escape");
+        await reach({ sheet: "settings", layers: 2 }, "Escape closes only the picker");
+        await tap('[aria-label="Choose Collaborator model"]');
+        await until(
+            async () => (await where()).layers === 3,
+            "collaborator picker reopened for Back",
+        );
+        await back();
+        await reach({ sheet: "settings", layers: 2 }, "Back closes only the picker");
+        await until(
+            async () =>
+                inPage<boolean>(`
+            return JSON.stringify(document.querySelector('[aria-label="Collaborator model"]') === null);
+        `),
+            "collaborator picker unmounted",
+        );
+        assert.equal(
+            await inPage<string>(`
+            return JSON.stringify(document.querySelector('[role="tab"][aria-selected="true"]').textContent.trim());
+        `),
+            "PiP",
+        );
+        await back();
+        await reach({ sheet: "menu", layers: 1 }, "Back leaves PiP settings for the menu");
+        await back();
+        await reach({ sheet: null, layers: 0 }, "menu closed");
+    },
+);
+
+test(
     "Settings preserves account and budget drafts, saves preferences, and returns from invites",
     real,
     async () => {

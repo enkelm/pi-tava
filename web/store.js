@@ -395,8 +395,12 @@ function applyChat(data) {
 
     const known = new Set(data.full ? [] : state.chat.map((message) => message.id));
     const added = data.messages.filter((message) => !known.has(message.id));
+    const replacements = new Map(data.messages.map((message) => [message.id, message]));
+    const chat = data.full
+        ? data.messages
+        : [...state.chat.map((message) => replacements.get(message.id) ?? message), ...added];
 
-    store.set({ chat: (data.full ? data.messages : [...state.chat, ...added]).slice(-CHAT_LIMIT) });
+    store.set({ chat: chat.slice(-CHAT_LIMIT) });
 
     // The People panel stays open for long: on its Pinned or Notes tab, new messages still count and show a notice.
     if (chatLogs > 0) {
@@ -1112,6 +1116,7 @@ export function connect() {
 // browser makes to a server, and after a handful nothing else loads. It closes on leaving and reconnects on return.
 addEventListener("pagehide", () => {
     foreground = false;
+    reviewNavigation++;
     clearTimeout(startRetry);
     suspend();
 });
@@ -1394,6 +1399,7 @@ export function closeSignIn(flowId) {
 }
 
 export function navigate(conversationId, { replace = false, sheet = null, privateId = null } = {}) {
+    reviewNavigation++;
     const path =
         privateId !== null
             ? `/private/${encodeURIComponent(privateId)}`
@@ -1450,6 +1456,7 @@ export function navigate(conversationId, { replace = false, sheet = null, privat
 
 // Back or forward to another route. Back that only closes a layer (a sheet, a panel) is back.js's.
 onRoute(() => {
+    reviewNavigation++;
     const id = routeConversation();
     const privateId = routePrivate();
 
@@ -1618,6 +1625,7 @@ export const actions = {
     changes: (id = current()) => api(`c/${id}/changes`),
     /** Comment-first reviews capture their session so navigation cannot retarget a send. */
     reviewComment: (request, id = current()) => api(`c/${id}/reviews/comment`, request),
+    applyReviewSuggestion: (request, id = current()) => api(`c/${id}/reviews/suggestion`, request),
     resolveReviewThreads: (request, id = current()) => api(`c/${id}/reviews/resolve`, request),
     /** Scoped, read-only Changes access for everyone in the conversation, including viewers. */
     reviewChanges: (id = current()) => api(`c/${id}/reviews/changes`),
@@ -1813,6 +1821,66 @@ export function revealReviewReviewer(userId) {
         sheet: null,
         reviewFocus: { conversationId, userId, n: (reviewFocus?.n ?? 0) + 1 },
     });
+}
+
+let reviewNavigation = 0;
+
+/** Open the original durable discussion, never a successor or a coincidentally matching line. */
+export async function revealReviewThread({ conversationId, threadId }, { reply = false } = {}) {
+    const opening = store.state.conversationId;
+    const person = store.state.me?.id;
+    const request = ++reviewNavigation;
+    const current = () =>
+        request === reviewNavigation &&
+        store.state.conversationId === opening &&
+        store.state.me?.id === person;
+
+    if (
+        !foreground ||
+        !person ||
+        !Number.isSafeInteger(conversationId) ||
+        conversationId < 1 ||
+        typeof threadId !== "string"
+    ) {
+        return;
+    }
+
+    try {
+        // Check current source access before navigating; forked history may link to another conversation.
+        const reviews = await api(`c/${conversationId}/reviews`);
+
+        if (!current()) {
+            return;
+        }
+
+        if (!reviews.threads?.some((thread) => thread.id === threadId)) {
+            throw new Error("Unavailable review discussion");
+        }
+
+        navigate(conversationId);
+        closePeople();
+        store.set({
+            filesOpen: true,
+            filesTab: "changes",
+            filesAsk: { tab: "changes", at: Date.now() },
+            browserOpen: false,
+            drawer: false,
+            sheet: null,
+            reviewTarget: {
+                conversationId,
+                threadId,
+                reply,
+                n: (store.state.reviewTarget?.n ?? 0) + 1,
+            },
+        });
+    } catch {
+        if (current()) {
+            notify(
+                "error",
+                "That review discussion is unavailable. Check your access and try again.",
+            );
+        }
+    }
 }
 
 /** Hide the People panel. Showing it is `openSheet({ type: "chat" })`, which docks it on wide screens. */

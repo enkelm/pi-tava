@@ -7,7 +7,7 @@ import { useBack } from "./back.js";
 import { jumpToEntry } from "./chat.js";
 import { fingerprint, firstLine, hunkRows, markRanges, parseDiff } from "./diff-parse.js";
 import { highlight, highlightLines, langOf } from "./highlight.js";
-import { ReviewsPanel, ReviewThreads } from "./reviews.js";
+import { ReviewsPanel, ReviewThreads, useReviewRange } from "./reviews.js";
 import { branchAvailable } from "./sheets/branch.js";
 import { actions, api, attempt, canSteer, notify, openSheet, store } from "./store.js";
 import { html, Icon, Loader, openFile, shortPath } from "./ui.js";
@@ -74,6 +74,7 @@ export const KIND_LETTERS = { modified: "M", added: "A", deleted: "D", renamed: 
 const BIG_DIFF = 1200;
 /** Hidden lines shown per tap on a long gap. */
 const EXPAND_STEP = 20;
+const NO_THREADS = [];
 
 /** The highlighted HTML of each line of a file's hunks, by line object: each side of a hunk colored as one run. */
 function highlightHunks(file, lang) {
@@ -170,7 +171,12 @@ function useFileText(path, key, wanted, reviewPath = null) {
                       );
 
         read.then(
-            (text) => keep(typeof text === "string" ? text.replace(/\n$/, "").split("\n") : false),
+            (text) =>
+                keep(
+                    typeof text === "string"
+                        ? text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n")
+                        : false,
+                ),
             () => keep(false),
         );
 
@@ -254,14 +260,37 @@ function gapsOf(file, length) {
     return gaps;
 }
 
+/** Captured line numbers, inclusive. Keep malformed stored anchors bounded and outdated. */
+function capturedLines(anchor) {
+    const start = anchor?.startLine ?? anchor?.line;
+    const end = anchor?.line;
+
+    if (
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        start < 1 ||
+        start > end ||
+        end - start >= 100 ||
+        typeof anchor.context !== "string" ||
+        anchor.context.length > (anchor.startLine == null ? 1000 : 8000)
+    ) {
+        return [];
+    }
+
+    return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+}
+
 /** A line-number cell. New-side numbers open the file at that line, when there is a file to open. */
-function LineNo({ line, side, onLine, onComment, kind = "" }) {
+function LineNo({ line, side, onLine, onComment, gutter, kind = "" }) {
     const number = side === "old" ? line?.old : line?.new;
     const comment = onComment && number !== undefined;
     const go = !comment && side === "new" && onLine && line?.new !== undefined;
+    const selected = gutter?.selected(side, number) ?? false;
+    const reviewed = gutter?.reviewed(side, number) ?? false;
+    const anchor = { side, line: number, context: line?.text.slice(0, 1000) };
 
     return html`<td
-        class=${`dv-n ${line ? kind : "none"} ${go ? "go" : ""} ${comment ? "commentable" : ""}`}
+        class=${`dv-n ${line ? kind : "none"} ${go ? "go" : ""} ${comment ? "commentable" : ""} ${selected ? "dv-selected" : ""} ${reviewed ? "dv-reviewed" : ""}`}
         data-n=${comment ? "" : (number ?? "")}
         onClick=${go ? () => onLine(line.new) : undefined}
     >
@@ -271,37 +300,52 @@ function LineNo({ line, side, onLine, onComment, kind = "" }) {
                 type="button"
                 class="dv-comment-line"
                 data-n=${number}
+                data-review-side=${side}
+                data-no-swipe
                 aria-label=${`Comment on ${side} line ${number}`}
-                title=${`Comment on ${side} line ${number}`}
-                onClick=${() => onComment({ side, line: number, context: line.text.slice(0, 1000) })}
+                title=${`Comment on ${side} line ${number} · drag or Shift-click for a range`}
+                aria-pressed=${selected}
+                disabled=${gutter?.pending}
+                onPointerDown=${(event) => gutter?.down(event, anchor)}
+                onPointerEnter=${(event) => gutter?.enter(event, anchor)}
+                onPointerUp=${(event) => gutter?.up(event)}
+                onPointerCancel=${(event) => gutter?.cancel(event)}
+                onTouchStart=${(event) => gutter?.touchStart(event, anchor)}
+                onTouchMove=${(event) => gutter?.touchMove(event)}
+                onTouchEnd=${(event) => gutter?.touchEnd(event)}
+                onTouchCancel=${(event) => gutter?.touchCancel(event)}
+                onContextMenu=${(event) => gutter?.contextMenu(event)}
+                onClick=${(event) => onComment(anchor, event)}
             ></button>`
         }
     </td>`;
 }
 
 /** The two number cells of a unified row. */
-const Numbers = ({ left, right, onLine, onComment, kind = "" }) =>
+const Numbers = ({ left, right, onLine, onComment, gutter, kind = "" }) =>
     html`<${LineNo}
         line=${left}
         side="old"
         onLine=${onLine}
         onComment=${onComment}
+        gutter=${gutter}
         kind=${kind}
     /><${LineNo}
         line=${right}
         side="new"
         onLine=${onLine}
         onComment=${onComment}
+        gutter=${gutter}
         kind=${kind}
     />`;
 
 /** One line's code cell: its sign, its colors, and the words that changed. */
-function Code({ line, colored, marks, kind }) {
+function Code({ line, colored, marks, kind, selected = false, reviewed = false }) {
     const source = colored.get(line);
     const body = markRanges(source ?? escapeText(line?.text ?? ""), marks.get(line));
 
     return html`<td
-        class=${`dv-code ${kind}`}
+        class=${`dv-code ${kind} ${selected ? "dv-selected" : ""} ${reviewed ? "dv-reviewed" : ""}`}
         data-sign=${kind === "add" ? "+" : kind === "del" ? "−" : ""}
         dangerouslySetInnerHTML=${{ __html: body }}
     ></td>`;
@@ -311,7 +355,7 @@ const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&
 const escapeText = (text) => text.replace(/[&<>"']/g, (char) => ESCAPES[char]);
 
 /** The rows of one hunk, unified: unchanged lines, then each run of removed lines before the lines that replaced it. */
-function UnifiedRows({ rows, colored, marks, onLine, onComment, afterLine }) {
+function UnifiedRows({ rows, colored, marks, onLine, onComment, gutter, afterLine }) {
     const out = [];
 
     for (let at = 0; at < rows.length; at++) {
@@ -331,8 +375,16 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment, afterLine }) {
                     right=${row.right}
                     onLine=${onLine}
                     onComment=${onComment}
+                    gutter=${gutter}
                 />
-                <${Code} line=${row.left} colored=${colored} marks=${marks} kind="ctx" />
+                <${Code}
+                    line=${row.left}
+                    colored=${colored}
+                    marks=${marks}
+                    kind="ctx"
+                    selected=${gutter?.selected("old", row.left?.old) || gutter?.selected("new", row.right?.new)}
+                    reviewed=${gutter?.reviewed("old", row.left?.old) || gutter?.reviewed("new", row.right?.new)}
+                />
             </tr>`);
             out.push(afterLine?.(row.left, row.right, 3));
             continue;
@@ -355,9 +407,17 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment, afterLine }) {
                         right=${null}
                         onLine=${onLine}
                         onComment=${onComment}
+                        gutter=${gutter}
                         kind="del"
                     />
-                    <${Code} line=${each.left} colored=${colored} marks=${marks} kind="del" />
+                    <${Code}
+                        line=${each.left}
+                        colored=${colored}
+                        marks=${marks}
+                        kind="del"
+                        selected=${gutter?.selected("old", each.left.old)}
+                        reviewed=${gutter?.reviewed("old", each.left.old)}
+                    />
                 </tr>`);
                 out.push(afterLine?.(each.left, null, 3));
             }
@@ -371,9 +431,17 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment, afterLine }) {
                         right=${each.right}
                         onLine=${onLine}
                         onComment=${onComment}
+                        gutter=${gutter}
                         kind="add"
                     />
-                    <${Code} line=${each.right} colored=${colored} marks=${marks} kind="add" />
+                    <${Code}
+                        line=${each.right}
+                        colored=${colored}
+                        marks=${marks}
+                        kind="add"
+                        selected=${gutter?.selected("new", each.right.new)}
+                        reviewed=${gutter?.reviewed("new", each.right.new)}
+                    />
                 </tr>`);
                 out.push(afterLine?.(null, each.right, 3));
             }
@@ -386,7 +454,7 @@ function UnifiedRows({ rows, colored, marks, onLine, onComment, afterLine }) {
 }
 
 /** The rows of one hunk side by side: old on the left, new on the right, changed lines paired across. */
-function SplitRows({ rows, colored, marks, onLine, onComment, afterLine }) {
+function SplitRows({ rows, colored, marks, onLine, onComment, gutter, afterLine }) {
     return rows.map((row) => {
         if (row.kind === "note") {
             return html`<tr class="dv-note">
@@ -403,6 +471,7 @@ function SplitRows({ rows, colored, marks, onLine, onComment, afterLine }) {
                 side="old"
                 onLine=${onLine}
                 onComment=${onComment}
+                gutter=${gutter}
                 kind=${change ? "del" : ""}
             />
             ${
@@ -412,6 +481,8 @@ function SplitRows({ rows, colored, marks, onLine, onComment, afterLine }) {
                           colored=${colored}
                           marks=${marks}
                           kind=${change ? "del" : "ctx"}
+                          selected=${gutter?.selected("old", left.old)}
+                          reviewed=${gutter?.reviewed("old", left.old)}
                       />`
                     : html`<td class="dv-code none"></td>`
             }
@@ -420,6 +491,7 @@ function SplitRows({ rows, colored, marks, onLine, onComment, afterLine }) {
                 side="new"
                 onLine=${onLine}
                 onComment=${onComment}
+                gutter=${gutter}
                 kind=${change ? "add" : ""}
             />
             ${
@@ -429,6 +501,8 @@ function SplitRows({ rows, colored, marks, onLine, onComment, afterLine }) {
                           colored=${colored}
                           marks=${marks}
                           kind=${change ? "add" : "ctx"}
+                          selected=${gutter?.selected("new", right.new)}
+                          reviewed=${gutter?.reviewed("new", right.new)}
                       />`
                     : html`<td class="dv-code none"></td>`
             }
@@ -507,6 +581,319 @@ function DiffFile({
     const ref = useRef(null);
     const width = useWidth(ref);
     const split = layoutFor(width) === "split";
+    const anchor = discussion?.anchor;
+    const selection = useReviewRange(file.path, anchor);
+    const [preview, setPreview] = useState(null);
+    const drag = useRef(null);
+    const skipClick = useRef(false);
+    const pointer = useRef("");
+
+    const cancelDrag = (event) => {
+        const current = drag.current;
+
+        if (
+            event?.pointerId != null &&
+            (current?.touch || event.pointerId !== current?.pointerId)
+        ) {
+            return;
+        }
+
+        if (current) {
+            current.cleanup();
+            skipClick.current = true;
+        }
+
+        drag.current = null;
+        setPreview(null);
+    };
+
+    const updateDrag = (current, number) => {
+        // Drag previews are bounded; Shift-click still reports an excessive range in the composer.
+        const end = Math.max(1, Math.min(current.start + 99, Math.max(current.start - 99, number)));
+
+        if (current.end !== end || !current.previewed) {
+            current.end = end;
+            current.previewed = true;
+            setPreview({
+                side: current.side,
+                start: Math.min(current.start, end),
+                end: Math.max(current.start, end),
+            });
+        }
+    };
+
+    const finishDrag = (event) => {
+        const current = drag.current;
+
+        if (!current || current.touch || current.pointerId !== event.pointerId) {
+            return;
+        }
+
+        current.cleanup();
+        drag.current = null;
+        setPreview(null);
+        skipClick.current = true;
+        current.commit(current.end);
+    };
+
+    const beginDrag = (event, next, touch = null) => {
+        cancelDrag();
+        skipClick.current = false;
+        const origin = event.shiftKey && anchor?.side === next.side ? anchor : next;
+        const current = {
+            pointerId: event.pointerId,
+            touch,
+            side: next.side,
+            start: origin.line,
+            end: next.line,
+            selecting: !touch,
+            timer: null,
+            commit: (end) => {
+                if (end !== origin.line || event.shiftKey) {
+                    selection.select(origin, origin.line, end);
+                }
+
+                onComment(origin);
+            },
+        };
+
+        const otherTouch = (event) => {
+            if (event.touches.length > 1) {
+                cancelDrag();
+            }
+        };
+
+        const hidden = () => document.hidden && cancelDrag();
+
+        // Only a live gesture owns global listeners, not every file in a large review.
+        // Mouse release outside the gutter settles the last valid endpoint. Touch events stay
+        // on their initial button; hit testing below follows the held contact instead of enter.
+        document.addEventListener("pointerup", finishDrag);
+        document.addEventListener("pointercancel", cancelDrag);
+        document.addEventListener("touchstart", otherTouch, { passive: true });
+        document.addEventListener("visibilitychange", hidden);
+        globalThis.addEventListener("blur", cancelDrag);
+        globalThis.addEventListener("pagehide", cancelDrag);
+
+        current.cleanup = () => {
+            clearTimeout(current.timer);
+            document.removeEventListener("pointerup", finishDrag);
+            document.removeEventListener("pointercancel", cancelDrag);
+            document.removeEventListener("touchstart", otherTouch);
+            document.removeEventListener("visibilitychange", hidden);
+            globalThis.removeEventListener("blur", cancelDrag);
+            globalThis.removeEventListener("pagehide", cancelDrag);
+        };
+
+        drag.current = current;
+
+        if (touch) {
+            current.timer = setTimeout(() => {
+                if (drag.current === current) {
+                    current.selecting = true;
+                    updateDrag(current, current.end);
+                }
+            }, 450);
+        } else {
+            updateDrag(current, current.end);
+        }
+    };
+
+    const touchHit = (current, contact) => {
+        const button = document
+            .elementFromPoint(contact.clientX, contact.clientY)
+            ?.closest(".dv-comment-line");
+        const number = Number(button?.dataset.n);
+
+        if (
+            ref.current?.contains(button) &&
+            button.dataset.reviewSide === current.side &&
+            Number.isSafeInteger(number) &&
+            number > 0
+        ) {
+            updateDrag(current, number);
+        }
+    };
+
+    useEffect(() => {
+        cancelDrag();
+
+        return () => cancelDrag();
+    }, [file, open, Boolean(onComment)]);
+
+    const selectLine = (next, event = {}) => {
+        if (skipClick.current && event.detail !== 0) {
+            skipClick.current = false;
+
+            return;
+        }
+
+        if (selection.pending) {
+            return;
+        }
+
+        const touch =
+            event.pointerType === "touch" ||
+            (!event.pointerType && event.detail !== 0 && pointer.current === "touch");
+        const extend = anchor?.line && anchor.side === next.side && (event.shiftKey || touch);
+
+        if (extend) {
+            selection.select(anchor, anchor.line, next.line);
+        }
+
+        onComment(extend ? anchor : next);
+    };
+
+    const shownSelection = preview ?? selection;
+    const reviewedLines = new Set();
+    const gutter = {
+        pending: selection.pending,
+        reviewed: (side, number) => reviewedLines.has(`${side}:${number}`),
+        selected: (side, number) =>
+            number !== undefined &&
+            side === shownSelection.side &&
+            number >= shownSelection.start &&
+            number <= shownSelection.end,
+        down: (event, next) => {
+            pointer.current = event.pointerType;
+            skipClick.current = false;
+
+            // Touch needs cancellable touchmove after hold intent: changing touch-action during
+            // pointerdown cannot take a native pan back from Safari. Ordinary motion stays native.
+            if (
+                event.pointerType === "touch" ||
+                event.button > 0 ||
+                event.isPrimary === false ||
+                selection.pending
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+            beginDrag(event, next);
+        },
+        enter: (event, next) => {
+            const current = drag.current;
+
+            if (
+                current &&
+                !current.touch &&
+                current.pointerId === event.pointerId &&
+                current.side === next.side
+            ) {
+                updateDrag(current, next.line);
+            }
+        },
+        up: finishDrag,
+        cancel: cancelDrag,
+        touchStart: (event, next) => {
+            pointer.current = "touch";
+
+            if (event.touches.length !== 1 || selection.pending) {
+                cancelDrag();
+
+                return;
+            }
+
+            const contact = event.changedTouches[0];
+
+            beginDrag(event, next, {
+                identifier: contact.identifier,
+                clientX: contact.clientX,
+                clientY: contact.clientY,
+            });
+        },
+        touchMove: (event) => {
+            const current = drag.current;
+            const contact = Array.from(event.touches).find(
+                (touch) => touch.identifier === current?.touch?.identifier,
+            );
+
+            if (!current?.touch || !contact) {
+                return;
+            }
+
+            if (
+                event.touches.length !== 1 ||
+                (!current.selecting &&
+                    Math.hypot(
+                        contact.clientX - current.touch.clientX,
+                        contact.clientY - current.touch.clientY,
+                    ) > 10)
+            ) {
+                cancelDrag();
+
+                return;
+            }
+
+            if (current.selecting) {
+                if (!event.cancelable) {
+                    cancelDrag();
+
+                    return;
+                }
+
+                // Local to the starting gutter button, and only after a deliberate stationary hold.
+                event.preventDefault();
+                touchHit(current, contact);
+            }
+        },
+        touchEnd: (event) => {
+            const current = drag.current;
+            const contact = Array.from(event.changedTouches).find(
+                (touch) => touch.identifier === current?.touch?.identifier,
+            );
+
+            if (!current?.touch || !contact) {
+                return;
+            }
+
+            // Some engines report the last displacement only at release.
+            if (
+                !current.selecting &&
+                Math.hypot(
+                    contact.clientX - current.touch.clientX,
+                    contact.clientY - current.touch.clientY,
+                ) > 10
+            ) {
+                cancelDrag();
+
+                return;
+            }
+
+            current.cleanup();
+            drag.current = null;
+            setPreview(null);
+
+            if (current.selecting) {
+                touchHit(current, contact);
+                setPreview(null);
+                skipClick.current = true;
+
+                if (event.cancelable) {
+                    event.preventDefault();
+                }
+
+                current.commit(current.end);
+            }
+        },
+        touchCancel: (event) => {
+            const current = drag.current;
+
+            if (
+                Array.from(event.changedTouches).some(
+                    (touch) => touch.identifier === current?.touch?.identifier,
+                )
+            ) {
+                cancelDrag();
+            }
+        },
+        contextMenu: (event) => {
+            if (drag.current?.touch) {
+                event.preventDefault();
+            }
+        },
+    };
 
     // The file header may be stuck above a scrolled diff. Its new composer lives at the file's
     // natural start, so reveal the mounted form rather than leaving it offscreen above that header.
@@ -576,17 +963,18 @@ function DiffFile({
 
         return lines;
     }, [file]);
-    const hunkLine = (anchor) => hunkLines.get(`${anchor.side}:${anchor.line}`);
     const needsContext =
         open &&
         canExpand &&
         discussion?.threads.some(
-            (thread) => thread.line && thread.cwd === discussion.cwd && !hunkLine(thread),
+            (thread) =>
+                thread.cwd === discussion.cwd &&
+                capturedLines(thread).some((number) => !hunkLines.has(`${thread.side}:${number}`)),
         );
     const fetched = useFileText(
         path,
         version || `${file.added}:${file.removed}`,
-        canExpand && (asked || needsContext),
+        canExpand && (asked || needsContext || Boolean(discussion?.anchor?.line)),
         reviewPath,
     );
     // The file as it is now must still read as the diff says, or its other lines would be shown in the wrong places.
@@ -611,16 +999,11 @@ function DiffFile({
         [file, expandable, text?.length],
     );
 
-    // Never attach an old comment to different text merely because its line number still exists.
-    const locate = (anchor) => {
-        if (!anchor?.line || typeof anchor.context !== "string") {
-            return null;
-        }
-
-        const line = hunkLine(anchor);
+    const lineAt = (side, lineNumber) => {
+        const line = hunkLines.get(`${side}:${lineNumber}`);
 
         if (line) {
-            return line.text.slice(0, 1000) === anchor.context ? { line, gap: -1 } : null;
+            return { line, gap: -1 };
         }
 
         if (!text || !expandable) {
@@ -629,13 +1012,9 @@ function DiffFile({
 
         for (let index = 0; index < gaps.length; index++) {
             const gap = gaps[index];
-            const number = anchor.side === "old" ? anchor.line + gap.shift : anchor.line;
+            const number = side === "old" ? lineNumber + gap.shift : lineNumber;
 
-            if (
-                number >= gap.from &&
-                number <= gap.to &&
-                text[number - 1]?.slice(0, 1000) === anchor.context
-            ) {
+            if (number >= gap.from && number <= gap.to && text[number - 1] !== undefined) {
                 return {
                     line: {
                         type: "ctx",
@@ -651,7 +1030,53 @@ function DiffFile({
         return null;
     };
 
-    const placed = new Map();
+    // Human range selection is confined to this file and its initially chosen side. Reuse
+    // the same complete-file evidence and old/new gap mapping as stored range placement.
+    const rangeEvidence = (start, end) => {
+        const locations = Array.from({ length: end - start + 1 }, (_, index) =>
+            lineAt(discussion.anchor.side, start + index),
+        );
+
+        if (locations.some((location) => !location)) {
+            return {
+                error:
+                    canExpand && fetched === null
+                        ? "Reading complete range context…"
+                        : "Complete range context is unavailable. Choose lines shown in this diff or refresh Changes.",
+            };
+        }
+
+        const context = locations.map((location) => location.line.text).join("\n");
+
+        return start !== end && context.length > 8000
+            ? { error: "Choose a smaller range." }
+            : { context };
+    };
+
+    // A range belongs at its original end only when ALL captured lines still match, not just
+    // the end line. Unlike legacy single-line anchors, range evidence is never truncated.
+    const locate = (anchor) => {
+        const numbers = capturedLines(anchor);
+
+        if (!numbers.length) {
+            return null;
+        }
+
+        const locations = numbers.map((number) => lineAt(anchor.side, number));
+
+        if (locations.some((location) => !location)) {
+            return null;
+        }
+
+        const context =
+            anchor.startLine == null
+                ? locations[0].line.text.slice(0, 1000)
+                : locations.map((location) => location.line.text).join("\n");
+
+        return context === anchor.context ? locations.at(-1) : null;
+    };
+
+    const capturedContext = new Map();
     const inlineThreads = new Map();
     const outdated = [];
     const fileThreads = [];
@@ -666,7 +1091,15 @@ function DiffFile({
             const location = locate(thread);
 
             if (location) {
-                placed.set(thread.id, location);
+                for (const number of capturedLines(thread)) {
+                    reviewedLines.add(`${thread.side}:${number}`);
+                    const captured = lineAt(thread.side, number);
+
+                    if (captured.gap !== -1) {
+                        capturedContext.set(captured.line.new, captured);
+                    }
+                }
+
                 const key = `${thread.side}:${thread.line}`;
                 const group = inlineThreads.get(key) ?? [];
 
@@ -678,7 +1111,6 @@ function DiffFile({
         }
     }
 
-    const anchor = discussion?.anchor;
     const anchorLocation = locate(anchor);
     const afterLine = discussion
         ? (left, right, columns) =>
@@ -706,7 +1138,8 @@ function DiffFile({
                               path=${file.path}
                               side=${side}
                               line=${number}
-                              context=${line.text.slice(0, 1000)}
+                              context=${anchor?.context ?? ""}
+                              rangeEvidence=${rangeEvidence}
                               threads=${[]}
                               composing=${Boolean(composing)}
                               onCancel=${discussion.onCancel}
@@ -755,6 +1188,7 @@ function DiffFile({
             side=${anchor.side}
             line=${anchor.line}
             context=${anchor.context}
+            rangeEvidence=${rangeEvidence}
             threads=${[]}
             composing=${true}
             outdated=${true}
@@ -790,6 +1224,10 @@ function DiffFile({
 
         /** Context rows for lines a gap shows, colored as one run. */
         const contextRows = (lines) => {
+            if (!lines.length) {
+                return null;
+            }
+
             const colors = highlightLines(
                 lines.map((line) => line.text),
                 lang,
@@ -801,7 +1239,8 @@ function DiffFile({
                 colored=${extra}
                 marks=${none}
                 onLine=${onLine}
-                onComment=${onComment}
+                onComment=${onComment ? selectLine : null}
+                gutter=${gutter}
                 afterLine=${afterLine}
             />`;
         };
@@ -836,7 +1275,7 @@ function DiffFile({
             // Reveal commented context without drawing thousands of unrelated hidden lines.
             const extra = new Map();
 
-            for (const location of [...placed.values(), anchorLocation]) {
+            for (const location of [...capturedContext.values(), anchorLocation]) {
                 if (
                     location?.gap === index &&
                     location.line.new >= from &&
@@ -856,12 +1295,21 @@ function DiffFile({
                 onShow=${(how) => show(index, how)}
             />`;
 
+            // Color adjacent captured lines as one run, preserving multiline syntax state
+            // and avoiding one highlighter invocation (and empty gap) per range line.
+            let run = [];
+
             for (const [number, line] of [...extra].sort(([a], [b]) => a - b)) {
-                middle.push(hidden(next, number - 1), contextRows([line]));
+                if (number !== next) {
+                    middle.push(contextRows(run), hidden(next, number - 1));
+                    run = [];
+                }
+
+                run.push(line);
                 next = number + 1;
             }
 
-            middle.push(hidden(next, to));
+            middle.push(contextRows(run), hidden(next, to));
 
             return html`${contextRows(top)}${middle}${contextRows(bottom)}`;
         };
@@ -903,7 +1351,8 @@ function DiffFile({
                         colored=${colored}
                         marks=${marks}
                         onLine=${onLine}
-                        onComment=${onComment}
+                        onComment=${onComment ? selectLine : null}
+                        gutter=${gutter}
                         afterLine=${afterLine}
                     />
                 </tbody>`,
@@ -925,6 +1374,16 @@ function DiffFile({
         lang,
         onComment,
         discussion,
+        selection,
+        preview,
+        // Cached VNodes also contain discussion controls. Keep their live permissions,
+        // people and capabilities fresh without rebuilding on every streamed entry.
+        store.state.me,
+        store.state.users,
+        store.state.server,
+        store.state.view.turns,
+        Boolean(store.state.view.live?.busy),
+        (store.state.view.subagents ?? []).some((agent) => agent.busy),
     ]);
 
     let body;
@@ -1705,10 +2164,19 @@ function ReviewFile({
               })
             : setUndoing(true);
 
-    const comment = (next) => {
-        onOpen();
-        setAnchor(next);
-    };
+    const comment = useMemo(
+        () => (next) => {
+            onOpen(file.path);
+            setAnchor(next);
+        },
+        [onOpen, file.path],
+    );
+    const cwd = file.discussionOnly ? null : reviewCwd();
+    const discussion = useMemo(
+        () =>
+            commenting ? { threads, cwd, anchor, target, onCancel: () => setAnchor(null) } : null,
+        [commenting, threads, cwd, anchor, target],
+    );
 
     const tools = html`${
         commenting &&
@@ -1765,23 +2233,13 @@ function ReviewFile({
             loading=${!entry && !error}
             error=${error}
             expand=${active && !file.discussionOnly && (commenting || canSteer())}
-            onComment=${commenting && !file.discussionOnly ? comment : null}
-            discussion=${
-                commenting
-                    ? {
-                          threads,
-                          cwd: file.discussionOnly ? null : reviewCwd(),
-                          anchor,
-                          target,
-                          onCancel: () => setAnchor(null),
-                      }
-                    : null
-            }
+            onComment=${active && commenting && !file.discussionOnly ? comment : null}
+            discussion=${discussion}
             tools=${tools}
             viewed=${viewed}
             onViewed=${(on) => onViewed(file.path, on ? (entry?.print ?? "?") : undefined)}
             open=${open && !viewed}
-            onToggle=${onToggle}
+            onToggle=${() => onToggle(file.path, viewed)}
             note=${html`${file.byPi && html`<span class="chip dv-chip">Pi</span>`}${file.discussionOnly && html`<span class="chip dv-chip">outdated</span>`}${stale && html`<span class="chip dv-chip warn" title="It changed after you marked it viewed">changed</span>`}`}
         />
     </div>`;
@@ -1800,13 +2258,25 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
     const allowed = commenting || canSteer();
     const { changes: workingChanges, error } = useChanges(active && allowed);
     const changes = allowed ? workingChanges : null;
-    const threads = commenting ? (store.state.view.reviews?.threads ?? []) : [];
+    const threads = commenting ? (store.state.view.reviews?.threads ?? NO_THREADS) : NO_THREADS;
+    const threadsByPath = useMemo(() => {
+        const grouped = new Map();
+
+        for (const thread of threads) {
+            const group = grouped.get(thread.path) ?? [];
+
+            group.push(thread);
+            grouped.set(thread.path, group);
+        }
+
+        return grouped;
+    }, [threads]);
     const cwd = reviewCwd();
     const viewId = commenting ? `${id}@${cwd}` : id;
     const target =
         store.state.reviewTarget?.conversationId === id ? store.state.reviewTarget : null;
     const targetThread = threads.find((thread) => thread.id === target?.threadId);
-    const load = () => reloadChanges(id);
+    const load = useMemo(() => () => reloadChanges(id), [id]);
 
     const refresh = () => {
         forgetDiffs(id);
@@ -1883,20 +2353,58 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
     }, [ask, changes !== null]);
 
     /** Mark a file viewed as of the diff `print` names, or not viewed (undefined), kept for this device. */
-    const setViewed = (path, print) =>
-        setViewedState((before) => {
-            const next = { ...before };
+    const setViewed = useMemo(
+        () => (path, print) =>
+            setViewedState((before) => {
+                const next = { ...before };
 
-            if (print === undefined) {
-                delete next[path];
+                if (print === undefined) {
+                    delete next[path];
+                } else {
+                    next[path] = print;
+                }
+
+                writeViewed(viewId, next);
+
+                return next;
+            }),
+        [viewId],
+    );
+    const openReviewFile = useMemo(
+        () => (path) => {
+            setViewed(path, undefined);
+            setFolded((each) => ({ ...each, [path]: false }));
+        },
+        [setViewed],
+    );
+    const toggleReviewFile = useMemo(
+        () => (path, marked) => {
+            if (marked) {
+                openReviewFile(path);
             } else {
-                next[path] = print;
+                setFolded((each) => ({ ...each, [path]: !each[path] }));
             }
+        },
+        [openReviewFile],
+    );
+    const loadedReviewFile = useMemo(
+        () => (path, print) => {
+            prints.current[path] = print;
+            // Marked viewed before its diff arrived: as of this one.
+            setViewedState((before) => {
+                if (before[path] !== "?") {
+                    return before;
+                }
 
-            writeViewed(viewId, next);
+                const next = { ...before, [path]: print };
 
-            return next;
-        });
+                writeViewed(viewId, next);
+
+                return next;
+            });
+        },
+        [viewId],
+    );
 
     // Marks of files that are no longer changed (committed, or put back) go: they would never be seen again.
     useEffect(() => {
@@ -1960,26 +2468,34 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
     const jumpRequest = useRef(null);
 
     const jumpToThread = (thread, { reply = false } = {}) => {
+        store.set({
+            reviewTarget: {
+                conversationId: id,
+                threadId: thread.id,
+                reply,
+                n: (store.state.reviewTarget?.n ?? 0) + 1,
+            },
+        });
+    };
+
+    // Internal index rows and external receipt links share the complete exact-thread operation.
+    // A cross-conversation link waits for the source room's committed thread before preparing it.
+    useLayoutEffect(() => {
+        if (!active || !targetThread || jumpRequest.current === target) {
+            return;
+        }
+
+        jumpRequest.current = target;
         setFilter("");
         setOnlyPi(false);
         setTreeOpen(false);
 
-        if (thread.path) {
-            setViewed(thread.path, undefined);
-            setFolded((before) => ({ ...before, [thread.path]: false }));
-            setCurrent(thread.path);
+        if (targetThread.path) {
+            setViewed(targetThread.path, undefined);
+            setFolded((before) => ({ ...before, [targetThread.path]: false }));
+            setCurrent(targetThread.path);
         }
-
-        const request = {
-            conversationId: id,
-            threadId: thread.id,
-            reply,
-            n: (store.state.reviewTarget?.n ?? 0) + 1,
-        };
-
-        jumpRequest.current = request;
-        store.set({ reviewTarget: request });
-    };
+    }, [active, target, targetThread]);
 
     // Wait for actual renders, not a guessed delay: lazy diffs, hidden context and thread disclosure
     // all settle before the one scroll. The deadline only bounds a failed load and never triggers a scroll.
@@ -2064,7 +2580,7 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
         schedule();
 
         return stop;
-    }, [active, id, target?.n, Boolean(changes), error]);
+    }, [active, id, target, Boolean(targetThread), Boolean(changes), error]);
 
     const scrollTo = (path) => {
         const element = ref.current?.querySelector(`.dr-file[data-path="${CSS.escape(path)}"]`);
@@ -2343,41 +2859,14 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
                             root=${changes?.repo?.root ?? cwd}
                             base=${changes?.repo?.head}
                             commenting=${commenting}
-                            threads=${threads.filter((thread) => thread.path === file.path)}
+                            threads=${threadsByPath.get(file.path) ?? NO_THREADS}
                             target=${targetThread?.path === file.path ? target : null}
-                            onOpen=${() => {
-                                setViewed(file.path, undefined);
-                                setFolded((each) => ({ ...each, [file.path]: false }));
-                            }}
+                            onOpen=${openReviewFile}
                             open=${!folded[file.path]}
                             viewedAs=${viewed[file.path]}
-                            onToggle=${() => {
-                                if (isViewed(file)) {
-                                    setViewed(file.path, undefined);
-                                    setFolded((each) => ({ ...each, [file.path]: false }));
-                                } else {
-                                    setFolded((each) => ({
-                                        ...each,
-                                        [file.path]: !each[file.path],
-                                    }));
-                                }
-                            }}
+                            onToggle=${toggleReviewFile}
                             onViewed=${setViewed}
-                            onLoaded=${(path, print) => {
-                                prints.current[path] = print;
-                                // Marked viewed before its diff arrived: as of this one.
-                                setViewedState((before) => {
-                                    if (before[path] !== "?") {
-                                        return before;
-                                    }
-
-                                    const next = { ...before, [path]: print };
-
-                                    writeViewed(viewId, next);
-
-                                    return next;
-                                });
-                            }}
+                            onLoaded=${loadedReviewFile}
                             onChanged=${load}
                         />`,
                     )}

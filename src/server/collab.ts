@@ -2,9 +2,9 @@
  * The people beside Pi: their side chat with mentions and quotes, activity lines ("Alex stopped the run"), typing,
  * reactions, pins, shared notes, and take turns. Pi sees none of it.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ConversationId } from "@earendil-works/pi-durable";
+import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
 import {
@@ -87,11 +87,13 @@ export class Collab {
     ): Promise<ChatMessage> {
         const app = this.#app;
 
+        user = { ...user };
         app.requireSee(user, id);
         await app.conversation(id);
-        const text = request.text.trim();
+        // Retain Markdown indentation on the first content line; trim outer blank lines as before.
+        const text = request.text.replace(/^(?:[^\S\r\n]*(?:\r\n?|\n))+/, "").trimEnd();
 
-        if (text === "") {
+        if (text.trim() === "") {
             throw new HttpError(400, "Message is empty");
         }
 
@@ -118,7 +120,11 @@ export class Collab {
         const messageId = `${user.id.slice(0, 8)}-${clientKey(request.requestId)}`;
         let created = false;
         const message = await app.harness.commit(async (tx) => {
+            app.requireSee(user, id);
+            const person = app.config.userById(user.id)!;
             const doc = await tx.doc(ChatDoc, id);
+
+            app.requireSee(user, id);
             const existing = doc.messages.find((each) => each.id === messageId);
 
             if (existing !== undefined) {
@@ -128,7 +134,7 @@ export class Collab {
             const fresh: ChatMessage = {
                 id: messageId,
                 userId: user.id,
-                name: user.name,
+                name: person.name,
                 text,
                 at: Date.now(),
                 ...(mentions.length === 0 ? {} : { mentions }),
@@ -141,9 +147,13 @@ export class Collab {
                 doc.messages.splice(0, doc.messages.length - CHAT_LIMIT);
             }
 
+            await app.pip.admitMention(tx, id, user, { kind: "chat", messageId });
+            app.requireSee(user, id);
             created = true;
 
-            return fresh;
+            return JSON.parse(
+                JSON.stringify(doc.messages.find((item) => item.id === messageId)),
+            ) as ChatMessage;
         }, context);
 
         this.setTyping(id, user, null);
@@ -153,6 +163,68 @@ export class Collab {
         }
 
         return message;
+    }
+
+    /** Internal transaction-aware reply sink. The caller owns invocation authority and its durable receipt. */
+    async replyAsPiP(
+        tx: Tx,
+        id: ConversationId,
+        supplied: User,
+        input: { requestId: string; messageId: string; text: string },
+    ): Promise<{ id: string }> {
+        const app = this.#app;
+
+        app.requireSee(supplied, id);
+
+        if (
+            !/^[a-f0-9]{64}$/.test(input.requestId) ||
+            !input.text.trim() ||
+            input.text.length > MAX_CHAT_TEXT ||
+            input.text.includes("\0")
+        ) {
+            throw new HttpError(400, "Invalid PiP chat reply");
+        }
+
+        const doc = await tx.doc(ChatDoc, id);
+        const parent = doc.messages.find(
+            (item) => item.id === input.messageId && item.kind !== "event",
+        );
+        const messageId = `pip-${createHash("sha256").update(input.requestId).digest("hex")}`;
+        const existing = doc.messages.find((item) => item.id === messageId);
+
+        app.requireSee(supplied, id);
+
+        if (existing) {
+            if (
+                existing.service !== "pip" ||
+                existing.text !== input.text.trim() ||
+                existing.replyTo?.id !== input.messageId
+            ) {
+                throw new HttpError(409, "The PiP reply receipt was used for different content");
+            }
+
+            return { id: existing.id };
+        }
+
+        if (!parent) {
+            throw new HttpError(404, "The original chat message is no longer available");
+        }
+
+        doc.messages.push({
+            id: messageId,
+            userId: "pip",
+            name: "PiP",
+            service: "pip",
+            text: input.text.trim(),
+            at: Date.now(),
+            replyTo: { id: parent.id, name: parent.name, text: snippet(parent.text, 160) },
+        });
+
+        if (doc.messages.length > CHAT_LIMIT) {
+            doc.messages.splice(0, doc.messages.length - CHAT_LIMIT);
+        }
+
+        return { id: messageId };
     }
 
     /** People named as `@Name` in a chat message, by id: the name must end at a word boundary. */

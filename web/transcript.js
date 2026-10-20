@@ -7,6 +7,7 @@ import { browserAvailable, setBrowserOpen } from "./browser.js";
 import { describeCall, describersRevision } from "./calls.js";
 import { DiffBlock } from "./diff.js";
 import { LinkedSessions } from "./linked-sessions.js";
+import { DiffComments } from "./review-comments.js";
 import { fromServer } from "./seen.js";
 import { Highlighted } from "./rich.js";
 import {
@@ -19,6 +20,7 @@ import {
     navigate,
     notify,
     openSheet,
+    revealReviewThread,
     store,
     TRANSCRIPT_ROWS,
 } from "./store.js";
@@ -981,6 +983,10 @@ function ToolStep({
             ? (details?.conversationId ??
               view.subagents.find((agent) => agent.name === args.name)?.conversationId)
             : undefined;
+    const diffComment =
+        !readOnly && call.name === "review_comment" && status === "done" && !result?.isError
+            ? details?.pipDiffComment
+            : null;
     const { label, subject } = stepWords(call, readOnly ? null : conversationLocation());
     // Counted from everything once it is loaded: a long write's lines, a long edit's whole diff.
     const said = readOnly
@@ -1031,6 +1037,16 @@ function ToolStep({
                     </span>`
                 }
             </button>
+            ${
+                diffComment &&
+                html`<button
+                    type="button"
+                    class="step-open diff-comment-open"
+                    onClick=${() => revealReviewThread(diffComment)}
+                >
+                    Open in diff
+                </button>`
+            }
             ${
                 child !== undefined &&
                 html`<button
@@ -1577,6 +1593,7 @@ function AnswerEnd({ entry, readOnly = false }) {
         html`<div class="error-box">${entry.error ?? "The model request failed."}</div>`
     }
     ${entry.stopReason === "aborted" && html`<div class="muted small">Stopped.</div>`}
+    ${!readOnly && entry.diffComments?.length > 0 && html`<${DiffComments} entry=${entry} />`}
     ${answer && html`<${AnswerActions} entry=${entry} />`}`;
 }
 

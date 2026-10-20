@@ -151,8 +151,6 @@ const CLEANUP_LIMIT_MS = 3000;
 /** The extension module with the browser tool. While it is off, the Browser panel is off too. */
 const BROWSER_FILE = "browser.ts";
 const BROWSER_EXTENSION = "pocket-browser";
-/** The extension module that is PiP. */
-const PIP_FILE = "pip.ts";
 /** The extension module with the subagent tool, rebuilt when the models subagents may use change. */
 const SUBAGENTS_FILE = "subagents.ts";
 /** The most models the owner may allow subagents besides their session's own. */
@@ -549,6 +547,7 @@ export class PocketApp {
         const registry = createRegistry();
 
         registry.install(CodingTools);
+        registry.install(this.pip.registration());
         // Durable work of the app itself, whatever extension modules are on.
         registry.install(
             defineExtension({
@@ -563,6 +562,7 @@ export class PocketApp {
                     createResearchTool(this),
                     createStageUploadTool(this),
                     this.workItems.tool,
+                    this.pip.reviewTool,
                 ],
                 tasks: [
                     ResendTask,
@@ -572,7 +572,7 @@ export class PocketApp {
                     ...this.workItems.tasks,
                 ],
                 sections: this.workItems.sections,
-                hooks: createWorkflowHooks(this),
+                hooks: [...createWorkflowHooks(this), ...this.pip.reviewHooks],
             }),
         );
         const host: PocketHost = {
@@ -606,7 +606,6 @@ export class PocketApp {
             goals: this.goals,
             browsers: this.browsers,
             pip: this.pip,
-            pipCompaction: this.pipCompaction,
             watches: this.watches,
             repoWatches: this.repoWatches,
             memory: this.memory,
@@ -672,6 +671,7 @@ export class PocketApp {
             context,
         );
 
+        await this.pip.open();
         const conversations = await this.#recover(storage);
 
         await this.spend.load(conversations);
@@ -713,6 +713,11 @@ export class PocketApp {
 
         if (this.guardOn()) {
             void this.guard.warm().catch(() => {});
+        }
+
+        // A legacy/native pause must not resume stored private generations merely because PiP is now core.
+        if (!this.config.pipEnabled) {
+            await this.pip.stopAll();
         }
 
         // Work a previous process left unfinished continues only with a usable provider runtime.
@@ -1650,6 +1655,10 @@ export class PocketApp {
 
     /** Scoped grants flow forward through handoff ancestry; every PiP/owner-only hop still restricts it. */
     canSee(user: User, id: ConversationId): boolean {
+        if (this.pip.isInternal(id)) {
+            return false;
+        }
+
         const currentUser = this.config.userById(user.id);
 
         if (currentUser === undefined || currentUser.tokenHash !== user.tokenHash) {
@@ -1889,13 +1898,17 @@ export class PocketApp {
 
     /** A conversation's shared view, opened when no tab has it open. Hand it to `releaseRoom` when done with it. */
     async room(id: ConversationId): Promise<Room> {
+        if (this.pip.isInternal(id)) {
+            throw new HttpError(404, "This session is not shared with you.");
+        }
+
         let pending = this.#rooms.get(id);
 
         if (pending === undefined) {
             pending = (async () => {
                 const conversation = await this.harness.conversation(id, context);
 
-                if (conversation === undefined) {
+                if (conversation === undefined || this.pip.isInternal(id)) {
                     throw new HttpError(404, `Conversation ${String(id)} does not exist`);
                 }
 
@@ -1988,6 +2001,7 @@ export class PocketApp {
                 collab: 2,
                 // Comment-first reviews and session-folder-scoped live diffs, including viewers.
                 localReviews: 2,
+                reviewSuggestions: 1,
                 // Durable project organization and independently typed threads.
                 projects: 1,
                 workItems: 1,
@@ -2022,6 +2036,10 @@ export class PocketApp {
                     : {}),
                 // This person may have a PiP, the assistant over every screen (`pip.ts`).
                 pip: this.pip.available(user),
+                pipSettings: 1,
+                pipEnabled: this.config.pipEnabled,
+                // Shared mentions are separate from the owner's private PiP panel availability.
+                pipMentions: true,
                 // Tokens of context above which PiP compacts itself once idle; 0: only as sessions do.
                 pipCompactAt: this.pipCompaction.compactAt,
             },
@@ -2272,7 +2290,8 @@ export class PocketApp {
     async conversation(id: ConversationId): Promise<Conversation> {
         const conversation = await this.harness.conversation(id, context);
 
-        if (conversation === undefined) {
+        // The lane may have been created while this read waited on the commit line.
+        if (conversation === undefined || this.pip.isInternal(id)) {
             throw new HttpError(404, `Conversation ${String(id)} does not exist`);
         }
 
@@ -2887,6 +2906,31 @@ export class PocketApp {
         await this.#refreshClients();
     }
 
+    /** PiP stays installed while paused, preserving recovery tasks and private compaction safety. */
+    async setPipEnabled(supplied: User, enabled: unknown): Promise<void> {
+        const user = this.config.userById(supplied.id);
+
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
+        }
+
+        if (user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can pause or resume PiP");
+        }
+
+        if (typeof enabled !== "boolean") {
+            throw new HttpError(400, "enabled must be a boolean");
+        }
+
+        this.config.pipEnabled = enabled;
+
+        if (!enabled) {
+            await this.pip.stopAll();
+        }
+
+        await this.#refreshClients();
+    }
+
     /** Turn an extension module on or off for every session, now and after restarts. */
     async setExtensionEnabled(user: User, file: string, enabled: boolean): Promise<void> {
         if (file === PI_PROVIDERS_FILE) {
@@ -2934,10 +2978,6 @@ export class PocketApp {
 
         if (file === BROWSER_FILE && !enabled) {
             await this.browsers.closeAll();
-        }
-
-        if (file === PIP_FILE && !enabled) {
-            await this.pip.stopAll();
         }
 
         this.notice(
@@ -2995,7 +3035,13 @@ export class PocketApp {
     }
 
     /** The owner chooses when PiP compacts itself: above so many tokens of context once idle, or (0) as sessions do. */
-    async setPipCompactAt(user: User, tokens: unknown): Promise<void> {
+    async setPipCompactAt(supplied: User, tokens: unknown): Promise<void> {
+        const user = this.config.userById(supplied.id);
+
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
+        }
+
         if (user.role !== "owner") {
             throw new HttpError(403, "Only the owner can do that");
         }
@@ -3318,6 +3364,7 @@ export class PocketApp {
             clearTimeout(this.#sessionsTimer);
             this.alerts.close();
             this.themes.close();
+            this.pip.close();
             this.spend.close();
             this.#unsubscribeCommits?.();
             this.#unsubscribeApprovals?.();

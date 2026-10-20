@@ -53,12 +53,11 @@ const ORDER = [
     "guard.ts",
     "codemode.ts",
     "memory.ts",
-    "pip.ts",
     "triggers.ts",
     "gallery.ts",
 ];
 /** Application-owned names, never imported, unloaded or hot-reloaded from either extension folder. */
-const CORE_MODULE_FILES = new Set(["pi-providers.ts", "work-items.ts"]);
+const CORE_MODULE_FILES = new Set(["pi-providers.ts", "work-items.ts", "pip.ts"]);
 
 /** The built-in modules' names (their files' without `.ts`): a drop-in with one of them is never loaded. */
 export const BUILT_IN_MODULES: ReadonlySet<string> = new Set(
@@ -80,7 +79,6 @@ const TITLES: Record<string, string> = {
     "guard.ts": "Lancet Guard",
     "codemode.ts": "Codemode",
     "memory.ts": "Memory",
-    "pip.ts": "PiP",
     "triggers.ts": "Triggers",
     "gallery.ts": "Extension gallery",
 };
@@ -123,6 +121,7 @@ export const BUILT_IN_TOOLS: ReadonlySet<string> = new Set([
     "publication",
     "pull",
     "research",
+    "review_comment",
 ]);
 
 /** Pi Pocket's own modules, or the owner's from the drop-in folder. */

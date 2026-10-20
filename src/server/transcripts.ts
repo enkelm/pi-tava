@@ -3,6 +3,7 @@
  * in them, what came before the active context, and the whole session as Markdown.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Context } from "@earendil-works/chord";
 import type {
     ConversationId,
     ConversationRecord,
@@ -101,6 +102,31 @@ export class Transcripts {
                 conversation = parent.conversationId;
             }
         }, context);
+    }
+
+    /** One bounded, cancellable page of public transcript entries, newest first, including fork history. */
+    async page(
+        id: ConversationId,
+        { before, limit = 20 }: { before?: number; limit?: number } = {},
+        ctx: Context = context,
+    ): Promise<{ entries: ClientEntry[]; before?: number }> {
+        const conversation = await this.#app.conversation(id);
+        const page = await conversation.entries(
+            before === undefined ? {} : { maxEntryId: (before - 1) as EntryId },
+            Math.max(1, Math.min(100, Math.floor(limit))),
+            undefined,
+            ctx,
+        );
+        const last = page.items.at(-1);
+
+        return {
+            entries: page.items.flatMap((entry) => {
+                const projected = projectEntry(entry);
+
+                return projected === undefined ? [] : [projected];
+            }),
+            ...(page.next !== undefined && last ? { before: Number(last.id) } : {}),
+        };
     }
 
     /** Entries before the active context: what compaction or a reset hid from the model. Oldest first. */

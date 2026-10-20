@@ -72,30 +72,41 @@ export function ModelPicker({
     agent: suppliedAgent,
     initialQuery,
     onPick,
+    onConfigure,
+    title = "Model",
+    disabled = false,
     onClose = closeSheet,
 }) {
+    const custom = typeof onConfigure === "function";
     const { server, me } = privateMode ? {} : store.state;
-    const [pipId] = useState(() => (privateMode ? undefined : store.state.sheet?.pipId));
+    const [pipId] = useState(() => (privateMode || custom ? undefined : store.state.sheet?.pipId));
     // A private Pi has its own state and delivery; never read a Durable room as its fallback.
     const view = privateMode ? null : pipId === undefined ? store.state.view : store.state.pipView;
     const agent = suppliedAgent ?? (privateMode ? null : view.agent);
-    const locked = privateMode
-        ? typeof onPick !== "function"
-        : pipId !== undefined &&
-          (view.conversation?.id !== pipId ||
-              view.live?.busy === true ||
-              (view.live?.compactions?.length ?? 0) > 0);
+    const locked =
+        disabled ||
+        (privateMode
+            ? typeof onPick !== "function"
+            : !custom &&
+              pipId !== undefined &&
+              (view.conversation?.id !== pipId ||
+                  view.live?.busy === true ||
+                  (view.live?.compactions?.length ?? 0) > 0));
     const configure = (change) =>
-        privateMode
-            ? undefined
-            : pipId === undefined
-              ? actions.configure(change)
-              : api(`c/${pipId}/configure`, { ...change, pipPanel: true });
+        custom
+            ? onConfigure(change)
+            : privateMode
+              ? undefined
+              : pipId === undefined
+                ? actions.configure(change)
+                : api(`c/${pipId}/configure`, { ...change, pipPanel: true });
     // While the picker animates out, the store has no sheet any more.
     const [query, setQuery] = useState(
         initialQuery ?? (privateMode ? "" : (store.state.sheet?.query ?? "")),
     );
-    const [forDefault] = useState(() => !privateMode && store.state.sheet?.forDefault === true);
+    const [forDefault] = useState(
+        () => !privateMode && !custom && store.state.sheet?.forDefault === true,
+    );
     const scopedModels = privateMode ? [] : models.filter((model) => model.scoped);
     // Opened already searching (`/model gem`) for models only outside the scope: it starts with all of them.
     const [showAll, setShowAll] = useState(
@@ -109,7 +120,7 @@ export function ModelPicker({
     const [expanded, setExpanded] = useState(() => new Map());
     const groupId = useId();
     const [anchor, setAnchor] = useState(() =>
-        forDefault || pipId !== undefined ? null : modelAnchor(),
+        custom || forDefault || pipId !== undefined ? null : modelAnchor(),
     );
     const close = useRef(onClose);
 
@@ -192,7 +203,8 @@ export function ModelPicker({
 
     useEffect(() => {
         // The default's picker has no chip to open from: it stays in the middle.
-        const place = () => setAnchor(forDefault || pipId !== undefined ? null : modelAnchor());
+        const place = () =>
+            setAnchor(custom || forDefault || pipId !== undefined ? null : modelAnchor());
         const onKey = (event) => event.key === "Escape" && close.current();
 
         addEventListener("resize", place);
@@ -302,7 +314,7 @@ export function ModelPicker({
             ref=${box}
             role="dialog"
             aria-modal="true"
-            aria-label=${forDefault ? "Default model" : "Model"}
+            aria-label=${forDefault ? "Default model" : title}
             aria-keyshortcuts=${scopedModels.length > 0 ? "Tab" : undefined}
             tabindex="-1"
             onKeyDown=${onKeyDown}
@@ -310,7 +322,7 @@ export function ModelPicker({
             <div class="grip" aria-hidden="true"></div>
             <header class="pop-menu-head">
                 <span>
-                    ${forDefault ? "Default model" : "Model"}
+                    ${forDefault ? "Default model" : title}
                     ${forDefault && html`<span class="pop-menu-head-sub">for new sessions</span>`}
                     ${
                         scopedModels.length > 0 &&
@@ -469,7 +481,7 @@ export function ModelPicker({
                 </div>`
             }
             ${
-                privateMode || pipId !== undefined || !defaultsKept()
+                privateMode || custom || pipId !== undefined || !defaultsKept()
                     ? null
                     : forDefault
                       ? html`<div class="pop-menu-foot pop-menu-default">

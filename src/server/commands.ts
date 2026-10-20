@@ -60,7 +60,7 @@ import { handoffInputKey } from "./handoff-input.ts";
 import { describe, HttpError, optionalText } from "./errors.ts";
 import { homePath } from "./paths.ts";
 import { type FileView, mentionedPaths } from "./files.ts";
-import { isThinkingLevel, THINKING_LEVELS } from "./models.ts";
+import { modelSelection } from "./models.ts";
 import { snippet } from "./projection.ts";
 import { globalModelSettings, projectModelDefault } from "./project-model.ts";
 import { parseWorkspaceLocation } from "./workspace-location.ts";
@@ -195,19 +195,6 @@ async function modelImage(bytes: Buffer, mimeType: string): Promise<ImageContent
     }
 
     return { type: "image", mimeType: image.mimeType, data: image.data };
-}
-
-/** A request's model, when it names one, must name a provider and a model id. */
-function checkModel(asked: { provider?: unknown; modelId?: unknown } | undefined): void {
-    if (
-        asked !== undefined &&
-        (typeof asked !== "object" ||
-            asked === null ||
-            typeof asked.provider !== "string" ||
-            typeof asked.modelId !== "string")
-    ) {
-        throw new HttpError(400, "model must name a provider and a model id");
-    }
 }
 
 /** A person's message to a failed subagent (`subagent`, its conversation), followed to its end; `failure`, its own then. */
@@ -1496,17 +1483,6 @@ export class Commands {
             throw new HttpError(403, "Only your own PiP can use this control.");
         }
 
-        const asked = request.model as { provider?: unknown; modelId?: unknown } | undefined;
-
-        checkModel(asked);
-
-        if (
-            optionalText(request.thinkingLevel, "thinkingLevel") !== undefined &&
-            !isThinkingLevel(request.thinkingLevel)
-        ) {
-            throw new HttpError(400, `thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
-        }
-
         optionalText(request.cwd, "cwd");
 
         if (request.cwd !== undefined) {
@@ -1527,18 +1503,15 @@ export class Commands {
 
         const conversation = await app.conversation(id);
         const current = await app.agentState(id);
-        const ref = request.model ?? current?.model;
+        const selection = modelSelection(app.models, {
+            model: request.model,
+            thinkingLevel: optionalText(request.thinkingLevel, "thinkingLevel"),
+        });
+        const ref = selection.model ?? current?.model;
         const model =
             ref === undefined ? undefined : app.models.getModel(ref.provider, ref.modelId);
 
-        if (request.model !== undefined && model === undefined) {
-            throw new HttpError(
-                400,
-                `Unknown model ${request.model.provider}/${request.model.modelId}`,
-            );
-        }
-
-        const wanted = (request.thinkingLevel ??
+        const wanted = (selection.thinkingLevel ??
             current?.thinkingLevel ??
             "off") as ModelThinkingLevel;
         const thinkingLevel = model === undefined ? wanted : clampThinkingLevel(model, wanted);
@@ -1554,9 +1527,7 @@ export class Commands {
                     );
 
         const change = {
-            ...(request.model === undefined
-                ? {}
-                : { model: { provider: request.model.provider, modelId: request.model.modelId } }),
+            ...(selection.model === undefined ? {} : { model: selection.model }),
             thinkingLevel,
             ...(cwd === undefined ? {} : { cwd }),
         };
@@ -2031,10 +2002,7 @@ export class Commands {
         this.#requireForkable(id, user, request.worktree);
         const entryId = entryIdOf(request.entryId);
         const edited = optionalText(request.text, "text")?.trim();
-        const asked = request.model as { provider?: unknown; modelId?: unknown } | undefined;
-
-        checkModel(asked);
-
+        const asked = modelSelection(app.models, { model: request.model }).model;
         const entry = await app.transcripts.visibleEntry(id, entryId);
 
         if (entry?.kind !== "pi.user") {
@@ -2043,10 +2011,7 @@ export class Commands {
 
         app.spend.check(user, id);
         const source = await app.agentState(id);
-        const ref =
-            asked === undefined
-                ? source?.model
-                : { provider: asked.provider as string, modelId: asked.modelId as string };
+        const ref = asked ?? source?.model;
         const model =
             ref === undefined ? undefined : app.models.getModel(ref.provider, ref.modelId);
 

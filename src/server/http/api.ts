@@ -65,7 +65,9 @@ export function createApi(options: HttpOptions, auth: Auth) {
             throw new HttpError(401, "Sign in first");
         }
 
-        return user;
+        // Config keeps mutable identities. Pin this request's credentials and grants before any
+        // route awaits, so later authorization can detect token rotation instead of inheriting it.
+        return structuredClone(user);
     };
 
     const requireOwner = (user: User): void => {
@@ -198,12 +200,14 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return providerPackageRoutes(route);
         }
 
+        // Subscriptions keep a live client identity for presence and access updates, not a
+        // request credential. No await separates authentication from registering that identity.
         if (first === "events" && method === "GET") {
-            return events(request, response, url, user);
+            return events(request, response, url, app.config.userById(user.id)!);
         }
 
         if (first === "poll" && method === "GET") {
-            return poll(request, response, url, user);
+            return poll(request, response, url, app.config.userById(user.id)!);
         }
 
         if (first === "me" && method === "GET") {
@@ -296,6 +300,47 @@ export function createApi(options: HttpOptions, auth: Auth) {
         // Every subagent in the sessions this person can see, as the subagents board shows them.
         if (first === "subagents" && method === "GET") {
             return json(response, 200, app.subagents(user));
+        }
+
+        // Native PiP settings never load or unload its private tools and recovery tasks.
+        if (first === "pip" && second === "settings" && fourth === undefined) {
+            requireOwner(user);
+            response.setHeader("Cache-Control", "no-store");
+
+            if (method === "POST") {
+                const body = await readJson<{
+                    enabled?: unknown;
+                    compactAt?: unknown;
+                } | null>(request);
+
+                if (third === "chats") {
+                    await app.pip.configureChats(user, body);
+                } else if (third === "collaborator") {
+                    app.pip.configureCollaborator(user, body);
+                } else if (third === undefined) {
+                    if (
+                        body === null ||
+                        typeof body !== "object" ||
+                        Array.isArray(body) ||
+                        [body.enabled, body.compactAt].filter((value) => value !== undefined)
+                            .length !== 1
+                    ) {
+                        throw new HttpError(400, "Change one PiP setting at a time.");
+                    }
+
+                    if (body.enabled !== undefined) {
+                        await app.setPipEnabled(user, body.enabled);
+                    } else {
+                        await app.setPipCompactAt(user, body.compactAt);
+                    }
+                } else {
+                    throw new HttpError(404, "No such PiP settings route");
+                }
+            } else if (method !== "GET" || third !== undefined) {
+                throw new HttpError(404, "No such PiP settings route");
+            }
+
+            return json(response, 200, await app.pip.settings(user));
         }
 
         // The PiP panel opened or closed in a tab: while open, it gets PiP's conversation (`pipview` events). Opening it
@@ -694,6 +739,10 @@ export function createApi(options: HttpOptions, auth: Auth) {
         if (first === "c" && second !== undefined) {
             const id = conversationId(second);
 
+            app.requireSee(user, id);
+            // Serialize existence with creation, then recheck access: a guessed future ID must not
+            // slip into PiP's internal lane while its first admission is still committing.
+            await app.conversation(id);
             app.requireSee(user, id);
 
             if (third === "browser") {

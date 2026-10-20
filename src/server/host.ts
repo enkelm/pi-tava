@@ -20,7 +20,6 @@ import type { Goals } from "./goals.ts";
 import type { LancetGuard } from "./lancet.ts";
 import type { Memory } from "./memory.ts";
 import type { Pip } from "./pip.ts";
-import type { PipCompaction } from "./pip-compact.ts";
 import type { Schedules } from "./schedules.ts";
 import type { SessionWorkflow } from "./session-workflows.ts";
 import type { RepoWatches } from "./repo-watches.ts";
@@ -274,34 +273,8 @@ export interface PocketHost {
     readonly goals: Pick<Goals, "get" | "run" | "record" | "mayCheck" | "mayContinue">;
     /** The built-in browser: a page per conversation, which the people in it watch and use too. */
     readonly browsers: Pick<Browsers, "open">;
-    /** PiP, the owner's assistant: what its tools do, each as PiP's person (`pip.ts`). */
-    readonly pip: Pick<
-        Pip,
-        | "ownerOf"
-        | "ownerName"
-        | "task"
-        | "sessions"
-        | "read"
-        | "start"
-        | "send"
-        | "stop"
-        | "archive"
-        | "approvals"
-        | "deny"
-        | "status"
-        | "schedules"
-        | "schedule"
-        | "countSchedule"
-        | "cancelSchedule"
-        | "follow"
-        | "watchPr"
-        | "prWatch"
-        | "addRepoWatch"
-        | "repoWatches"
-        | "removeRepoWatch"
-    >;
-    /** PiP's compactions: its extension's hook has PiP write its own summaries. */
-    readonly pipCompaction: Pick<PipCompaction, "summarize">;
+    /** Internal schedule-tool accounting: PiP's own reminders share its hourly action limit. */
+    readonly pip: Pick<Pip, "countSchedule">;
     /** Sessions' watches of their pull requests: Pi's watch_pr tool starts and stops them. */
     readonly watches: Pick<Watches, "task" | "start" | "stop" | "get">;
     /** Repository watches: the triggers extension runs their task; PiP's repo_watch tool sets them up. */

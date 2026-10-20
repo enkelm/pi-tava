@@ -5,6 +5,7 @@
  * Kinds are part of the stored data: rename one and old sessions lose it.
  */
 import type { JsonValue } from "@earendil-works/chord";
+import type { ModelThinkingLevel, Usage } from "@earendil-works/pi-ai";
 import {
     type ConversationId,
     defineDoc,
@@ -239,17 +240,39 @@ export const AuthorsDoc = defineDoc<{
 
 export type ReviewState = "pending" | "commented" | "approved" | "changes_requested" | "dismissed";
 
+export type PipMentionState = {
+    status: "queued" | "working" | "answered" | "unavailable" | "failed" | "interrupted";
+    reason?: "paused" | "model" | "budget" | "permission" | "turn" | "capacity" | "source";
+    replyId?: string;
+};
+
+export type ReviewSuggestionState = {
+    status: "applying" | "applied" | "uncertain";
+    by: string;
+    at: number;
+};
+
 export type ReviewMessage = {
     id: string;
     userId: string;
     name: string;
     text: string;
     at: number;
+    /** Application-authored discussion entry; never supplied by a human request. */
+    service?: "pip";
+    /** Native outcome of this person's explicit mention, not model-authored metadata. */
+    pip?: PipMentionState;
+    /** Human application receipts, keyed by zero-based top-level suggestion fence index. */
+    suggestions?: Record<string, ReviewSuggestionState>;
+    /** Captured destination/scope for this fresh suggestion source; not write authority by itself. */
+    workspace?: string;
 };
 
 export type ReviewThread = ReviewMessage & {
     path?: string;
     side?: "old" | "new";
+    /** Inclusive start; absent means a single line at `line`. */
+    startLine?: number;
     line?: number;
     resolved: boolean;
     resolvedBy?: string;
@@ -329,6 +352,109 @@ export const CommentReviewDoc = defineDoc<ChangeReviews & { requests: Record<str
     history: "latest",
     fork: "initial",
     initial: () => ({ threads: [], rev: 0, requests: {} }),
+});
+
+/** Private application claims survive lost acknowledgements/restarts; no claim is ever replayed as a write. */
+export const ReviewSuggestionsDoc = defineDoc<{
+    claims: Record<string, { workspace: string; path: string; expectedRevision: string }>;
+}>({
+    kind: "pocket.review-suggestions",
+    version: 1,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ claims: {} }),
+});
+
+/** Public references stamped by core onto a Reviewer's yielded assessment; never inferred from prose. */
+export type PipDiffComment = {
+    conversationId: number;
+    threadId: string;
+    commentId: string;
+    path: string;
+    side: "old" | "new";
+    line: number;
+    startLine?: number;
+    text: string;
+};
+
+export type PipReviewReceipt = PipDiffComment & {
+    fingerprint: string;
+    /** First input submission of the actual Reviewer run; survives generation handovers. */
+    episode: number;
+    context: string;
+    observation: string;
+    origin: {
+        requesterId: string;
+        role: "reviewer";
+        taskId: number;
+        callId: string;
+        generationId: number;
+        provider: string;
+        model: string;
+    };
+    at: number;
+};
+
+/** Internal publication receipts/provenance. Never projected into a room or inherited by forks. */
+export const PipReviewCommentsDoc = defineDoc<{ receipts: Record<string, PipReviewReceipt> }>({
+    kind: "pocket.pip-review-comments",
+    version: 1,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ receipts: {} }),
+});
+
+export type PipMentionSource =
+    { kind: "chat"; messageId: string } | { kind: "review"; threadId: string; commentId: string };
+
+export type PipMentionJob = {
+    source: PipMentionSource;
+    requesterId: string;
+    authority: string;
+    fingerprint: string;
+    context: string;
+    createdAt: number;
+    selection: {
+        provider: string;
+        modelId: string;
+        thinkingLevel: ModelThinkingLevel;
+        revision: number;
+    };
+    taskId: number;
+    status: "queued" | "dispatched" | "ready" | "delivered" | "failed" | "interrupted";
+    /** Each returned model response has a separate immutable Spend receipt; result is the last response. */
+    responses?: number;
+    replyId?: string;
+    result?: {
+        text?: string;
+        provider: string;
+        model: string;
+        usage: { [K in keyof Usage]: Usage[K] };
+    };
+};
+
+/** Only the independent task lane and bounded active index; historical receipts live in job families. */
+export const PipMentionsDoc = defineDoc<{
+    lane?: number;
+    active: Record<string, { source: number; taskId: number }>;
+}>({
+    kind: "pocket.pip-mentions",
+    version: 1,
+    scope: "session",
+    initial: () => ({ active: {} }),
+});
+
+/** One bounded, durable invocation per actual source message. Never inherited by a fork. */
+export const PipMentionJobDoc = defineDocFamily<{ job?: PipMentionJob }, null>({
+    kind: "pocket.pip-mention-job",
+    version: 1,
+    family: true,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({}),
 });
 
 export type ArtifactType = "html" | "markdown" | "svg";
@@ -456,6 +582,10 @@ export type ChatMessage = {
     kind?: "event";
     /** People named with `@Name` in the text. */
     mentions?: string[];
+    /** Application-owned PiP author/outcome and exact chat parent; ignored on human requests. */
+    service?: "pip";
+    pip?: PipMentionState;
+    replyTo?: { id: string; name: string; text: string };
     /** A transcript message this one discusses. */
     quote?: { entryId: number; text: string };
 };
@@ -631,6 +761,51 @@ export const SpendDoc = defineDoc<{
     version: 1,
     scope: "session",
     initial: () => ({ people: {}, counted: {} }),
+});
+
+/** A bounded auxiliary model response, independent of conversation turn attribution. */
+export type AuxiliaryUsageRecord = {
+    receiptId: string;
+    requesterId: string;
+    sourceConversationId: number;
+    provider: string;
+    model: string;
+    usage: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+        cacheWrite1h?: number;
+        reasoning?: number;
+        totalTokens: number;
+        cost: {
+            input: number;
+            output: number;
+            cacheRead: number;
+            cacheWrite: number;
+            total: number;
+        };
+    };
+};
+
+/** One immutable receipt per source/receipt digest; not a room document or transcript. */
+export const AuxiliaryUsageReceiptDoc = defineDocFamily<{ record?: AuxiliaryUsageRecord }, null>({
+    kind: "pocket.auxiliary-usage-receipt",
+    version: 1,
+    family: true,
+    scope: "session",
+    initial: () => ({}),
+});
+
+/** Cumulative auxiliary dollars, committed with receipts, never fed into pi.usage counting. */
+export const AuxiliaryUsageDoc = defineDoc<{
+    sources: Record<string, number>;
+    people: Record<string, number>;
+}>({
+    kind: "pocket.auxiliary-usage",
+    version: 1,
+    scope: "session",
+    initial: () => ({ sources: {}, people: {} }),
 });
 
 export type Lesson = {

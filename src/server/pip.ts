@@ -1,7 +1,7 @@
 /**
  * PiP, "Pi in Pocket": the owner's assistant, which looks after their other sessions. PiP is a conversation of its own,
- * kept out of the session list and shown in a small panel over whatever is open (`web/pip.js`). Its extension
- * (`extensions/pip.ts`) is selected there only, and gives it tools to list, read, start, message, stop, archive, and
+ * kept out of the session list and shown in a small panel over whatever is open (`web/pip.js`). Its core registration
+ * (`pip/private-agent.ts`) is selected there only, and gives it tools to list, read, start, message, stop, archive, and
  * schedule sessions, to see the calls waiting for approval and deny them (never allow: that stays a person's), and to
  * follow a session until its run ends. Every tool acts as PiP's person, with exactly their rights: the checks are the
  * ones their own requests meet.
@@ -16,7 +16,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import {
+    clampThinkingLevel,
+    type AssistantMessage,
+    type ModelThinkingLevel,
+} from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -35,15 +39,18 @@ import {
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
-import { AuthorsDoc, FollowsDoc, PipAskedDoc, SessionsDoc } from "./docs.ts";
+import { AuthorsDoc, FollowsDoc, PipAskedDoc, SessionsDoc, type PipMentionSource } from "./docs.ts";
 import { NOTE_ENTRY } from "./entry-format.ts";
 import { describe, HttpError } from "./errors.ts";
 import { clip, defang, quoted } from "./fence.ts";
 import { git } from "./git.ts";
 import { originRepo, parseRepo, requirePush, sameRepo } from "./github.ts";
 import { indexed, modelsNamed, personNamed, sharePhrase, words } from "./model-names.ts";
-import { findModel } from "./models.ts";
+import { agentInfo, findModel, isThinkingLevel, modelSelection } from "./models.ts";
 import { homePath } from "./paths.ts";
+import { createPrivateAgent } from "./pip/private-agent.ts";
+import { PipReviewer } from "./pip/reviewer.ts";
+import { PipMentions } from "./pip/mentions.ts";
 import { type ClientEntry, projectEntry, snippet } from "./projection.ts";
 import type { RepoWatchRequest, RepoWatchView } from "./repo-watches.ts";
 import { clientKey, requestFor } from "./requests.ts";
@@ -51,7 +58,7 @@ import { describeMoment, describeRepeat } from "./when.ts";
 
 const context = BACKGROUND_CONTEXT;
 
-/** PiP's extension: its tools, its prompt, and the follow task. Selected in PiP's conversation only. */
+/** PiP's persisted private selection identity: core-owned tools, prompt, compaction hook and follow task. */
 export const PIP_EXTENSION = "pocket-pip";
 /** What PiP is called, in the app and in what it sends. */
 export const PIP_NAME = "PiP";
@@ -181,6 +188,8 @@ export function ago(moment: number, now: number): string {
 
 export class Pip {
     readonly #app: PocketApp;
+    readonly #reviewer: PipReviewer;
+    readonly #mentions: PipMentions;
     /** A PiP being made, by person, so two tabs opening it at once make one. */
     readonly #creating = new Map<string, Promise<ConversationId>>();
     /** When each PiP started its recent sessions, and made its recent messages and follows: for the hourly limits. */
@@ -193,13 +202,15 @@ export class Pip {
      * memory: after a restart PiP looks again before it acts.
      */
     readonly #checked = new Map<string, number>();
-    /** The durable task behind each follow; PiP's extension installs it. */
+    /** The durable task behind each follow; PiP's always-installed core registration owns it. */
     readonly task: Task<FollowInput, FollowState, null, object>;
     /** How long a report waits before it looks again whether PiP is back on (tests shorten it). */
     holdMs = 60_000;
 
     constructor(app: PocketApp) {
         this.#app = app;
+        this.#reviewer = new PipReviewer(app);
+        this.#mentions = new PipMentions(app);
         this.task = defineTask<FollowInput, FollowState, null>({
             name: "pocket.pip-follow",
             version: 1,
@@ -218,11 +229,172 @@ export class Pip {
         });
     }
 
+    /** Install once before Harness.open, including while paused, so stored selections and follows recover. */
+    registration(): ReturnType<typeof createPrivateAgent> {
+        return createPrivateAgent(this, this.#app.pipCompaction);
+    }
+
+    /** Shared Reviewer publication remains separate from private PiP's owner tools and model. */
+    get reviewTool(): PipReviewer["tool"] {
+        return this.#reviewer.tool;
+    }
+
+    get reviewHooks(): PipReviewer["hooks"] {
+        return this.#reviewer.hooks;
+    }
+
+    /** Shared jobs have an independent, deliberately non-viewable task lane. */
+    get mentionTask(): PipMentions["task"] {
+        return this.#mentions.task;
+    }
+
+    open(): Promise<void> {
+        return this.#mentions.open();
+    }
+
+    isInternal(id: ConversationId): boolean {
+        return this.#mentions.isInternal(id);
+    }
+
+    admitMention(tx: Tx, id: ConversationId, user: User, source: PipMentionSource): Promise<void> {
+        return this.#mentions.admit(tx, id, user, source);
+    }
+
+    close(): void {
+        this.#mentions.close();
+    }
+
+    // ─── Native settings ────────────────────────────────────────────────────
+
+    #settingsOwner(supplied: User): User {
+        const user = this.#app.config.userById(supplied.id);
+
+        if (user === undefined || user.tokenHash !== supplied.tokenHash) {
+            throw new HttpError(401, "Your access was removed or changed; sign in again");
+        }
+
+        if (user.role !== "owner") {
+            throw new HttpError(403, "Only the owner can manage PiP");
+        }
+
+        return { ...user };
+    }
+
+    /** Read-only: opening Settings never creates a private chat or selects a collaborator model. */
+    async settings(supplied: User) {
+        const app = this.#app;
+        const user = this.#settingsOwner(supplied);
+        const id = this.idOf(user.id);
+        const agent = id === undefined ? app.commands.defaultModel() : await app.agentState(id);
+        const selection = app.config.pipCollaborator;
+
+        this.#settingsOwner(user);
+
+        return {
+            enabled: app.config.pipEnabled,
+            compactAt: app.pipCompaction.compactAt,
+            chats: {
+                ...agentInfo(app.models, agent ?? {}, app.defaultCwd, app.signInNeeded),
+                id: id === undefined ? null : Number(id),
+                busy: id !== undefined && app.isBusy(id),
+            },
+            collaborator: {
+                ...agentInfo(
+                    app.models,
+                    {
+                        ...(selection === undefined
+                            ? {}
+                            : {
+                                  model: {
+                                      provider: selection.choice.provider,
+                                      modelId: selection.choice.modelId,
+                                  },
+                                  thinkingLevel: isThinkingLevel(selection.choice.thinkingLevel)
+                                      ? selection.choice.thinkingLevel
+                                      : "off",
+                              }),
+                    },
+                    app.defaultCwd,
+                    app.signInNeeded,
+                ),
+                revision: selection?.revision ?? 0,
+            },
+        };
+    }
+
+    #modelChange(input: unknown): {
+        model?: { provider: string; modelId: string };
+        thinkingLevel?: ModelThinkingLevel;
+    } {
+        if (input === null || typeof input !== "object" || Array.isArray(input)) {
+            throw new HttpError(400, "Choose a model or thinking level");
+        }
+
+        const asked = input as { model?: unknown; thinkingLevel?: unknown };
+
+        if (asked.model === undefined && asked.thinkingLevel === undefined) {
+            throw new HttpError(400, "Choose a model or thinking level");
+        }
+
+        return modelSelection(this.#app.models, asked);
+    }
+
+    /** The same owner/idle transaction as the panel chip; never changes defaults for ordinary threads. */
+    async configureChats(supplied: User, input: unknown): Promise<void> {
+        const user = this.#settingsOwner(supplied);
+        const change = this.#modelChange(input);
+        const id = this.idOf(user.id) ?? (await this.ensure(user));
+
+        this.#settingsOwner(user);
+        await this.#app.commands.configure(id, user, { ...change, pipPanel: true });
+    }
+
+    /** Independent revisioned choice. No private conversation, idle guard, history or model fallback. */
+    configureCollaborator(supplied: User, input: unknown): void {
+        this.#settingsOwner(supplied);
+        const change = this.#modelChange(input);
+        const current = this.#app.config.pipCollaborator;
+        const expected = (input as { expectedRevision?: unknown }).expectedRevision;
+
+        if (expected !== (current?.revision ?? 0)) {
+            throw new HttpError(
+                409,
+                "Collaborator settings changed elsewhere. Reload PiP settings before saving.",
+            );
+        }
+
+        const ref = change.model ?? current?.choice;
+
+        if (ref === undefined) {
+            throw new HttpError(400, "Choose a collaborator model first");
+        }
+
+        const model = this.#app.models.getModel(ref.provider, ref.modelId);
+
+        if (model === undefined) {
+            throw new HttpError(400, `Unknown model ${ref.provider}/${ref.modelId}`);
+        }
+
+        const level = current?.choice.thinkingLevel;
+        const choice = {
+            provider: ref.provider,
+            modelId: ref.modelId,
+            thinkingLevel: clampThinkingLevel(
+                model,
+                change.thinkingLevel ?? (isThinkingLevel(level) ? level : "off"),
+            ),
+        };
+
+        if (JSON.stringify(current?.choice) !== JSON.stringify(choice)) {
+            this.#app.config.pipCollaborator = { choice, revision: (current?.revision ?? 0) + 1 };
+        }
+    }
+
     // ─── Whose PiP ──────────────────────────────────────────────────────────
 
-    /** Whether this person may have a PiP: the owner, while its extension is on. */
+    /** Whether this live person may run PiP: the current owner, while native PiP execution is enabled. */
     available(user: User): boolean {
-        return user.role === "owner" && this.#app.loader.extensionNames().includes(PIP_EXTENSION);
+        return this.#app.config.pipEnabled && this.#app.config.userById(user.id)?.role === "owner";
     }
 
     /** The conversation of this person's PiP, once they have one. */
@@ -243,12 +415,14 @@ export class Pip {
     async stopAll(): Promise<void> {
         const app = this.#app;
 
-        for (const user of app.config.users) {
-            const id = this.idOf(user.id);
+        await this.#mentions.stop();
 
-            if (id === undefined) {
+        for (const [key, meta] of Object.entries(app.sessionCatalogue())) {
+            if (meta.pip === undefined) {
                 continue;
             }
+
+            const id = Number(key) as unknown as ConversationId;
 
             try {
                 await (await app.conversation(id)).abort(context);
@@ -295,13 +469,11 @@ export class Pip {
     }
 
     /** This person's PiP, made the first time they open it. Its agent is set to what PiP runs with each time. */
-    async ensure(user: User): Promise<ConversationId> {
-        if (user.role !== "owner") {
-            throw new HttpError(403, "PiP is the owner's for now.");
-        }
+    async ensure(supplied: User): Promise<ConversationId> {
+        const user = this.#settingsOwner(supplied);
 
         if (!this.available(user)) {
-            throw new HttpError(409, "PiP is turned off in Extensions.");
+            throw new HttpError(409, "PiP is turned off in Settings → PiP.");
         }
 
         const existing = this.idOf(user.id);
@@ -338,6 +510,12 @@ export class Pip {
                         : { thinkingLevel: initial.thinkingLevel }),
                 },
                 init: async (tx, id) => {
+                    this.#settingsOwner(user);
+
+                    if (!this.available(user)) {
+                        throw new HttpError(409, "PiP is paused in Settings → PiP.");
+                    }
+
                     const agent = await tx.doc(AgentDoc, id);
 
                     agent.extensions = [...PIP_EXTENSIONS];
@@ -471,13 +649,17 @@ export class Pip {
         ).requestId;
     }
 
-    /** PiP's person, from its conversation; an error when the conversation is no PiP, or its person is gone. */
+    /** PiP's live owner, from its conversation; no private power while paused, removed, or no longer owner. */
     #person(pipId: ConversationId): User {
         const userId = this.ownerOf(pipId);
         const user = userId === undefined ? undefined : this.#app.config.userById(userId);
 
-        if (user === undefined) {
-            throw new Error("Only PiP has these tools.");
+        if (user === undefined || user.role !== "owner") {
+            throw new Error("Only PiP for a current owner has these tools.");
+        }
+
+        if (!this.available(user)) {
+            throw new Error("PiP is turned off in Settings → PiP.");
         }
 
         return user;
@@ -1647,20 +1829,20 @@ export class Pip {
         context: Context,
     ): Promise<void> {
         const pipId = runtime.conversationId;
+        const pip = await this.#app.harness.conversation(pipId, context);
 
-        // PiP turned off keeps its follows: a report waits until it is on again, as its schedules, watches, and hooks
-        // do, so no run starts in its conversation without its rules and tools.
+        // Paused PiP keeps its follows: a report waits for native execution and its live owner's authority,
+        // like its schedules, watches, and hooks. Recheck after opening the conversation, just before submission.
         for (;;) {
             const person = this.#app.config.userById(input.userId);
 
-            if (person === undefined || this.available(person)) {
+            if (person !== undefined && this.available(person)) {
                 break;
             }
 
             await runtime.sleep(runtime.now() + this.holdMs, context);
         }
 
-        const pip = await this.#app.harness.conversation(pipId, context);
         const requestId = requestFor(input.userId, `pip-report-${String(runtime.taskId)}`);
 
         // The report says what the session did: PiP has looked at it.

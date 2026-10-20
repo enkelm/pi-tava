@@ -578,6 +578,15 @@ export function createWorkflowHooks(app: PocketApp) {
                         };
                     }
 
+                    if (call.name === "review_comment") {
+                        return id === app.rootOf(id) &&
+                            app.sessionMeta(id)?.threadType === "reviewer"
+                            ? undefined
+                            : {
+                                  block: "Only the active main Reviewer may publish PiP diff comments.",
+                              };
+                    }
+
                     if (call.name === "research" || call.name === "browser") {
                         requireResearch(app, id);
 

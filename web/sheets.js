@@ -20,6 +20,7 @@ import { MemorySheet } from "./sheets/memory.js";
 import { MenuSheet, PlacesSheet } from "./sheets/menu.js";
 import { MessageSheet } from "./sheets/message.js";
 import { ModelPicker } from "./sheets/model.js";
+import { PipModelPicker } from "./sheets/pip.js";
 import { InviteSheet } from "./sheets/people.js";
 import { AuthDialog } from "./sheets/providers.js";
 import { RunningSheet } from "./sheets/running.js";
@@ -248,6 +249,9 @@ function sheetBody(sheet) {
             break;
         case "model":
             body = html`<${ModelPicker} />`;
+            break;
+        case "pip-model":
+            body = html`<${PipModelPicker} target=${sheet.target} agent=${sheet.agent} />`;
             break;
         case "branch":
             body = view.conversation ? html`<${BranchPicker} />` : null;

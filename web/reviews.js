@@ -1,15 +1,25 @@
 // Comment-first review. Navigation and diff placement belong to diff.js.
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "preact/hooks";
+import { reviewMessageParts } from "./review-message.js";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { Avatar } from "./avatar.js";
+import { useMentionComposer } from "./mention-composer.js";
+import { DiscussionMentionText, PipMentionStatus } from "./pip-mentions.js";
 import { actions, canSteer, collab, notify, store, uid } from "./store.js";
 import { html, Icon } from "./ui.js";
 
 const reviewThreads = () => store.state.view.reviews?.threads ?? [];
 const enabled = () => (store.state.server?.localReviews ?? 0) >= 2;
 
-function ReviewAuthor({ userId, name, showYou = false }) {
+function ReviewAuthor({ userId, name, service, showYou = false }) {
     const me = store.state.me;
-    const user = me?.id === userId ? me : store.state.users.find((person) => person.id === userId);
+    const user =
+        service === "pip"
+            ? null
+            : me?.id === userId
+              ? me
+              : store.state.users.find((person) => person.id === userId);
+
+    name = service === "pip" ? "PiP" : name;
 
     return html`<span class="rv-author">
         <${Avatar} person=${{ id: userId, name }} size=${22} />
@@ -70,6 +80,7 @@ function draftRecord(key) {
         drafts.set(key, {
             text: typeof saved?.text === "string" ? saved.text : "",
             receipt: saved?.receipt ?? null,
+            range: saved?.range ?? null,
             error: typeof saved?.error === "string" ? saved.error : "",
             pending: false,
             listeners: new Set(),
@@ -83,12 +94,13 @@ function updateDraft(key, record, patch) {
     Object.assign(record, patch);
 
     try {
-        if (record.text || record.receipt || record.error) {
+        if (record.text || record.receipt || record.error || record.range) {
             sessionStorage.setItem(
                 key,
                 JSON.stringify({
                     text: record.text,
                     receipt: record.receipt,
+                    range: record.range,
                     error: record.error,
                 }),
             );
@@ -104,8 +116,11 @@ function updateDraft(key, record, patch) {
     }
 }
 
+const reviewDraftKey = (conversationId, scope) =>
+    `pocket.review-draft.${JSON.stringify([store.state.me?.id, conversationId, ...scope])}`;
+
 function useReviewRequest(conversationId, scope) {
-    const key = `pocket.review-draft.${JSON.stringify([store.state.me?.id, conversationId, ...scope])}`;
+    const key = reviewDraftKey(conversationId, scope);
     const record = draftRecord(key);
     const [, redraw] = useState(0);
     const mounted = useRef(false);
@@ -139,7 +154,7 @@ function useReviewRequest(conversationId, scope) {
 
             updateDraft(key, record, {
                 receipt: null,
-                ...(clearText ? { text: "" } : {}),
+                ...(clearText ? { text: "", range: null } : {}),
             });
 
             if (mounted.current && store.state.conversationId === conversationId) {
@@ -161,6 +176,55 @@ function useReviewRequest(conversationId, scope) {
     };
 }
 
+/** Gutter selection and the composer share the original anchor's persisted draft, including retries. */
+export function useReviewRange(path, anchor) {
+    const conversationId = store.state.conversationId;
+    const request = useReviewRequest(conversationId, [
+        "comment",
+        path,
+        anchor?.side ?? null,
+        anchor?.line ?? null,
+    ]);
+    const saved = request.range;
+
+    return useMemo(
+        () => ({
+            side: anchor?.side,
+            start: Number(saved?.start ?? anchor?.line),
+            end: Number(saved?.end ?? anchor?.line),
+            pending: request.pending,
+            select: (origin, start, end) => {
+                const key = reviewDraftKey(conversationId, [
+                    "comment",
+                    path,
+                    origin.side,
+                    origin.line,
+                ]);
+                const record = draftRecord(key);
+
+                if (!record.pending && store.state.conversationId === conversationId) {
+                    updateDraft(key, record, {
+                        range: {
+                            start: String(Math.min(start, end)),
+                            end: String(Math.max(start, end)),
+                        },
+                        error: "",
+                    });
+                }
+            },
+        }),
+        [
+            conversationId,
+            path,
+            anchor?.side,
+            anchor?.line,
+            saved,
+            request.pending,
+            store.state.me?.id,
+        ],
+    );
+}
+
 function RequestError({ error }) {
     return error ? html`<p class="rv-error" role="alert">${error}</p>` : null;
 }
@@ -177,12 +241,18 @@ function ReviewTime({ at }) {
     </time>`;
 }
 
-function locationLabel({ path, side, line }) {
+function locationLabel({ path, side, startLine, line }) {
     if (!path) {
         return "All changes";
     }
 
-    return line == null ? `${path} · file` : `${path} · ${side} line ${line}`;
+    if (line == null) {
+        return `${path} · file`;
+    }
+
+    return startLine != null && startLine !== line
+        ? `${path} · ${side} lines ${startLine}–${line}`
+        : `${path} · ${side} line ${line}`;
 }
 
 function reviewPrompt(people) {
@@ -568,6 +638,7 @@ export function ReviewThreads({
     side = null,
     line = null,
     context = "",
+    rangeEvidence = null,
     composing = false,
     active = true,
     onCancel,
@@ -592,7 +663,11 @@ export function ReviewThreads({
         return null;
     }
 
-    return html`<section class="rv-threads" aria-label=${`Review comments: ${locationLabel({ path, side, line })}`}>
+    const locations = scoped.length
+        ? [...new Set(scoped.map(locationLabel))].join("; ")
+        : locationLabel({ path, side, line });
+
+    return html`<section class="rv-threads" aria-label=${`Review comments: ${locations}`}>
         ${outdated && scoped.length > 0 && html`<p class="rv-notice">${typeof outdated === "string" ? outdated : "Earlier context · these comments may no longer match the current changes."}</p>`}
         ${scoped.map(
             (thread) => html`<${ReviewThread}
@@ -613,19 +688,11 @@ export function ReviewThreads({
             side=${side}
             line=${line}
             context=${context}
+            rangeEvidence=${rangeEvidence}
             onCancel=${onCancel}
         />`
         }
     </section>`;
-}
-
-function BusyWarning() {
-    const view = store.state.view;
-    const busy = view.live?.busy || (view.subagents ?? []).some((agent) => agent.busy);
-
-    return busy
-        ? html`<p class="rv-notice" role="status">Pi or a subagent is working; these lines may change. You can still comment.</p>`
-        : null;
 }
 
 function CommentComposer({
@@ -635,6 +702,7 @@ function CommentComposer({
     side,
     line,
     context,
+    rangeEvidence,
     thread,
     onCancel,
 }) {
@@ -643,10 +711,77 @@ function CommentComposer({
     const input = useRef(null);
     const fieldId = useId();
     const writable = active && !!store.state.me && store.state.conversationId === conversationId;
+    const mentions = useMentionComposer({
+        text: request.text,
+        onChange: request.setText,
+        input,
+        enabled: writable && !request.pending,
+    });
+    const selectable = !thread && line != null && !!rangeEvidence;
+    const range = request.range ?? { start: String(line), end: String(line) };
+    const start = Number(range.start);
+    const end = Number(range.end);
+    const multiple = start !== end;
+    const rangeError =
+        selectable &&
+        (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start
+            ? "Select valid lines in the diff gutter."
+            : end - start >= 100
+              ? "Choose a smaller range."
+              : null);
+    const evidence =
+        selectable && !rangeError
+            ? multiple
+                ? rangeEvidence(start, end)
+                : start === line
+                  ? { context }
+                  : rangeEvidence(start, end)
+            : null;
+    const selectionError = rangeError || evidence?.error;
     const label = thread
         ? `Reply to ${thread.name}`
-        : `Comment on ${locationLabel({ path, side, line })}`;
+        : `Comment on ${locationLabel({
+              path,
+              side,
+              startLine: selectable && !rangeError ? start : undefined,
+              line: selectable && !rangeError ? end : line,
+          })}`;
     const postLabel = thread ? "Post reply" : "Post comment";
+    const suggestionAnchor = thread ?? { path, side, line, context: evidence?.context ?? context };
+    const canSuggest =
+        (store.state.server?.reviewSuggestions ?? 0) >= 1 &&
+        suggestionAnchor.path != null &&
+        suggestionAnchor.side === "new" &&
+        suggestionAnchor.line != null &&
+        typeof suggestionAnchor.context === "string" &&
+        !selectionError;
+
+    const insertSuggestion = () => {
+        if (!writable || request.pending || !canSuggest) {
+            return;
+        }
+
+        const code = suggestionAnchor.context;
+        const fence = "`".repeat(
+            Math.max(3, ...[...code.matchAll(/`+/g)].map((match) => match[0].length + 1)),
+        );
+        const before =
+            request.text +
+            (request.text
+                ? request.text.endsWith("\n\n")
+                    ? ""
+                    : request.text.endsWith("\n")
+                      ? "\n"
+                      : "\n\n"
+                : "");
+        const prefix = `${before}${fence}suggestion\n`;
+
+        request.setText(`${prefix}${code}\n${fence}\n`);
+        queueMicrotask(() => {
+            input.current?.focus({ preventScroll: true });
+            input.current?.setSelectionRange(prefix.length, prefix.length + code.length);
+        });
+    };
 
     useLayoutEffect(() => {
         if (writable) {
@@ -657,18 +792,24 @@ function CommentComposer({
     const submit = (event) => {
         event.preventDefault();
 
-        if (!writable || !request.text.trim()) {
+        if (!writable || !request.text.trim() || selectionError) {
             return;
         }
 
         const payload = thread
-            ? { threadId: thread.id, text: request.text.trim() }
+            ? { threadId: thread.id, text: request.text.trimEnd() }
             : {
-                  text: request.text.trim(),
+                  text: request.text.trimEnd(),
                   ...(path == null ? {} : { path }),
-                  ...(line == null ? {} : { side, line }),
+                  ...(line == null ? {} : { side, line: selectable ? end : line }),
+                  ...(selectable && multiple ? { startLine: start } : {}),
                   ...(path != null && side != null && line != null
-                      ? { context: context.slice(0, 1000) }
+                      ? {
+                            context:
+                                multiple && selectable
+                                    ? evidence.context
+                                    : (evidence?.context ?? context).slice(0, 1000),
+                        }
                       : {}),
               };
 
@@ -684,7 +825,7 @@ function CommentComposer({
 
         const sameComment =
             previous &&
-            ["text", "threadId", "path", "side", "line"].every(
+            ["text", "threadId", "path", "side", "startLine", "line"].every(
                 (field) => previous[field] === payload[field],
             );
 
@@ -693,7 +834,8 @@ function CommentComposer({
 
     return html`<form class="rv-form" onSubmit=${submit} aria-busy=${request.pending}>
         <label class="rv-form-label" for=${`${fieldId}-comment`}>${label}</label>
-        <${BusyWarning} />
+        <${RequestError} error=${selectionError} />
+        ${mentions.list}
         <div class="rv-input">
             <textarea
                 id=${`${fieldId}-comment`}
@@ -703,9 +845,22 @@ function CommentComposer({
                 required
                 value=${request.text}
                 disabled=${!writable || request.pending}
-                onInput=${(event) => request.setText(event.currentTarget.value)}
+                ...${mentions.inputProps}
             ></textarea>
             <div class="rv-input-actions">
+                ${
+                    canSuggest &&
+                    html`<button
+                        type="button"
+                        class="icon-button rv-icon"
+                        aria-label="Insert suggestion"
+                        title="Insert suggestion"
+                        disabled=${!writable || request.pending}
+                        onClick=${insertSuggestion}
+                    >
+                        <${Icon} name="diff" size=${17} />
+                    </button>`
+                }
                 <button
                     type="button"
                     class="icon-button rv-icon"
@@ -721,7 +876,7 @@ function CommentComposer({
                     class="icon-button rv-icon rv-post"
                     aria-label=${postLabel}
                     title=${postLabel}
-                    disabled=${!writable || !request.text.trim() || request.pending}
+                    disabled=${!writable || !request.text.trim() || request.pending || !!selectionError}
                 >
                     <${Icon} name="send" size=${17} />
                 </button>
@@ -729,6 +884,91 @@ function CommentComposer({
         </div>
         <${RequestError} error=${request.error} />
     </form>`;
+}
+
+function ReviewMessage({ message, thread, conversationId, active, outdated }) {
+    const parts = useMemo(() => reviewMessageParts(message.text), [message.text]);
+
+    return html`<div class="rv-message">
+        ${parts.map((part) =>
+            part.type === "text"
+                ? html`<p class="rv-text">
+                    <${DiscussionMentionText} text=${part.text} links=${true} />
+                </p>`
+                : part.suggestionIndex !== undefined
+                  ? html`<${ReviewSuggestion}
+                    key=${part.suggestionIndex}
+                    index=${part.suggestionIndex}
+                    code=${part.text}
+                    message=${message}
+                    thread=${thread}
+                    conversationId=${conversationId}
+                    active=${active}
+                    outdated=${outdated}
+                />`
+                  : html`<pre class="rv-code"><code>${part.text}</code></pre>`,
+        )}
+    </div>`;
+}
+
+function ReviewSuggestion({ code, message, thread, index, conversationId, active, outdated }) {
+    const request = useReviewRequest(conversationId, ["suggestion", thread.id, message.id, index]);
+    const [resultStatus, setResultStatus] = useState(null);
+    const savedStatus = message.suggestions?.[index]?.status;
+    const status = savedStatus === "applied" ? savedStatus : (resultStatus ?? savedStatus);
+    const supported = (store.state.server?.reviewSuggestions ?? 0) >= 1;
+    const canApply = () =>
+        active &&
+        !outdated &&
+        status !== "applied" &&
+        supported &&
+        typeof (message.workspace ?? thread.workspace) === "string" &&
+        thread.path != null &&
+        thread.side === "new" &&
+        thread.line != null &&
+        store.state.conversationId === conversationId &&
+        canSendReviews() &&
+        !store.state.view.live?.busy &&
+        !(store.state.view.subagents ?? []).some((agent) => agent.busy);
+
+    const apply = () => {
+        if (!canApply()) {
+            return;
+        }
+
+        request.run(
+            actions.applyReviewSuggestion,
+            { threadId: thread.id, commentId: message.id, index },
+            (result) => setResultStatus(result.status === "applied" ? "applied" : "uncertain"),
+        );
+    };
+
+    const label =
+        status === "applied"
+            ? "Applied"
+            : request.pending
+              ? "Applying…"
+              : status === "applying" || status === "uncertain"
+                ? "Check result"
+                : "Apply suggestion";
+
+    return html`<div class="rv-suggestion">
+        <div class="rv-suggestion-head">
+            <span>${code === "" ? "Delete selected lines" : "Suggestion"}</span>
+            ${
+                supported &&
+                html`<button
+                    type="button"
+                    class="button small rv-button"
+                    disabled=${!canApply() || request.pending}
+                    aria-busy=${request.pending}
+                    onClick=${apply}
+                >${label}</button>`
+            }
+        </div>
+        ${code !== "" && html`<pre class="rv-code"><code>${code}</code></pre>`}
+        <${RequestError} error=${request.error} />
+    </div>`;
 }
 
 function ReviewThread({ thread, conversationId, outdated, active = true }) {
@@ -790,7 +1030,7 @@ function ReviewThread({ thread, conversationId, outdated, active = true }) {
                 <span class=${`rv-chevron ${open ? "rv-expanded" : ""}`}>
                     <${Icon} name="chevron" size=${14} />
                 </span>
-                <${ReviewAuthor} userId=${thread.userId} name=${thread.name} />
+                <${ReviewAuthor} userId=${thread.userId} name=${thread.name} service=${thread.service} />
                 <span class=${`rv-status ${thread.resolved ? "resolved" : "unresolved"}`}>
                     ${thread.resolved ? "Resolved" : "Open"}
                 </span>
@@ -847,17 +1087,31 @@ function ReviewThread({ thread, conversationId, outdated, active = true }) {
                     <pre>${thread.context}</pre>
                 </details>`
             }
-            <p class="rv-text">${thread.text}</p>
+            <${ReviewMessage}
+                message=${thread}
+                thread=${thread}
+                conversationId=${conversationId}
+                active=${active && open}
+                outdated=${outdated}
+            />
+            <${PipMentionStatus} state=${thread.pip} />
             ${
                 replies.length > 0 &&
                 html`<ol class="rv-replies" aria-label="Replies">
                     ${replies.map(
                         (reply) => html`<li key=${reply.id} class="rv-reply">
                             <div class="rv-comment-meta">
-                                <${ReviewAuthor} userId=${reply.userId} name=${reply.name} />
+                                <${ReviewAuthor} userId=${reply.userId} name=${reply.name} service=${reply.service} />
                                 <${ReviewTime} at=${reply.at} />
                             </div>
-                            <p class="rv-text">${reply.text}</p>
+                            <${ReviewMessage}
+                                message=${reply}
+                                thread=${thread}
+                                conversationId=${conversationId}
+                                active=${active && open}
+                                outdated=${outdated}
+                            />
+                            <${PipMentionStatus} state=${reply.pip} />
                         </li>`,
                     )}
                 </ol>`

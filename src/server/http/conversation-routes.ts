@@ -9,7 +9,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
-import type { CommentReview, ResolveReview } from "../reviews.ts";
+import type { ApplyReviewSuggestion, CommentReview, ResolveReview } from "../reviews.ts";
 import { serveImage, sniffImage, TYPES } from "./assets.ts";
 import { extensionRoute } from "./extension-routes.ts";
 import { type ApiRequest, json, readJson, send, withReadContext } from "./io.ts";
@@ -95,6 +95,20 @@ async function dispatchConversation(
                 200,
                 await app.reviews.comment(id, user, await readJson<CommentReview>(request)),
             );
+        }
+
+        if (fourth === "suggestion" && method === "POST") {
+            const result = await app.reviews.applySuggestion(
+                id,
+                user,
+                await readJson<ApplyReviewSuggestion>(request),
+            );
+
+            if (result.status !== "applied") {
+                throw new HttpError(409, "Could not confirm the edit. Use Check result.");
+            }
+
+            return json(response, 200, result);
         }
 
         if (fourth === "resolve" && method === "POST") {

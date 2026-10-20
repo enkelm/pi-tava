@@ -97,7 +97,8 @@ const sources: Record<string, string> = {
     "./back.js": "export const useBack=()=>{};",
     "./chat.js": "export const jumpToEntry=()=>{};",
     "./highlight.js": "export const highlight=()=>{},highlightLines=()=>{},langOf=()=>{};",
-    "./reviews.js": "export const ReviewsPanel=()=>{},ReviewThreads=()=>{};",
+    "./reviews.js":
+        "export const ReviewsPanel=()=>{},ReviewThreads=()=>{},useReviewRange=()=>({select(){}});",
     "./sheets/branch.js": "export const branchAvailable=()=>{};",
     "./ui.js":
         "export const html=()=>{},Icon=()=>{},Loader=()=>{},openFile=()=>{},shortPath=()=>{};",

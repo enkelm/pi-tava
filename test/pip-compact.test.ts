@@ -417,7 +417,7 @@ test("only the owner sets when PiP compacts, to one of its choices; PiP turned o
     // Turned off mid-answer: PiP stops, takes nothing, and is not compacted.
     await app.commands.submit(id, me, { text: "slow", requestId: crypto.randomUUID() });
     await until(() => app.isBusy(id), "PiP at work");
-    await app.setExtensionEnabled(me, "pip.ts", false);
+    await app.setPipEnabled(me, false);
 
     try {
         await until(() => !app.isBusy(id), "PiP stopped", 3000);
@@ -439,6 +439,6 @@ test("only the owner sets when PiP compacts, to one of its choices; PiP turned o
         );
         await assert.rejects(app.commands.compact(id, me, undefined), /PiP is turned off/);
     } finally {
-        await app.setExtensionEnabled(me, "pip.ts", true);
+        await app.setPipEnabled(me, true);
     }
 });

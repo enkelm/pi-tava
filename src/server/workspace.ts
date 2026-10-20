@@ -5,7 +5,7 @@
  * `readableFile`, `uploadDirectory`) leave seeing the conversation to their callers.
  */
 import { lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, posix, resolve, sep } from "node:path";
+import localPaths, { isAbsolute, join, posix, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
@@ -24,7 +24,13 @@ import {
 import { type Changes, changesIn, diffOf, revertFile } from "./changes.ts";
 import type { User } from "./config.ts";
 import { describe, HttpError } from "./errors.ts";
-import { decodeText, fileEditInput, saveFileEdit } from "./file-edits.ts";
+import {
+    decodeText,
+    fileEditInput,
+    MAX_EDIT_BYTES,
+    saveFileEdit,
+    textRevision,
+} from "./file-edits.ts";
 import {
     inspectRemoteFileEdit,
     saveRemoteFileEdit,
@@ -45,6 +51,33 @@ import {
     remoteImage,
     remoteView,
 } from "./remote-workspace.ts";
+
+function inside(paths: typeof posix, root: string, file: string): boolean {
+    const relative = paths.relative(root, file);
+
+    return (
+        relative === "" ||
+        (relative !== ".." && !relative.startsWith(".." + paths.sep) && !paths.isAbsolute(relative))
+    );
+}
+
+/** One private-root policy for local/remote viewers, scoped reads and edits. Canonicalize at the caller. */
+function protectedPath(
+    paths: typeof posix,
+    file: string,
+    data: string,
+    agent: string,
+    mode: "read" | "edit",
+): boolean {
+    const exceptions =
+        mode === "read" ? ["uploads", "worktrees", "repos"] : ["uploads", "worktrees"];
+
+    return (
+        inside(paths, agent, file) ||
+        (inside(paths, data, file) &&
+            !exceptions.some((part) => inside(paths, paths.join(data, part), file)))
+    );
+}
 
 export class Workspace {
     readonly #app: PocketApp;
@@ -408,16 +441,14 @@ export class Workspace {
             }
         };
 
-        const target = real(file);
-        const inside = (root: string) => target === root || target.startsWith(root + sep);
-        const data = real(this.#app.dataDir);
-
         if (
-            inside(real(getAgentDir())) ||
-            (inside(data) &&
-                !inside(join(data, "uploads")) &&
-                !inside(join(data, "worktrees")) &&
-                !inside(join(data, "repos")))
+            protectedPath(
+                localPaths,
+                real(file),
+                real(this.#app.dataDir),
+                real(getAgentDir()),
+                "read",
+            )
         ) {
             throw new HttpError(404, "Not found");
         }
@@ -451,24 +482,22 @@ export class Workspace {
             }
         };
 
-        const inside = (target: string, root: string) =>
-            target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
-        const data = real(this.#app.dataDir);
-        const agent = real(getAgentDir());
-        const protectedPath = (target: string, dataRoot: string, agentRoot: string) =>
-            inside(target, agentRoot) ||
-            (inside(target, dataRoot) &&
-                !inside(target, join(dataRoot, "uploads")) &&
-                !inside(target, join(dataRoot, "worktrees")));
-
         // Check both spellings: a protected folder's symlink must not grant an edit of its target, nor may an
         // unprotected alias grant an edit of configuration. Exceptions are real subpaths, not symlink targets.
         if (
-            protectedPath(canonical, data, agent) ||
             protectedPath(
+                localPaths,
+                canonical,
+                real(this.#app.dataDir),
+                real(getAgentDir()),
+                "edit",
+            ) ||
+            protectedPath(
+                localPaths,
                 this.conversationPath(id, path),
                 resolve(this.#app.dataDir),
                 resolve(getAgentDir()),
+                "edit",
             )
         ) {
             throw new HttpError(403, "App data and Pi configuration cannot be edited here.");
@@ -640,6 +669,133 @@ export class Workspace {
         return result;
     }
 
+    /** A source name, not path authority: shared reads never accept credentials or traversal. */
+    sourcePath(path?: string): string {
+        if (
+            !path ||
+            path.includes("\0") ||
+            path.includes("\\") ||
+            path.startsWith("/") ||
+            path.startsWith("~") ||
+            /^[a-z]:/i.test(path) ||
+            path.split("/").some((part) => ["..", ".git", ".ssh", ".aws", ".gnupg"].includes(part))
+        ) {
+            throw new HttpError(400, "Use a source path relative to the shared folder");
+        }
+
+        return path;
+    }
+
+    /** Shared source discovery uses the same local Git/remote dispatcher as human file mentions. */
+    async sourceFiles(
+        id: ConversationId,
+        user: User,
+        context: Context = BACKGROUND_CONTEXT,
+    ): Promise<{ files: string[]; truncated: boolean }> {
+        user = structuredClone(user);
+
+        return this.#sourceRead(id, user, context, async (backend, root, permitted) => {
+            const listing = await this.fileList(id, user, context);
+            const files = listing.files.filter((path) => {
+                try {
+                    this.sourcePath(path);
+                } catch {
+                    return false;
+                }
+
+                return permitted(backend.paths.resolve(root, path));
+            });
+
+            return { files, truncated: listing.truncated };
+        });
+    }
+
+    /** Complete bounded UTF-8 source, confined even for owners; never the broad human file viewer. */
+    async sourceFile(
+        id: ConversationId,
+        user: User,
+        path: string,
+        context: Context = BACKGROUND_CONTEXT,
+    ): Promise<{ text: string; revision: string }> {
+        path = this.sourcePath(path);
+
+        return this.#sourceRead(id, user, context, async (backend, root, permitted) => {
+            const file = await backend.canonical(path);
+
+            if (!permitted(file)) {
+                throw new HttpError(404, "That file is outside the shared folder");
+            }
+
+            // Aliases must not bypass protected relative directories such as .ssh or .git.
+            this.sourcePath(backend.paths.relative(root, file));
+            const snapshot = backend.remote
+                ? await inspectRemoteFileEdit({
+                      backend,
+                      root,
+                      file,
+                      offline: this.#app.workItems.isManaged(id),
+                  })
+                : { bytes: await backend.readBytes(file, MAX_EDIT_BYTES), revision: undefined };
+
+            if ((await backend.canonical(path)) !== file) {
+                throw new HttpError(409, "The file's location changed during the read");
+            }
+
+            const text = decodeText(snapshot.bytes);
+
+            if (text === undefined) {
+                throw new HttpError(415, "Only UTF-8 source text can be read");
+            }
+
+            return { text, revision: snapshot.revision ?? textRevision(snapshot.bytes) };
+        });
+    }
+
+    /** Keep destination, live requester, private-root exclusions and canonical rechecks in one owner. */
+    async #sourceRead<T>(
+        id: ConversationId,
+        user: User,
+        context: Context,
+        read: (
+            backend: WorkspaceBackend,
+            root: string,
+            permitted: (path: string) => boolean,
+        ) => Promise<T>,
+    ): Promise<T> {
+        user = structuredClone(user);
+        requireWorkflowRequester(this.#app, id, user);
+        context.abortSignal?.throwIfAborted();
+
+        return this.#app.sshSessions.withWorkspace(id, user, context, async (backend) => {
+            const root = await backend.canonical(backend.cwd);
+            const agent = await backend.canonicalWithMissingTail(
+                backend.remote ? "~/.pi/agent" : getAgentDir(),
+            );
+            const data = await backend.canonicalWithMissingTail(
+                backend.remote ? "~/.pi-durable-app" : this.#app.dataDir,
+            );
+
+            const permitted = (path: string) =>
+                inside(backend.paths, root, path) &&
+                !protectedPath(backend.paths, path, data, agent, "read");
+
+            if (!permitted(root)) {
+                throw new HttpError(404, "Private application context is not shared code");
+            }
+
+            const result = await read(backend, root, permitted);
+
+            if ((await backend.canonical(backend.cwd)) !== root) {
+                throw new HttpError(409, "The folder's location changed during the read");
+            }
+
+            context.abortSignal?.throwIfAborted();
+            requireWorkflowRequester(this.#app, id, user);
+
+            return result;
+        });
+    }
+
     /**
      * A file or folder for the viewer, as a person who can steer may load it through the session (`conversationFile`):
      * its text, or that it is an image, a folder's entries, or binary.
@@ -799,8 +955,6 @@ export class Workspace {
         requested = file,
     ): Promise<void> {
         const targets = [file, await backend.absolute(requested)];
-        const inside = (target: string, root: string) =>
-            target === root || target.startsWith(root.replace(/\/$/, "") + "/");
         const agent = [
             await backend.absolute("~/.pi/agent"),
             await backend.canonicalWithMissingTail("~/.pi/agent"),
@@ -811,15 +965,10 @@ export class Workspace {
         ];
 
         if (
-            targets.some(
-                (target) =>
-                    agent.some((root) => inside(target, root)) ||
-                    data.some(
-                        (root) =>
-                            inside(target, root) &&
-                            !inside(target, backend.paths.join(root, "uploads")) &&
-                            !inside(target, backend.paths.join(root, "worktrees")),
-                    ),
+            targets.some((target) =>
+                data.some((root, index) =>
+                    protectedPath(backend.paths, target, root, agent[index]!, "edit"),
+                ),
             )
         ) {
             throw new HttpError(403, "App data and Pi configuration cannot be edited here.");
@@ -835,6 +984,8 @@ export class Workspace {
         path: unknown,
         text: unknown,
         revision: unknown,
+        /** A source-bound action can additionally pin its earlier read through every save authorization. */
+        guard?: () => Promise<void>,
     ): Promise<{ revision: string; warning?: string }> {
         user = structuredClone(user);
         this.#app.requireSee(user, id);
@@ -882,6 +1033,7 @@ export class Workspace {
             const root = onlyHere ? await backend.canonical(backend.cwd) : "/";
 
             await this.#remoteEditProtection(backend, file, input.path);
+            await guard?.();
             await this.#app.requireDriver(id, assertLive());
             assertLive();
             requireWorkflowLocalWrite(this.#app, id);
@@ -902,6 +1054,12 @@ export class Workspace {
             assertLive();
             await this.#app.conversation(id);
             await this.#app.requireDriver(id, assertLive());
+
+            if (guard !== undefined) {
+                await guard();
+                await this.#app.requireDriver(id, assertLive());
+            }
+
             // A queued save may have waited behind another conversation's save of this same path.
             assertLive();
             requireWorkflowLocalWrite(this.#app, id);

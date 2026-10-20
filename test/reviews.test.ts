@@ -297,7 +297,13 @@ test("concurrent comments and replies are durable once; atomic bulk resolves res
     const me = owner(app);
     const { user: a } = app.config.addUser("A", "viewer");
     const { user: b } = app.config.addUser("B", "viewer");
-    const first = { requestId: "same", text: "First concern" };
+    const first = {
+        requestId: "same",
+        text: "First concern",
+        service: "pip",
+        name: "PiP",
+        userId: "pip",
+    };
     const results = await Promise.all(
         Array.from({ length: 12 }, () => app.reviews.comment(id, a, first)),
     );
@@ -358,6 +364,8 @@ test("concurrent comments and replies are durable once; atomic bulk resolves res
     );
     saved = await app.reviews.list(id, me);
     assert.equal(saved.threads[0]!.userId, a.id);
+    assert.equal(saved.threads[0]!.name, "A");
+    assert.equal(saved.threads[0]!.service, undefined, "human input cannot forge PiP authorship");
     assert.equal(saved.threads[0]!.resolvedBy, a.id);
     assert.equal(saved.threads[1]!.resolved, false);
     assert.equal(saved.threads[1]!.resolvedBy, undefined);
@@ -376,15 +384,32 @@ test("threads and retry receipts survive restart and cwd changes; legacy rounds 
             "scoped/code.txt": "OLD_SNAPSHOT_SECRET",
         };
     }, context);
+    writeFileSync(join(cwd, "code.txt"), "after\nmiddle\nlast\n");
     const input = {
         requestId: "persist",
-        text: "Old line",
+        text: "Old range",
         path: "scoped/code.txt",
         side: "new",
-        line: 1,
-        context: "after",
+        startLine: 1,
+        line: 3,
+        context: "after\nmiddle\nlast",
     };
     const result = await app.reviews.comment(id, owner(app), input);
+
+    assert.equal((await app.reviews.list(id, owner(app))).threads[0]!.startLine, 1);
+    await assert.rejects(
+        app.reviews.comment(id, owner(app), { ...input, startLine: 2, context: "middle\nlast" }),
+        status(409),
+    );
+    await assert.rejects(
+        app.reviews.comment(id, owner(app), {
+            requestId: "range-reply",
+            text: "Cannot move a reply",
+            threadId: result.id,
+            startLine: 1,
+        }),
+        status(400),
+    );
     const resolution = { requestId: "resolve", threadIds: [result.id], resolved: true };
 
     await app.reviews.resolve(id, owner(app), resolution);
@@ -685,6 +710,16 @@ test("invalid anchors and oversized comments fail atomically; a full collaborati
         { requestId: "empty", text: "   " },
         { requestId: "side", text: "No side", path: "file", line: 1 },
         { requestId: "line", text: "Bad line", path: "file", side: "new", line: 0 },
+        { requestId: "side-name", text: "Bad side", path: "file", side: "both", line: 1 },
+        { requestId: "no-file", text: "No file", side: "new", line: 1 },
+        {
+            requestId: "nul-context",
+            text: "NUL",
+            path: "file",
+            side: "new",
+            line: 1,
+            context: "\0",
+        },
         { requestId: "huge", text: "Huge line", path: "file", side: "old", line: 10_000_001 },
         {
             requestId: "excerpt",
@@ -695,6 +730,21 @@ test("invalid anchors and oversized comments fail atomically; a full collaborati
             context: "x".repeat(1001),
         },
         { requestId: "reply", text: "Replies have no anchor", threadId: "missing", path: "file" },
+        ...[
+            { startLine: 0, line: 2, context: "one\ntwo" },
+            { startLine: 3, line: 2, context: "one\ntwo" },
+            { startLine: 1.5, line: 2, context: "one\ntwo" },
+            { startLine: 1, line: 101, context: "line\n".repeat(100) + "line" },
+            { startLine: 1, line: 2, context: "Only the end" },
+            { startLine: 1, line: 2 },
+            { startLine: 1, line: 2, context: "x".repeat(8000) + "\nend" },
+        ].map((range, index) => ({
+            requestId: `invalid-range-${index}`,
+            text: "Invalid inclusive range",
+            path: "file",
+            side: "new",
+            ...range,
+        })),
     ];
 
     for (const input of invalid) {
@@ -742,6 +792,38 @@ test("invalid anchors and oversized comments fail atomically; a full collaborati
     assert.equal(saved.threads.length, ids.length);
     assert.ok(saved.threads.every((thread) => thread.resolved && thread.resolvedBy === me.id));
     assert.equal(saved.threads[0]!.text.length, 4000);
+});
+
+test("legacy single-line anchors and maximum inclusive ranges preserve their original context", async () => {
+    const { cwd } = repo("anchor-limits");
+    const id = await newSession(app, cwd);
+    const me = owner(app);
+    const anchors = [
+        { side: "old", line: 1 },
+        // Legacy single-line context is advisory, not necessarily exactly one line of evidence.
+        { side: "new", line: 2, context: "before\nafter" },
+        { side: "new", startLine: 1, line: 100, context: Array(100).fill("line").join("\n") },
+        { side: "old", startLine: 10, line: 10, context: "x".repeat(8000) },
+    ];
+
+    for (const [index, anchor] of anchors.entries()) {
+        await app.reviews.comment(id, me, {
+            requestId: `accepted-anchor-${index}`,
+            text: "Original anchor",
+            path: "scoped/code.txt",
+            ...anchor,
+        });
+    }
+
+    assert.deepEqual(
+        (await app.reviews.list(id, me)).threads.map(({ side, line, startLine, context }) => ({
+            side,
+            line,
+            ...(startLine === undefined ? {} : { startLine }),
+            ...(context === undefined ? {} : { context }),
+        })),
+        anchors,
+    );
 });
 
 // An actual running model distinguishes collaboration from steering/capture and guards against reintroducing idle gates.

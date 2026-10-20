@@ -124,6 +124,10 @@ interface PocketConfig {
     approvals?: ApprovalRule;
     /** The tokens of context above which PiP compacts itself once idle; 0: only as sessions do. Absent: the default. */
     pipCompactAt?: number;
+    /** Native PiP execution setting. Absent preserves the legacy PiP disabled choice. */
+    pipEnabled?: boolean;
+    /** Independent shared-discussion model; never follows the private PiP conversation's model. */
+    pipCollaborator?: { choice: ModelChoice; revision: number };
     /**
      * The owner's shared model list (`provider/modelId`). For background subagents, absent or empty leaves explicit
      * choices unrestricted; nonempty restricts extra models. The parent's model is always allowed. Linked sessions
@@ -249,6 +253,48 @@ export class ConfigStore {
         }
 
         this.save();
+    }
+
+    get pipEnabled(): boolean {
+        if (this.#config.pipEnabled !== undefined) {
+            return this.#config.pipEnabled === true;
+        }
+
+        return this.extensionChoice("pip.ts") !== false;
+    }
+
+    set pipEnabled(enabled: boolean) {
+        const previous = this.#config.pipEnabled;
+
+        this.#config.pipEnabled = enabled;
+
+        try {
+            this.save();
+        } catch (error) {
+            this.#config.pipEnabled = previous;
+
+            throw error;
+        }
+    }
+
+    get pipCollaborator(): { choice: ModelChoice; revision: number } | undefined {
+        return this.#config.pipCollaborator === undefined
+            ? undefined
+            : structuredClone(this.#config.pipCollaborator);
+    }
+
+    set pipCollaborator(selection: { choice: ModelChoice; revision: number }) {
+        const previous = this.#config.pipCollaborator;
+
+        this.#config.pipCollaborator = structuredClone(selection);
+
+        try {
+            this.save();
+        } catch (error) {
+            this.#config.pipCollaborator = previous;
+
+            throw error;
+        }
     }
 
     /** Shared model list: empty means unrestricted background choices, but parent-only linked sessions. */

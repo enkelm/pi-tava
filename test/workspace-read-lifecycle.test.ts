@@ -192,7 +192,8 @@ const sources: Record<string, string> = {
     "chat.js": "export const jumpToEntry = () => {};",
     "highlight.js":
         "export const highlight = text => text, highlightLines = lines => lines, langOf = () => null;",
-    "reviews.js": "export const ReviewsPanel = () => null, ReviewThreads = () => null;",
+    "reviews.js":
+        "export const ReviewsPanel = () => null, ReviewThreads = () => null, useReviewRange = () => ({select(){}});",
     "branch.js": "export const branchAvailable = () => true;",
     "browser.js": "export const browserAvailable = () => false, openInBrowser = () => {};",
     "files.js":
@@ -543,7 +544,12 @@ test("diff context reads are cancelled without caching an abandoned failure", as
             ...node.props,
             expand: true,
             reviewPath: scoped ? "context.txt" : null,
-            discussion: { cwd: "/fixture", threads: [{ cwd: "/fixture", line: 1, side: "new" }] },
+            discussion: {
+                cwd: "/fixture",
+                threads: [
+                    { cwd: "/fixture", line: 1, side: "new", context: "first unchanged line" },
+                ],
+            },
         };
         const diff = mountChild(node, props);
 
@@ -566,7 +572,9 @@ test("diff context reads are cancelled without caching an abandoned failure", as
         await flush();
         const before = requests.length;
 
-        props.discussion.threads = [{ cwd: "/fixture", line: 1, side: "new" }];
+        props.discussion.threads = [
+            { cwd: "/fixture", line: 1, side: "new", context: "first unchanged line" },
+        ];
         render(diff);
         assert.equal(
             requests.length,

@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime, ScopedModel } from "@earendil-works/pi-coding-agent";
 import type { AgentState, ModelRef } from "@earendil-works/pi-durable";
+import { HttpError } from "./errors.ts";
 
 // A record, so a level Pi adds fails the type check until it is here too.
 const LEVELS: Record<ModelThinkingLevel, true> = {
@@ -30,6 +31,44 @@ export const THINKING_LEVELS: readonly ModelThinkingLevel[] = Object.freeze(
 /** Whether `level` names a thinking level. */
 export function isThinkingLevel(level: unknown): level is ModelThinkingLevel {
     return typeof level === "string" && Object.hasOwn(LEVELS, level);
+}
+
+/** Validate an explicit picker change without choosing defaults, checking authority, or saving it. */
+export function modelSelection(
+    models: ModelRuntime,
+    input: { model?: unknown; thinkingLevel?: unknown },
+): { model?: ModelRef; thinkingLevel?: ModelThinkingLevel } {
+    const asked = input.model as { provider?: unknown; modelId?: unknown } | undefined;
+
+    if (
+        asked !== undefined &&
+        (typeof asked !== "object" ||
+            asked === null ||
+            typeof asked.provider !== "string" ||
+            typeof asked.modelId !== "string")
+    ) {
+        throw new HttpError(400, "model must name a provider and a model id");
+    }
+
+    const level = input.thinkingLevel;
+
+    if (level !== undefined && !isThinkingLevel(level)) {
+        throw new HttpError(400, `thinkingLevel must be one of ${THINKING_LEVELS.join(", ")}`);
+    }
+
+    const model =
+        asked === undefined
+            ? undefined
+            : { provider: asked.provider as string, modelId: asked.modelId as string };
+
+    if (model !== undefined && models.getModel(model.provider, model.modelId) === undefined) {
+        throw new HttpError(400, `Unknown model ${model.provider}/${model.modelId}`);
+    }
+
+    return {
+        ...(model === undefined ? {} : { model }),
+        ...(level === undefined ? {} : { thinkingLevel: level }),
+    };
 }
 
 type ModelSummary = {

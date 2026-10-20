@@ -3,7 +3,9 @@
 
 import { Component } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { Avatar, initials, personColor } from "./avatar.js";
+import { Avatar, personColor } from "./avatar.js";
+import { useMentionComposer } from "./mention-composer.js";
+import { DiscussionMentionText, PipMentionStatus } from "./pip-mentions.js";
 import { reviewPeople } from "./reviews.js";
 import {
     actions,
@@ -41,7 +43,9 @@ export function chatUnread(state = store.state) {
 
 /** The current name of whoever sent a message, or the name they had when they sent it. */
 function senderName(message, users) {
-    return users.find((user) => user.id === message.userId)?.name ?? message.name;
+    return message.service === "pip"
+        ? "PiP"
+        : (users.find((user) => user.id === message.userId)?.name ?? message.name);
 }
 
 /** Top bar: the other people in this session, and the chat with its unread count. Shows and hides the People panel. */
@@ -163,50 +167,6 @@ export function jumpToEntry(entryId) {
     });
 }
 
-/** Chat text with `@Name` mentions of known people highlighted (and the reader's own name more so). */
-function MessageText({ text, mentions, users, me }) {
-    const named = users
-        .filter((user) => mentions?.includes(user.id))
-        .sort((a, b) => b.name.length - a.name.length);
-
-    if (named.length === 0) {
-        return text;
-    }
-
-    const parts = [];
-    let rest = text;
-
-    while (rest.length > 0) {
-        const lower = rest.toLowerCase();
-        let best = null;
-
-        for (const user of named) {
-            const at = lower.indexOf(`@${user.name.toLowerCase()}`);
-
-            if (at !== -1 && (best === null || at < best.at)) {
-                best = { at, user };
-            }
-        }
-
-        if (best === null) {
-            parts.push(rest);
-            break;
-        }
-
-        parts.push(rest.slice(0, best.at));
-        const length = best.user.name.length + 1;
-
-        parts.push(
-            html`<span class=${`mention ${best.user.id === me?.id ? "me" : ""}`}>
-                ${rest.slice(best.at, best.at + length)}
-            </span>`,
-        );
-        rest = rest.slice(best.at + length);
-    }
-
-    return parts;
-}
-
 /**
  * One line of the chat log. The whole app renders again on every update while Pi streams; a line renders again only
  * when something it shows changed, so a long chat stays light.
@@ -220,7 +180,7 @@ class ChatLine extends Component {
         );
     }
 
-    render({ message, grouped, open, pinned, users, me, steer, onSelect }) {
+    render({ message, grouped, open, pinned, users, me, steer, onSelect, onShowParent }) {
         if (message.kind === "event") {
             return html`<div class="chat-event">
                 <span style=${`color:${personColor(message.userId)}`}>${message.userId === me?.id ? "You" : senderName(message, users)}</span> ${message.text} · ${clock(message.at)}
@@ -248,14 +208,27 @@ class ChatLine extends Component {
                     ${message.quote.text}
                 </button>`
             }
+            ${
+                message.replyTo &&
+                html`<button
+                    type="button"
+                    class="chat-quote"
+                    aria-label=${`Show chat message from ${message.replyTo.name}`}
+                    style="min-height:40px"
+                    onClick=${() => onShowParent(message.replyTo.id)}
+                >
+                    <strong>${message.replyTo.name}</strong>: ${message.replyTo.text}
+                </button>`
+            }
             <div class="chat-text" onClick=${() => collab() && onSelect(open ? null : message.id)}>
-                <${MessageText}
+                <${DiscussionMentionText}
                     text=${message.text}
                     mentions=${message.mentions}
                     users=${users}
                     me=${me}
                 />
             </div>
+            <${PipMentionStatus} state=${message.pip} />
             ${
                 open &&
                 html`<div class="chat-actions">
@@ -290,14 +263,6 @@ class ChatLine extends Component {
     }
 }
 
-/** The `@query` being typed right before the caret, if any. */
-function mentionQuery(value, caret) {
-    const before = value.slice(0, caret);
-    const match = /(^|\s)@([^\s@]{0,30})$/.exec(before);
-
-    return match ? { query: match[2], start: caret - match[2].length - 1 } : null;
-}
-
 /** The chat. `focus` puts the caret in its box on desktops: not when a reload brings back the People panel. */
 function ChatTab({ highlight, focus }) {
     const { chat, me, users, conversationId, chatQuote, view } = store.state;
@@ -305,7 +270,6 @@ function ChatTab({ highlight, focus }) {
     const [text, setText] = useState(() => drafts.get(draftKey));
     const [sending, setSending] = useState(false);
     const [selected, setSelected] = useState(highlight ?? null);
-    const [mention, setMention] = useState(null);
     const log = useRef(null);
     const box = useRef(null);
     const pinned = new Set((view.pins ?? []).map((pin) => pin.chatId).filter(Boolean));
@@ -404,37 +368,13 @@ function ChatTab({ highlight, focus }) {
         element.style.height = `${Math.min(element.scrollHeight, innerHeight * 0.3)}px`;
     }, [text]);
 
-    const update = (value, caret = value.length) => {
+    const update = (value) => {
         setText(value);
         drafts.set(draftKey, value);
         typing(value.trim() === "" ? null : "chat");
-        setMention(collab() ? mentionQuery(value, caret) : null);
     };
 
-    const candidates = mention
-        ? users
-              .filter(
-                  (user) =>
-                      user.id !== me?.id &&
-                      user.name.toLowerCase().includes(mention.query.toLowerCase()),
-              )
-              .slice(0, 5)
-        : [];
-
-    const pick = (user) => {
-        const element = box.current;
-        const caret = element?.selectionStart ?? text.length;
-        const value = `${text.slice(0, mention.start)}@${user.name} ${text.slice(caret)}`;
-
-        update(value, mention.start + user.name.length + 2);
-        setMention(null);
-        requestAnimationFrame(() => {
-            element?.focus();
-            const at = mention.start + user.name.length + 2;
-
-            element?.setSelectionRange(at, at);
-        });
-    };
+    const mentions = useMentionComposer({ text, onChange: update, input: box, enabled: collab() });
 
     const send = async () => {
         if (text.trim() === "" || sending) {
@@ -456,8 +396,28 @@ function ChatTab({ highlight, focus }) {
         }
     };
 
+    const showParent = (id) => {
+        if (!store.state.chat.some((message) => message.id === id)) {
+            notify("info", "That message is no longer in the recent chat log.");
+
+            return;
+        }
+
+        follow.current.on = false;
+        setSelected(id);
+        requestAnimationFrame(() => {
+            log.current
+                ?.querySelector(`[data-chat="${CSS.escape(id)}"]`)
+                ?.scrollIntoView({ block: "center", behavior: "smooth" });
+        });
+    };
+
     return html`<div class="chat-label">
-        <${Icon} name="eye" size=${12} />Side chat · Pi does not see this chat.
+        <${Icon} name="eye" size=${12} />${
+            store.state.server?.pipMentions
+                ? "Side chat · Mention @PiP to ask about the current work."
+                : "Side chat · Pi does not see this chat."
+        }
     </div>
     <div class="chat-log" ref=${log}>
         ${chat.length === 0 && html`<div class="muted">No messages yet.</div>`}
@@ -468,7 +428,8 @@ function ChatTab({ highlight, focus }) {
                 previous?.kind !== "event" &&
                 previous?.userId === message.userId &&
                 message.at - previous.at < 5 * 60_000 &&
-                !message.quote;
+                !message.quote &&
+                !message.replyTo;
 
             return html`<${ChatLine}
                 key=${message.id}
@@ -480,6 +441,7 @@ function ChatTab({ highlight, focus }) {
                 me=${me}
                 steer=${canSteer()}
                 onSelect=${setSelected}
+                onShowParent=${showParent}
             />`;
         })}
     </div>
@@ -497,51 +459,22 @@ function ChatTab({ highlight, focus }) {
             </button>
         </div>`
     }
-    ${
-        candidates.length > 0 &&
-        html`<div class="mention-list">
-            ${candidates.map(
-                (user) =>
-                    html`<button
-                        class="list-item"
-                        onMouseDown=${(event) => event.preventDefault()}
-                        onClick=${() => pick(user)}
-                    >
-                        <span>
-                            <span class="avatar" style=${`--who:${personColor(user.id)};width:20px;height:20px`}>${initials(user.name)}</span> ${user.name}
-                        </span>
-                        <span class="muted small">${user.online ? "online" : ""}</span>
-                    </button>`,
-            )}
-        </div>`
-    }
+    ${mentions.list}
     <div class="chat-compose">
         <textarea
             ref=${box}
             rows="1"
             maxlength="4000"
             value=${text}
+            aria-label="Chat message"
             placeholder=${collab() ? "Message… @ to mention" : "Message the people here…"}
-            onInput=${(event) => update(event.currentTarget.value, event.currentTarget.selectionStart)}
+            ...${mentions.inputProps}
             onKeyDown=${(event) => {
-                if (
-                    candidates.length > 0 &&
-                    (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey))
-                ) {
-                    event.preventDefault();
-                    pick(candidates[0]);
-
+                if (mentions.onKeyDown(event) || event.isComposing || event.keyCode === 229) {
                     return;
                 }
 
-                if (event.key === "Escape" && mention) {
-                    event.stopPropagation();
-                    setMention(null);
-
-                    return;
-                }
-
-                if (event.key === "Enter" && !event.shiftKey && !coarse && !event.isComposing) {
+                if (event.key === "Enter" && !event.shiftKey && !coarse) {
                     event.preventDefault();
                     send();
                 }
