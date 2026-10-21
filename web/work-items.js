@@ -52,6 +52,9 @@ export function workItemRows(sessions, enabled = true) {
 
         rows.push({
             ...representative,
+            // The owner-only supervisor projection changes where the group opens, never
+            // its identity, membership, mutations or exact child-thread destinations.
+            openId: representative.supervisor?.conversationId,
             linkedFrom: linkedFrom ? { ...linkedFrom } : undefined,
             title: session.workItemTitle ?? representative.title ?? "Work Item",
             busy: active?.busy ?? false,
@@ -77,6 +80,23 @@ export function workItemRows(sessions, enabled = true) {
                 : row;
         })
         .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Open a projected group at its controller, but keep exact child-thread destinations unchanged. */
+export function rowOpenId(row) {
+    return row?.openId ?? row?.id;
+}
+
+/** A group stays selected while its controller or any visible execution member is open. */
+export function rowIsOpen(row, conversationId) {
+    return (
+        conversationId !== null &&
+        conversationId !== undefined &&
+        (row.id === conversationId ||
+            row.openId === conversationId ||
+            (row.members !== undefined && row.supervisor?.conversationId === conversationId) ||
+            row.members?.some((member) => member.id === conversationId) === true)
+    );
 }
 
 /** Group mutations have one request per Work Item, even when several of its members were selected. */

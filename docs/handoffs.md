@@ -2,6 +2,21 @@
 
 A handoff starts a fresh thread with a compact brief and transfers responsibility for the work. It does not reset, fork or compact the source conversation. Earlier conversations remain available for reading and discussion, but they cannot regain write access.
 
+## Handoff file
+
+The existing handoff tool writes the summary and exact human direction to an actual
+`handoff.md` in a private `pi-coop-handoff-*` temporary directory before creating the successor.
+The successor receives a short prompt with that absolute path and uses the existing `read` tool.
+For SSH work the file is written on the SSH target, where the successor also runs.
+There is no separate context-file UI, API, reader tool, preparation model or file database.
+New records and recurring workflow instructions retain only the path, not another inline summary.
+Historical inline handoffs and already-accepted legacy summary tasks keep their original recovery path.
+There is no handoff-specific 8k/12k editorial limit;
+normal request/model/tool limits still apply. Temporary files are not an archive or part of database
+backups: if the OS or a person removes one, it must be recreated before it can be read again.
+Optional naming failure does not suppress the successor's read prompt; its normal `read` reports
+an unavailable file rather than pretending to have received the context.
+
 ## Availability and execution pause
 
 Work Items is part of the app, not an optional extension. Its built-in profiles, role instructions,
@@ -16,7 +31,7 @@ controls cannot change it. Owner-only `POST /api/agents` accepts `{ workItemsEna
 execution. While paused, non-Chat built-in starters and new built-in handoffs are unavailable, and managed writes are
 blocked. Accepted legacy transfers and receipts still recover through their existing durable paths,
 with live authorization checks, but recovery does not authorize new managed effects while paused.
-Already-accepted legacy summaries may finish their atomic transfer while paused, but fresh destination delivery is blocked. Resuming execution does not automatically retry a blocked courier; the human can continue from the visible brief. A pause fences new effects rather than rolling back or promising to terminate already-dispatched work. Histories, owner prompt overrides, stable profile IDs and permanent writer retirement remain intact.
+Already-accepted legacy summaries may finish their atomic transfer while paused, but fresh destination delivery is blocked. Resuming execution does not automatically retry a blocked courier; the human can continue in the active thread using the saved handoff. A pause fences new effects rather than rolling back or promising to terminate already-dispatched work. Histories, owner prompt overrides, stable profile IDs and permanent writer retirement remain intact.
 
 Ordinary ungrouped Chat and Agent Teams continue without mandatory Work Item membership. Third-party
 namespaced profiles and graphs keep their independent extension lifecycle. Missing or unknown managed
@@ -28,7 +43,7 @@ product-contract change for the next minor release, not a patch-level removal of
 
 ## The flow
 
-Humans request handoffs; agents execute them. A request may name a type explicitly or describe the next task in ordinary English. The agent infers a clear intended type, or asks a focused follow-up if the request is ambiguous, confusing or unavailable. The app deterministically enforces transitions from thread type/history, current diff, access and write ownership. Agents do not invent readiness gates, pick an unrelated fallback or advance the workflow autonomously. A common path is Worker → Reviewer → Land → Publish, but it is not a mandatory checklist.
+Humans request handoffs; agents execute them. A request may name a type explicitly or describe the next task in ordinary English. The agent infers a clear intended type, or asks a focused follow-up if the request is ambiguous, confusing or unavailable. The app deterministically enforces transitions from thread type/history, current diff, access and write ownership. Agents do not invent readiness gates, pick an unrelated fallback or advance the workflow autonomously. A common path is Worker → Reviewer → Land → Publish, with eligible Follow-up between Reviewer and Land for bounded repairs. This is not a mandatory checklist: routine post-review repairs do not restart a Worker → Reviewer cycle.
 
 The same-work choices are:
 
@@ -118,14 +133,14 @@ The command supports:
 
 Type `/handoff ` to see role and relationship completions from the server's current state, including reasons for unavailable choices. Arrow keys and Tab complete a choice; tapping a suggestion only fills the draft. Add instructions before sending. Desktop Enter completes a partial argument or an explicitly arrow-selected choice; Enter after a complete role otherwise sends it. Escape hides suggestions. Completion stops when your instructions begin and does not replace text while editing earlier in the draft. Without an explicit type, the agent interprets your request. A bare `/handoff` with insufficient context asks which thread type you intend; it never silently chooses a default stage.
 
-Same-work is the default; `/handoff worker` needs no `--same` flag. `--new` starts a separate Work Item. Put `--same` or `--new` before instructions (role-first or flag-first is accepted). The remaining text is your direction for the brief and successor, not a request to do more work before handing off. Instructions are copied directly to the successor so they do not depend on the agent remembering them in its summary. Multiline instructions are supported, up to 8,000 characters. Choices follow the state rules above, not agent-authored readiness decisions. An unavailable type is not permission to pick another: the agent explains and asks you to clarify. No completed assistant report or readiness declaration is required before executing; Worker → Reviewer needs the actual current diff instead.
+Same-work is the default; `/handoff worker` needs no `--same` flag. `--new` starts a separate Work Item. Put `--same` or `--new` before instructions (role-first or flag-first is accepted). The remaining text is your direction for the brief and successor, not a request to do more work before handing off. Instructions are saved verbatim in the handoff file so they do not depend on the agent remembering them in its summary. Multiline instructions are supported without a handoff-specific character cap. Choices follow the state rules above, not agent-authored readiness decisions. An unavailable type is not permission to pick another: the agent explains and asks you to clarify. No completed assistant report or readiness declaration is required before executing; Worker → Reviewer needs the actual current diff instead.
 
 After the human asks:
 
 1. The actual message is accepted as ordinary durable model input and the composer clears on acceptance, without waiting for a brief or successor. A rejected send preserves the draft. The app does not inject a second source message pretending to be the human.
-2. The agent clarifies the type if needed, checks `handoff status` for available transitions and supplies `handoff start` with the type, relationship and a compact summary (at most 12,000 characters). The brief includes the original ask, steering, direction, files/checkpoint, actual changes/checks/results, blockers, deferred checks, risks and mutation limits. It distinguishes new scope from unfinished earlier work.
-3. The tool verifies a real human input in its current main run, not a copied courier, helper or schedule; rechecks runtime state and atomically creates the successor, pins its receipt, reserves the writer position and permanently retires the source. An explicit slash-command type/relationship cannot be changed by the tool. A repeated accepted call returns the existing successor rather than creating another. Summary text alone is not authorization to publish or mutate the checkout.
-4. Durable delivery and naming run for that successor. Completed naming responses and usage apply once, and a manual rename takes precedence. The source agent stops work after its successful tool call.
+2. The agent clarifies the type if needed, checks `handoff status` for available transitions and supplies `handoff start` with the type, relationship and a concise summary. The brief includes the original ask, steering, direction, files/checkpoint, actual changes/checks/results, blockers, deferred checks, risks and mutation limits. It distinguishes new scope from unfinished earlier work.
+3. The tool verifies a real human input in its current main run, not a copied courier, helper or schedule; saves the Markdown file before admission, rechecks runtime state and atomically creates the successor, pins its receipt, reserves the writer position and permanently retires the source. An explicit slash-command type/relationship cannot be changed by the tool. A repeated accepted call returns the existing successor rather than creating another. Summary text alone is not authorization to publish or mutate the checkout.
+4. The existing durable courier sends an application-attributed prompt telling the successor to read the file, without duplicating its contents. Naming reads the same file. Completed naming responses and usage apply once, and a manual rename takes precedence. The source agent stops work after its successful tool call.
 
 Before submitting, the initiating tab pins the payload and retry identity in `sessionStorage`. If the HTTP acknowledgement is lost, an explicit retry keeps that identity rather than submitting the human message twice. Recovery uses the passive `GET /api/c/:id/submit?requestId=…` receipt lookup, never an automatic resubmission; a missing receipt creates no input or handoff intent. Accepted inputs retain an opaque handoff correlation. Core `GET /api/c/:id/transfers` passively looks up only the current person's accepted outgoing receipts from this exact source, including while Work Item execution is paused. Session updates or reload resolve a matching outgoing handoff; redirect is limited to the initiating tab/user while still on the source. Other viewers, switched users and people who navigated elsewhere are not pulled into the successor. Ordinary English requests use the same correlation path; the browser does not guess intent from keywords. Delayed acceptance clears only the submitted draft revision, not edits made later—even when undo restores identical text.
 
@@ -169,9 +184,51 @@ The first same-work handoff wraps the source thread and its successor in a Work 
 
 Further same-work handoffs join that item. There are no nested Work Items. A new-work handoff starts a separate item linked to the preceding work. Once work lands, substantial subsequent implementation normally starts a new item; Publish can still follow within the landed item.
 
+A Work Item has exactly two control states: **PiP active** or **human control**, shown by its row's
+PiP status icon and accessible label. The row's PiP action replaces mark-read and opens the same
+owner-only PiP Thread without a goal form. Opening creates an inert controller or reuses the existing
+Thread without activating it. Only a newly accepted owner message in that exact controller activates
+PiP; duplicate or stale retries never activate it. Legacy persisted paused/reclaimed states both mean
+human control. Activation preserves the pending question, scope, history, cumulative usage and caps. The grouped row, folded rails, launcher, Home
+and keyboard navigation open the same owner-only PiP conversation and keep that row selected;
+explicit execution-child links still open those exact threads. Questions, answers, checks and sends
+are read in that PiP conversation, including expandable tool activity. Saved questions remain in its
+transcript after an answer clears the pending state. Collaborators receive no private controller
+destination or controls.
+
+PiP reads canonical Work Item context, current execution and relevant discussion/evidence first.
+Private `work_context status` supplies the actual active role and description, recent role history
+(last 12 visible members, with `historyOmitted`) and live workflow choices/reasons from the existing
+handoff service, even when the read is anchored at an older Worker. PiP uses eligible Follow-up for
+concrete bounded post-review/Pull repairs, with focused checks and one delta/integration self-review.
+It carries applicable prior review for untouched work and discloses stale evidence/material rewrites.
+Unavailable infrastructure or deferred full-suite gaps alone never call for another Reviewer or
+Follow-up or retries of unchanged checks. Material new implementation may need an initial independent
+Reviewer for that new scope; this is guidance, not a new runtime gate, and human overrides still apply.
+PiP honors required manual-testing green lights before Land and separate exact publication approvals.
+It recovers actual human scope rather than inventing a goal, and asks one or two focused questions
+in chat only when the next goal is unclear. The normal **Stop** button fences PiP and returns the
+item to human control even while PiP is idle or waiting; execution Threads are left untouched.
+There are no separate Pause, Resume, Reclaim or sidebar takeover buttons.
+Optional dollar **Limits…** live in the selected Work Item’s right-click or long-press menu, not in
+the composer, and address that item without opening or steering a different conversation. Loads and
+saves remain bound to the current owner, selected item and controller; saves use an epoch
+compare-and-swap so a changed grant cannot accept stale limits.
+A new grant has no additional work cap unless the owner sets an optional dollar cap in **Limits**.
+That pop-up contains budgets only, not goals, questions or action controls. Cumulative spend remains
+visible; existing explicit caps survive activation and omitted changes. Saving limits returns the
+item to human control; a newly accepted owner message in its exact PiP Thread activates PiP again.
+Clearing the optional dollar field removes only that work cost cap, not account/session limits. Work-wide token limits are deferred until historical auxiliary token usage can be included
+soundly; no unenforced token field is displayed.
+Account/session budgets and publication approvals remain separate. PiP checks the actual independent
+review outcome and unresolved findings before directing staging/commits by default; role availability,
+idle state, resolved comments and a finish report are not review approval. Execution threads report
+meaningful results/questions/blockers and yield, automatically notifying PiP rather than sending
+periodic status messages. PiP waits between meaningful outcomes, checking alignment at those points.
+
 An item can stand alone or belong directly to a project. Move, archive and restore apply to the whole item. Member conversations cannot be archived independently, even through a direct metadata request.
 
-Placement and grouping never grant access. Hidden threads and their full histories remain hidden, and hidden members block whole-item mutations. Moving an item between projects changes organization, not the threads' pinned local/SSH destination or cwd. Both same-work and new-work handoffs inherit the source's pinned destination; access and execution remain the responsibility of the workspace and SSH modules. The compact handoff brief is copied content belonging to the destination conversation; sharing that destination also shares its brief. A session-scoped invitation is not authority to create unrelated conversations or publish code.
+Placement and grouping never grant access. Hidden threads and their full histories remain hidden, and hidden members block whole-item mutations. Moving an item between projects changes organization, not the threads' pinned local/SSH destination or cwd. Both same-work and new-work handoffs inherit the source's pinned destination; access and execution remain the responsibility of the workspace and SSH modules. The destination receives the path to the handoff file, which contains exported source context. A session-scoped invitation is not authority to create unrelated conversations or publish code.
 
 ## Durable state
 
@@ -180,7 +237,7 @@ and whole-item organization. Its private Handoffs engine retains transfer admiss
 recovery and atomic successor transactions. PiSessions remains responsible for local Pi history
 and import, not work lifecycle.
 
-Agent-executed handoffs correlate to the real human submission through an opaque key and pin the accepted type, relationship and brief in a durable receipt. Legacy pending summary-first intent retains the source, selected destination/relationship, requester, retry identity, summary task and settlement. Handoff records identify the resulting source, destination type, relationship, brief, requester and destination conversation; older records may also retain a source checkpoint. Work Items record their origin, membership, placement and active thread. Thread workflow state records permanent read-only status and retains historical milestone/recommendation data, external-review provenance, applicability declarations, separate code/validation assessments and append-only human validation-risk decisions. Historical readiness and recommendations are not exposed as destination controls.
+Agent-executed handoffs correlate to the real human submission through an opaque key and pin the accepted type, relationship and brief in a durable receipt. Legacy pending summary-first intent retains the source, selected destination/relationship, requester, retry identity, summary task and settlement. Handoff records identify the resulting source, destination type, relationship, temporary file path, requester and destination conversation; historical records retain inline briefs and may also retain a source checkpoint. Work Items record their origin, membership, placement and active thread. Thread workflow state records permanent read-only status and retains historical milestone/recommendation data, external-review provenance, applicability declarations, separate code/validation assessments and append-only human validation-risk decisions. Historical readiness and recommendations are not exposed as destination controls.
 
 At successful tool execution (or settlement of an older summary task), destination creation, active-writer reservation, source write withdrawal, relationship records and membership publish in one commit. Initial prompt delivery has a durable task and request identity. After successor creation, recovering the same request after a disconnect or restart finds that destination instead of creating or delivering its initial prompt twice. Recovery does not rerun failed source summaries or expose legacy summary admission/retry writers. Naming uses the received summary and a durable response memo; accepted naming, exactly-once usage and task settlement commit together, with a manual rename protected from delayed application.
 
@@ -218,4 +275,4 @@ Repository rules govern local integration and delivery details. They cannot disa
 
 ## Scope
 
-This release supports agent-executed human-requested handoffs with state-based transitions, typed successors, Work Items, guarded destination naming and mandatory individual publication approval. Core task registrations recover already-accepted summary/delivery data only; new requests use the current human-input/tool path. Historical milestone/review/risk-acceptance records remain evidence, not thread-creation gates. It does not add an autonomous project orchestrator, automatic merge monitoring or an MCP host.
+This release supports agent-executed human-requested handoffs with state-based transitions, typed successors, Work Items, guarded destination naming and mandatory individual publication approval. Core task registrations recover already-accepted summary/delivery data only; new requests use the current human-input/tool path. Historical milestone/review/risk-acceptance records remain evidence, not thread-creation gates. A newly accepted owner message in the exact Work Item PiP Thread activates a bounded private supervisor: it observes running work, uses this same file/courier engine for settled controller handoffs, manages discussions and asks durable human questions. The controller bypasses historical role/diff eligibility but retains access, spend, driver, writer/helper-idle and publication safeguards. Direct human execution input and normal Stop return it to human control without stopping execution Threads; publication is never preapproved by activation. This is not a general project scheduler, generic context-relay/file service, automatic merge monitor or MCP host.

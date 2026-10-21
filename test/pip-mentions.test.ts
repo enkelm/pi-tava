@@ -478,8 +478,16 @@ test("shared context tools reject foreign/private threads and escaped paths even
         if (++round === 1) {
             return fauxAssistantMessage(
                 [
-                    fauxToolCall("work_context", { action: "thread", threadId: Number(foreign) }),
-                    fauxToolCall("work_context", { action: "thread", threadId: Number(privateId) }),
+                    fauxToolCall("work_context", {
+                        action: "discussion",
+                        threadId: Number(foreign),
+                        before: 2,
+                    }),
+                    fauxToolCall("work_context", {
+                        action: "discussion",
+                        threadId: Number(privateId),
+                        before: 2,
+                    }),
                     fauxToolCall("work_context", { action: "file", path: outside }),
                     fauxToolCall("work_context", {
                         action: "file",
@@ -792,6 +800,29 @@ test("shared results expose text only, bound output and context, and never execu
             fauxAssistantMessage(fauxToolCall("session_start", { message: "do not execute" }), {
                 stopReason: "toolUse",
             }),
+            fauxAssistantMessage(
+                fauxToolCall("work_review", {
+                    action: "resolve",
+                    session: 1,
+                    threadIds: ["not-authorized"],
+                }),
+                { stopReason: "toolUse" },
+            ),
+            fauxAssistantMessage(
+                fauxToolCall("work_handoff", {
+                    session: 1,
+                    targetType: "researcher",
+                    summary: "Not authorized by a shared mention.",
+                }),
+                { stopReason: "toolUse" },
+            ),
+            fauxAssistantMessage(
+                fauxToolCall("work_supervise", {
+                    action: "finish",
+                    text: "Not an authorized private controller.",
+                }),
+                { stopReason: "toolUse" },
+            ),
             fauxAssistantMessage(fauxToolCall("public_web", {}), { stopReason: "toolUse" }),
             fauxAssistantMessage(fauxToolCall("work_context", { action: "status" }), {
                 stopReason: "length",

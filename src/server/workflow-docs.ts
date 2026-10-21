@@ -77,6 +77,19 @@ export type WorkItem = {
     archived?: boolean;
     predecessorWorkItemId?: string;
     createdAt: number;
+    /** Private controller grant. Never include this object in shared work-context or room data. */
+    supervisor?: {
+        conversationId: number;
+        ownerId: string;
+        tokenHash: string;
+        epoch: number;
+        status: "running" | "paused" | "reclaimed";
+        /** Cumulative work-spend ceiling. Absent means no Work Item cost cap. */
+        maxCost?: number;
+        /** Legacy explicit action ceiling. Absent means no action cap; never default or replenish it. */
+        maxActions?: number;
+        actions: number;
+    };
 };
 export type Handoff = {
     id: string;
@@ -85,8 +98,10 @@ export type Handoff = {
     targetType: ThreadType;
     relationship: Relationship;
     workItemId: string;
-    brief: string;
-    /** Human direction is copied separately from the model's summary so it cannot be summarized away. */
+    /** Historical inline handoffs remain readable. New handoffs use the temporary Markdown file. */
+    brief?: string;
+    file?: string;
+    /** Historical inline human direction; new handoffs keep it verbatim in the Markdown file. */
     instructions?: string;
     /** Opaque correlation for the initiating tab; never a raw human request/submission identifier. */
     requestKey?: string;

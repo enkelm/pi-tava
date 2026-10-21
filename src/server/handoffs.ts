@@ -24,7 +24,8 @@ import { SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
 import { HttpError } from "./errors.ts";
 import { hasPendingSubagentReports } from "./subagent-reports.ts";
 import { handoffInputKey, parseHandoffCommand } from "./handoff-input.ts";
-import { ownRequest, requestPerson } from "./requests.ts";
+import { ownRequest, requestFor, requestPerson } from "./requests.ts";
+import { getOrThrow } from "@earendil-works/pi-durable/env";
 import { PublicationsDoc } from "./workflow-publication.ts";
 import { userContent } from "./resend.ts";
 import { createSessionRoot } from "./session-roots.ts";
@@ -44,7 +45,6 @@ import {
 } from "./workflow-docs.ts";
 
 const context = BACKGROUND_CONTEXT;
-const MAX_HANDOFF_INSTRUCTIONS = 8000;
 const finished = { status: "terminal", outcome: { status: "completed", result: null } } as const;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -58,19 +58,27 @@ type HandoffAdmission = {
     instructions?: string;
     requestKey?: string;
     accepted?: boolean;
+    /** Internal controller policy, never authority supplied by a tool argument. */
+    controller?: true;
     targetTitle?: string;
+    file?: string;
 };
 /** Pi Durable implements this transaction read but omits it from its public Tx declaration. */
 type SubmissionTx = Tx & {
     submission(id: SubmissionId): Promise<SubmissionRecord | undefined>;
 };
 
-function text(value: unknown, name: string, max = 12_000): string {
-    if (typeof value !== "string" || !value.trim() || value.length > max || value.includes("\0")) {
-        throw new HttpError(400, `${name} must be nonempty text of at most ${max} characters`);
+function text(value: unknown, name: string): string {
+    if (
+        typeof value !== "string" ||
+        !value.trim() ||
+        value.includes("\0") ||
+        Buffer.from(value, "utf8").toString("utf8") !== value
+    ) {
+        throw new HttpError(400, `${name} must be nonempty valid text without NULs`);
     }
 
-    return value.trim();
+    return value;
 }
 
 export function humanDirection(instructions: string): string {
@@ -344,6 +352,200 @@ export class Handoffs {
               );
     }
 
+    /** A real private PiP invocation controls an explicit source through WorkItems' live grant. */
+    async controllerStart(
+        controllerId: ConversationId,
+        sourceId: ConversationId,
+        epoch: number,
+        request: { targetType: string; summary: string; instructions?: string },
+        api: ToolExecutionApi,
+        ctx: Context,
+        inspect: () => void,
+    ): Promise<HandoffResult> {
+        if (api.conversationId !== controllerId) {
+            throw new HttpError(403, "Use the controller's own invocation for this handoff");
+        }
+
+        const kind = target(request.targetType);
+        const brief = text(request.summary, "summary");
+        const instructions =
+            request.instructions === undefined
+                ? undefined
+                : text(request.instructions, "instructions");
+        const key = digest(["controller-handoff", controllerId, api.taskId, api.callId]);
+        const input = digest([sourceId, kind, brief, instructions ?? null]);
+        let file: { path: string; host: string | null; input: string } | undefined;
+
+        const activate = async (tx: Tx, create: boolean): Promise<HandoffResult | undefined> => {
+            const user = await this.#app.workItems.requireController(
+                tx,
+                controllerId,
+                epoch,
+                sourceId,
+                false,
+            );
+            const doc = await tx.doc(HandoffsDoc);
+            const saved = doc.requests[key];
+
+            if (saved !== undefined) {
+                if (saved.input !== input) {
+                    throw new HttpError(
+                        409,
+                        "This controller action already started a different handoff",
+                    );
+                }
+
+                this.#app.requireSee(user, saved.id as ConversationId);
+
+                return { id: saved.id, handoffId: saved.handoffId, workItemId: saved.workItemId };
+            }
+
+            if (!create) {
+                return undefined;
+            }
+
+            const current = await this.#app.workItems.requireController(
+                tx,
+                controllerId,
+                epoch,
+                sourceId,
+                true,
+            );
+
+            if (
+                new Set([...Object.keys(doc.requests), ...Object.keys(doc.pending ?? {})]).size >=
+                10_000
+            ) {
+                throw new HttpError(413, "The handoff request limit was reached");
+            }
+
+            if (
+                file === undefined ||
+                file.input !== input ||
+                file.host !== (this.#app.locationOf(sourceId)?.host ?? null)
+            ) {
+                throw new HttpError(
+                    409,
+                    "The handoff file's destination changed; start a fresh request",
+                );
+            }
+
+            inspect();
+            const result = await this.#create(
+                tx,
+                sourceId,
+                current,
+                {
+                    kind,
+                    relation: "same-work",
+                    brief,
+                    instructions,
+                    key,
+                    requestKey: key,
+                    input,
+                    file: file.path,
+                    controller: true,
+                },
+                new Set<TaskId>(),
+            );
+
+            // Same-work creation has retired sourceId and moved this grant to the new active member.
+            await this.#app.workItems.requireController(
+                tx,
+                controllerId,
+                epoch,
+                result.id as ConversationId,
+                true,
+            );
+
+            return result;
+        };
+
+        const saved = await api.commit((tx) => activate(tx, false), ctx);
+
+        if (saved !== undefined) {
+            return saved;
+        }
+
+        // Freshness is caller policy for new effects, never a prerequisite to recover a saved receipt.
+        inspect();
+        const user = await api.commit(
+            (tx) => this.#app.workItems.requireController(tx, controllerId, epoch, sourceId, true),
+            ctx,
+        );
+
+        this.#controllerWritable(sourceId, kind);
+        file = await api.memo<{ path: string; host: string | null; input: string }>(
+            "controller-handoff-file",
+            ctx,
+        );
+
+        if (file === undefined) {
+            const person = structuredClone(user);
+            const host = this.#app.locationOf(sourceId)?.host ?? null;
+            const env = this.#app.envFor(sourceId, person);
+            const directory = getOrThrow(await env.createTempDir("pi-coop-handoff-", ctx));
+            const path = getOrThrow(await env.joinPath([directory, "handoff.md"], ctx));
+            const markdown =
+                [
+                    `# Handoff from thread ${sourceId}`,
+                    brief,
+                    ...(instructions === undefined
+                        ? []
+                        : [
+                              `PiP direction for this continuation (on behalf of the work owner; subject to existing limits):\n${instructions}`,
+                          ]),
+                ].join("\n\n") + "\n";
+
+            text(markdown, "handoff file");
+            getOrThrow(await env.writeFile(path, markdown, ctx));
+            await api.commit(
+                (tx) =>
+                    this.#app.workItems.requireController(tx, controllerId, epoch, sourceId, true),
+                ctx,
+            );
+            file = await api.memo("controller-handoff-file", { path, host, input }, ctx);
+        }
+
+        if (file.input !== input || file.host !== (this.#app.locationOf(sourceId)?.host ?? null)) {
+            throw new HttpError(
+                409,
+                "The handoff file's input or destination changed; start a fresh request",
+            );
+        }
+
+        const current = await api.commit(
+            (tx) => this.#app.workItems.requireController(tx, controllerId, epoch, sourceId, true),
+            ctx,
+        );
+        const info = getOrThrow(
+            await this.#app.envFor(sourceId, structuredClone(current)).fileInfo(file.path, ctx),
+        );
+
+        if (info.kind !== "file" || info.size === 0) {
+            throw new HttpError(
+                409,
+                "The saved handoff file is missing or empty; start a fresh request",
+            );
+        }
+
+        return (await withWorkflowPublicationLock(this.#app, sourceId, () =>
+            api.commit((tx) => activate(tx, true), ctx),
+        ))!;
+    }
+
+    #controllerWritable(id: ConversationId, kind: ThreadType): void {
+        if (!this.#app.workItems.enabled) {
+            throw new HttpError(409, "Work Item execution is paused; ask the owner to resume it");
+        }
+
+        this.#app.workItems.requireWritable(id);
+
+        if (this.#app.workItems.profile(kind) === undefined) {
+            throw new HttpError(409, "The requested agent profile is unavailable");
+        }
+    }
+
     readonly summaryTask = defineTask<
         { key: string },
         { phase: "summarize" },
@@ -422,7 +624,7 @@ export class Handoffs {
                                 user,
                                 [
                                     `The human has requested a ${intent.relationship} handoff to ${intent.targetType}. The destination is already chosen; do not recommend, choose or create any thread.`,
-                                    "Write only a compact handoff summary for that destination (at most 12,000 characters). Include the original ask, current direction/decisions, relevant code/files and checkpoint, changes made, actual checks/results, blockers, deferred checks, remaining risks and mutation limits. If this starts a new Work Item, clearly separate its requested scope from unfinished prior work. Do not call tools, delegate work, change files or record completion. The app will create the selected successor after your reply.",
+                                    "Write only a concise handoff summary for that destination. Include the original ask, current direction/decisions, relevant code/files and checkpoint, changes made, actual checks/results, blockers, deferred checks, remaining risks and mutation limits. If this starts a new Work Item, clearly separate its requested scope from unfinished prior work. Do not call tools, delegate work, change files or record completion. The app will create the selected successor after your reply.",
                                     ...(intent.brief === undefined
                                         ? []
                                         : [`Human handoff context:\n${intent.brief}`]),
@@ -463,20 +665,18 @@ export class Handoffs {
                     }
 
                     const brief = text(userContent(response).text, "handoff summary");
-                    const result = await withWorkflowPublicationLock(this.#app, id, () =>
-                        this.#start(
-                            id,
-                            user,
-                            {
-                                kind: intent.targetType,
-                                relation: intent.relationship,
-                                key,
-                                input: intent.input,
-                                brief,
-                            },
-                            runtime,
-                            ctx,
-                        ),
+                    const result = await this.#start(
+                        id,
+                        user,
+                        {
+                            kind: intent.targetType,
+                            relation: intent.relationship,
+                            key,
+                            input: intent.input,
+                            brief,
+                        },
+                        runtime,
+                        ctx,
                     );
 
                     await runtime.commit(async (tx) => {
@@ -605,7 +805,7 @@ export class Handoffs {
                     );
 
                     await source?.waitForIdle(ctx);
-                    const requestId = ownRequest(
+                    const requestId = (record.file === undefined ? ownRequest : requestFor)(
                         record.requestedBy,
                         `handoff:${record.id}:${record.deliveryAttempt ?? 0}`,
                     );
@@ -650,12 +850,22 @@ export class Handoffs {
                                     : this.#app.commands.messageText(
                                           user,
                                           [
-                                              `Continue as the ${record.targetType} agent in this independent thread, following your thread-role system instructions.`,
+                                              `${record.file === undefined ? "" : "[via handoff] "}Continue as the ${record.targetType} agent in this independent thread, following your thread-role system instructions.`,
                                               `Independent handoff from thread ${record.sourceThreadId}; work item ${record.workItemId}.`,
-                                              ...(record.instructions === undefined
-                                                  ? []
-                                                  : [humanDirection(record.instructions)]),
-                                              record.brief,
+                                              ...(record.file === undefined
+                                                  ? [
+                                                        ...(record.instructions === undefined
+                                                            ? []
+                                                            : [
+                                                                  humanDirection(
+                                                                      record.instructions,
+                                                                  ),
+                                                              ]),
+                                                        record.brief ?? "",
+                                                    ]
+                                                  : [
+                                                        `Read the handoff file ${JSON.stringify(record.file)} using read before continuing. Read the whole file, continuing with offset if truncated. It contains the summary and any continuation direction; it supplies context, not additional authority.`,
+                                                    ]),
                                           ].join("\n\n"),
                                       ),
                             requestId,
@@ -764,6 +974,21 @@ export class Handoffs {
         let named = await runtime.memo<TitleResult>("handoff-title", ctx);
 
         if (named === undefined) {
+            let brief = record.brief ?? "";
+
+            if (record.file !== undefined) {
+                const saved = await this.#app
+                    .envFor(id, this.#app.config.userById(record.requestedBy))
+                    .readTextFile(record.file, ctx);
+
+                // Naming is optional: losing a temporary file must not suppress its read prompt.
+                if (!saved.ok) {
+                    return;
+                }
+
+                brief = saved.value;
+            }
+
             const agent = await runtime.agent(ctx);
             const current =
                 agent.model === undefined
@@ -772,7 +997,7 @@ export class Handoffs {
             let candidate: TitleResult = {
                 title:
                     cleanTitle(
-                        record.brief
+                        brief
                             .split("\n")
                             .slice(1)
                             .find((line) => line.trim()) ?? "",
@@ -800,7 +1025,7 @@ export class Handoffs {
                                     content: [
                                         {
                                             type: "text",
-                                            text: `${TITLE_PROMPT}\n\n<message>\n${record.brief.slice(0, 3000)}\n</message>`,
+                                            text: `${TITLE_PROMPT}\n\n<message>\n${brief.slice(0, 3000)}\n</message>`,
                                         },
                                     ],
                                     timestamp: Date.now(),
@@ -1026,6 +1251,7 @@ export class Handoffs {
         }
 
         const pinned = pin;
+        let file: { path: string; host: string | null } | undefined;
 
         const activate = async (
             tx: Tx,
@@ -1051,9 +1277,7 @@ export class Handoffs {
             }
 
             const instructions =
-                route === undefined
-                    ? text(source.body, "human direction", MAX_HANDOFF_INSTRUCTIONS)
-                    : route.instructions;
+                route === undefined ? text(source.body, "human direction") : route.instructions;
             const input = digest([kind, relation, brief, instructions ?? null]);
             const doc = await tx.doc(HandoffsDoc);
             const saved = doc.requests[source.key];
@@ -1078,6 +1302,17 @@ export class Handoffs {
                     handoffId: saved.handoffId,
                     workItemId: saved.workItemId,
                 };
+            }
+
+            const workItemId = (await tx.doc(SessionsDoc)).items[String(id)]?.workItemId;
+            const grant =
+                workItemId === undefined ? undefined : doc.workItems[workItemId]?.supervisor;
+
+            if (grant?.status === "running") {
+                throw new HttpError(
+                    409,
+                    "PiP currently controls this Work Item. Send a new human instruction or use the human handoff controls to reclaim control before handing off here.",
+                );
             }
 
             if (!create) {
@@ -1109,6 +1344,13 @@ export class Handoffs {
                 throw new HttpError(413, "The handoff request limit was reached");
             }
 
+            if (file === undefined || file.host !== (this.#app.locationOf(id)?.host ?? null)) {
+                throw new HttpError(
+                    409,
+                    "The handoff file's destination changed; start a fresh request",
+                );
+            }
+
             return this.#create(
                 tx,
                 id,
@@ -1118,6 +1360,7 @@ export class Handoffs {
                     relation,
                     brief,
                     instructions,
+                    file: file.path,
                     key: source.key,
                     requestKey: source.key,
                     input,
@@ -1135,6 +1378,48 @@ export class Handoffs {
         }
 
         this.#app.workItems.requireWritable(id);
+        file = await api.memo<{ path: string; host: string | null }>("handoff-file", ctx);
+
+        if (file === undefined) {
+            const source = await api.commit(
+                (tx) => this.#humanInput(tx, id, api.taskId, pinned.submissionId),
+                ctx,
+            );
+            const person = structuredClone(source.user);
+            const host = this.#app.locationOf(id)?.host ?? null;
+            const route = parseHandoffCommand(source.body);
+            const instructions =
+                route === undefined ? text(source.body, "human direction") : route.instructions;
+            const env = this.#app.envFor(id, person);
+            const directory = getOrThrow(await env.createTempDir("pi-coop-handoff-", ctx));
+            const path = getOrThrow(await env.joinPath([directory, "handoff.md"], ctx));
+            const markdown =
+                [
+                    `# Handoff from thread ${id}`,
+                    brief,
+                    ...(instructions === undefined ? [] : [humanDirection(instructions)]),
+                ].join("\n\n") + "\n";
+
+            text(markdown, "handoff file");
+            getOrThrow(await env.writeFile(path, markdown, ctx));
+            this.#human(id, person);
+            file = await api.memo("handoff-file", { path, host }, ctx);
+        }
+
+        const source = await api.commit(
+            (tx) => this.#humanInput(tx, id, api.taskId, pinned.submissionId),
+            ctx,
+        );
+        const info = getOrThrow(
+            await this.#app.envFor(id, structuredClone(source.user)).fileInfo(file.path, ctx),
+        );
+
+        if (info.kind !== "file" || info.size === 0) {
+            throw new HttpError(
+                409,
+                "The saved handoff file is missing or empty; start a fresh request",
+            );
+        }
 
         return (await withWorkflowPublicationLock(this.#app, id, async () => {
             let currentDiff: boolean | undefined;
@@ -1297,7 +1582,7 @@ export class Handoffs {
                 ? undefined
                 : await tx.submissionByRequest(
                       id,
-                      ownRequest(
+                      (incoming.file === undefined ? ownRequest : requestFor)(
                           incoming.requestedBy,
                           `handoff:${incoming.id}:${incoming.deliveryAttempt ?? 0}`,
                       ),
@@ -1444,6 +1729,7 @@ export class Handoffs {
         relation: Relationship,
         allowed = new Set<TaskId>(),
         accepted = false,
+        controller = false,
     ) {
         const user = this.#human(id, supplied);
 
@@ -1459,6 +1745,10 @@ export class Handoffs {
         }
 
         this.#writable(state);
+
+        if (controller) {
+            this.#controllerWritable(id, kind);
+        }
 
         if (relation === "new-work" && user.sessions !== undefined) {
             throw new HttpError(
@@ -1483,19 +1773,21 @@ export class Handoffs {
             this.#requireMembers(item, user);
         }
 
-        const history = (item?.threadIds ?? [Number(id)]).map(
-            (member) => sessions.items[String(member)]?.threadType ?? "worker",
-        );
-        const reason = this.#app.workItems
-            .options(meta.threadType ?? "worker", history)
-            .some((option) => option.targetType === kind && option.relationship === relation)
-            ? undefined
-            : "This handoff is not available from the current thread state";
+        if (!controller) {
+            const history = (item?.threadIds ?? [Number(id)]).map(
+                (member) => sessions.items[String(member)]?.threadType ?? "worker",
+            );
+            const reason = this.#app.workItems
+                .options(meta.threadType ?? "worker", history)
+                .some((option) => option.targetType === kind && option.relationship === relation)
+                ? undefined
+                : "This handoff is not available from the current thread state";
 
-        // A durably accepted intent already fixed its workflow choice. Extension unload/reload must
-        // not strand it, but all live ownership, access, spend and task-graph checks still apply.
-        if (!accepted && reason !== undefined) {
-            throw new HttpError(409, reason);
+            // A durably accepted intent already fixed its workflow choice. Extension unload/reload must
+            // not strand it, but all live ownership, access, spend and task-graph checks still apply.
+            if (!accepted && reason !== undefined) {
+                throw new HttpError(409, reason);
+            }
         }
 
         await this.#requireResolvedPublications(tx, item?.threadIds ?? [Number(id)]);
@@ -1546,6 +1838,20 @@ export class Handoffs {
     }
 
     async #start(
+        id: ConversationId,
+        supplied: User,
+        request: HandoffAdmission,
+        runtime: SummaryRuntime,
+        ctx: Context,
+    ): Promise<HandoffResult> {
+        return this.#app.workItems.withControl(id, () =>
+            withWorkflowPublicationLock(this.#app, id, () =>
+                this.#startAccepted(id, supplied, request, runtime, ctx),
+            ),
+        );
+    }
+
+    async #startAccepted(
         id: ConversationId,
         supplied: User,
         request: HandoffAdmission,
@@ -1614,18 +1920,27 @@ export class Handoffs {
         allowed: Set<TaskId>,
         currentDiff?: boolean,
     ): Promise<HandoffResult> {
-        const { kind, relation, brief, key, input, instructions, requestKey } = request;
+        const { kind, relation, brief, key, input, instructions, requestKey, file } = request;
         const {
             user,
             doc,
             meta,
             state,
             item: oldItem,
-        } = await this.#admit(tx, id, supplied, kind, relation, allowed, request.accepted === true);
+        } = await this.#admit(
+            tx,
+            id,
+            supplied,
+            kind,
+            relation,
+            allowed,
+            request.accepted === true,
+            request.controller === true,
+        );
 
         // The caller inspected this diff while holding the same exclusive lock, not at status time.
         const diffRequirement =
-            request.accepted === true
+            request.accepted === true || request.controller === true
                 ? undefined
                 : this.#app.workItems
                       .optionsFor(id)
@@ -1730,8 +2045,9 @@ export class Handoffs {
             initialTitle,
             relationship: relation,
             workItemId: item.id,
-            brief: initialBrief,
-            ...(instructions === undefined ? {} : { instructions }),
+            ...(file === undefined
+                ? { brief: initialBrief, ...(instructions === undefined ? {} : { instructions }) }
+                : { file }),
             ...(requestKey === undefined ? {} : { requestKey }),
             ...(sourceEntry === undefined ? {} : { sourceEntryId: Number(sourceEntry) }),
             requestedBy: user.id,
@@ -1752,7 +2068,9 @@ export class Handoffs {
         // Native pause and workflow registration can change outside Durable's mutation line while
         // the awaited setup above runs. Reject before returning so all prospective writes roll back.
         // Ordinary ungrouped Chat remains writable paused, but its fresh handoff edges do not.
-        if (request.accepted !== true) {
+        if (request.controller === true) {
+            this.#controllerWritable(id, kind);
+        } else if (request.accepted !== true) {
             this.#app.workItems.requireWritable(id);
 
             if (

@@ -43,6 +43,7 @@ import {
     varsStyle,
 } from "./theme.js";
 import { APPLE, copyText, html, Icon, Keys, Marked, scrimPress, shortPath, timeAgo } from "./ui.js";
+import { rowIsOpen, rowOpenId } from "./work-items.js";
 
 /** How far a letter that does not begin a word may be from the one before it, in a match that is not contiguous. */
 const MAX_GAP = 3;
@@ -394,7 +395,7 @@ function sessionItems() {
             detail: shortPath(session.cwd, server?.home),
             status:
                 [
-                    session.id === store.state.conversationId ? "Current" : null,
+                    rowIsOpen(session, store.state.conversationId) ? "Current" : null,
                     session.waiting ? "Waiting" : session.busy ? "Working" : null,
                     session.archived ? "Archived" : null,
                 ]
@@ -403,7 +404,7 @@ function sessionItems() {
             text: `${session.title ?? "New session"} ${shortPath(session.cwd, server?.home)}`,
             keys: number >= 0 && number < 9 ? `Alt ${number + 1}` : undefined,
             rank: session.archived ? -20 : -number * 0.01,
-            run: () => navigate(session.id),
+            run: () => navigate(rowOpenId(session)),
             folder: folderColor(session.cwd),
             tone: session.waiting ? "waiting" : session.busy ? "working" : "quiet",
         };

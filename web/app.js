@@ -75,6 +75,7 @@ import {
     usePresence,
 } from "./ui.js";
 import { toggleDictation } from "./voice.js";
+import { rowIsOpen, rowOpenId } from "./work-items.js";
 
 /** What changed in the session's folder: lines added and removed, and how many files. It opens Changes. */
 function ChangesButton() {
@@ -574,13 +575,8 @@ function step(by) {
         return;
     }
 
-    const at = order.findIndex(
-        (session) =>
-            session.id === store.state.conversationId ||
-            session.members?.some((member) => member.id === store.state.conversationId),
-    );
-
-    const next = order[(at + by + order.length) % order.length].id;
+    const at = order.findIndex((session) => rowIsOpen(session, store.state.conversationId));
+    const next = rowOpenId(order[(at + by + order.length) % order.length]);
 
     openingByAlt(next);
     navigate(next);
@@ -656,8 +652,10 @@ addEventListener("keydown", (event) => {
             event.preventDefault();
 
             if (session) {
-                openingByAlt(session.id);
-                navigate(session.id);
+                const id = rowOpenId(session);
+
+                openingByAlt(id);
+                navigate(id);
             }
 
             return;
@@ -798,9 +796,10 @@ const ESCAPE_TWICE_MS = 1500;
 /** Esc twice stops Pi, as Esc does in other agents' terminals. Twice, since Esc also closes things and leaves fields. */
 function stopOnSecondEscape() {
     const { view, sheet, launcher, board, page, drawer } = store.state;
+    const stoppable = view.live?.busy || view.conversation?.workSupervisor?.status === "running";
 
     // Esc closes these first.
-    if (sheet || launcher || board || page || drawer || !view.live?.busy || !canSteer()) {
+    if (sheet || launcher || board || page || drawer || !stoppable || !canSteer()) {
         return;
     }
 

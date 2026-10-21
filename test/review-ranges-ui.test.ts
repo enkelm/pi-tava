@@ -635,6 +635,38 @@ const thread = (extra: Props = {}): Props => ({
     ...extra,
 });
 
+test("review discussion shows delegated authors and the latest resolve or reopen actor", async (t) => {
+    const onBehalfOf = { id: "owner", name: "Work owner" };
+    const actor = { userId: "pip", name: "PiP", service: "pip", onBehalfOf, at: 1 };
+    const original = thread({
+        userId: "reviewer",
+        name: "Reviewer",
+        resolved: true,
+        resolution: actor,
+        replies: [{ ...actor, id: "private-reply", text: "Keep the observed failure evidence." }],
+    });
+    const app = await setup(t, {
+        diff: visibleDiff(),
+        text: "",
+        threads: [original],
+        domWidth: 390,
+    });
+
+    assert.match(app.text(), /PiP for Work owner/);
+    assert.match(app.text(), /Resolved by PiP for Work owner/);
+    await app.deliverReviews([{ ...original, resolved: false }]);
+    assert.match(app.text(), /Reopened by PiP for Work owner/);
+    await app.deliverReviews([
+        { ...original, resolution: { userId: "owner", name: "Work owner", at: 2 } },
+    ]);
+    assert.doesNotMatch(
+        app.text(),
+        /Resolved by PiP|Reopened by PiP/,
+        "a later human resolution must not inherit PiP attribution",
+    );
+    assert.match(app.text(), /PiP for Work owner/, "the original delegated reply keeps its author");
+});
+
 test("exact review navigation waits for delayed reviews after Changes and diffs are ready", async (t) => {
     for (const delayedReviews of [false, true]) {
         await t.test(

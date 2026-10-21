@@ -674,6 +674,7 @@ export class PocketApp {
         await this.pip.open();
         const conversations = await this.#recover(storage);
 
+        await this.pip.orchestration.recover(storage);
         await this.spend.load(conversations);
 
         this.#unsubscribeCommits = this.harness.subscribeCommits((publication) =>
@@ -710,6 +711,8 @@ export class PocketApp {
                 () => {},
             );
         });
+
+        await this.pip.orchestration.open();
 
         if (this.guardOn()) {
             void this.guard.warm().catch(() => {});
@@ -857,6 +860,8 @@ export class PocketApp {
                 }
             }
         }
+
+        this.pip.orchestration.committed(publication);
 
         if (sessionsChanged) {
             this.browsers.reconcilePolicy();
@@ -2166,6 +2171,9 @@ export class PocketApp {
                     ...linkage,
                     threadType: meta.threadType ?? "worker",
                     ...this.workItems.projection(Number(id) as ConversationId, user),
+                    ...(user === undefined
+                        ? {}
+                        : this.pip.orchestration.navigation(Number(id) as ConversationId, user)),
                     busy,
                     waiting: waiting.has(id),
                     ...(endedAt === undefined ? {} : { endedAt }),
@@ -2222,6 +2230,10 @@ export class PocketApp {
         const forkedFrom = meta?.forkedFrom;
         const root = this.rootOf(room.id);
         const budget = this.#sessions[String(root)]?.budget;
+        const workSupervisor =
+            meta?.pipWorkItemId !== undefined && user !== undefined
+                ? this.pip.orchestration.navigation(room.id, user).supervisor
+                : undefined;
 
         return {
             id: room.id,
@@ -2242,6 +2254,7 @@ export class PocketApp {
             archived: meta?.archived === true,
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
+            ...(workSupervisor?.conversationId === Number(room.id) ? { workSupervisor } : {}),
             workflow: this.workItems.projection(room.id).workflow,
             ...(meta === undefined
                 ? {}

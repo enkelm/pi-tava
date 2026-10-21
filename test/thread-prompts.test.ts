@@ -161,10 +161,9 @@ async function handoff(
     source: ConversationId,
     type: "worker" | "researcher" | "reviewer" | "land" | "publish" | "follow-up" | "pull",
 ) {
-    const created = await executeHandoff(app, source, type, {
-        summary:
-            "Inspect this fixture independently; the brief is orientation, not role instructions.",
-    });
+    const summary =
+        "Inspect this fixture independently; the brief is orientation, not role instructions.";
+    const created = await executeHandoff(app, source, type, { summary });
     const id = created.id as ConversationId;
 
     await until(
@@ -181,6 +180,21 @@ async function handoff(
     );
 
     assert.ok(initial, "the destination agent receives its own initial handoff request");
+    const incoming = (await app.workItems.list(id, owner(app))).handoffs.find(
+        (record) => record.targetThreadId === created.id,
+    )!;
+
+    assert.ok(incoming.file);
+    assert.ok(initial.text.includes(incoming.file));
+    assert.ok(initial.sections.workflow!.includes(incoming.file));
+    assert.ok(
+        !initial.text.includes(summary),
+        "the prompt points to the file, not a second inline summary",
+    );
+    assert.ok(
+        !initial.sections.workflow!.includes(summary),
+        "recurring instructions must not reinject the file",
+    );
     role(
         initial.sections,
         roles.find((expected) => expected.type === type)!,

@@ -5,7 +5,6 @@ import { mkdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { cleanUp, context, openApp, owner, root, scriptedModel } from "./helpers.ts";
-import { PipSharedContext } from "../src/server/pip/shared-context.ts";
 import { MAX_EDIT_BYTES } from "../src/server/file-edits.ts";
 
 after(cleanUp);
@@ -29,7 +28,7 @@ test("shared source discovery honors local Git ignores and includes tracked dotf
     try {
         const user = owner(app);
         const { id } = await app.commands.createSession(user, { cwd, threadType: "chat" });
-        const shared = new PipSharedContext(app, id, async () => owner(app), context);
+        const shared = app.workItems.reader(id, async () => owner(app), context, "shared");
         const listing = await shared.read({
             type: "toolCall",
             id: "source-list",

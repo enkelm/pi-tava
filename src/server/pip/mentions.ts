@@ -29,7 +29,7 @@ import {
 } from "../docs.ts";
 import { HttpError } from "../errors.ts";
 import { isThinkingLevel } from "../models.ts";
-import { PipSharedContext, sharedContextTool } from "./shared-context.ts";
+import { sharedContextTool } from "../work-items/context.ts";
 
 const context = BACKGROUND_CONTEXT;
 const MAX_ACTIVE = 64;
@@ -572,11 +572,11 @@ export class PipMentions {
                 return this.#person(id, job.requesterId, job.authority);
             };
 
-            const reads = new PipSharedContext(
-                this.#app,
+            const reads = this.#app.workItems.reader(
                 id,
                 authorize,
                 withAbortSignal(signal, ctx),
+                "shared",
             );
             const tools: AgentTool[] = [
                 {

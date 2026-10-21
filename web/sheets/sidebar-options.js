@@ -13,6 +13,7 @@ import {
     scoped,
     setUnread,
     store,
+    uid,
 } from "../store.js";
 import { isPinned, togglePin } from "../theme.js";
 import { copyText, html, Icon, Sheet, SheetInfo } from "../ui.js";
@@ -212,6 +213,54 @@ export function SidebarOptions({ kind, id, at }) {
             add("Work Item options…", "target", () =>
                 openSidebarOptions("work-item", id, at, { keepDrawer: true }),
             );
+        }
+
+        if (workItem && store.state.me?.role === "owner" && !thread.archived) {
+            const userId = store.state.me.id;
+            const workItemId = thread.workItemId;
+            const controllerId = thread.supervisor?.conversationId;
+            const epoch = thread.supervisor?.epoch;
+            const status = thread.supervisor?.status;
+            const viewId = store.state.conversationId;
+            const opening = store.state.sheet;
+
+            const requireCurrent = () => {
+                const current = store.state;
+                const target = current.sessions.find((each) => each.id === id);
+
+                if (
+                    current.me?.id !== userId ||
+                    current.me?.role !== "owner" ||
+                    current.conversationId !== viewId ||
+                    current.sheet !== opening ||
+                    !handoffsAvailable() ||
+                    target?.workItemId !== workItemId ||
+                    target.archived ||
+                    target.supervisor?.conversationId !== controllerId ||
+                    target.supervisor?.epoch !== epoch ||
+                    target.supervisor?.status !== status
+                ) {
+                    throw new Error(
+                        "This Work Item changed. Reopen its options before continuing.",
+                    );
+                }
+            };
+
+            if (controllerId !== undefined) {
+                add("Limits…", "settings", () => {
+                    requireCurrent();
+                    const opening = uid();
+
+                    openSheet({
+                        type: "work-item-limits",
+                        id,
+                        userId,
+                        workItemId,
+                        viewId,
+                        opening,
+                    });
+                });
+            }
         }
 
         if ((!grouped || workItem) && canMoveSessions()) {

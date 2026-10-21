@@ -35,6 +35,7 @@ import { ShortcutsSheet } from "./sheets/shortcuts.js";
 import { TextSheet } from "./sheets/text.js";
 import { ArtifactsSheet, ArtifactViewer, ImageViewer } from "./sheets/viewers.js";
 import { piSessionsAvailable } from "./sheets/pi-sessions.js";
+import { WorkItemLimitsSheet } from "./sheets/work-item-limits.js";
 import { WorktreeSheet } from "./sheets/worktree.js";
 import { TrustSheet } from "./trust.js";
 import { addLayer, goBack, removeLayer } from "./back.js";
@@ -252,6 +253,9 @@ function sheetBody(sheet) {
             break;
         case "pip-model":
             body = html`<${PipModelPicker} target=${sheet.target} agent=${sheet.agent} />`;
+            break;
+        case "work-item-limits":
+            body = html`<${WorkItemLimitsSheet} sheet=${sheet} />`;
             break;
         case "branch":
             body = view.conversation ? html`<${BranchPicker} />` : null;

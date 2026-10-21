@@ -2,16 +2,24 @@ import { isHandoffRouting, suggestHandoffs } from "./commands.js";
 import { createControls } from "./controls.js";
 import { createHandoffSheet } from "./sheet.js";
 import { createHandoffState } from "./state.js";
+import { createSupervisorUi } from "./supervisor.js";
 
 export const pocketApi = 1;
 
 export default function setup(pocket) {
     const state = createHandoffState(pocket);
     const { HandoffButton, WorkflowTools } = createControls(pocket, state);
+    const supervisor = createSupervisorUi(pocket);
 
     pocket.onDispose(state.dispose);
+    pocket.onDispose(supervisor.dispose);
     pocket.style("style.css");
     pocket.sessionControl({ id: "handoff", slot: "header", component: HandoffButton });
+    pocket.sessionControl({
+        id: "supervisor",
+        slot: "header",
+        component: supervisor.SupervisorButton,
+    });
     pocket.sessionControl({ id: "workflow", slot: "composer", component: WorkflowTools });
     pocket.sheet({
         id: "handoff",

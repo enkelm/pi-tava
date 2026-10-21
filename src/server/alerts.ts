@@ -109,8 +109,10 @@ export class Alerts {
 
         const title = await app.conversationTitle(id);
         const failed = last.stopReason === "error";
-        // PiP's answers open its panel, over whatever the app shows, rather than a session.
-        const pip = app.sessionMeta(id)?.pip !== undefined;
+        // Global PiP opens its panel; a work supervisor opens its separate private conversation.
+        const meta = app.sessionMeta(id);
+        const pip = meta?.pip !== undefined;
+        const panel = pip && meta.pipWorkItemId === undefined;
         const message: PushMessage = {
             title: pip
                 ? title
@@ -121,7 +123,7 @@ export class Alerts {
                 failed ? (last.error ?? "The model request failed.") : entryText(last) || "Done.",
                 400,
             ),
-            url: pip ? "/?pip=1" : `/s/${String(id)}`,
+            url: panel ? "/?pip=1" : `/s/${String(id)}`,
             tag: `done-${String(id)}`,
         };
 

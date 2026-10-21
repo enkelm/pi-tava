@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import { PipWorkDoc } from "../src/server/docs.ts";
 import {
+    activateWorkPip,
     cleanUp,
     context,
     lastText,
@@ -31,6 +33,21 @@ test("lost browser submission acceptance retains its identity across explicit re
         scriptedModel((request) => {
             const last = lastText(request as never);
             const text = last.text.replace(/^\[from:[^\]]+\]\s*/, "");
+
+            if (JSON.stringify(request.messages).includes("the private supervisor for Work Item")) {
+                return fauxAssistantMessage(
+                    [
+                        fauxToolCall("work_supervise", {
+                            action: text === "Continue only this investigation." ? "finish" : "ask",
+                            text:
+                                text === "Continue only this investigation."
+                                    ? "Decision recorded; no publication authorized."
+                                    : "Should I continue investigating?",
+                        }),
+                    ],
+                    { stopReason: "toolUse" },
+                );
+            }
 
             return last.role === "user" && text.startsWith("/handoff researcher")
                 ? fauxAssistantMessage(
@@ -131,7 +148,9 @@ test("lost browser submission acceptance retains its identity across explicit re
         cleanUp();
     });
 
-    const posts: Array<{ requestId: string; mode: string; text: string }> = [];
+    const posts: Array<{ requestId: string; mode: string; text: string; pipQuestionId?: string }> =
+        [];
+    const opens: unknown[] = [];
     let loseSuccess = true;
     let allowReceiptReads = false;
     let receiptReads = 0;
@@ -139,6 +158,17 @@ test("lost browser submission acceptance retains its identity across explicit re
     t.mock.method(globalThis, "fetch", async (address: string, options: RequestInit = {}) => {
         const url = new URL(String(address), "http://localhost");
         const match = /^\/api\/c\/(\d+)\/submit$/.exec(url.pathname);
+        const open = /^\/api\/c\/(\d+)\/orchestrator$/.exec(url.pathname);
+
+        if (open) {
+            const body = JSON.parse(String(options.body));
+
+            opens.push(body);
+
+            return Response.json(
+                await app.pip.orchestration.control(Number(open[1]) as ConversationId, user, body),
+            );
+        }
 
         if (url.pathname === "/api/me") {
             return Response.json(await app.hello(user));
@@ -262,4 +292,82 @@ test("lost browser submission acceptance retains its identity across explicit re
     ).entries({ order: "ascending" }, 100, undefined, context);
 
     assert.equal(acceptedEntries.items.filter((entry) => entry.kind === "pi.user").length, 2);
+
+    const started = await activateWorkPip(app, second, user, {
+        text: "Ask before continuing; do not publish.",
+    });
+    const controller = started.orchestration!.conversationId as ConversationId;
+
+    await until(
+        async () =>
+            (await app.harness.snapshot(PipWorkDoc, controller, context))?.question !== undefined &&
+            !app.isBusy(controller),
+        "real private chat question",
+    );
+    const question = (await app.harness.snapshot(PipWorkDoc, controller, context))!.question!;
+
+    location.pathname = `/s/${controller}`;
+    reloaded.store.set({ conversationId: controller });
+    loseSuccess = true;
+    allowReceiptReads = false;
+    await assert.rejects(
+        reloaded.actions.submit(
+            "Continue only this investigation.",
+            [],
+            "followUp",
+            false,
+            controller,
+            undefined,
+            question.id,
+        ),
+        /accepted response lost/,
+    );
+    await until(() => !app.isBusy(controller), "the exact answer finishes supervision");
+    const answerPost = posts.at(-1)!;
+
+    assert.equal(answerPost.pipQuestionId, question.id);
+    await reloaded.actions.submit(
+        "Continue only this investigation.",
+        [],
+        "steer",
+        false,
+        controller,
+        undefined,
+        "a-newer-question",
+    );
+    assert.equal(posts.at(-1)!.requestId, answerPost.requestId);
+    assert.equal(
+        posts.at(-1)!.pipQuestionId,
+        question.id,
+        "an uncertain reply retains its original question across updates",
+    );
+    assert.equal(
+        (await app.harness.snapshot(PipWorkDoc, controller, context))!.questions.length,
+        1,
+    );
+    const transcriptRows = (await app.transcripts.allEntries(controller, true)).filter(
+        reloaded.isRow,
+    );
+
+    assert.deepEqual(
+        transcriptRows.filter((entry) => entry.kind === "pipQuestion").map((entry) => entry.text),
+        [question.text],
+        "the answered question stays in the visible PiP transcript after pending state clears",
+    );
+    reloaded.store.set({ sessions: app.sessions(user) });
+    const opening = reloaded.actions.openWorkPip(second);
+
+    assert.equal(reloaded.actions.openWorkPip(second), opening);
+    await opening;
+    assert.deepEqual(
+        opens,
+        [{ action: "open" }],
+        "row navigation uses one goal-free native request",
+    );
+    assert.equal(reloaded.store.state.conversationId, controller);
+    assert.equal(
+        app.workItems.itemFor(second)!.supervisor!.status,
+        "reclaimed",
+        "opening the finished chat never renews delegation",
+    );
 });

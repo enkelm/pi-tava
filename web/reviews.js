@@ -10,7 +10,7 @@ import { html, Icon } from "./ui.js";
 const reviewThreads = () => store.state.view.reviews?.threads ?? [];
 const enabled = () => (store.state.server?.localReviews ?? 0) >= 2;
 
-function ReviewAuthor({ userId, name, service, showYou = false }) {
+function ReviewAuthor({ userId, name, service, onBehalfOf, showYou = false }) {
     const me = store.state.me;
     const user =
         service === "pip"
@@ -23,7 +23,7 @@ function ReviewAuthor({ userId, name, service, showYou = false }) {
 
     return html`<span class="rv-author">
         <${Avatar} person=${{ id: userId, name }} size=${22} />
-        <span class="rv-name">${name}${showYou && userId === me?.id ? " (you)" : ""}</span>
+        <span class="rv-name">${name}${service === "pip" && onBehalfOf ? ` for ${onBehalfOf.name}` : ""}${showYou && userId === me?.id ? " (you)" : ""}</span>
         ${user?.role === "owner" && html`<span class="rv-owner">Owner</span>`}
     </span>`;
 }
@@ -1030,7 +1030,12 @@ function ReviewThread({ thread, conversationId, outdated, active = true }) {
                 <span class=${`rv-chevron ${open ? "rv-expanded" : ""}`}>
                     <${Icon} name="chevron" size=${14} />
                 </span>
-                <${ReviewAuthor} userId=${thread.userId} name=${thread.name} service=${thread.service} />
+                <${ReviewAuthor}
+                    userId=${thread.userId}
+                    name=${thread.name}
+                    service=${thread.service}
+                    onBehalfOf=${thread.onBehalfOf}
+                />
                 <span class=${`rv-status ${thread.resolved ? "resolved" : "unresolved"}`}>
                     ${thread.resolved ? "Resolved" : "Open"}
                 </span>
@@ -1078,6 +1083,7 @@ function ReviewThread({ thread, conversationId, outdated, active = true }) {
             <div class="rv-comment-meta">
                 <span class="rv-location">${locationLabel(thread)}</span>
                 <${ReviewTime} at=${thread.at} />
+                ${thread.resolution?.service === "pip" && html`<span class="rv-hint">${thread.resolved ? "Resolved" : "Reopened"} by PiP${thread.resolution.onBehalfOf ? ` for ${thread.resolution.onBehalfOf.name}` : ""}</span>`}
             </div>
             ${
                 outdated &&
@@ -1101,7 +1107,12 @@ function ReviewThread({ thread, conversationId, outdated, active = true }) {
                     ${replies.map(
                         (reply) => html`<li key=${reply.id} class="rv-reply">
                             <div class="rv-comment-meta">
-                                <${ReviewAuthor} userId=${reply.userId} name=${reply.name} service=${reply.service} />
+                                <${ReviewAuthor}
+                                    userId=${reply.userId}
+                                    name=${reply.name}
+                                    service=${reply.service}
+                                    onBehalfOf=${reply.onBehalfOf}
+                                />
                                 <${ReviewTime} at=${reply.at} />
                             </div>
                             <${ReviewMessage}

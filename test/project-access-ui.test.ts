@@ -293,6 +293,92 @@ function reset() {
     fixture.opened = [];
 }
 
+test("Work Item options offer only optional Limits for the selected PiP Thread", async () => {
+    for (const state of [undefined, "running", "paused", "reclaimed"]) {
+        reset();
+        fixture.store.state.conversationId = 2;
+        fixture.store.state.sessions = [
+            {
+                id: 1,
+                workItemId: "selected-work",
+                supervisor: state ? { conversationId: 99, status: state } : undefined,
+            },
+            { id: 2, workItemId: "other-work" },
+        ];
+        const menu = mount(() => SidebarOptions({ kind: "work-item", id: 1 }));
+        const pipLabels = nodes(menu.tree)
+            .filter((node) => node.type === "button")
+            .map((node) => textOf(node).trim())
+            .filter((label) => /PiP|Reclaim work|Limits/.test(label));
+
+        assert.deepEqual(pipLabels, state ? ["Limits…"] : [], String(state));
+
+        if (state) {
+            await button(menu, "Limits…").props.onClick();
+            const sheet = fixture.opened.at(-1)!;
+
+            assert.equal(sheet.type, "work-item-limits");
+            assert.equal(sheet.id, 1);
+            assert.equal(sheet.workItemId, "selected-work");
+            assert.equal(sheet.viewId, 2);
+            assert.equal(sheet.userId, "owner");
+        }
+
+        assert.deepEqual(fixture.navigated, [], "Limits never changes the viewed thread");
+    }
+});
+
+test("Limits reject stale owner, item, controller, state, epoch, view and menu and never appear on child menus", async () => {
+    for (const mutation of [
+        (state: Props) => (state.me = { id: "owner", role: "guest" }),
+        (state: Props) => (state.me = { id: "another-owner", role: "owner" }),
+        (state: Props) => (state.sessions = []),
+        (state: Props) => (state.sessions[0].workItemId = "replacement-work"),
+        (state: Props) => (state.sessions[0].supervisor.status = "reclaimed"),
+        (state: Props) => (state.sessions[0].supervisor.epoch = 2),
+        (state: Props) => (state.sessions[0].supervisor.conversationId = 100),
+        (state: Props) => (state.sessions[0].archived = true),
+        (state: Props) => (state.conversationId = 3),
+        (state: Props) => (state.sheet = { type: "another-menu" }),
+    ]) {
+        reset();
+        fixture.store.state.sessions = [
+            {
+                id: 1,
+                workItemId: "selected-work",
+                supervisor: { conversationId: 99, status: "paused", epoch: 1 },
+            },
+        ];
+        const menu = mount(() => SidebarOptions({ kind: "work-item", id: 1 }));
+        const staleLimits = button(menu, "Limits…");
+
+        mutation(fixture.store.state);
+        await staleLimits.props.onClick();
+        assert.deepEqual(fixture.opened, []);
+        assert.deepEqual(fixture.navigated, []);
+    }
+
+    for (const [kind, role, archived] of [
+        ["thread", "owner", false],
+        ["work-item", "guest", false],
+        ["work-item", "owner", true],
+    ]) {
+        reset();
+        fixture.store.state.me.role = role;
+        fixture.store.state.sessions = [
+            {
+                id: 1,
+                workItemId: "work",
+                archived,
+                supervisor: { conversationId: 99, status: "paused" },
+            },
+        ];
+        const menu = mount(() => SidebarOptions({ kind, id: 1 }));
+
+        assert.doesNotMatch(textOf(menu.tree), /Resume PiP|Reclaim work|Limits/);
+    }
+});
+
 function chooseFilter(instance: Mount, label: string) {
     const filter = child(instance, ProjectFilters);
     const rendered = mount(() => ProjectFilters(filter.props));

@@ -57,6 +57,7 @@ function fixture(t: TestContext, visibilityState = "visible", onLine = true) {
     const requests: Request[] = [];
     let suggest: (text: string) => Promise<unknown[]>;
     let contributionUpdates = 0;
+    const controls: { id: string; slot: string }[] = [];
     const pocket = {
         session: () => session,
         onSessionChange(listener: (value: Session) => void) {
@@ -82,7 +83,9 @@ function fixture(t: TestContext, visibilityState = "visible", onLine = true) {
         },
         onDispose: (stop: () => void) => effects.push(stop),
         style() {},
-        sessionControl() {},
+        sessionControl(control: { id: string; slot: string }) {
+            controls.push(control);
+        },
         sheet() {},
         inputCommand(spec: { suggest: typeof suggest }) {
             suggest = spec.suggest;
@@ -118,6 +121,7 @@ function fixture(t: TestContext, visibilityState = "visible", onLine = true) {
     return {
         state,
         requests,
+        controls,
         document,
         window,
         navigator,
@@ -147,6 +151,22 @@ function fixture(t: TestContext, visibilityState = "visible", onLine = true) {
         },
     };
 }
+
+test("native Work Item setup keeps PiP management out of the mounted composer", (t) => {
+    const f = fixture(t);
+
+    f.installHints();
+    assert.equal(
+        f.controls.some(
+            (control) => control.slot === "composer" && control.id.startsWith("supervisor"),
+        ),
+        false,
+        "orchestration management must live in Work Item options, not the message box",
+    );
+    assert.ok(
+        f.controls.some((control) => control.slot === "header" && control.id === "supervisor"),
+    );
+});
 
 test("context reads share and cache but mounted controls do not create polling demand", async (t) => {
     const f = fixture(t);

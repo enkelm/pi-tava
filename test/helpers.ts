@@ -153,10 +153,17 @@ export async function recordCost(app: App, id: ConversationId, dollars: number):
 export const owner = (app: App) => app.config.users.find((user) => user.role === "owner")!;
 
 /** A session in `cwd` with the scripted model, no thinking. */
-export async function newSession(app: App, cwd = work): Promise<ConversationId> {
+export async function newSession(
+    app: App,
+    cwd = work,
+    threadType?: string,
+): Promise<ConversationId> {
     // New sessions start with a model someone picked, and none when nobody did: as if the owner picked this one before.
     app.config.lastModel ??= { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
-    const { id } = await app.commands.createSession(owner(app), { cwd });
+    const { id } = await app.commands.createSession(owner(app), {
+        cwd,
+        ...(threadType === undefined ? {} : { threadType }),
+    });
 
     await app.commands.configure(id, owner(app), {
         model: { provider: "faux", modelId: "faux-1" },
@@ -180,6 +187,53 @@ export async function say(
     });
 
     await (await app.harness.submission(submissionId, context))!.wait(context);
+}
+
+/** Save limits against a fresh owner/item/controller/epoch observation. */
+export async function setWorkPipLimits(
+    app: App,
+    id: ConversationId,
+    user: User,
+    input: { budget?: number | null; maxActions?: number | null },
+) {
+    const item = (await app.pip.orchestration.inspect(id, user)).orchestration!;
+
+    return app.pip.orchestration.control(id, user, {
+        action: "limits",
+        ...input,
+        expected: {
+            workItemId: item.workItemId,
+            conversationId: item.conversationId,
+            epoch: item.epoch,
+        },
+    });
+}
+
+/** Open privately, optionally set limits, then activate only through an accepted owner message. */
+export async function activateWorkPip(
+    app: App,
+    id: ConversationId,
+    user: User = owner(app),
+    input: { text?: string; budget?: number | null; maxActions?: number | null } = {},
+) {
+    const opened = await app.pip.orchestration.control(id, user, { action: "open" });
+    const controller = opened.orchestration!.conversationId as ConversationId;
+
+    if (input.budget !== undefined || input.maxActions !== undefined) {
+        await setWorkPipLimits(app, id, user, {
+            ...(input.budget === undefined ? {} : { budget: input.budget }),
+            ...(input.maxActions === undefined ? {} : { maxActions: input.maxActions }),
+        });
+    }
+
+    await app.commands.submit(controller, user, {
+        requestId: crypto.randomUUID(),
+        text:
+            input.text ??
+            "Read the current Work Item context and observe its next meaningful outcome.",
+    });
+
+    return app.pip.orchestration.inspect(id, user);
 }
 
 /** Real human input and the registered handoff tool create setup transfers, never direct admission. */

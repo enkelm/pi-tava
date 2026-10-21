@@ -15,11 +15,13 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { awaitWithContext } from "@earendil-works/chord/context";
-import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative } from "node:path";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId, JsonObject } from "@earendil-works/pi-durable";
+import { err, FileError } from "@earendil-works/pi-durable/env";
+import { sshFixture } from "./ssh-fixture.ts";
 import type { Changes } from "../src/server/changes.ts";
 import { PlanDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "../src/server/docs.ts";
 import { handoffInputKey } from "../src/server/handoff-input.ts";
@@ -63,9 +65,12 @@ type Scenario = {
 };
 const scenarios = new Map<string, Scenario>();
 const courierResults: Result[] = [];
+const courierReads = new Map<string, Result>();
+const handoffDirectories = new Set<string>();
 const helperResults: Result[] = [];
 let helperGate: Gate | undefined;
-const stripAuthor = (text: string) => text.replace(/^\[from:[^\]]+\]\s*/, "");
+const stripAuthor = (text: string) =>
+    text.replace(/^\[from:[^\]]+\]\s*/, "").replace(/^\[via handoff\]\s*/, "");
 const model = scriptedModel(async (input) => {
     const last = lastText(input as never);
     const lastUser = input.messages.findLast((message) => message.role === "user");
@@ -77,8 +82,35 @@ const model = scriptedModel(async (input) => {
     }
 
     if (original.startsWith("Continue as the ")) {
-        if (original.includes("TRY_COURIER_CHAIN")) {
-            if (last.role === "user") {
+        const pathMatch = /Read the handoff file ("(?:\\.|[^"\\])*") using read/.exec(original);
+        const path = pathMatch === null ? undefined : (JSON.parse(pathMatch[1]!) as string);
+        const read = input.messages.findLast(
+            (message) => message.role === "toolResult" && message.toolName === "read",
+        );
+        const latest = input.messages.at(-1);
+        const contents =
+            read === undefined ? original : lastText({ messages: [read] } as never).text;
+
+        if (path !== undefined && last.role === "user") {
+            handoffDirectories.add(dirname(path));
+
+            return fauxAssistantMessage([fauxToolCall("read", { path })], {
+                stopReason: "toolUse",
+            });
+        }
+
+        if (path !== undefined && read !== undefined) {
+            courierReads.set(path, {
+                text: contents,
+                isError: "isError" in read && read.isError === true,
+            });
+        }
+
+        if (contents.includes("TRY_COURIER_CHAIN")) {
+            if (
+                last.role === "user" ||
+                (latest?.role === "toolResult" && latest.toolName === "read")
+            ) {
                 return fauxAssistantMessage(
                     [
                         fauxToolCall("handoff", {
@@ -187,6 +219,11 @@ after(async () => {
     }
 
     await app.close();
+
+    for (const directory of handoffDirectories) {
+        rmSync(directory, { recursive: true, force: true });
+    }
+
     cleanUp();
 });
 
@@ -300,6 +337,13 @@ test("normal slash/freeform/English inputs execute with exact human direction an
             relation: "same-work",
             direction: "Please hand this to a researcher to investigate only duplicate delivery.",
         },
+        {
+            body: `/handoff researcher ${"Keep the exact direction. 🧭 ".repeat(400)}`.trim(),
+            kind: "researcher",
+            relation: "same-work",
+            direction: "Keep the exact direction. 🧭 ".repeat(400).trim(),
+            summary: "Keep the full generated handoff. 漢字\n".repeat(500),
+        },
     ];
 
     for (const row of rows) {
@@ -309,7 +353,7 @@ test("normal slash/freeform/English inputs execute with exact human direction an
         const { scenario, accepted } = await run(
             id,
             row.body,
-            [start(row.kind, row.relation)],
+            [{ ...start(row.kind, row.relation), summary: row.summary ?? summary }],
             requestId,
         );
 
@@ -320,8 +364,22 @@ test("normal slash/freeform/English inputs execute with exact human direction an
         assert.ok(record);
         assert.equal(record.targetType, row.kind);
         assert.equal(record.relationship, row.relation);
-        assert.equal(record.brief, summary);
-        assert.equal(record.instructions, row.direction);
+        assert.ok(record.file, "the actual Markdown file is written before creating the successor");
+        handoffDirectories.add(dirname(record.file));
+        assert.ok(isAbsolute(record.file));
+        assert.ok(relative(work, record.file).startsWith(".."), "handoff is outside the checkout");
+        assert.match(dirname(record.file), /pi-coop-handoff-/);
+        assert.equal(statSync(dirname(record.file)).mode & 0o777, 0o700);
+        assert.equal(
+            readFileSync(record.file, "utf8"),
+            [
+                `# Handoff from thread ${id}`,
+                row.summary ?? summary,
+                `Human direction for the successor (verbatim; subject to its role, safety and mutation limits):\n<human_handoff_direction>\n${row.direction}\n</human_handoff_direction>`,
+            ].join("\n\n") + "\n",
+        );
+        assert.equal(record.brief, undefined, "no second stored inline summary");
+        assert.equal(record.instructions, undefined, "human direction lives in the file");
         assert.equal(
             record.requestKey,
             handoffInputKey(owner(app).id, id, `u:${owner(app).id}:${requestId}`),
@@ -342,10 +400,32 @@ test("normal slash/freeform/English inputs execute with exact human direction an
         const successorUsers = await sourceUsers(cid(record.targetThreadId));
 
         assert.equal(successorUsers.length, 1);
-        assert.ok(
-            JSON.stringify(successorUsers[0]!.model).includes(
-                row.direction.replaceAll("\n", "\\n"),
-            ),
+        const prompt = JSON.stringify(successorUsers[0]!.model);
+
+        assert.ok(prompt.includes(record.file));
+        assert.ok(!prompt.includes((row.summary ?? summary).replaceAll("\n", "\\n")));
+        assert.ok(!prompt.includes(row.direction.replaceAll("\n", "\\n")));
+        assert.equal(
+            courierReads.get(record.file)?.isError,
+            false,
+            "the successor can use the existing read tool",
+        );
+        assert.ok(courierReads.get(record.file)?.text.includes(row.direction.slice(0, 80)));
+        const submission = await app.harness.commit(
+            (tx) =>
+                tx.submissionByRequest(
+                    cid(record.targetThreadId),
+                    requestFor(owner(app).id, `handoff:${record.id}:0`),
+                ),
+            context,
+        );
+
+        assert.equal(submission?.type, "input");
+
+        assert.match(
+            submission?.requestId ?? "",
+            /^p:/,
+            "generated delivery is not forged human authorship",
         );
         const retried = await app.commands.submit(id, owner(app), { text: row.body, requestId });
 
@@ -476,6 +556,164 @@ test("ambiguous requests can ask follow-ups without creating intent or a success
     assert.equal((await sourceUsers(id)).length, 1);
 });
 
+test("a failed temporary-file write leaves the source active and creates no successor", async (t) => {
+    const id = await source();
+    const count = app.sessions().length;
+    const envFor = app.envFor.bind(app);
+
+    t.mock.method(app, "envFor", (...args: Parameters<App["envFor"]>) => {
+        const env = envFor(...args);
+
+        return new Proxy(env, {
+            get(target, name) {
+                if (name === "writeFile") {
+                    return async (path: string) => {
+                        handoffDirectories.add(dirname(path));
+
+                        return err(
+                            new FileError(
+                                "permission_denied",
+                                "Fixture handoff write denied",
+                                path,
+                            ),
+                        );
+                    };
+                }
+
+                const value = Reflect.get(target, name, target);
+
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        });
+    });
+    const { scenario } = await run(id, "/handoff researcher File writing must succeed first.", [
+        start(),
+    ]);
+
+    assert.equal(scenario.results[0]?.isError, true);
+    assert.match(scenario.results[0]?.text ?? "", /Fixture handoff write denied/);
+    assert.equal(app.sessions().length, count);
+    assert.equal((await records(id)).length, 0);
+    assert.equal(app.workItems.isReadOnly(id), false);
+});
+
+test("losing the file after transfer does not let optional naming suppress the successor prompt", async (t) => {
+    const id = await source();
+    const envFor = app.envFor.bind(app);
+
+    t.mock.method(app, "envFor", (...args: Parameters<App["envFor"]>) => {
+        const env = envFor(...args);
+
+        if (args[0] === id) {
+            return env;
+        }
+
+        return new Proxy(env, {
+            get(target, name) {
+                if (name === "readTextFile") {
+                    return async (...args: Parameters<typeof target.readTextFile>) => {
+                        handoffDirectories.add(dirname(args[0]));
+                        rmSync(args[0], { force: true });
+
+                        return target.readTextFile(...args);
+                    };
+                }
+
+                const value = Reflect.get(target, name, target);
+
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        });
+    });
+    const { scenario } = await run(id, "/handoff researcher Report a missing file honestly.", [
+        start(),
+    ]);
+
+    assert.equal(
+        scenario.results[0]?.isError,
+        false,
+        scenario.results[0]?.text ?? "No tool result",
+    );
+    const [record] = await records(id);
+
+    await until(
+        async () =>
+            (await records(id))[0]?.delivery !== "pending" &&
+            !app.isBusy(cid(record!.targetThreadId)),
+        "delivery settles after file loss",
+    );
+    assert.equal(
+        (await records(id))[0]!.delivery,
+        "delivered",
+        "optional naming cannot block the read instruction",
+    );
+    assert.ok(
+        JSON.stringify((await sourceUsers(cid(record!.targetThreadId)))[0]!.model).includes(
+            record!.file!,
+        ),
+    );
+    assert.equal(
+        courierReads.get(record!.file!)?.isError,
+        true,
+        "the existing read tool reports the real missing file",
+    );
+});
+
+test("SSH handoffs write and read the Markdown in the target temporary directory", async () => {
+    const host = "fixture-handoff-host";
+    const ssh = await sshFixture(host);
+    const remote = await openApp(model, join(ssh.root, "app"));
+
+    try {
+        const { id } = await remote.commands.createSession(owner(remote), {
+            cwd: ssh.root,
+            location: { kind: "ssh", host },
+            threadType: "worker",
+        });
+
+        await remote.commands.configure(id, owner(remote), {
+            model: { provider: "faux", modelId: "faux-1" },
+            thinkingLevel: "off",
+        });
+        const body = "/handoff researcher Keep this on the SSH target.";
+        const scenario = script(body, [start()]);
+
+        await say(remote, id, body);
+        assert.equal(
+            scenario.results[0]?.isError,
+            false,
+            scenario.results[0]?.text ?? "No tool result",
+        );
+        const record = Object.values(
+            (await remote.harness.snapshot(HandoffsDoc, context))!.handoffs,
+        ).find((each) => each.sourceThreadId === Number(id))!;
+
+        assert.ok(record.file);
+        handoffDirectories.add(dirname(record.file));
+        assert.match(record.file, /^\/tmp\/pi-coop-handoff-[^/]+\/handoff\.md$/);
+        assert.equal(remote.locationOf(cid(record.targetThreadId))?.host, host);
+        await until(async () => {
+            const saved = (await remote.harness.snapshot(HandoffsDoc, context))?.handoffs[
+                record.id
+            ];
+
+            return saved?.delivery === "delivered" && !remote.isBusy(cid(record.targetThreadId));
+        }, "remote successor reads the handoff");
+        assert.equal(courierReads.get(record.file)?.isError, false);
+        assert.ok(courierReads.get(record.file)?.text.includes("Keep this on the SSH target."));
+        const packets = readFileSync(join(ssh.root, "packets"), "utf8").trim().split("\n");
+
+        assert.ok(packets.includes("14"), "the directory was created over SFTP");
+        assert.ok(
+            packets.includes("6"),
+            "the Markdown bytes were written over SFTP, not host fallback",
+        );
+    } finally {
+        await remote.close();
+        await ssh.close();
+    }
+});
+
 // Explicit target/relationship come from actual persisted input, never the model's summary or tool arguments.
 test("explicit route mismatches and malformed route prefixes refuse without reserving a receipt", async () => {
     for (const [body, call, expected] of [
@@ -502,7 +740,6 @@ test("explicit route mismatches and malformed route prefixes refuse without rese
         ],
         ["/handoff --other researcher Invalid leading flag.", start(), /relationship flag/],
         ["/handoff researcher --same --new Conflicting flags.", start(), /flags must precede/],
-        ["/handoff researcher " + "x".repeat(8001), start(), /8000/],
     ] as const) {
         const id = await source();
         const { scenario } = await run(id, body, [call]);

@@ -584,6 +584,126 @@ async function setup(name: string, viewport: "mobile" | "desktop") {
     };
 }
 
+// Presentation belongs to the browser: memory navigation tests cannot check the CSS cascade
+// or whether a hidden shortcut can take focus. No stylesheet/source assertions stand in for it.
+test(
+    "phone and wide tablet Work Items hide PiP shortcuts while taps and held Limits remain available",
+    browserOptions,
+    async () => {
+        const fixture = await setup("pip-touch-actions", "desktop");
+
+        try {
+            const opened = await fixture.app.pip.orchestration.control(
+                fixture.worker,
+                owner(fixture.app),
+                { action: "open" },
+            );
+            const controller = opened.orchestration!.conversationId;
+            const item = fixture.app.workItems.itemFor(fixture.worker)!;
+            const grant = structuredClone(item.supervisor);
+            const page = await fixture.connect(1, fixture.app.config.ownerToken);
+            const options = ":is(.sidebar-options-menu, .sidebar-options-sheet)";
+            const limits = '[role="dialog"][aria-label="Work Item limits"]';
+            let group = "";
+
+            for (const viewport of [
+                VIEWPORTS.mobile,
+                VIEWPORTS.tablet,
+                { ...VIEWPORTS.tablet, width: 1180, height: 820 },
+            ]) {
+                await page.setViewport(viewport);
+                const scope = viewport.width < 600 ? home : sidebar;
+
+                group = `${scope} [data-work-item-id="${item.id}"]`;
+                const source = `${group} > .work-item-head > .session`;
+                const shortcut = `${group} > .work-item-head .session-orchestrate`;
+
+                const backToList = async () => {
+                    await page.evaluate(`(await import('/store.js')).navigate(null)`);
+                    await present(page, source);
+                };
+
+                await backToList();
+                assert.equal(await value(page, 'matchMedia("(pointer: coarse)").matches'), true);
+                assert.equal(
+                    await value(
+                        page,
+                        `(() => {
+                        const action = document.querySelector(${JSON.stringify(shortcut)});
+                        const bounds = action.getBoundingClientRect();
+
+                        action.focus();
+
+                        return bounds.width === 0 && bounds.height === 0 && document.activeElement !== action;
+                    })()`,
+                    ),
+                    true,
+                    `${viewport.width}px touch layout has no visible or focusable right-edge PiP shortcut`,
+                );
+                await present(page, `${group} .work-item-pip-state`);
+                await click(page, source);
+                await until(
+                    () => value(page, `location.pathname === '/s/${controller}'`),
+                    "Work Item tap opens its existing PiP Thread",
+                );
+                await backToList();
+                const disclosure = `${group} .work-item-disclosure`;
+
+                if (
+                    await value(
+                        page,
+                        `document.querySelector(${JSON.stringify(disclosure)}).getAttribute('aria-expanded') === 'false'`,
+                    )
+                ) {
+                    await click(page, disclosure);
+                }
+
+                await click(
+                    page,
+                    `${group} .work-item-member[data-id="${fixture.worker}"] > .session`,
+                );
+                await until(
+                    () => value(page, `location.pathname === '/s/${fixture.worker}'`),
+                    "execution child tap remains exact",
+                );
+                await backToList();
+                const point = await beginTouch(page, scope, fixture.worker);
+
+                await present(page, overlay(scope, fixture.worker));
+                await finger(page, "touchmove", { x: point.x + 16, y: point.y });
+                await present(page, options);
+                await finger(page, "touchend");
+                await button(page, options, "Limits…");
+                await present(page, limits);
+                await present(page, `${limits} input`);
+                assert.equal(
+                    await value(page, `(await import('/store.js')).store.state.sheet.type`),
+                    "work-item-limits",
+                );
+                await button(page, limits, "Close");
+                await present(page, limits, false);
+                assert.deepEqual(
+                    fixture.app.workItems.itemFor(fixture.worker)!.supervisor,
+                    grant,
+                    "navigation and reading Limits never change PiP control",
+                );
+            }
+
+            // A keyboard on the same touch tablet still has the ordinary context-menu path.
+            await page.evaluate(
+                `document.querySelector(${JSON.stringify(`${group} > .work-item-head > .session`)}).focus()`,
+            );
+            await page.press("Shift+F10");
+            await present(page, '.sidebar-options-menu[role="menu"]');
+            await button(page, options, "Limits…");
+            await present(page, `${limits} input`);
+            await button(page, limits, "Close");
+        } finally {
+            await fixture.close();
+        }
+    },
+);
+
 // Regression: iPad touch capability must not force context actions into a bottom sheet.
 // These cases own menu placement/input routing; existing phone hold tests own sheet actions.
 test(

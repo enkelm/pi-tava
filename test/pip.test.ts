@@ -5,6 +5,7 @@ import {
     type App,
     cleanUp,
     context,
+    executeHandoff,
     fakeTab,
     lastText,
     modelTexts,
@@ -20,8 +21,8 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -128,6 +129,24 @@ async function said(id: ConversationId): Promise<string[]> {
               ? entry.blocks.flatMap((block) => (block.type === "text" ? [block.text] : []))
               : [],
     );
+}
+
+/** Real private registration and tool execution, not a mock of the control interface. */
+async function privateCall(
+    id: ConversationId,
+    name: string,
+    args: Parameters<typeof fauxToolCall>[1],
+) {
+    const previous = (await app.transcripts.allEntries(id, true)).at(-1)?.id ?? 0;
+
+    await say(app, id, `call ${name} ${JSON.stringify(args)}`);
+    const result = (await app.transcripts.allEntries(id, true)).findLast(
+        (entry) => entry.id > previous && entry.kind === "toolResult" && entry.name === name,
+    );
+
+    assert.ok(result?.kind === "toolResult", `a result from ${name}`);
+
+    return result;
 }
 
 test("PiP is made once, for the owner, and stays out of the session list", async () => {
@@ -378,7 +397,15 @@ test("only PiP has PiP's tools, and PiP has none that change files or run comman
     const pipTools = await names(id);
     const sessionTools = await names(session);
 
-    for (const name of ["sessions", "session_start", "session_send", "approvals", "read"]) {
+    for (const name of [
+        "sessions",
+        "session_start",
+        "session_send",
+        "approvals",
+        "read",
+        "work_context",
+        "work_review",
+    ]) {
         assert.ok(pipTools.includes(name), `PiP has ${name}`);
     }
 
@@ -387,12 +414,494 @@ test("only PiP has PiP's tools, and PiP has none that change files or run comman
     }
 
     assert.ok(sessionTools.includes("bash"));
-    assert.ok(!sessionTools.includes("sessions"), "a session has no PiP tools");
+
+    for (const name of ["sessions", "work_context", "work_review"]) {
+        assert.ok(!sessionTools.includes(name), `a session has no private ${name} control`);
+    }
+
     assert.ok(
         !(await (await app.conversation(session)).agent(context)).extensions.some(
             (extension) => extension.name === PIP_EXTENSION,
         ),
     );
+});
+
+test("private PiP reads Work Item members and current code without crossing into other work or private PiP", async (t) => {
+    const id = await pip();
+    const source = await newSession(app);
+
+    await say(app, source, "ORIGINAL_WORK_ITEM_ASK");
+    const next = await executeHandoff(app, source, "researcher");
+    const target = next.id as ConversationId;
+    const record = (await app.harness.snapshot(HandoffsDoc, context))!.handoffs[next.handoffId]!;
+
+    t.after(() => {
+        if (record.file !== undefined) {
+            rmSync(dirname(record.file), { recursive: true, force: true });
+        }
+    });
+    await until(
+        async () =>
+            (await app.harness.snapshot(HandoffsDoc, context))!.handoffs[next.handoffId]
+                ?.delivery === "delivered" && !app.isBusy(target),
+        "handoff delivery",
+    );
+    const status = await privateCall(id, "work_context", {
+        session: Number(source),
+        action: "status",
+    });
+
+    assert.equal(status.isError, false, status.text);
+    const view = JSON.parse(status.text.slice(SESSION_OPEN.length, -SESSION_CLOSE.length));
+
+    assert.equal(view.workItem.id, next.workItemId);
+    assert.equal(view.workItem.activeThreadId, next.id);
+    assert.deepEqual(
+        new Set(view.workItem.threads.map((entry: { id: number }) => entry.id)),
+        new Set([Number(source), next.id]),
+    );
+    assert.equal(view.workflow.readOnly, true, "the old member remains retired");
+    const listing = await privateCall(id, "sessions", {});
+
+    assert.ok(listing.text.includes(`work ${next.workItemId}`));
+    assert.ok(listing.text.includes(`active /s/${next.id}`));
+    const history = await privateCall(id, "work_context", {
+        session: Number(source),
+        action: "thread",
+    });
+
+    assert.equal(history.isError, false, history.text);
+    assert.match(history.text, /ORIGINAL_WORK_ITEM_ASK/);
+    await app.harness.commit(async (tx) => {
+        (await tx.doc(SessionsDoc)).items[String(target)]!.ownerOnly = true;
+    }, context);
+    const path = "private-work-context.txt";
+
+    writeFileSync(join(work, path), "CURRENT_PRIVATE_WORK_VALUE\n");
+    const file = await privateCall(id, "work_context", {
+        session: Number(source),
+        threadId: next.id,
+        action: "file",
+        path,
+    });
+
+    assert.equal(file.isError, false, file.text);
+    assert.match(file.text, /CURRENT_PRIVATE_WORK_VALUE/);
+    await privateCall(id, "work_context", {
+        session: Number(source),
+        threadId: next.id,
+        action: "thread",
+        query: "NO_CURRENT_ENTRIES_MATCH",
+        limit: 1,
+    });
+    const unread = await privateCall(id, "session_send", {
+        session: next.id,
+        message: "Do not dispatch without current inspection.",
+        report: false,
+    });
+
+    assert.equal(
+        unread.isError,
+        true,
+        "a filtered/partial read cannot bypass the existing inspect-before-acting check",
+    );
+    const current = await privateCall(id, "work_context", {
+        session: Number(source),
+        threadId: next.id,
+        action: "thread",
+    });
+
+    assert.equal(current.isError, false, current.text);
+    const sent = await privateCall(id, "session_send", {
+        session: next.id,
+        message: "Continue this exact selected investigation.",
+        report: false,
+    });
+
+    assert.equal(sent.isError, false, sent.text);
+    await until(
+        async () =>
+            (await said(target)).includes(
+                "> [via PiP] Continue this exact selected investigation.",
+            ),
+        "normal Commands delivery to the inspected exact thread",
+    );
+    const unrelated = await newSession(app);
+
+    const deniedInputs: Parameters<typeof fauxToolCall>[1][] = [
+        { session: Number(source), threadId: Number(unrelated), action: "thread" },
+        { session: Number(source), threadId: Number(unrelated), action: "discussion", before: 2 },
+        { session: Number(source), threadId: Number(id), action: "discussion", before: 2 },
+        { session: Number(id), action: "status" },
+    ];
+
+    for (const args of deniedInputs) {
+        const denied = await privateCall(id, "work_context", args);
+
+        assert.equal(denied.isError, true, "the actual tool denies the unrelated/private target");
+    }
+
+    await assert.rejects(
+        app.pip.workContext(source, Number(target), { action: "status" }, context),
+        /Only PiP/,
+    );
+});
+
+test("private PiP can page to an older unresolved finding behind a full page of resolved reviews", async () => {
+    const id = await pip();
+    const session = await newSession(app);
+    const me = owner(app);
+    const ids: string[] = [];
+
+    for (let index = 0; index < 101; index++) {
+        ids.push(
+            (
+                await app.reviews.comment(session, me, {
+                    requestId: `paged-discussion-${index}`,
+                    text: index === 0 ? "Oldest unresolved finding" : `Later finding ${index}`,
+                })
+            ).id,
+        );
+    }
+
+    await app.reviews.resolve(session, me, {
+        requestId: "resolve-newer-discussions",
+        threadIds: ids.slice(1),
+        resolved: true,
+    });
+
+    for (let index = 0; index < 14; index++) {
+        await app.collab.postChat(session, me, {
+            requestId: `paged-chat-${index}`,
+            text: `Chat message ${index}`,
+        });
+    }
+
+    const read = async (input: { before?: number; limit?: number } = {}) => {
+        const result = await app.pip.workContext(
+            id,
+            Number(session),
+            { action: "discussion", ...input },
+            context,
+        );
+
+        return JSON.parse(result.slice(SESSION_OPEN.length, -SESSION_CLOSE.length));
+    };
+
+    const newest = await read({ limit: 100 });
+
+    assert.deepEqual(
+        newest.reviews.map((thread: { id: string }) => thread.id),
+        ids.slice(1),
+    );
+    assert.ok(newest.reviews.every((thread: { resolved: boolean }) => thread.resolved));
+    const oldest = await read({ before: newest.reviewPage?.before, limit: 100 });
+
+    assert.deepEqual(
+        oldest.reviews.map((thread: { id: string }) => thread.id),
+        [ids[0]],
+        "the private reader must retrieve the older unresolved finding, not repeat the newest page",
+    );
+    assert.equal(oldest.reviews[0].resolved, false);
+    assert.deepEqual(newest.reviewPage, {
+        total: 101,
+        unresolved: 1,
+        omitted: 1,
+        omittedUnresolved: 1,
+        before: 2,
+    });
+    assert.deepEqual(oldest.reviewPage, {
+        total: 101,
+        unresolved: 1,
+        omitted: 100,
+        omittedUnresolved: 0,
+        before: null,
+    });
+    assert.deepEqual(oldest.chat, newest.chat, "the review cursor does not page recent chat");
+    assert.equal(newest.chat.length, 14);
+    assert.equal(newest.chatOmitted, 0);
+    assert.ok(
+        newest.reviews.every((thread: { omittedReplies: number }) => thread.omittedReplies === 0),
+    );
+
+    // New threads, replies and resolution changes cannot shift the earlier page's creation cursor.
+    await app.reviews.comment(session, me, {
+        requestId: "appended-during-review-traversal",
+        text: "New discussion after the first page",
+    });
+    await app.reviews.resolve(session, me, {
+        requestId: "reopen-during-review-traversal",
+        threadIds: [ids.at(-1)!],
+        resolved: false,
+    });
+    const replies: string[] = [];
+
+    for (let index = 0; index < 8; index++) {
+        replies.push(
+            (
+                await app.reviews.comment(session, me, {
+                    requestId: `paged-reply-${index}`,
+                    threadId: ids[0]!,
+                    text: `Clarification ${index}`,
+                })
+            ).id,
+        );
+    }
+
+    const continued = await read({ before: newest.reviewPage.before, limit: 100 });
+
+    assert.deepEqual(
+        continued.reviews.map((thread: { id: string }) => thread.id),
+        [ids[0]],
+    );
+    assert.deepEqual(continued.reviewPage, {
+        total: 102,
+        unresolved: 3,
+        omitted: 101,
+        omittedUnresolved: 2,
+        before: null,
+    });
+    assert.deepEqual(
+        continued.reviews[0].replies.map((reply: { id: string }) => reply.id),
+        replies.slice(2),
+    );
+    assert.equal(continued.reviews[0].omittedReplies, 2);
+    const recent = await read();
+
+    assert.equal(recent.reviews.length, 8);
+    assert.deepEqual(recent.reviewPage, {
+        total: 102,
+        unresolved: 3,
+        omitted: 94,
+        omittedUnresolved: 1,
+        before: 95,
+    });
+    assert.deepEqual(
+        recent.chat.map((message: { text: string }) => message.text),
+        Array.from({ length: 12 }, (_, index) => `Chat message ${index + 2}`),
+    );
+    assert.equal(recent.chatOmitted, 2);
+    const end = await read({ before: 1 });
+
+    assert.deepEqual(end.reviews, []);
+    assert.deepEqual(end.reviewPage, {
+        total: 102,
+        unresolved: 3,
+        omitted: 102,
+        omittedUnresolved: 3,
+        before: null,
+    });
+    const emptySession = await newSession(app);
+    const empty = JSON.parse(
+        (
+            await app.pip.workContext(id, Number(emptySession), { action: "discussion" }, context)
+        ).slice(SESSION_OPEN.length, -SESSION_CLOSE.length),
+    );
+
+    assert.deepEqual(empty, {
+        chat: [],
+        chatOmitted: 0,
+        reviewPage: { total: 0, unresolved: 0, omitted: 0, omittedUnresolved: 0, before: null },
+        reviews: [],
+    });
+    const unsupported = await privateCall(id, "work_context", {
+        session: Number(session),
+        action: "discussion",
+        query: "Oldest unresolved finding",
+    });
+
+    assert.equal(unsupported.isError, true);
+    assert.match(unsupported.text, /discussion does not support query/);
+});
+
+test("private PiP review actions keep truthful attribution and durable resolve/reopen retries", async () => {
+    const id = await pip();
+    const session = await newSession(app);
+    const me = owner(app);
+    const thread = await app.reviews.comment(session, me, {
+        requestId: "private-discussion",
+        text: "Check the retry boundary.",
+    });
+    const discussion = await privateCall(id, "work_context", {
+        session: Number(session),
+        action: "discussion",
+    });
+
+    assert.equal(discussion.isError, false, discussion.text);
+    assert.ok(discussion.text.includes(thread.id));
+    const reply = await privateCall(id, "work_review", {
+        action: "reply",
+        session: Number(session),
+        threadId: thread.id,
+        text: "@PiP: keep the concrete failure evidence before resolving.",
+    });
+
+    assert.equal(reply.isError, false, reply.text);
+    const posted = (await app.reviews.list(session, me)).threads[0]!.replies[0]!;
+
+    assert.equal(posted.userId, "pip");
+    assert.equal(posted.service, "pip");
+    assert.deepEqual(posted.onBehalfOf, { id: me.id, name: me.name });
+    assert.equal(posted.pip, undefined, "a service reply does not recursively invoke shared PiP");
+    const resolved = await privateCall(id, "work_review", {
+        action: "resolve",
+        session: Number(session),
+        threadIds: [thread.id],
+    });
+
+    assert.equal(resolved.isError, false, resolved.text);
+    let saved = (await app.reviews.list(session, me)).threads[0]!;
+
+    assert.equal(saved.resolved, true);
+    assert.equal(saved.resolvedBy, "pip");
+    assert.equal(saved.resolution?.service, "pip");
+    assert.deepEqual(saved.resolution?.onBehalfOf, { id: me.id, name: me.name });
+    const request = { action: "reopen" as const, threadIds: [thread.id] };
+
+    await app.pip.reviewDiscussion(id, Number(session), request, "restart-reopen");
+    await app.reviews.resolve(session, me, {
+        requestId: "human-later-resolve",
+        threadIds: [thread.id],
+        resolved: true,
+    });
+    await app.close();
+    app = await openApp(model, dataDir);
+    const reopenedId = await pip();
+
+    assert.equal(reopenedId, id);
+    await app.pip.reviewDiscussion(id, Number(session), request, "restart-reopen");
+    saved = (await app.reviews.list(session, owner(app))).threads[0]!;
+    assert.equal(
+        saved.resolved,
+        true,
+        "replaying the old reopen cannot erase the later human resolve",
+    );
+    assert.equal(saved.resolution?.userId, me.id);
+    assert.equal(saved.resolution?.service, undefined);
+    assert.equal(saved.replies.length, 1);
+    await assert.rejects(
+        app.pip.reviewDiscussion(
+            id,
+            Number(session),
+            { action: "resolve", threadIds: [thread.id] },
+            "restart-reopen",
+        ),
+        /requestId/,
+    );
+    const again = await privateCall(id, "work_review", {
+        action: "reopen",
+        session: Number(session),
+        threadIds: [thread.id],
+    });
+
+    assert.equal(again.isError, false, again.text);
+    saved = (await app.reviews.list(session, owner(app))).threads[0]!;
+    assert.equal(saved.resolved, false);
+    assert.equal(saved.resolvedBy, undefined);
+    assert.equal(saved.resolution?.service, "pip", "reopening retains its real actor too");
+    assert.equal(saved.resolution?.onBehalfOf?.id, me.id);
+});
+
+test("private work reads and review transactions recheck live private authority before exposing or committing results", async (t) => {
+    const id = await pip();
+    const session = await newSession(app);
+    const path = "private-pause-context.txt";
+
+    writeFileSync(join(work, path), "DO_NOT_FORWARD_AFTER_PAUSE");
+    const read = app.workspace.sourceFile.bind(app.workspace);
+    const mockedRead = t.mock.method(
+        app.workspace,
+        "sourceFile",
+        async (...args: Parameters<typeof read>) => {
+            const result = await read(...args);
+
+            app.config.pipEnabled = false;
+
+            return result;
+        },
+    );
+
+    t.after(() => {
+        app.config.pipEnabled = true;
+    });
+    await assert.rejects(
+        app.pip.workContext(id, Number(session), { action: "file", path }, context),
+        /turned off/,
+    );
+    mockedRead.mock.restore();
+    app.config.pipEnabled = true;
+    const me = owner(app);
+    const tokenHash = me.tokenHash;
+    const rotatedRead = t.mock.method(
+        app.workspace,
+        "sourceFile",
+        async (...args: Parameters<typeof read>) => {
+            const result = await read(...args);
+
+            me.tokenHash = "rotated-during-private-read";
+
+            return result;
+        },
+    );
+
+    t.after(() => {
+        me.tokenHash = tokenHash;
+    });
+    await assert.rejects(
+        app.pip.workContext(id, Number(session), { action: "file", path }, context),
+        /owner or sign-in changed/,
+    );
+    rotatedRead.mock.restore();
+    me.tokenHash = tokenHash;
+    const list = app.reviews.list.bind(app.reviews);
+    const rotatedDiscussionRead = t.mock.method(
+        app.reviews,
+        "list",
+        async (...args: Parameters<typeof list>) => {
+            const result = await list(...args);
+
+            me.tokenHash = "rotated-during-discussion-page";
+
+            return result;
+        },
+    );
+
+    await assert.rejects(
+        app.pip.workContext(id, Number(session), { action: "discussion", before: 1 }, context),
+        /owner or sign-in changed/,
+        "even an empty review page's counts must not escape revoked private authority",
+    );
+    rotatedDiscussionRead.mock.restore();
+    me.tokenHash = tokenHash;
+    const thread = await app.reviews.comment(session, me, {
+        requestId: "pause-source",
+        text: "Keep this open.",
+    });
+    const before = await app.reviews.list(session, me);
+    const resolve = app.reviews.resolveAsPiP.bind(app.reviews);
+    const mockedResolve = t.mock.method(
+        app.reviews,
+        "resolveAsPiP",
+        async (...args: Parameters<typeof resolve>) => {
+            await resolve(...args);
+            app.config.pipEnabled = false;
+        },
+    );
+    const request = { action: "resolve" as const, threadIds: [thread.id] };
+
+    await assert.rejects(
+        app.pip.reviewDiscussion(id, Number(session), request, "pause-before-commit"),
+        /turned off/,
+    );
+    mockedResolve.mock.restore();
+    app.config.pipEnabled = true;
+    assert.deepEqual(
+        await app.reviews.list(session, me),
+        before,
+        "the resolution and its receipt roll back together",
+    );
+    await app.pip.reviewDiscussion(id, Number(session), request, "pause-before-commit");
+    assert.equal((await app.reviews.list(session, me)).threads[0]!.resolved, true);
 });
 
 test("PiP starts a session for its person, and hears back when Pi there answers", async () => {

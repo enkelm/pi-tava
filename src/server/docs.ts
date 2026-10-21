@@ -53,6 +53,8 @@ export type SessionMeta = {
      * kept out of the session list; an older Pi Pocket, which does not know this field, lists it as a session.
      */
     pip?: string;
+    /** Separate private work controller, not execution membership and not the global PiP panel. */
+    pipWorkItemId?: string;
 };
 
 /** The catalogue of user-facing sessions: ownerless conversations created by the app. Subagents are not listed. */
@@ -260,6 +262,8 @@ export type ReviewMessage = {
     at: number;
     /** Application-authored discussion entry; never supplied by a human request. */
     service?: "pip";
+    /** Application-authored attribution; no private PiP conversation identity or history is shared. */
+    onBehalfOf?: { id: string; name: string };
     /** Native outcome of this person's explicit mention, not model-authored metadata. */
     pip?: PipMentionState;
     /** Human application receipts, keyed by zero-based top-level suggestion fence index. */
@@ -276,6 +280,8 @@ export type ReviewThread = ReviewMessage & {
     line?: number;
     resolved: boolean;
     resolvedBy?: string;
+    /** The last actual resolve/reopen actor, including delegated and reopening actions. */
+    resolution?: Pick<ReviewMessage, "userId" | "name" | "at" | "service" | "onBehalfOf">;
     replies: ReviewMessage[];
 };
 
@@ -908,6 +914,62 @@ export const FollowsDoc = defineDoc<{
  * provider, and the newest entry of PiP's conversation then (`at`). Their next message answers it when it is just one of
  * those providers' whole name or id, in the same context.
  */
+export type PipWorkQuestion = {
+    id: string;
+    text: string;
+    at: number;
+    /** Absent on historical questions, whose pending display is projected from this document. */
+    entryId?: number;
+    answer?: {
+        text: string;
+        by: string;
+        requestId: string;
+        at: number;
+        /** Native composer identity; absent on historical orchestration-form answers. */
+        submissionRequestId?: string;
+        /** Authority fence when the immutable reply was saved, before native admission. */
+        epoch?: number;
+    };
+    /** Unadmitted replies replaced by a fresh owner decision after an authority fence. */
+    supersededAnswers?: NonNullable<PipWorkQuestion["answer"]>[];
+};
+
+/** Private supervisor memory and wake receipts; only the pending ask is projected in its owner's private room. */
+export const PipWorkDoc = defineDoc<{
+    goal: string;
+    observed: string;
+    sequence: number;
+    pending?: {
+        fingerprint: string;
+        requestId: string;
+        epoch: number;
+        source: number;
+        busy: boolean;
+        taskId: number;
+    };
+    question?: PipWorkQuestion;
+    questions: PipWorkQuestion[];
+    actions: Record<string, { epoch: number; finish?: string }>;
+    humanInputs: Record<string, true>;
+    humanPending?: string;
+    lastInput?: { requestId: string; epoch: number };
+    reason?: string;
+}>({
+    kind: "pocket.pip-work",
+    version: 1,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({
+        goal: "",
+        observed: "",
+        sequence: 0,
+        questions: [],
+        actions: {},
+        humanInputs: {},
+    }),
+});
+
 export const PipAskedDoc = defineDoc<{
     asked?: { models: { provider: string; id: string }[]; at: number };
 }>({

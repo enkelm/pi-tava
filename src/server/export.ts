@@ -175,6 +175,8 @@ export function transcriptMarkdown(input: ExportInput): string {
                     .filter((line) => line !== "")
                     .join("\n\n"),
             );
+        } else if (entry.kind === "pipQuestion") {
+            sections.push(`**PiP asks:**\n\n${entry.text}`);
         } else if (entry.kind === "note") {
             sections.push(`_${entry.name} ${entry.text}._`);
         } else if (entry.kind === "fromPi") {

@@ -6,6 +6,7 @@ import { sessionMark } from "./sessions.js";
 import { canSteer, navigate, openSheet, scoped, store, workspaceOrder } from "./store.js";
 import { lookLabel, prefs } from "./theme.js";
 import { html, Icon, Keys, shortPath, timeAgo } from "./ui.js";
+import { rowOpenId } from "./work-items.js";
 
 const LOGO = [
     "▗▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▖",
@@ -54,7 +55,7 @@ export function Splash() {
 
             if (session) {
                 event.preventDefault();
-                navigate(session.id);
+                navigate(rowOpenId(session));
             }
         };
 
@@ -148,7 +149,7 @@ export function Splash() {
                         html`<button
                             class="splash-row"
                             data-part="home-recent-row"
-                            onClick=${() => navigate(session.id)}
+                            onClick=${() => navigate(rowOpenId(session))}
                         >
                             <span class="splash-key" data-part="home-recent-key">${index + 1}</span>
                             <span

@@ -82,8 +82,8 @@ export function parseHandoffCommand(
         throw new HttpError(400, `${USAGE}. Relationship flags must precede direction.`);
     }
 
-    if (rest.length > 8000 || rest.includes("\0")) {
-        throw new HttpError(400, "Handoff direction must be at most 8000 characters without NULs");
+    if (rest.includes("\0")) {
+        throw new HttpError(400, "Handoff direction must not contain NULs");
     }
 
     return {

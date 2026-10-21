@@ -16,7 +16,13 @@ import { sessionResultUnread } from "./session-seen.js";
 import { RemoteProjectIcon } from "./ssh-status.js";
 import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
 import { ThreadTypeTag, threadTypeLabel } from "./thread-type.js";
-import { organizationTargets, workItemRows, WORKFLOW_LABELS } from "./work-items.js";
+import {
+    organizationTargets,
+    rowIsOpen,
+    rowOpenId,
+    workItemRows,
+    WORKFLOW_LABELS,
+} from "./work-items.js";
 import {
     actions,
     attempt,
@@ -441,6 +447,8 @@ function SessionRow({
 }) {
     const { conversationId, server, me } = store.state;
     const ref = useRef(null);
+    const orchestrationFlight = useRef(false);
+    const [orchestrationBusy, setOrchestrationBusy] = useState(false);
     const options = (at) => onOptions(session.id, at, session.members ? "work-item" : "thread");
 
     useSidebarContext(ref, options);
@@ -460,10 +468,7 @@ function SessionRow({
         }
     };
 
-    const open =
-        !session.archived &&
-        (session.id === conversationId ||
-            session.members?.some((member) => member.id === conversationId));
+    const open = !session.archived && rowIsOpen(session, conversationId);
     const marked = isUnread(session.id);
     const unread = collab() && sessionUnread(session);
     const moving = store.state.moving[session.id] !== undefined;
@@ -479,6 +484,21 @@ function SessionRow({
         onDragCancel: () => dnd.cancelTouch(),
     });
     const title = session.title ?? "New session";
+    const orchestratable = session.members && me?.role === "owner" && !session.archived;
+    const supervisor = me?.role === "owner" ? session.supervisor : undefined;
+    const supervising = supervisor?.status === "running";
+    const orchestrationLabel = `Open PiP Thread for ${title}`;
+    const workStatus = me?.role === "owner"
+        ? html`<span
+              class="work-item-pip-state"
+              data-status=${supervising ? "running" : "reclaimed"}
+              role="img"
+              aria-label=${supervising ? "PiP active" : "Human control"}
+              title=${supervising ? "PiP active" : "Human control"}
+          >
+              <${Icon} name="pip" size=${12} />
+          </span>`
+        : (WORKFLOW_LABELS[session.workflow?.status] ?? "Active");
     // Every top-level thread has working context, even without a Coop-created worktree or handoff.
     const details = !member;
     const path = shortPath(session.cwd, server?.home);
@@ -608,7 +628,7 @@ function SessionRow({
                             ${
                                 session.members &&
                                 html`<span class="work-item-status">
-                                    ${WORKFLOW_LABELS[session.workflow?.status] ?? "Active"} · ${session.members.length} threads
+                                    ${workStatus} · ${session.members.length} threads
                                 </span>`
                             }
                             <span class="mono"><${Highlight} text=${path} needle=${needle} /></span>
@@ -690,16 +710,53 @@ function SessionRow({
                 </button>`
             }
             ${
-                !session.archived &&
-                html`<button
-                    class=${`session-act session-unread ${marked ? "on" : ""}`}
-                    data-session-hold-action="true"
-                    title=${marked ? "Mark read" : "Mark unread"}
-                    aria-label=${marked ? "Mark read" : "Mark unread"}
-                    onClick=${() => setUnread(session.id, !marked)}
-                >
-                    <${Icon} name=${marked ? "check" : "unread"} size=${14} />
-                </button>`
+                orchestratable
+                    ? html`<button
+                        class="session-act session-orchestrate"
+                        data-session-hold-action="true"
+                        title=${orchestrationLabel}
+                        aria-label=${orchestrationLabel}
+                        aria-description=${supervising ? "PiP active" : "Human control"}
+                        disabled=${moving || orchestrationBusy}
+                        onClick=${() => {
+                            const current = store.state;
+                            const source = current.sessions.find((each) => each.id === session.id);
+
+                            if (
+                                orchestrationFlight.current ||
+                                current.me?.role !== "owner" ||
+                                current.me.id !== me.id ||
+                                source?.workItemId !== session.workItemId ||
+                                source?.archived
+                            ) {
+                                return;
+                            }
+
+                            orchestrationFlight.current = true;
+                            setOrchestrationBusy(true);
+
+                            return attempt(async () => {
+                                try {
+                                    await actions.openWorkPip(session.id);
+                                } finally {
+                                    orchestrationFlight.current = false;
+                                    setOrchestrationBusy(false);
+                                }
+                            });
+                        }}
+                    >
+                        <${Icon} name="pip" size=${16} />
+                    </button>`
+                    : !session.archived &&
+                      html`<button
+                          class=${`session-act session-unread ${marked ? "on" : ""}`}
+                          data-session-hold-action="true"
+                          title=${marked ? "Mark read" : "Mark unread"}
+                          aria-label=${marked ? "Mark read" : "Mark unread"}
+                          onClick=${() => setUnread(session.id, !marked)}
+                      >
+                          <${Icon} name=${marked ? "check" : "unread"} size=${14} />
+                      </button>`
             }
         </span>
         ${
@@ -1081,7 +1138,7 @@ export function SessionList({ compact = false, home = false }) {
         }
 
         clearSelection();
-        navigate(id);
+        navigate(rowOpenId(shown.find((row) => row.id === id)) ?? id);
     };
 
     /**
@@ -1733,10 +1790,10 @@ export function Rail() {
                 (session, index) =>
                     html`<button
                         key=${session.id}
-                        class=${`ws ${session.id === conversationId || session.members?.some((member) => member.id === conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
+                        class=${`ws ${rowIsOpen(session, conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
                         style=${`--i:${index}`}
                         title=${`${session.title ?? "New session"}${index < 9 ? `  (Alt ${index + 1})` : ""}`}
-                        onClick=${() => navigate(session.id)}
+                        onClick=${() => navigate(rowOpenId(session))}
                     >
                         ${index < 9 ? index + 1 : initials(session.title ?? "New session")}
                         ${collab() && sessionUnread(session) && html`<span class="unread-dot"></span>`}
@@ -1795,12 +1852,12 @@ function RailTiles() {
             (session, index) =>
                 html`<button
                     key=${session.id}
-                    class=${`ws ${session.id === conversationId || session.members?.some((member) => member.id === conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
+                    class=${`ws ${rowIsOpen(session, conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
                     style=${`--i:${index}`}
                     title=${`${session.title ?? "New session"}${index < 9 ? ` (Alt+${index + 1})` : ""}`}
                     aria-label=${`${session.title ?? "New session"}${session.waiting ? ", needs you" : session.busy ? ", working" : ""}`}
-                    aria-current=${session.id === conversationId || session.members?.some((member) => member.id === conversationId) ? "page" : undefined}
-                    onClick=${() => navigate(session.id)}
+                    aria-current=${rowIsOpen(session, conversationId) ? "page" : undefined}
+                    onClick=${() => navigate(rowOpenId(session))}
                 >
                     ${index < 9 ? index + 1 : initials(session.title ?? "New session")}
                     ${

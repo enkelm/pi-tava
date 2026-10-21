@@ -568,6 +568,7 @@ export function Composer() {
     // An extension's command while its send is unresolved: sending the same text again finds the first run.
     const commandRequest = useRef(null);
     const busy = view.live.busy;
+    const stoppable = busy || view.conversation?.workSupervisor?.status === "running";
     const agent = view.agent;
 
     useEffect(() => {
@@ -1059,6 +1060,9 @@ export function Composer() {
                 attachments,
                 busy && steer ? "steer" : "followUp",
                 inlineFiles && mentionsFiles,
+                conversationId,
+                undefined,
+                view.pipQuestion?.id,
             ),
         );
 
@@ -1445,12 +1449,13 @@ export function Composer() {
             <${WatchBar} />
             <${SubagentsBar} />
             <${TrustBar} />
+            ${view.pipQuestion && html`<p class="muted small" role="status">Reply to PiP’s question below.</p>`}
         </div>
         <${ParentSessionButton} />
         ${
             blocked
                 ? html`${
-                      busy &&
+                      stoppable &&
                       html`<div class="composer-row stop-only">
                           <span class="muted small grow">Pi is working…</span>
                           <${StopButton} />
@@ -1837,7 +1842,7 @@ export function Composer() {
                                               : html`<${Icon} name="send" size=${16} stroke=${2.4} />`
                                       }
                                   </button>
-                                  ${busy && html`<${StopButton} />`}`
+                                  ${stoppable && html`<${StopButton} />`}`
                     }
                 </${MessageBox}>`
         }

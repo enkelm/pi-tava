@@ -7,6 +7,8 @@
 export const FILE_BLOCK = '<file name="';
 /** The entry kind of a note about what a person did (`Commands.note`). */
 export const NOTE_ENTRY = "pocket.note";
+/** An immutable question in a Work Item's private PiP chat, written with its decision record. */
+export const PIP_QUESTION_ENTRY = "pocket.pip-question";
 
 /** Imported context notes have no asserted human author. Metadata is not a visible transcript card. */
 export const IMPORT_NOTE_ENTRY = "pocket.import-note";

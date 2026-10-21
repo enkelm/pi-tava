@@ -7,6 +7,7 @@ import { browserAvailable, setBrowserOpen } from "./browser.js";
 import { describeCall, describersRevision } from "./calls.js";
 import { DiffBlock } from "./diff.js";
 import { LinkedSessions } from "./linked-sessions.js";
+import { PipQuestion } from "./pip-question.js";
 import { DiffComments } from "./review-comments.js";
 import { fromServer } from "./seen.js";
 import { Highlighted } from "./rich.js";
@@ -1884,6 +1885,12 @@ export function TranscriptEntry({
         return html`<${CommandEntry} entry=${entry} readOnly=${readOnly} />`;
     }
 
+    if (entry.kind === "pipQuestion") {
+        return html`<div id=${`entry-${entry.id}`}>
+            <${PipQuestion} question=${{ text: entry.text }} />
+        </div>`;
+    }
+
     if (entry.kind === "note") {
         return html`<${NoteEntry} entry=${readOnly ? { ...entry, imported: true } : entry} />`;
     }
@@ -2768,6 +2775,12 @@ export function Transcript() {
                 approvals=${approvals}
                 busy=${busy}
                 conversationId=${conversation.id}
+            />
+            <${PipQuestion}
+                key=${view.pipQuestion?.id}
+                question=${view.pipQuestion}
+                conversationId=${conversation.id}
+                showText=${!rows.slice(start).some((entry) => entry.id === view.pipQuestion?.entryId)}
             />
             <${PendingShells} conversationId=${conversation.id} rows=${rows} />
             ${approvals.map(

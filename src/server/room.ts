@@ -36,6 +36,8 @@ import {
     type PrWatch,
     ReactionsDoc,
     CommentReviewDoc,
+    PipWorkDoc,
+    type PipWorkQuestion,
     type ChangeReviews,
     type Schedule,
     ScheduleDoc,
@@ -80,6 +82,7 @@ export const ROOM_DOCS = new Set(
         GoalDoc,
         WatchDoc,
         CommentReviewDoc,
+        PipWorkDoc,
     ].map((doc) => doc.definition.kind),
 );
 /** A typing indicator lasts this long unless the browser renews it. */
@@ -314,6 +317,8 @@ export class Room {
     goal: Goal | undefined;
     watch: PrWatch | undefined;
     reviews: ChangeReviews = { threads: [], rev: 0 };
+    /** Only the pending question is projected, never the private supervision document. */
+    pipQuestion: PipWorkQuestion | undefined;
     /** Who is typing where, by user id. Memory only: it means nothing after a restart. */
     readonly #typing = new Map<string, { where: TypingPlace; timer: NodeJS.Timeout }>();
     parent: { id: ConversationId; title: string } | undefined;
@@ -368,6 +373,11 @@ export class Room {
         };
         this.goal = (await harness.snapshot(GoalDoc, this.id, context))?.goal;
         this.watch = (await harness.snapshot(WatchDoc, this.id, context))?.watch;
+
+        if (this.#app.pip.orchestration.isScoped(this.id)) {
+            this.pipQuestion = (await harness.snapshot(PipWorkDoc, this.id, context))?.question;
+        }
+
         const reviews = await harness.snapshot(CommentReviewDoc, this.id, context);
 
         this.reviews = {
@@ -455,6 +465,11 @@ export class Room {
             this.goal = (value?.goal as Goal | undefined) ?? undefined;
         } else if (kind === WatchDoc.definition.kind) {
             this.watch = (value?.watch as PrWatch | undefined) ?? undefined;
+        } else if (
+            kind === PipWorkDoc.definition.kind &&
+            this.#app.pip.orchestration.isScoped(this.id)
+        ) {
+            this.pipQuestion = value?.question as PipWorkQuestion | undefined;
         } else if (kind === CommentReviewDoc.definition.kind) {
             this.reviews = {
                 threads: [...((value?.threads as ChangeReviews["threads"]) ?? [])],
@@ -597,6 +612,30 @@ export class Room {
             authors: this.authors,
             reactions: this.reactions,
             reviews: this.reviews,
+            pipQuestion:
+                this.pipQuestion !== undefined &&
+                this.#app.pip.orchestration.isScoped(this.id) &&
+                this.#app.pip.ownerOf(this.id) === client.user.id &&
+                client.user.role === "owner"
+                    ? {
+                          id: this.pipQuestion.id,
+                          text: this.pipQuestion.text,
+                          ...(this.pipQuestion.entryId === undefined
+                              ? {}
+                              : { entryId: this.pipQuestion.entryId }),
+                          ...(this.pipQuestion.answer === undefined
+                              ? {}
+                              : {
+                                    answer: {
+                                        text: this.pipQuestion.answer.text,
+                                        requestId: this.pipQuestion.answer.requestId,
+                                        legacy:
+                                            this.pipQuestion.answer.submissionRequestId ===
+                                            undefined,
+                                    },
+                                }),
+                      }
+                    : null,
             pins: this.pins,
             turns: this.turns,
             decisions: this.decisions,

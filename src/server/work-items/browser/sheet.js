@@ -3,7 +3,6 @@ import { profileName } from "./state.js";
 
 const keyOf = (option) => `${option.targetType}:${option.relationship}`;
 const DIRECTION_PREFIX = "Instructions:\n";
-const MAX_DIRECTION = 8000 - DIRECTION_PREFIX.length;
 const GROUPS = [
     { relationship: "same-work", label: "Same Work Item" },
     { relationship: "new-work", label: "New Work Item" },
@@ -331,7 +330,6 @@ export function createHandoffSheet(pocket, state) {
                                           id="handoff-direction"
                                           ref=${field}
                                           rows="5"
-                                          maxlength=${MAX_DIRECTION}
                                           value=${draft.instructions}
                                           disabled=${busy}
                                           aria-describedby="handoff-send-hint"

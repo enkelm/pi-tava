@@ -3,7 +3,8 @@
  * subagents'. Auxiliary requests add their own receipt-backed usage to the source and immutable requester, without
  * changing pi.usage or the main agent's attribution. Ordinary work goes to the person Pi works for when its usage
  * is committed. The owner can limit a session or a person. Past a limit, new messages are refused,
- * and a run that crosses it is stopped; the model request that crossed it still counts.
+ * and a run that crosses it is stopped; the model request that crossed it still counts. Supervised Work Items also
+ * share an absolute cap across their execution threads, helpers and separate PiP conversation until reclaimed.
  */
 import { createHash } from "node:crypto";
 import type { Usage } from "@earendil-works/pi-ai";
@@ -278,6 +279,31 @@ export class Spend {
         return spent;
     }
 
+    /** All execution roots and the separate supervisor, including historical and auxiliary usage once each. */
+    workSpent(id: ConversationId): number {
+        const app = this.#app;
+        const root = app.rootOf(id);
+        const item = app.workItems.itemFor(root);
+
+        if (item === undefined) {
+            return this.sessionSpent(root);
+        }
+
+        const roots = new Set(item.threadIds.map((member) => app.rootOf(member as ConversationId)));
+
+        if (item.supervisor !== undefined) {
+            roots.add(app.rootOf(item.supervisor.conversationId as ConversationId));
+        }
+
+        let spent = 0;
+
+        for (const member of roots) {
+            spent += this.sessionSpent(member);
+        }
+
+        return spent;
+    }
+
     /**
      * The session at the top of a linked family (`linked-sessions.ts`): the one that started this one, and so on up. A
      * session no link started is its own.
@@ -323,11 +349,11 @@ export class Spend {
         return (this.#people[userId] ?? 0) + (this.#auxiliary.people[userId] ?? 0);
     }
 
-    /** The limit work in a conversation reached when `userId` pays for it: the session's, or theirs. */
+    /** The thread, team, supervised Work Item or person limit this conversation reached. */
     #reached(
         id: ConversationId,
         userId: string,
-    ): { budget: number; person?: User; team?: true } | undefined {
+    ): { budget: number; person?: User; team?: true; work?: true } | undefined {
         const app = this.#app;
         const root = app.rootOf(id);
         const budget = app.sessionMeta(root)?.budget;
@@ -342,6 +368,16 @@ export class Spend {
 
         if (team !== undefined && this.#teamSpent(top) >= team) {
             return top === root ? { budget: team } : { budget: team, team: true };
+        }
+
+        const supervisor = app.workItems.itemFor(root)?.supervisor;
+
+        if (
+            supervisor !== undefined &&
+            supervisor.maxCost !== undefined &&
+            this.workSpent(root) >= supervisor.maxCost
+        ) {
+            return { budget: supervisor.maxCost, work: true };
         }
 
         const person = app.config.userById(userId);
@@ -367,7 +403,9 @@ export class Spend {
                 ? "You reached your"
                 : reached.team
                   ? "The session that started this one reached its"
-                  : "This session reached its";
+                  : reached.work
+                    ? "This work item reached its"
+                    : "This session reached its";
 
         throw new HttpError(
             409,
@@ -390,7 +428,9 @@ export class Spend {
             ? `${reached.person.name} reached their ${dollars(reached.budget)} spend limit`
             : reached.team
               ? `the session that started this one reached its ${dollars(reached.budget)} spend limit`
-              : `this session reached its ${dollars(reached.budget)} spend limit`;
+              : reached.work
+                ? `this work item reached its ${dollars(reached.budget)} spend limit`
+                : `this session reached its ${dollars(reached.budget)} spend limit`;
     }
 
     /** Call `listener` whenever the owner changes a session's or a person's limit; returns how to stop. */

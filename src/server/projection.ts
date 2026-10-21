@@ -14,6 +14,7 @@ import {
     IMPORT_META_ENTRY,
     IMPORT_NOTE_ENTRY,
     NOTE_ENTRY,
+    PIP_QUESTION_ENTRY,
     SHELL_ENTRY,
     type ShellData,
     splitAttachments,
@@ -75,6 +76,7 @@ export type ClientEntry =
     | ({ id: number; kind: "shell"; truncated?: number } & ShellData)
     | ({ id: number; kind: "command"; truncated?: number } & CommandData)
     | { id: number; kind: "note"; text: string; name: string; imported?: boolean }
+    | { id: number; kind: "pipQuestion"; text: string; questionId: string }
     | { id: number; kind: "fromPi"; title: string; file: string }
     | { id: number; kind: "other"; entryKind: string };
 
@@ -472,6 +474,17 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
                     textOfContent(message?.content) ||
                     String((entry.data as { text?: string } | undefined)?.text ?? ""),
             };
+
+        case PIP_QUESTION_ENTRY: {
+            const data = entry.data as { text?: unknown; questionId?: unknown } | undefined;
+
+            return {
+                id,
+                kind: "pipQuestion",
+                text: String(data?.text ?? ""),
+                questionId: String(data?.questionId ?? ""),
+            };
+        }
 
         case NOTE_ENTRY: {
             const data = entry.data as { text?: unknown; name?: unknown } | undefined;

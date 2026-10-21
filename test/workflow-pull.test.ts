@@ -116,7 +116,24 @@ process.exitCode=existsSync(${JSON.stringify(exit)})?Number(readFileSync(${JSON.
             }
         }
 
-        if (last.role === "user" && last.text.includes("FETCH_FROM_HANDOFF")) {
+        const file =
+            last.role === "user"
+                ? /Read the handoff file ("(?:\\.|[^"\\])*") using read/.exec(last.text)
+                : null;
+
+        if (file !== null) {
+            return fauxAssistantMessage([fauxToolCall("read", { path: JSON.parse(file[1]!) })], {
+                stopReason: "toolUse",
+            });
+        }
+
+        const latest = request.messages.at(-1);
+
+        if (
+            (last.role === "user" ||
+                (latest?.role === "toolResult" && latest.toolName === "read")) &&
+            last.text.includes("FETCH_FROM_HANDOFF")
+        ) {
             return fauxAssistantMessage(
                 [fauxToolCall("pull", { command: ["git", "fetch", "origin"] })],
                 { stopReason: "toolUse" },

@@ -64,6 +64,7 @@ const emptyView = () => ({
     branch: null,
     subagentsHeld: null,
     reviews: { threads: [], rev: 0 },
+    pipQuestion: null,
 });
 
 export const store = {
@@ -911,6 +912,7 @@ function mergeView(current, data) {
         reviews: Array.isArray(data.reviews)
             ? { threads: [], rev: 0 }
             : (data.reviews ?? base.reviews),
+        pipQuestion: data.pipQuestion === undefined ? base.pipQuestion : data.pipQuestion,
         // No goal is null, which the server sends too: only a missing field keeps the last value.
         goal: data.goal === undefined ? base.goal : data.goal,
         // The session's PR watch, or null: the same.
@@ -1525,8 +1527,49 @@ export async function start() {
 // ─── Commands ───────────────────────────────────────────────────────────
 
 const current = () => store.state.conversationId;
+const workPipFlights = new Map();
+
+// Authority changes share the per-item in-flight guard but never navigate away from the work.
+function workPipAction(id, action) {
+    const userId = store.state.me?.id;
+    const key = `${userId}.${id}`;
+
+    const pending = workPipFlights.get(key);
+
+    if (pending) {
+        return pending.action === action
+            ? pending.flight
+            : Promise.reject(
+                  new Error("A PiP action is in progress. Wait before trying another action."),
+              );
+    }
+
+    const source = current();
+    const navigation = reviewNavigation;
+    const flight = api(`c/${id}/orchestrator`, { action })
+        .then((result) => {
+            if (
+                action === "open" &&
+                store.state.me?.id === userId &&
+                store.state.me?.role === "owner" &&
+                current() === source &&
+                reviewNavigation === navigation &&
+                store.state.sessions.some((each) => each.id === id)
+            ) {
+                navigate(result.orchestration.conversationId);
+            }
+
+            return result;
+        })
+        .finally(() => workPipFlights.delete(key));
+
+    workPipFlights.set(key, { action, flight });
+
+    return flight;
+}
 
 export const actions = {
+    openWorkPip: (id) => workPipAction(id, "open"),
     /** `inlineFiles` attaches @ files; captured ids and receipts keep review sends on their thread. */
     submit: async (
         text,
@@ -1535,6 +1578,7 @@ export const actions = {
         inlineFiles = false,
         id = current(),
         requestId = uid(),
+        pipQuestionId = undefined,
     ) => {
         const userId = store.state.me?.id;
         const epoch = handoffInputEpoch;
@@ -1552,7 +1596,7 @@ export const actions = {
         const fresh = attempt === undefined;
 
         if (tracked && fresh) {
-            attempt = { sourceId: id, userId, payload, requestId };
+            attempt = { sourceId: id, userId, payload, requestId, pipQuestionId };
             // Persist before dispatch, including the window where reload cannot know POST's outcome.
             saveSubmitAttempts([...submitAttempts, attempt]);
         }
@@ -1578,6 +1622,9 @@ export const actions = {
                     mode,
                     requestId: attempt?.requestId ?? requestId,
                     ...(inlineFiles ? { inlineFiles } : {}),
+                    ...((attempt ? attempt.pipQuestionId : pipQuestionId) === undefined
+                        ? {}
+                        : { pipQuestionId: attempt ? attempt.pipQuestionId : pipQuestionId }),
                 });
 
                 if (attempt) {
@@ -1610,6 +1657,23 @@ export const actions = {
 
         return send;
     },
+    retryPipAnswer: (id, question) =>
+        question.answer.legacy
+            ? api(`c/${id}/orchestrator`, {
+                  action: "answer",
+                  questionId: question.id,
+                  text: question.answer.text,
+                  requestId: question.answer.requestId,
+              })
+            : actions.submit(
+                  question.answer.text,
+                  [],
+                  "followUp",
+                  false,
+                  id,
+                  question.answer.requestId,
+                  question.id,
+              ),
     updateWorkItem: (id, patch) => api(`c/${id}/x/work-items/work-item`, patch),
     /** Run a command in the session's folder (`!`); `context: false` keeps it from Pi (`!!`). */
     shell: (command, context, requestId = uid()) =>
@@ -1713,9 +1777,17 @@ export const actions = {
 
 /** Entries that show as transcript rows. Tool results show inside their call's card instead. */
 export const isRow = (entry) =>
-    ["user", "assistant", "compaction", "reset", "shell", "command", "note", "fromPi"].includes(
-        entry.kind,
-    );
+    [
+        "user",
+        "assistant",
+        "compaction",
+        "reset",
+        "shell",
+        "command",
+        "note",
+        "pipQuestion",
+        "fromPi",
+    ].includes(entry.kind);
 
 /**
  * Show the transcript from this entry down when it is above the rows shown now, as for a jump to a pinned or quoted

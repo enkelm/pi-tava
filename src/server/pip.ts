@@ -36,8 +36,11 @@ import {
     type Task,
     type TaskRuntime,
     type Tx,
+    type ToolExecutionApi,
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
+import type { WorkReadInput } from "./work-items/context.ts";
+import { PipSupervision } from "./pip/supervision.ts";
 import type { User } from "./config.ts";
 import { AuthorsDoc, FollowsDoc, PipAskedDoc, SessionsDoc, type PipMentionSource } from "./docs.ts";
 import { NOTE_ENTRY } from "./entry-format.ts";
@@ -76,7 +79,7 @@ export const PIP_EXTENSIONS = [
     "pocket-memory",
 ];
 /** Pi Durable's coding tools PiP goes without: it reads files, and changes nothing itself. */
-export const PIP_WITHOUT = ["bash", "write", "edit"];
+export const PIP_WITHOUT = ["bash", "write", "edit", "work_handoff", "work_supervise"];
 /** How reports from followed sessions start, so PiP knows what they are. */
 export const REPORT_HEAD = "[report] ";
 /** Sessions PiP may start in an hour, so a confused loop cannot fill the list. */
@@ -93,6 +96,8 @@ const ORIGIN_FOR_MS = 5 * 60_000;
 const FOLLOW_MEMORY_MS = 24 * 3_600_000;
 /** How long PiP's look at a session (a read, its start, a report from it) counts as knowing what it is doing. */
 const CHECKED_FOR_MS = 15 * 60_000;
+/** Match session_read: a current unfiltered page requests at least this many entries. */
+const MIN_INSPECTION_ENTRIES = 4;
 /**
  * How many of PiP's newest entries are searched for the models its person named, at most, and how many at a time: its
  * context (since its last compaction or new context) is searched whole, up to this many.
@@ -136,6 +141,10 @@ export type PipSession = {
     branch?: string;
     updatedAt: number;
     subagents?: string;
+    threadType: string;
+    readOnly: boolean;
+    paused: boolean;
+    workItem?: { id: string; title: string; activeThreadId?: number };
 };
 
 /** What a tab's PiP button shows: whether PiP works, and when it last answered. */
@@ -190,6 +199,7 @@ export class Pip {
     readonly #app: PocketApp;
     readonly #reviewer: PipReviewer;
     readonly #mentions: PipMentions;
+    readonly orchestration: PipSupervision;
     /** A PiP being made, by person, so two tabs opening it at once make one. */
     readonly #creating = new Map<string, Promise<ConversationId>>();
     /** When each PiP started its recent sessions, and made its recent messages and follows: for the hourly limits. */
@@ -211,6 +221,7 @@ export class Pip {
         this.#app = app;
         this.#reviewer = new PipReviewer(app);
         this.#mentions = new PipMentions(app);
+        this.orchestration = new PipSupervision(app);
         this.task = defineTask<FollowInput, FollowState, null>({
             name: "pocket.pip-follow",
             version: 1,
@@ -262,6 +273,7 @@ export class Pip {
 
     close(): void {
         this.#mentions.close();
+        this.orchestration.close();
     }
 
     // ─── Native settings ────────────────────────────────────────────────────
@@ -400,7 +412,7 @@ export class Pip {
     /** The conversation of this person's PiP, once they have one. */
     idOf(userId: string): ConversationId | undefined {
         for (const [id, meta] of Object.entries(this.#app.sessionCatalogue())) {
-            if (meta.pip === userId) {
+            if (meta.pip === userId && meta.pipWorkItemId === undefined) {
                 return Number(id) as unknown as ConversationId;
             }
         }
@@ -615,6 +627,7 @@ export class Pip {
      * found, not sent again (nor checked again: a limit reached since does not undo it).
      */
     async #submit(
+        pipId: ConversationId,
         id: ConversationId,
         user: User,
         text: string,
@@ -639,14 +652,19 @@ export class Pip {
         await checks();
         this.#count(user, "act", ACTIONS_PER_HOUR);
 
-        return (
-            await app.commands.submit(
-                id,
-                user,
-                { text, requestId: asked, ...(steer ? { mode: "steer" as const } : {}) },
-                PIP_NAME,
-            )
-        ).requestId;
+        const admit = async () =>
+            (
+                await app.commands.submit(
+                    id,
+                    user,
+                    { text, requestId: asked, ...(steer ? { mode: "steer" as const } : {}) },
+                    PIP_NAME,
+                )
+            ).requestId;
+
+        return this.orchestration.isScoped(pipId)
+            ? admit()
+            : this.orchestration.input(id, user, requestId, admit);
     }
 
     /** PiP's live owner, from its conversation; no private power while paused, removed, or no longer owner. */
@@ -660,6 +678,10 @@ export class Pip {
 
         if (!this.available(user)) {
             throw new Error("PiP is turned off in Settings → PiP.");
+        }
+
+        if (this.orchestration.isScoped(pipId)) {
+            this.#app.workItems.controllerCurrent(pipId, undefined, false);
         }
 
         return user;
@@ -682,8 +704,33 @@ export class Pip {
         }
 
         this.#app.requireSee(user, id);
+        const scope = this.#app.sessionMeta(pipId)?.pipWorkItemId;
+
+        if (scope !== undefined && this.#app.sessionMeta(id)?.workItemId !== scope) {
+            throw new Error("That session is outside this PiP's Work Item.");
+        }
 
         return id;
+    }
+
+    /** Preserve this private caller's identity across every awaited work read or discussion mutation. */
+    #workAuthority(pipId: ConversationId, sessionId: number) {
+        const user = structuredClone(this.#person(pipId));
+        const id = this.#session(pipId, user, sessionId);
+
+        const check = () => {
+            const current = this.#person(pipId);
+
+            if (current.id !== user.id || current.tokenHash !== user.tokenHash) {
+                throw new Error("PiP's owner or sign-in changed; read the work again.");
+            }
+
+            this.#session(pipId, current, sessionId);
+
+            return current;
+        };
+
+        return { id, user, check };
     }
 
     /** PiP just looked at a session, and knows what it is doing. */
@@ -965,35 +1012,55 @@ export class Pip {
         const app = this.#app;
         const user = this.#person(pipId);
         const words = (filter.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-        const all = app.sessions(user).map((session): PipSession => {
-            const counts = session.subagents;
+        const scope = app.sessionMeta(pipId)?.pipWorkItemId;
+        const all = app
+            .sessions(user)
+            .filter((session) => scope === undefined || session.workItemId === scope)
+            .map((session): PipSession => {
+                const counts = session.subagents;
 
-            return {
-                id: session.id,
-                title: session.title ?? "New session",
-                state: session.waiting ? "needs approval" : session.busy ? "working" : "idle",
-                folder: homePath(app.cwdOf(session.id as unknown as ConversationId)),
-                archived: session.archived === true,
-                ...(session.model === undefined ? {} : { model: session.model }),
-                ...(session.worktree === undefined ? {} : { branch: session.worktree.branch }),
-                updatedAt: session.updatedAt,
-                ...(counts === undefined
-                    ? {}
-                    : {
-                          // "2 failed (1 dismissed)": failures a person dealt with need nobody now.
-                          subagents: Object.entries(counts)
-                              .filter(
-                                  ([kind, count]) =>
-                                      kind !== "dealt" && typeof count === "number" && count > 0,
-                              )
-                              .map(
-                                  ([kind, count]) =>
-                                      `${String(count)} ${kind}${kind === "failed" && counts.dealt !== undefined ? ` (${String(counts.dealt)} dismissed)` : ""}`,
-                              )
-                              .join(", "),
-                      }),
-            };
-        });
+                return {
+                    id: session.id,
+                    title: session.title ?? "New session",
+                    state: session.waiting ? "needs approval" : session.busy ? "working" : "idle",
+                    folder: homePath(app.cwdOf(session.id as unknown as ConversationId)),
+                    archived: session.archived === true,
+                    ...(session.model === undefined ? {} : { model: session.model }),
+                    ...(session.worktree === undefined ? {} : { branch: session.worktree.branch }),
+                    updatedAt: session.updatedAt,
+                    threadType: session.threadType,
+                    readOnly: session.workflow.readOnly,
+                    paused: session.workflow.paused,
+                    ...(session.workItemId === undefined
+                        ? {}
+                        : {
+                              workItem: {
+                                  id: session.workItemId,
+                                  title: session.workItemTitle ?? "Work item",
+                                  ...(session.activeThreadId === undefined
+                                      ? {}
+                                      : { activeThreadId: session.activeThreadId }),
+                              },
+                          }),
+                    ...(counts === undefined
+                        ? {}
+                        : {
+                              // "2 failed (1 dismissed)": failures a person dealt with need nobody now.
+                              subagents: Object.entries(counts)
+                                  .filter(
+                                      ([kind, count]) =>
+                                          kind !== "dealt" &&
+                                          typeof count === "number" &&
+                                          count > 0,
+                                  )
+                                  .map(
+                                      ([kind, count]) =>
+                                          `${String(count)} ${kind}${kind === "failed" && counts.dealt !== undefined ? ` (${String(counts.dealt)} dismissed)` : ""}`,
+                                  )
+                                  .join(", "),
+                          }),
+                };
+            });
         const folders = [
             ...new Set(all.filter((each) => !each.archived).map((each) => each.folder)),
         ];
@@ -1002,7 +1069,7 @@ export class Pip {
                 (filter.archived === true ? session.archived : !session.archived) &&
                 (filter.state === undefined || session.state === filter.state) &&
                 words.every((word) =>
-                    `${session.title} ${session.folder} ${session.branch ?? ""}`
+                    `${session.title} ${session.folder} ${session.branch ?? ""} ${session.workItem?.title ?? ""}`
                         .toLowerCase()
                         .includes(word),
                 ),
@@ -1019,6 +1086,111 @@ export class Pip {
         };
     }
 
+    /** The same scoped work reader as shared mentions, authorized as this private PiP's live owner. */
+    async workContext(
+        pipId: ConversationId,
+        sessionId: number,
+        input: WorkReadInput,
+        ctx: Context,
+    ): Promise<string> {
+        const { id, check } = this.#workAuthority(pipId, sessionId);
+        const reader = this.#app.workItems.reader(id, async () => check(), ctx, "private");
+        const result = await reader.read({
+            type: "toolCall",
+            id: "work-context",
+            name: "work_context",
+            arguments: input,
+        });
+
+        check();
+
+        if (
+            input.action === "thread" &&
+            input.before === undefined &&
+            input.query === undefined &&
+            (input.limit ?? 20) >= MIN_INSPECTION_ENTRIES
+        ) {
+            this.#looked(pipId, input.threadId ?? id);
+        }
+
+        return fenced(JSON.stringify(result));
+    }
+
+    async controllerHandoff(
+        pipId: ConversationId,
+        sessionId: number,
+        request: { targetType: string; summary: string; instructions?: string },
+        api: ToolExecutionApi,
+        ctx: Context,
+        epoch: number | undefined,
+    ) {
+        const user = this.#person(pipId);
+        const source = this.#session(pipId, user, sessionId);
+
+        if (epoch === undefined || api.conversationId !== pipId) {
+            throw new Error("Only a granted work-scoped PiP can hand off execution.");
+        }
+
+        return this.#app.workItems.controllerStart(pipId, source, epoch, request, api, ctx, () =>
+            this.#requireLooked(pipId, sessionId, "hand off"),
+        );
+    }
+
+    /** Discussion management only: no code edits, publication approval or review-completion claim. */
+    async reviewDiscussion(
+        pipId: ConversationId,
+        sessionId: number,
+        input: {
+            action: "reply" | "resolve" | "reopen";
+            threadId?: string;
+            threadIds?: string[];
+            text?: string;
+        },
+        key: string,
+        epoch?: number,
+    ): Promise<{ id?: string }> {
+        const { id, user, check } = this.#workAuthority(pipId, sessionId);
+        const requestId = requestKey(`private-review:${pipId}:${key}`);
+
+        await this.#app.conversation(id);
+
+        return this.#app.harness.commit(async (tx) => {
+            check();
+
+            if (this.orchestration.isScoped(pipId)) {
+                if (epoch === undefined) {
+                    throw new Error("A scoped review action requires generation authority.");
+                }
+
+                await this.#app.workItems.requireController(tx, pipId, epoch);
+            }
+
+            let result: { id?: string } = {};
+
+            if (input.action === "reply") {
+                if (input.threadId === undefined) {
+                    throw new Error("Choose the existing review thread to reply to.");
+                }
+
+                result = await this.#app.reviews.commentAsPiP(tx, id, user, {
+                    requestId,
+                    threadId: input.threadId,
+                    text: input.text,
+                });
+            } else {
+                await this.#app.reviews.resolveAsPiP(tx, id, user, {
+                    requestId,
+                    threadIds: input.threadIds,
+                    resolved: input.action === "resolve",
+                });
+            }
+
+            check();
+
+            return result;
+        }, context);
+    }
+
     /** The newest part of a session, as text for PiP: its state, what waits there, and its last messages. */
     async read(pipId: ConversationId, sessionId: number, entries = 40): Promise<string> {
         const app = this.#app;
@@ -1028,7 +1200,7 @@ export class Pip {
         const conversation = await app.conversation(id);
         const page = await conversation.entries(
             {},
-            Math.max(4, Math.min(entries, 200)),
+            Math.max(MIN_INSPECTION_ENTRIES, Math.min(entries, 200)),
             undefined,
             context,
         );
@@ -1186,18 +1358,23 @@ export class Pip {
         message: string,
         steer: boolean,
         key: string,
-        options: { started?: boolean } = {},
+        options: { started?: boolean; epoch?: number } = {},
     ): Promise<{ requestId: string }> {
         const user = this.#person(pipId);
         const id = this.#session(pipId, user, sessionId);
 
         return {
-            requestId: await this.#submit(id, user, message, key, steer, async () => {
+            requestId: await this.#submit(pipId, id, user, message, key, steer, async () => {
                 // The first message of a session the same call started (`started`) needs no look, there being nothing to
                 // see, and was checked for model names as the session started.
                 if (options.started !== true) {
                     this.#requireLooked(pipId, sessionId, "message");
                     await this.#requireNoModelChoice(pipId, user, message);
+                }
+
+                if (this.orchestration.isScoped(pipId)) {
+                    this.#app.workItems.controllerCurrent(pipId, options.epoch);
+                    this.#app.workItems.requireWritable(id);
                 }
             }),
         };
@@ -1412,7 +1589,11 @@ export class Pip {
         this.#requireLooked(pipId, sessionId, "stop");
         const busy = this.#app.isBusy(id);
 
-        await this.#app.commands.abort(id, this.#through(user));
+        await this.#app.commands.abort(
+            id,
+            this.#through(user),
+            this.orchestration.isScoped(pipId) ? PIP_NAME : undefined,
+        );
 
         return busy;
     }

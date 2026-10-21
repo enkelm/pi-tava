@@ -113,6 +113,8 @@ export interface SubmitRequest {
     requestId: string;
     /** Send the files the message mentions with `@` along with it, so Pi need not read them first. */
     inlineFiles?: boolean;
+    /** The exact pending question shown in this Work Item's private PiP chat. */
+    pipQuestionId?: string;
 }
 
 /** Attached images that also go to the model itself, when it takes images. */
@@ -900,6 +902,30 @@ export class Commands {
             throw new HttpError(409, "PiP is turned off in Extensions.");
         }
 
+        if (request.pipQuestionId !== undefined) {
+            if (via !== undefined || (request.attachments?.length ?? 0) > 0) {
+                throw new HttpError(400, "Reply to PiP's question with text in its private chat.");
+            }
+
+            return app.pip.orchestration.answerFromChat(id, initialUser, {
+                questionId: request.pipQuestionId,
+                text: request.text,
+                requestId: request.requestId,
+            });
+        }
+
+        if (
+            via === undefined &&
+            app.pip.orchestration.isScoped(id) &&
+            request.requestId !== undefined
+        ) {
+            const receipt = await this.submissionReceipt(id, initialUser, request.requestId);
+
+            if (receipt !== undefined) {
+                return receipt;
+            }
+        }
+
         const conversation = await app.conversation(id);
         const typed = request.text.trim();
 
@@ -983,15 +1009,35 @@ export class Commands {
         app.requireSee(current, id);
         app.requireSteer(current);
         app.spend.check(current, id);
-        const submission = await conversation.submit(
-            {
-                type: "input",
-                content,
-                whenBusy: request.mode === "steer" ? "steer" : "followUp",
-                requestId,
-            },
-            context,
-        );
+
+        const admit = async () => {
+            const liveUser = this.#requireCurrentUser(user);
+
+            await app.requireDriver(id, liveUser);
+            app.requireSee(this.#requireCurrentUser(user), id);
+            app.spend.check(liveUser, id);
+
+            if (app.pip.orchestration.isScoped(id)) {
+                const grant = app.workItems.itemFor(id)?.supervisor;
+
+                app.workItems.controllerCurrent(id, grant?.epoch, via !== undefined);
+            }
+
+            return conversation.submit(
+                {
+                    type: "input",
+                    content,
+                    whenBusy: request.mode === "steer" ? "steer" : "followUp",
+                    requestId,
+                },
+                context,
+            );
+        };
+
+        const submission =
+            via === undefined
+                ? await app.pip.orchestration.input(id, current, requestId, admit)
+                : await admit();
 
         app.collab.setTyping(id, user, null);
         await this.#touched(id, typed, text === typed ? undefined : text);
@@ -1306,20 +1352,33 @@ export class Commands {
     }
 
     /** Stop the run. Anyone who can steer may, even while someone else drives: stopping is the safe direction. */
-    async abort(id: ConversationId, user: User): Promise<void> {
+    async abort(id: ConversationId, user: User, via?: string): Promise<void> {
         const app = this.#app;
+        const current = this.#requireCurrentUser(user);
 
-        app.requireSee(user, id);
-        app.requireSteer(user);
+        app.requireSee(current, id);
+        app.requireSteer(current);
+
+        if (via === undefined) {
+            await app.pip.orchestration.stopped(id, current);
+        }
+
         const conversation = await app.conversation(id);
         const busy = app.isBusy(id) || app.workItems.isPreparing(id);
 
         // Stop withdraws what waits in the queue, subagents' reports too: a person meant them gone.
         await this.#discardReports(id);
         await app.workItems.abortSummary(id, user);
-        void conversation
-            .abort(context)
-            .catch((error: unknown) => app.notice("error", `Abort failed: ${describe(error)}`, id));
+
+        // Scoped human Stop already captured its exact run/queue with the grant fence. A
+        // conversation-wide abort here could cancel work started by a later explicit resume.
+        if (via !== undefined || !app.pip.orchestration.isScoped(id)) {
+            void conversation
+                .abort(context)
+                .catch((error: unknown) =>
+                    app.notice("error", `Abort failed: ${describe(error)}`, id),
+                );
+        }
 
         if (busy) {
             await app.collab.activity(id, user, "stopped the run");

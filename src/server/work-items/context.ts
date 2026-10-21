@@ -1,4 +1,4 @@
-/** Requester-bound public work reads for shared PiP. Never the private assistant's authority or tool registry. */
+/** Source-bound Work Item reads shared by private PiP and the read-only mention adapter. */
 import { Type, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import type { Context } from "@earendil-works/chord";
@@ -9,29 +9,37 @@ import type { ClientEntry } from "../projection.ts";
 import { ChatDoc } from "../docs.ts";
 import { HttpError } from "../errors.ts";
 
+export const workContextParameters = Type.Object(
+    {
+        action: Type.Union(
+            ["status", "thread", "discussion", "files", "file", "changes", "diff"].map((action) =>
+                Type.Literal(action),
+            ),
+        ),
+        threadId: Type.Optional(Type.Integer({ minimum: 1 })),
+        path: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+        query: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+        before: Type.Optional(
+            Type.Integer({
+                minimum: 1,
+                description:
+                    "thread: transcript cursor. discussion: exclusive 1-based review creation position; pass reviewPage.before for older threads (not chat).",
+            }),
+        ),
+        startLine: Type.Optional(Type.Integer({ minimum: 1, maximum: 10_000_000 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    },
+    { additionalProperties: false },
+);
+
 export const sharedContextTool: Tool = {
     name: "work_context",
     description:
-        "Read the current shared work, without changing it. status shows the thread, project, workflow and visible Work Item threads. thread reads public coding-agent history (before paginates, query filters literal text). discussion reads human chat/review discussions. files discovers paths (query filters names); file reads current UTF-8 code with line numbers (startLine/limit paginate, query finds text). changes/diff inspect current Changes (startLine/limit also page diff lines). threadId defaults to the source and may name only a visible thread in this same Work Item. All paths are relative to that thread's folder. No private PiP, arbitrary sessions, shell, writes or external access.",
-    parameters: Type.Object(
-        {
-            action: Type.Union(
-                ["status", "thread", "discussion", "files", "file", "changes", "diff"].map(
-                    (action) => Type.Literal(action),
-                ),
-            ),
-            threadId: Type.Optional(Type.Integer({ minimum: 1 })),
-            path: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
-            query: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-            before: Type.Optional(Type.Integer({ minimum: 1 })),
-            startLine: Type.Optional(Type.Integer({ minimum: 1, maximum: 10_000_000 })),
-            limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-        },
-        { additionalProperties: false },
-    ),
+        "Read the current shared work, without changing it. status shows the thread, project, workflow and visible Work Item threads. thread reads public coding-agent history (before paginates, query filters literal text). discussion reads recent chat and pages review threads (pass reviewPage.before until null; reviewPage counts all/omitted/unresolved threads, chatOmitted and omittedReplies disclose other truncation; query is not supported). files discovers paths (query filters names); file reads current UTF-8 code with line numbers (startLine/limit paginate, query finds text). changes/diff inspect current Changes (startLine/limit also page diff lines). threadId defaults to the source and may name only a visible thread in this same Work Item. All paths are relative to that thread's folder. No private PiP, arbitrary sessions, shell, writes or external access.",
+    parameters: workContextParameters,
 };
 
-type ReadInput = {
+export type WorkReadInput = {
     action: string;
     threadId?: number;
     path?: string;
@@ -60,11 +68,12 @@ function publicEntry(entry: ClientEntry) {
     };
 }
 
-export class PipSharedContext {
+export class WorkContext {
     readonly #app: PocketApp;
     readonly #source: ConversationId;
     readonly #authorize: () => Promise<User>;
     readonly #context: Context;
+    readonly #audience: "shared" | "private";
     readonly #destinations = new Map<number, string>();
 
     constructor(
@@ -72,11 +81,13 @@ export class PipSharedContext {
         source: ConversationId,
         authorize: () => Promise<User>,
         context: Context,
+        audience: "shared" | "private",
     ) {
         this.#app = app;
         this.#source = source;
         this.#authorize = authorize;
         this.#context = context;
+        this.#audience = audience;
     }
 
     async #target(requested?: number) {
@@ -92,11 +103,11 @@ export class PipSharedContext {
         if (
             !meta ||
             meta.pip !== undefined ||
-            meta.ownerOnly ||
+            (this.#audience === "shared" && meta.ownerOnly) ||
             app.pip.isInternal(id) ||
             (root !== app.rootOf(this.#source) && !allowed.includes(Number(root)))
         ) {
-            throw new HttpError(404, "That thread is outside this shared work");
+            throw new HttpError(404, "That thread is outside this work");
         }
 
         const destination = JSON.stringify([app.cwdOf(id), app.locationOf(id), meta.projectId]);
@@ -126,6 +137,15 @@ export class PipSharedContext {
         const project = app.projects
             .list(user)
             .projects.find((entry) => entry.id === meta.projectId);
+        const active = (workItem?.activeThreadId ?? Number(root)) as ConversationId;
+        const routes =
+            this.#audience === "private" ? await app.workItems.list(active, user) : undefined;
+        const currentType = app.sessionMeta(active)?.threadType ?? "worker";
+        const role = app.workItems.profile(currentType);
+        const history = [...members].slice(-12).map((member) => ({
+            id: member,
+            type: app.sessionMeta(member as ConversationId)?.threadType ?? "worker",
+        }));
 
         return {
             thread: {
@@ -139,6 +159,21 @@ export class PipSharedContext {
                 readOnly: workflow.readOnly,
                 paused: workflow.paused,
                 preparing: workflow.preparing,
+                ...(routes === undefined
+                    ? {}
+                    : {
+                          activeThreadId: Number(active),
+                          currentType,
+                          ...(role === undefined
+                              ? {}
+                              : { role: { name: role.name, description: role.description } }),
+                          history,
+                          historyOmitted: members.size - history.length,
+                          options: routes.options,
+                          ...(routes.diffReason === undefined
+                              ? {}
+                              : { diffReason: routes.diffReason }),
+                      }),
             },
             workItem: workItem
                 ? {
@@ -167,7 +202,7 @@ export class PipSharedContext {
     }
 
     async read(call: ToolCall): Promise<unknown> {
-        const input = validateToolArguments(sharedContextTool, call) as ReadInput;
+        const input = validateToolArguments(sharedContextTool, call) as WorkReadInput;
         const { id, user } = await this.#target(input.threadId);
         const app = this.#app;
         let result: unknown;
@@ -198,17 +233,41 @@ export class PipSharedContext {
             }
 
             case "discussion": {
+                if (input.query !== undefined) {
+                    throw new HttpError(
+                        400,
+                        "discussion does not support query; omit it and use reviewPage.before to read older review threads",
+                    );
+                }
+
                 const chat = await app.harness.snapshot(ChatDoc, id, this.#context);
                 const reviews = await app.reviews.list(id, user);
                 const messages = (chat?.messages ?? []).filter((entry) => entry.kind !== "event");
+                const recentChat = messages.slice(-(input.limit ?? 12));
+                // Reviews appends threads without reordering/removing them. Creation positions stay
+                // stable across new comments, replies and resolution changes between page requests.
+                const end = Math.min(reviews.threads.length, (input.before ?? Infinity) - 1);
+                const start = Math.max(0, end - (input.limit ?? 8));
+                const threads = reviews.threads.slice(start, end);
+                const unresolved = reviews.threads.filter((thread) => !thread.resolved).length;
 
                 result = {
-                    chat: messages
-                        .slice(-(input.limit ?? 12))
-                        .map(({ name, text }) => ({ name, text })),
-                    reviews: reviews.threads.slice(-(input.limit ?? 8)).map((thread) => ({
+                    chat: recentChat.map(({ name, text }) => ({ name, text })),
+                    chatOmitted: messages.length - recentChat.length,
+                    reviewPage: {
+                        total: reviews.threads.length,
+                        unresolved,
+                        omitted: reviews.threads.length - threads.length,
+                        omittedUnresolved:
+                            unresolved - threads.filter((thread) => !thread.resolved).length,
+                        before: start > 0 ? start + 1 : null,
+                    },
+                    reviews: threads.map((thread) => ({
                         id: thread.id,
+                        userId: thread.userId,
                         name: thread.name,
+                        service: thread.service,
+                        onBehalfOf: thread.onBehalfOf,
                         text: thread.text,
                         path: thread.path,
                         side: thread.side,
@@ -216,7 +275,17 @@ export class PipSharedContext {
                         line: thread.line,
                         context: thread.context,
                         resolved: thread.resolved,
-                        replies: thread.replies.slice(-6).map(({ name, text }) => ({ name, text })),
+                        resolution: thread.resolution,
+                        omittedReplies: Math.max(0, thread.replies.length - 6),
+                        replies: thread.replies
+                            .slice(-6)
+                            .map(({ id, name, text, service, onBehalfOf }) => ({
+                                id,
+                                name,
+                                text,
+                                service,
+                                onBehalfOf,
+                            })),
                     })),
                 };
                 break;

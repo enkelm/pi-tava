@@ -58,6 +58,26 @@ async function dispatchConversation(
         return extensionRoute(api, parts.slice(3), id);
     }
 
+    if (third === "orchestrator" && fourth === undefined) {
+        if (method === "GET") {
+            response.setHeader("cache-control", "no-store");
+
+            return json(response, 200, await app.pip.orchestration.inspect(id, user));
+        }
+
+        if (method === "POST") {
+            return json(
+                response,
+                200,
+                await app.pip.orchestration.control(
+                    id,
+                    user,
+                    await readJson<Parameters<typeof app.pip.orchestration.control>[2]>(request),
+                ),
+            );
+        }
+    }
+
     if (third === "transfers" && fourth === undefined && method === "GET") {
         return json(response, 200, app.workItems.receipts(id, user));
     }

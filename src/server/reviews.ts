@@ -155,8 +155,21 @@ function digest(value: unknown): string {
     return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function requestKey(user: User, value: unknown): string {
-    return digest([user.id, text(value, "requestId", 160)]);
+function requestKey(user: User, value: unknown, asPiP = false): string {
+    const requestId = text(value, "requestId", 160);
+
+    return digest(asPiP ? ["pip", user.id, requestId] : [user.id, requestId]);
+}
+
+function reviewAuthor(user: User, asPiP: boolean) {
+    return asPiP
+        ? {
+              userId: "pip",
+              name: "PiP",
+              service: "pip" as const,
+              onBehalfOf: { id: user.id, name: user.name },
+          }
+        : { userId: user.id, name: user.name };
 }
 
 /** Keep receipts forever within a bounded document; never replay an old resolve over newer work. */
@@ -742,9 +755,7 @@ export class Reviews {
         asPiP = false,
     ): Promise<{ id: string }> {
         const person = this.#person(id, supplied);
-        const key = asPiP
-            ? digest(["pip", person.id, text(input?.requestId, "requestId", 160)])
-            : requestKey(person, input?.requestId);
+        const key = requestKey(person, input?.requestId, asPiP);
         const messageId = `c-${key}`;
         const message = text(input?.text, "text", 4000, true);
         const threadId =
@@ -833,12 +844,10 @@ export class Reviews {
         user = this.#person(id, supplied);
         const comment = {
             id: messageId,
-            userId: asPiP ? "pip" : user.id,
-            name: asPiP ? "PiP" : user.name,
+            ...reviewAuthor(user, asPiP),
             text: message,
             at: Date.now(),
             ...(workspace === undefined ? {} : { workspace }),
-            ...(asPiP ? { service: "pip" as const } : {}),
         };
 
         if (thread !== undefined) {
@@ -1169,8 +1178,30 @@ export class Reviews {
 
     async resolve(id: ConversationId, supplied: User, input: ResolveReview): Promise<void> {
         supplied = { ...supplied };
+        this.#person(id, supplied);
+        await this.#app.conversation(id);
+        await this.#app.harness.commit((tx) => this.#resolveIn(tx, id, supplied, input), context);
+    }
+
+    /** Like commentAsPiP: the private caller commits live authority and the discussion effect together. */
+    async resolveAsPiP(
+        tx: Tx,
+        id: ConversationId,
+        supplied: User,
+        input: ResolveReview,
+    ): Promise<void> {
+        return this.#resolveIn(tx, id, { ...supplied }, input, true);
+    }
+
+    async #resolveIn(
+        tx: Tx,
+        id: ConversationId,
+        supplied: User,
+        input: ResolveReview,
+        asPiP = false,
+    ): Promise<void> {
         const person = this.#person(id, supplied);
-        const key = requestKey(person, input?.requestId);
+        const key = requestKey(person, input?.requestId, asPiP);
         const resolved = input?.resolved;
 
         if (
@@ -1186,48 +1217,43 @@ export class Reviews {
             ...new Set(input.threadIds.map((value) => text(value, "threadId", 160))),
         ].sort();
 
-        await this.#app.conversation(id);
-        await this.#app.harness.commit(async (tx) => {
-            const doc = await tx.doc(CommentReviewDoc, id);
-            const user = this.#person(id, supplied);
-            // Authorize the entire batch, including retries, before recording or changing anything.
-            const threads = ids.map((threadId) => {
-                const thread = doc.threads.find((item) => item.id === threadId);
+        const doc = await tx.doc(CommentReviewDoc, id);
+        const user = this.#person(id, supplied);
+        // Authorize the entire batch, including retries, before recording or changing anything.
+        const threads = ids.map((threadId) => {
+            const thread = doc.threads.find((item) => item.id === threadId);
 
-                if (thread === undefined) {
-                    throw new HttpError(404, "No such review thread");
-                }
-
-                if (user.role !== "owner" && thread.userId !== user.id) {
-                    throw new HttpError(
-                        403,
-                        "Only the owner or original author can resolve a thread",
-                    );
-                }
-
-                return thread;
-            });
-
-            if (retry(doc, user, key, ["resolve", ids, resolved])) {
-                return;
+            if (thread === undefined) {
+                throw new HttpError(404, "No such review thread");
             }
 
-            for (const thread of threads) {
-                if (thread.resolved === resolved) {
-                    continue;
-                }
-
-                thread.resolved = resolved;
-
-                if (resolved) {
-                    thread.resolvedBy = user.id;
-                } else {
-                    delete thread.resolvedBy;
-                }
+            if (user.role !== "owner" && thread.userId !== user.id) {
+                throw new HttpError(403, "Only the owner or original author can resolve a thread");
             }
 
-            doc.rev++;
-            bounded(doc, user);
-        }, context);
+            return thread;
+        });
+
+        if (retry(doc, user, key, ["resolve", ids, resolved])) {
+            return;
+        }
+
+        for (const thread of threads) {
+            if (thread.resolved === resolved) {
+                continue;
+            }
+
+            thread.resolved = resolved;
+            thread.resolution = { ...reviewAuthor(user, asPiP), at: Date.now() };
+
+            if (resolved) {
+                thread.resolvedBy = asPiP ? "pip" : user.id;
+            } else {
+                delete thread.resolvedBy;
+            }
+        }
+
+        doc.rev++;
+        bounded(doc, user);
     }
 }

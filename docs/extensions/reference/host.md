@@ -239,7 +239,7 @@ handoff(
 Since 0.15.0 · Experimental
 
 Accepts a request from a tool's actual `ToolExecutionApi` and Chord context. It returns a filtered state/options projection or the durable successor receipt.
-`relationship` defaults to `"same-work"`; `summary` is nonempty and at most 12,000 characters.
+`relationship` defaults to `"same-work"`; `summary` is nonempty text without NULs or invalid Unicode, without a handoff-specific editorial character cap. The existing tool saves it with human direction in a temporary Markdown file and prompts the successor to read the file with `read`; historical inline handoffs remain supported.
 
 Core derives the requester from the invocation and verifies an actually placed written human input
 in its owning main run. A caller cannot supply a human identity or authority flag. Explicit slash
