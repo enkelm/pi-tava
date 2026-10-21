@@ -98,6 +98,11 @@
     /* --r-pill: 999px; */
     /* --radius: var(--r-control); */
 
+    /* Shared custom-drawn checkboxes */
+    /* --checkbox-size: 14px; */
+    /* --checkbox-radius: calc(var(--r-tag) - 1px); */
+    /* --checkbox-border: var(--hair-2); */
+
     /* Space and layout */
     /* --gap-out: 8px; */
     /* --gap-in: 4px; */

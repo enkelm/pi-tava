@@ -196,7 +196,7 @@ To share one of your own themes, choose it in Appearance and tap **Share…**. P
 
 ## Themes that come with Pi Pocket
 
-Two come with it: **Pocket**, the app's own look, and **Lantern**, a calm, warm dark theme with colors of its own (`web/themes/lantern/`: `frame.css` is its frame, `direction.css` and `colors.toml` its turns and palette). Built-in themes are folders in `web/themes/<id>/`, in the same format. They cannot be edited or removed from the app: duplicate one to change it. A change to one is a change to Pi Pocket's code ([self-editing.md](../self-editing.md)).
+Two come with it: **Pocket**, the app's own look, and **Lantern**, a calm, warm dark theme with colors of its own (`web/themes/lantern/`: `frame.css` is its frame, `direction.css` and `colors.toml` its turns and palette). Lantern carries its rounded corners through sidebar actions, Settings categories, role tags (including PiP), review-comment controls, editor status controls and shared switches, and uses its palette for shared checkboxes and native selection controls. Peek tiles keep solid borders on hover and keyboard focus, so those borders follow the rounded corners. Built-in themes are folders in `web/themes/<id>/`, in the same format. They cannot be edited or removed from the app: duplicate one to change it. A change to one is a change to Pi Pocket's code ([self-editing.md](../self-editing.md)).
 
 ## Stability
 

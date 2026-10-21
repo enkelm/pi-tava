@@ -1,5 +1,3 @@
-import { profileName } from "./state.js";
-
 const WORKFLOW_LABELS = {
     active: "Active",
     "review-complete": "Review complete",
@@ -9,7 +7,7 @@ const WORKFLOW_LABELS = {
 };
 
 export function createControls(pocket, state) {
-    const { html, Icon, AgentProfileTag } = pocket;
+    const { html, Icon } = pocket;
 
     function HandoffButton() {
         const { session, status } = state.useContext();
@@ -46,10 +44,10 @@ export function createControls(pocket, state) {
         </button>`;
     }
 
-    /** Retired threads remain promptable; these quiet icons explain their workspace ownership. */
+    /** Retired threads remain promptable; this status explains their workspace ownership. */
     function WorkflowTools() {
         const { session, status } = state.useContext();
-        const { id, sessions, profiles } = session;
+        const { id, sessions } = session;
 
         if (!session.me || id === null || session.conversation?.kind !== "session") {
             return null;
@@ -64,11 +62,6 @@ export function createControls(pocket, state) {
             preparing: Boolean(sourceSession?.workflow?.preparing || data?.workflow?.preparing),
             paused: Boolean(sourceSession?.workflow?.paused || data?.workflow?.paused),
         };
-        const item = data?.workItem;
-        const active = sessions.find(
-            (each) => each.id === (item?.activeThreadId ?? sourceSession?.activeThreadId),
-        );
-        const origin = sessions.find((each) => each.id === item?.originThreadId);
         const incoming = data?.handoffs?.find((handoff) => handoff.targetThreadId === id);
         const source = sessions.find((each) => each.id === incoming?.sourceThreadId);
         const type = session.conversation.threadType ?? sourceSession?.threadType;
@@ -108,11 +101,6 @@ export function createControls(pocket, state) {
               : ["review-complete", "landed", "published"].includes(workflow.status)
                 ? "check"
                 : "pulse";
-        const sourceLabel =
-            incoming?.relationship === "new-work" ? "Previous Work Item" : "Previous thread";
-        const originLabel = origin?.threadType
-            ? `Source ${profileName(profiles, origin.threadType)}`
-            : "Source thread";
 
         return html`<div class="workflow-tools" role="group" aria-label="Work Item context">
             <span
@@ -124,50 +112,6 @@ export function createControls(pocket, state) {
                 title=${tooltip}
                 ><${Icon} name=${icon} size=${16}
             /></span>
-            ${
-                active &&
-                active.id !== id &&
-                html`<button
-                    class="handoff-icon-button"
-                    aria-label="Open active thread"
-                    title="Open active thread"
-                    onClick=${() => pocket.navigate(active.id)}
-                >
-                    ${
-                        active.threadType
-                            ? html`<${AgentProfileTag}
-                                  profile=${active.threadType}
-                                  iconOnly=${true}
-                              />`
-                            : html`<${Icon} name="chat" size=${16} />`
-                    }
-                </button>`
-            }
-            ${
-                source &&
-                source.id !== id &&
-                html`<button
-                    class="handoff-icon-button"
-                    aria-label=${sourceLabel}
-                    title=${sourceLabel}
-                    onClick=${() => pocket.navigate(source.id)}
-                >
-                    <${Icon} name="back" size=${16} />
-                </button>`
-            }
-            ${
-                origin &&
-                origin.id !== id &&
-                origin.id !== source?.id &&
-                html`<button
-                    class="handoff-icon-button"
-                    aria-label=${originLabel}
-                    title=${originLabel}
-                    onClick=${() => pocket.navigate(origin.id)}
-                >
-                    <${Icon} name="bot" size=${16} />
-                </button>`
-            }
         </div>`;
     }
 

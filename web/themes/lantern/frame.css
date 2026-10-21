@@ -24,6 +24,12 @@
     --r-window: 10px;
     --r-sheet: 12px;
     --r-float: 12px;
+    --r-pill: 999px;
+
+    /* Shared checks: a legible mark, modest corners, and a visible unchecked outline. */
+    --checkbox-size: 16px;
+    --checkbox-radius: var(--r-mark);
+    --checkbox-border: var(--line-strong);
 
     --gap-out: 6px;
     --gap-in: 3px;
@@ -51,7 +57,8 @@
     [data-part~="files-panel"],
     [data-part~="browser-panel"],
     [data-part~="people-panel"],
-    [data-part~="peeks"]
+    [data-part~="peeks"],
+    [data-part~="peek-tile"]
 ) {
     border-image: none;
 }
@@ -70,6 +77,13 @@
 
 [data-part~="session-button"]:not([aria-current="page"]) {
     --text: var(--body);
+}
+
+/* ─── Shared form controls ─── */
+
+/* Native controls (including review checkboxes) use the palette rather than the browser's blue. */
+input:is([type="checkbox"], [type="radio"], [type="range"]) {
+    accent-color: var(--accent-fill);
 }
 
 /* ─── The top bar: the title, then its folder and branch ─── */

@@ -366,7 +366,37 @@ test(
         const f = await fixture(original);
 
         await open({ ...f, path: `${f.path}:2` });
+        await page.evaluate(`
+            const theme = await import("/theme.js");
+
+            theme.setPrefs({ motion: "reduced" });
+            theme.chooseLook("lantern");
+        `);
+        await until(
+            () =>
+                inPage<boolean>(`return JSON.stringify(
+                document.documentElement.dataset.theme === "lantern" &&
+                getComputedStyle(document.documentElement).getPropertyValue("--r-control").trim() === "8px"
+            );`),
+            "Lantern loaded in the editor’s browser",
+        );
         await begin();
+        const corners = await inPage<{ status: string; language: string; shortcuts: string[] }>(`
+            return JSON.stringify({
+                status: getComputedStyle(document.querySelector(${JSON.stringify(SAVE_STATE)})).borderRadius,
+                language: getComputedStyle(document.querySelector(${JSON.stringify(LSP_MENU_BUTTON)})).borderRadius,
+                shortcuts: [...document.querySelectorAll(".file-edit-shortcut")]
+                    .map(button => getComputedStyle(button).borderRadius),
+            });
+        `);
+
+        assert.equal(corners.status, "5px", "save state follows Lantern’s tag corners");
+        assert.equal(corners.language, "8px", "language status follows Lantern’s control corners");
+        assert.ok(corners.shortcuts.length > 0);
+        assert.ok(
+            corners.shortcuts.every((radius) => radius === "6px"),
+            "editor shortcuts follow Lantern’s row corners",
+        );
         assert.equal(await editorText(), original);
         assert.equal(
             await inPage<number>(`

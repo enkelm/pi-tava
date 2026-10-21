@@ -273,23 +273,21 @@ export function ProjectSessionPanel({
                               }
                             : undefined
                     }
-                >
-                    ${
-                        owner &&
-                        html`<label class="check" title="Create a branch and checkout of its own">
-                            <input
-                                type="checkbox"
-                                checked=${worktree}
-                                disabled=${busy}
-                                onChange=${(event) => {
-                                    setWorktree(event.currentTarget.checked);
-                                    requestId.current = uid();
-                                }}
-                            /> Own Git worktree
-                        </label>`
-                    }
-                <//>
-                ${owner && worktree && html`<span class="muted small">Own Git worktree</span>`}
+                />
+                ${
+                    owner &&
+                    html`<label class="check" title="Create a branch and checkout of its own">
+                        <input
+                            type="checkbox"
+                            checked=${worktree}
+                            disabled=${busy}
+                            onChange=${(event) => {
+                                setWorktree(event.currentTarget.checked);
+                                requestId.current = uid();
+                            }}
+                        /> Own Git worktree
+                    </label>`
+                }
                 ${
                     !profileAvailable &&
                     html`<p class="error" role="status">

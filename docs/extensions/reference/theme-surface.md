@@ -79,6 +79,18 @@ Set by Colors (`colors.toml`, an Omarchy palette, or the desktop's). A theme rea
 
 Most corners in the app are these tokens, some a pixel or two from one (`calc(var(--r-row) - 1px)`), so they follow when a theme changes the scale. The timeline's rule, marks, and what shows under each step all place themselves from `--timeline-x`, `--step-mark-size`, and `--step-gap`, so a theme that moves the marks moves them all.
 
+### Shared checkboxes
+
+The custom-drawn native checkboxes in shared forms, including subagent model choices, use these tokens. Browser-rendered checkboxes (such as the diff's Viewed control), radios, and ranges keep their own geometry. These tokens are available in Pi Coop 0.14.0.
+
+| Token               | Default and purpose                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------ |
+| `--checkbox-size`   | `14px`: the width and height of the box, not its label's tap target                        |
+| `--checkbox-radius` | `calc(var(--r-tag) - 1px)`: its corners                                                    |
+| `--checkbox-border` | `var(--hair-2)`: its unchecked border color; checked borders and fills use `--accent-fill` |
+
+The label, native checked/disabled state, checkmark, and keyboard focus ring stay with the app.
+
 ### Set by the person
 
 Read them; a theme cannot change them, as they are each person's choice in Appearance.

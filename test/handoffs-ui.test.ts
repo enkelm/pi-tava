@@ -865,7 +865,9 @@ test(
                     assert.equal(handoffInputs.length, 1);
                     assert.equal(titleRequests, 1);
                     await present(page, '.composer [aria-label="Work Item context"]');
-                    await present(page, '.composer [aria-label="Previous thread"]');
+                    await present(page, '.composer [aria-label="Work Item context"] button', false);
+                    await present(page, '.topbar [aria-label="Choose next thread"]');
+                    await present(page, '.topbar [aria-label="Open PiP chat"]');
                     await app.commands.updateSession(reviewerId, user, {
                         title: "独立 review matching member",
                     });
@@ -964,8 +966,14 @@ test(
                     await present(page, `${workItem} .work-item-member`);
                     await click(page, `${memberRow} .session`);
                     await present(page, '.composer [aria-label="Read-only workspace"]');
+                    await present(page, '.composer [aria-label="Work Item context"] button', false);
                     await present(page, composer);
-                    await click(page, '.composer [aria-label="Open active thread"]');
+                    await present(page, '.topbar [aria-label="Choose next thread"]', false);
+                    await home(page);
+                    await click(
+                        page,
+                        `${workItem} .work-item-member[data-id="${reviewer.id}"] .session`,
+                    );
                     await present(page, ".topbar .title-sub .thread-type.reviewer");
 
                     const newScope =
@@ -990,7 +998,8 @@ test(
                         ),
                         "ordinary English also saves a navigation key",
                     );
-                    await click(page, '.composer [aria-label="Previous thread"]');
+                    await home(page);
+                    await click(page, `${memberRow} .session`);
                     await present(page, '.composer [aria-label="Read-only workspace"]');
                     assert.equal(
                         await value(page, "sessionStorage.getItem('pocket.handoffInputs')"),
@@ -1030,8 +1039,15 @@ test(
                         2,
                     );
                     await click(page, `${nextItem} > .work-item-head .session`);
-                    await present(page, '.composer [aria-label="Previous Work Item"]');
                     await present(page, ".topbar .handoff-button", false);
+                    await home(page);
+                    await click(
+                        page,
+                        `${nextItem} .work-item-member[data-id="${newWorker.id}"] .session`,
+                    );
+                    await present(page, '.composer [aria-label="Work Item context"]');
+                    await present(page, '.composer [aria-label="Work Item context"] button', false);
+                    await present(page, '.topbar [aria-label="Choose next thread"]');
                     await home(page);
 
                     // Whole-item controls must update every member but not another Work Item in

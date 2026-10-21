@@ -447,6 +447,7 @@ async function chooseProject(page: BrowserPage, name: string) {
 }
 
 async function destination(page: BrowserPage, cwd: string) {
+    await present(page, `${panel} .session-destination .check input[type="checkbox"]`);
     assert.equal(
         await value(
             page,
@@ -941,11 +942,38 @@ test(
                     }
 
                     await destination(page, cwd);
+                    const worktreeChoice = `${panel} .session-destination .check input[type="checkbox"]`;
+
+                    await click(page, worktreeChoice);
                     await button(page, `${panel} .session-path`, "Change");
                     await present(page, `${panel} select[aria-label="Working location"]`);
+                    assert.equal(
+                        await value(
+                            page,
+                            `(() => {
+                            const check = document.querySelector(${JSON.stringify(worktreeChoice)});
+                            const options = document.querySelector('${panel} .workspace-field-options');
+
+                            return check.checked &&
+                                check.closest("label").getBoundingClientRect().top >= options.getBoundingClientRect().bottom &&
+                                document.querySelectorAll(${JSON.stringify(worktreeChoice)}).length === 1;
+                        })()`,
+                        ),
+                        true,
+                        "the selected worktree checkbox remains once below the expanded directory controls",
+                    );
                     await fill(page, `${panel} input[aria-label="Working directory"]`, override);
                     await button(page, `${panel} .session-path`, "Done");
                     await destination(page, override);
+                    assert.equal(
+                        await value(
+                            page,
+                            `document.querySelector(${JSON.stringify(worktreeChoice)}).checked`,
+                        ),
+                        true,
+                        "collapsing directory controls retains the visible worktree choice",
+                    );
+                    await click(page, worktreeChoice);
                     const second = await start(page, app, "Worker");
 
                     assert.equal(second.cwd, override);

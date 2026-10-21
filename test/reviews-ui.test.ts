@@ -468,6 +468,39 @@ test(
         await ownerPage.evaluate(`document.querySelector(${JSON.stringify(OLD_LINE)}).focus()`);
         await ownerPage.press("Enter");
         await inlineComposer(ownerPage, OLD_LINE);
+        await ownerPage.evaluate(`
+            const theme = await import("/theme.js");
+
+            theme.setPrefs({ motion: "reduced" });
+            theme.chooseLook("lantern");
+        `);
+        await until(
+            () =>
+                inPage<boolean>(
+                    ownerPage,
+                    `return JSON.stringify(
+                document.documentElement.dataset.theme === "lantern" &&
+                getComputedStyle(document.documentElement).getPropertyValue("--r-control").trim() === "8px"
+            );`,
+                ),
+            "Lantern loaded in the reviewer’s browser",
+        );
+        const corners = await inPage<string[]>(
+            ownerPage,
+            `
+            return JSON.stringify([
+                document.querySelector(${JSON.stringify(`${FORM} textarea`)}),
+                document.querySelector(${JSON.stringify(`${FORM} button[type="submit"]`)}),
+                document.querySelector(${JSON.stringify(`${REVIEWS} .rv-disclosure`)}),
+            ].map(control => getComputedStyle(control).borderRadius));
+        `,
+        );
+
+        assert.deepEqual(
+            corners,
+            ["8px", "8px", "6px"],
+            "review fields, action buttons and disclosures follow Lantern’s control and row corners",
+        );
         await ownerPage.type(
             { selector: await field(ownerPage, `Comment on ${PATH} · old line 2`) },
             OLD_COMMENT,

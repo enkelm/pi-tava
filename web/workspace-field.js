@@ -14,7 +14,6 @@ export function WorkspaceField({
     disabled = false,
     visible = true,
     label = "Working directory",
-    children,
 }) {
     const [editing, setEditing] = useState(false);
     const [browsing, setBrowsing] = useState(false);
@@ -117,7 +116,6 @@ export function WorkspaceField({
                 }}
             />`
             }
-            ${children}
             ${
                 onReset &&
                 html`<button type="button" class="button small" disabled=${disabled} onClick=${() => {

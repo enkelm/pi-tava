@@ -1,7 +1,17 @@
 // Real-app appearance owns browser-local legacy fallback/persistence, native palettes, mode assignments,
 // font rendering and pointer/keyboard disclosure. Launcher previews/commands share that boundary.
 // The fixture controls only the platform color-scheme signal, before the app loads; no production seam.
-import { type App, cleanUp, openApp, owner, root, scriptedModel, until, work } from "./helpers.ts";
+import {
+    type App,
+    cleanUp,
+    newSession,
+    openApp,
+    owner,
+    root,
+    scriptedModel,
+    until,
+    work,
+} from "./helpers.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -373,10 +383,12 @@ async function previewTheme(page: BrowserPage, query: string, bg: string, name: 
 // The real rendered theme owns corner/contrast consistency; token/source assertions cannot
 // detect a missing radius consumer, a third empty grid column, or extension color precedence.
 test(
-    "Lantern keeps rounded focus borders and consistent project creation controls",
+    "Lantern keeps rounded focus borders, sidebar actions, and shared form controls",
     browserOptions,
     async (t) => {
         await withAppearance(async ({ app, page }) => {
+            const worker = await newSession(app, work, "worker");
+
             await app.projects.create(owner(app), {
                 name: "Lantern project",
                 cwd: work,
@@ -473,6 +485,31 @@ test(
                         frame.rowToken,
                         "project hover surfaces follow Lantern row corners",
                     );
+                    const footer = await inPage<{ tiles: string[]; account: string; role: string }>(
+                        page,
+                        `
+                    const list = document.querySelector('${scope} [data-part~="session-list"]')
+                        ?? document.querySelector('${scope}[data-part~="session-list"]');
+
+                    return JSON.stringify({
+                        tiles: [...list.querySelectorAll('.foot-tile')].map(tile => getComputedStyle(tile).borderRadius),
+                        account: getComputedStyle(list.querySelector('.me-row')).borderRadius,
+                        role: getComputedStyle(list.querySelector('.me-role')).borderRadius,
+                    });
+                `,
+                    );
+
+                    assert.ok(footer.tiles.length > 0, "sidebar actions are present");
+                    assert.ok(
+                        footer.tiles.every((radius) => radius === "8px"),
+                        "all sidebar actions have Lantern control corners",
+                    );
+                    assert.equal(
+                        footer.account,
+                        "6px",
+                        "the account row has the same corners as other rows",
+                    );
+                    assert.equal(footer.role, "5px", "the account badge has Lantern tag corners");
                     await page.click({ selector: `${scope} .new-button` });
                     const sheet = '[role="dialog"][aria-label="New Session"]';
 
@@ -521,8 +558,285 @@ test(
                         controls.buttonColor,
                         "the Start icon uses its button's monochrome ink",
                     );
+                    const checkbox = `${sheet} .session-destination .check input[type="checkbox"]`;
+
+                    await present(page, checkbox);
+                    const unchecked = await inPage<{
+                        size: number[];
+                        radius: string;
+                        mark: string;
+                    }>(
+                        page,
+                        `
+                    const check = document.querySelector('${checkbox}');
+                    const style = getComputedStyle(check);
+
+                    return JSON.stringify({
+                        size: [check.getBoundingClientRect().width, check.getBoundingClientRect().height],
+                        radius: style.borderRadius,
+                        mark: getComputedStyle(check, '::before').opacity,
+                    });
+                `,
+                    );
+
+                    assert.deepEqual(
+                        unchecked.size,
+                        [16, 16],
+                        "the worktree checkbox has a legible, compact mark",
+                    );
+                    assert.equal(
+                        unchecked.radius,
+                        "3px",
+                        "checkbox corners follow Lantern's small marks, not pills",
+                    );
+                    assert.equal(unchecked.mark, "0", "an unchecked box does not show a checkmark");
+                    const themedCheck = await inPage<string[]>(
+                        page,
+                        `
+                    const root = document.documentElement.style;
+
+                    root.setProperty('--checkbox-size', '18px');
+                    root.setProperty('--checkbox-radius', '2px');
+                    root.setProperty('--checkbox-border', 'rgb(1, 2, 3)');
+
+                    try {
+                        const style = getComputedStyle(document.querySelector('${checkbox}'));
+
+                        return JSON.stringify([style.width, style.height, style.borderRadius, style.borderTopColor]);
+                    } finally {
+                        for (const token of ['--checkbox-size', '--checkbox-radius', '--checkbox-border']) {
+                            root.removeProperty(token);
+                        }
+                    }
+                `,
+                    );
+
+                    assert.deepEqual(
+                        themedCheck,
+                        ["18px", "18px", "2px", "rgb(1, 2, 3)"],
+                        "shared checkboxes consume the public tokens even with Lantern active",
+                    );
+                    await page.evaluate(`document.querySelector('${checkbox}').focus()`);
+                    await page.press("Space");
+                    const checked = await inPage<{
+                        on: boolean;
+                        mark: string;
+                        outline: string;
+                        width: string;
+                    }>(
+                        page,
+                        `
+                    const check = document.querySelector('${checkbox}');
+                    const style = getComputedStyle(check);
+
+                    return JSON.stringify({
+                        on: check.checked,
+                        mark: getComputedStyle(check, '::before').opacity,
+                        outline: style.outlineStyle,
+                        width: style.outlineWidth,
+                    });
+                `,
+                    );
+
+                    assert.equal(
+                        checked.on,
+                        true,
+                        "Space still changes the native worktree checkbox",
+                    );
+                    assert.equal(checked.mark, "1", "the checked state draws its mark");
+                    assert.notEqual(
+                        checked.outline,
+                        "none",
+                        "the checkbox keeps a keyboard focus ring",
+                    );
+                    assert.ok(parseFloat(checked.width) > 0);
+                    await page.evaluate(`(await import('/theme.js')).chooseLook('pocket')`);
+                    await until(
+                        () =>
+                            inPage<boolean>(
+                                page,
+                                `return JSON.stringify(getComputedStyle(document.querySelector('${checkbox}')).width === '14px')`,
+                            ),
+                        "Pocket restores the shared checkbox's original size",
+                    );
+                    const pocket = await inPage<{
+                        corners: string[];
+                        checked: boolean;
+                        mark: string;
+                    }>(
+                        page,
+                        `
+                    const check = document.querySelector('${checkbox}');
+
+                    return JSON.stringify({
+                        corners: [check, ...document.querySelectorAll('${scope} :is(.foot-tile, .me-row, .me-role)')]
+                            .map(element => getComputedStyle(element).borderRadius),
+                        checked: check.checked,
+                        mark: getComputedStyle(check, '::before').opacity,
+                    });
+                `,
+                    );
+
+                    assert.ok(
+                        pocket.corners.length > 3,
+                        "the real checkbox and footer are present",
+                    );
+                    assert.ok(
+                        pocket.corners.every((radius) => radius === "0px"),
+                        "Pocket keeps square shared checkboxes, footer actions and account controls",
+                    );
+                    assert.equal(
+                        pocket.checked,
+                        true,
+                        "theme switching preserves the native state",
+                    );
+                    assert.equal(pocket.mark, "1", "the checked mark survives theme switching");
+                    await page.evaluate(`(await import('/theme.js')).chooseLook('lantern')`);
+                    await until(
+                        () =>
+                            inPage<boolean>(
+                                page,
+                                `
+                            const style = getComputedStyle(document.querySelector('${checkbox}'));
+
+                            return JSON.stringify(style.width === '16px' && style.borderRadius === '3px');
+                        `,
+                            ),
+                        "Lantern restores its checkbox size and corners in the open form",
+                    );
                     await page.press("Escape");
                     await present(page, sheet, false);
+
+                    // Exercise the real sidebar entry point, not an injected switch fixture.
+                    await page.click({ selector: `${scope} .foot-tile:last-child` });
+                    const toggle = `${settings} [role="switch"][aria-label="Show thinking"]`;
+
+                    await present(page, toggle);
+                    const categoryCorners = await inPage<string[]>(
+                        page,
+                        `return JSON.stringify([...document.querySelectorAll('${settings} .settings-tabs button')]
+                            .map(button => getComputedStyle(button).borderRadius));`,
+                    );
+
+                    assert.ok(categoryCorners.length > 0);
+                    assert.ok(
+                        categoryCorners.every((radius) => radius === "6px"),
+                        "Settings categories follow Lantern’s row corners",
+                    );
+                    const before = await inPage<{
+                        on: string;
+                        radius: number;
+                        knob: number;
+                        color: string;
+                    }>(
+                        page,
+                        `
+                    const toggle = document.querySelector('${toggle}');
+                    const style = getComputedStyle(toggle);
+
+                    return JSON.stringify({
+                        on: toggle.getAttribute('aria-checked'),
+                        radius: parseFloat(style.borderRadius),
+                        knob: parseFloat(getComputedStyle(toggle.querySelector('span')).borderRadius),
+                        color: style.backgroundColor,
+                    });
+                `,
+                    );
+
+                    assert.ok(before.radius >= 11, "the switch track is round at both ends");
+                    assert.ok(before.knob >= 8, "the switch thumb is circular");
+                    await page.evaluate(`document.querySelector('${toggle}').focus()`);
+                    await page.press("Space");
+                    const after = await inPage<{
+                        on: string;
+                        color: string;
+                        outline: string;
+                        width: string;
+                    }>(
+                        page,
+                        `
+                    const toggle = document.querySelector('${toggle}');
+                    const style = getComputedStyle(toggle);
+
+                    return JSON.stringify({
+                        on: toggle.getAttribute('aria-checked'),
+                        color: style.backgroundColor,
+                        outline: style.outlineStyle,
+                        width: style.outlineWidth,
+                    });
+                `,
+                    );
+
+                    assert.equal(
+                        after.on,
+                        String(before.on !== "true"),
+                        "Space still toggles the shared switch",
+                    );
+                    assert.notEqual(
+                        after.color,
+                        before.color,
+                        "on and off remain visibly distinct",
+                    );
+                    assert.notEqual(
+                        after.outline,
+                        "none",
+                        "the switch keeps a keyboard focus ring",
+                    );
+                    assert.ok(parseFloat(after.width) > 0);
+                    await page.press("Escape");
+                    await present(page, settings, false);
+
+                    // The newly added PiP thread reuses role tags, not an injected badge fixture.
+                    await page.evaluate(`(await import('/store.js')).navigate(${worker})`);
+                    const openPip = '.topbar [aria-label="Open PiP chat"]';
+
+                    await present(page, openPip);
+                    assert.equal(
+                        await inPage<string>(
+                            page,
+                            `return JSON.stringify(getComputedStyle(document.querySelector('${openPip}')).borderRadius)`,
+                        ),
+                        "8px",
+                        "the PiP entry control follows the shared control corners",
+                    );
+                    await page.click({ selector: openPip });
+                    const roleTag = ".topbar .thread-type:not(.icon-only)";
+
+                    await until(
+                        () =>
+                            inPage<boolean>(
+                                page,
+                                `return JSON.stringify(document.querySelector('${roleTag}')?.textContent.trim() === 'PiP')`,
+                            ),
+                        "the native PiP thread opens",
+                    );
+                    assert.equal(
+                        await inPage<string>(
+                            page,
+                            `return JSON.stringify(getComputedStyle(document.querySelector('${roleTag}')).borderRadius)`,
+                        ),
+                        "5px",
+                        "the bordered PiP role tag follows Lantern's tag corners",
+                    );
+                    await page.evaluate(`(await import('/theme.js')).chooseLook('pocket')`);
+                    await until(
+                        () =>
+                            inPage<boolean>(
+                                page,
+                                `return JSON.stringify(getComputedStyle(document.querySelector('${roleTag}')).borderRadius === '0px')`,
+                            ),
+                        "Pocket keeps its square role tags",
+                    );
+                    await page.evaluate(`(await import('/theme.js')).chooseLook('lantern')`);
+                    await until(
+                        () =>
+                            inPage<boolean>(
+                                page,
+                                `return JSON.stringify(getComputedStyle(document.querySelector('${roleTag}')).borderRadius === '5px')`,
+                            ),
+                        "switching back restores Lantern's role tag corners",
+                    );
+                    await page.evaluate(`(await import('/store.js')).navigate(null)`);
                 });
             }
         });

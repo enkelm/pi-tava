@@ -90,6 +90,10 @@ export const TOKENS = [
     "--r-float",
     "--r-pill",
     "--radius",
+    // Shared custom-drawn checkboxes
+    "--checkbox-size",
+    "--checkbox-radius",
+    "--checkbox-border",
     // Space and layout
     "--gap-out",
     "--gap-in",

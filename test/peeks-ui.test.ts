@@ -243,6 +243,37 @@ test("the top bar's switch turns them on, and Alt+P off and on again", real, asy
         20_000,
     );
     await sameAsScreen("the tiles on screen, live");
+    await page.evaluate(`
+        const theme = await import("/theme.js");
+
+        theme.setPrefs({ tiling: true, motion: "reduced" });
+        theme.chooseLook("lantern");
+    `);
+    await until(
+        () =>
+            inPage<boolean>(`return JSON.stringify(
+            document.documentElement.dataset.theme === "lantern" &&
+            getComputedStyle(document.documentElement).getPropertyValue("--r-window").trim() === "10px"
+        );`),
+        "Lantern’s rounded tiles loaded",
+    );
+    await page.hover({ selector: ".peeks .peek-head" });
+    assert.equal(
+        await inPage<string>(
+            `return JSON.stringify(getComputedStyle(document.querySelector(".peeks .peek")).borderImageSource);`,
+        ),
+        "none",
+        "hover keeps the solid border that follows Lantern’s rounded tile corners",
+    );
+    await page.evaluate(`document.querySelector(".peeks .peek-head").focus()`);
+    await page.hover({ selector: ".topbar" });
+    assert.equal(
+        await inPage<string>(
+            `return JSON.stringify(getComputedStyle(document.querySelector(".peeks .peek")).borderImageSource);`,
+        ),
+        "none",
+        "keyboard focus also keeps the tile’s rounded border",
+    );
 
     await altP();
     await until(async () => (await tiles()).length === 0, "the column to slide away");

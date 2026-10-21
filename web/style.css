@@ -145,6 +145,10 @@
     --r-pill: 0;
     /* Fields and plain controls that name no corner of their own. */
     --radius: 0;
+    /* Shared custom-drawn checkboxes; checked fills still use --accent-fill. */
+    --checkbox-size: 14px;
+    --checkbox-radius: calc(var(--r-tag) - 1px);
+    --checkbox-border: var(--hair-2);
     /* Coop's saved tiling geometry. */
     --gap-out: 10px;
     --gap-in: 5px;
@@ -5267,6 +5271,7 @@ button.chip:active:not(:disabled):not(.on) {
     font-size: 0.68rem;
     padding-inline: 0.2rem;
     border: 1px solid currentColor;
+    border-radius: var(--r-tag);
     white-space: nowrap;
 }
 
@@ -5763,6 +5768,7 @@ button.chip:active:not(:disabled):not(.on) {
     letter-spacing: 0.03em;
     color: var(--muted);
     border: 1px solid var(--line);
+    border-radius: var(--r-control);
     background: var(--card);
     transition:
         background-color var(--t-hover) var(--ease-out),
@@ -5802,6 +5808,7 @@ button.chip:active:not(:disabled):not(.on) {
     align-items: center;
     gap: 0.55rem;
     padding: 0.35rem 0.4rem;
+    border-radius: var(--r-row);
     text-align: left;
     font-size: 0.8rem;
     color: var(--body);
@@ -5826,6 +5833,7 @@ button.chip:active:not(:disabled):not(.on) {
     font-size: 0.66rem;
     color: var(--muted);
     border: 1px solid var(--line);
+    border-radius: var(--r-tag);
     padding: 0 0.35rem;
 }
 
@@ -7384,12 +7392,12 @@ button.chip:active:not(:disabled):not(.on) {
     display: inline-grid;
     place-items: center;
     flex: none;
-    width: 14px;
-    height: 14px;
+    width: var(--checkbox-size);
+    height: var(--checkbox-size);
     margin: 0;
     padding: 0;
-    border: 1.5px solid var(--hair-2);
-    border-radius: calc(var(--r-tag) - 1px);
+    border: 1.5px solid var(--checkbox-border);
+    border-radius: var(--checkbox-radius);
     background: var(--card);
     color: var(--accent-ink);
     cursor: pointer;
@@ -10141,9 +10149,11 @@ textarea.notes {
 
 /* ─── Settings ─────────────────────────────────────────────── */
 
+/* Settings is a workspace, not a short prompt: leave only a small dismissal margin. */
 .sheet.settings-sheet {
-    max-width: 900px;
-    height: min(720px, 86dvh);
+    max-width: 1200px;
+    height: calc(100dvh - max(12px, env(safe-area-inset-top)));
+    max-height: calc(100dvh - max(12px, env(safe-area-inset-top)));
 }
 
 .settings-sheet .sheet-head {
@@ -10153,6 +10163,7 @@ textarea.notes {
 
 .settings-sheet .sheet-body {
     flex: 1;
+    min-width: 0;
     min-height: 0;
     padding: 0;
     overflow: hidden;
@@ -10162,6 +10173,7 @@ textarea.notes {
 .settings-layout {
     display: flex;
     flex: 1;
+    width: 100%;
     min-width: 0;
     min-height: 0;
 }
@@ -10172,8 +10184,10 @@ textarea.notes {
     flex-direction: column;
     gap: 4px;
     width: 210px;
+    max-width: 100%;
     padding: 12px 8px;
     overflow-y: auto;
+    overscroll-behavior: contain;
     border-right: 1px solid var(--line);
 }
 
@@ -10184,6 +10198,7 @@ textarea.notes {
     min-height: 44px;
     padding: 0.6rem 0.7rem;
     border: 1px solid transparent;
+    border-radius: var(--r-row);
     text-align: left;
     font-size: 0.84rem;
     color: var(--body);
@@ -10207,6 +10222,7 @@ textarea.notes {
 }
 
 .settings-panel {
+    container: settings-panel / inline-size;
     display: flex;
     flex: 1;
     flex-direction: column;
@@ -10221,6 +10237,21 @@ textarea.notes {
 
 .settings-panel[hidden] {
     display: none;
+}
+
+.settings-panel > * {
+    flex-shrink: 0;
+}
+
+/* Native fields and long button labels must fit the panel, including iPad Split View. */
+.settings-panel :is(input, select, textarea, .segmented) {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.settings-panel .button {
+    max-width: 100%;
+    white-space: normal;
 }
 
 .settings-panel > h3 {
@@ -10410,8 +10441,14 @@ textarea.notes {
 }
 
 @media (min-width: 700px) {
+    .overlay:has(> .settings-sheet) {
+        align-items: center;
+        padding: 24px calc(24px + var(--safe-right)) 24px calc(24px + var(--safe-left));
+    }
     .sheet.settings-sheet {
-        width: calc(100% - 2rem);
+        width: 100%;
+        height: min(960px, calc(100dvh - 48px));
+        max-height: calc(100dvh - 48px);
     }
 }
 
@@ -10438,9 +10475,17 @@ textarea.notes {
     .settings-panel {
         padding: 0.8rem 1rem 1rem;
     }
-    .settings-panel .setting-row:has(.segmented) {
+}
+
+/* Respond to the content width, not the device: the category sidebar also costs room. */
+@container settings-panel (max-width: 520px) {
+    .settings-panel .setting-row:has(.segmented, .font-picker) {
         flex-direction: column;
         align-items: stretch;
+        gap: 8px;
+    }
+    .settings-panel .font-picker {
+        width: 100%;
     }
     .settings-panel .segmented {
         align-self: flex-start;
@@ -10472,7 +10517,7 @@ textarea.notes {
 
 .theme-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(150px, 100%), 1fr));
     gap: 10px;
 }
 
@@ -10854,7 +10899,7 @@ textarea.notes {
 /* The theme: a card for each theme folder, in the app's own colors (a theme cannot be drawn small, as colors can). */
 .look-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr));
     gap: 10px;
 }
 
@@ -12956,6 +13001,7 @@ textarea.notes {
 .file-edit-save-state {
     padding: 0.15rem 0.45rem;
     border: 1px solid var(--line);
+    border-radius: var(--r-tag);
     background: var(--card);
     color: var(--body);
     white-space: nowrap;
@@ -12978,6 +13024,7 @@ textarea.notes {
     padding: 0.15rem 0.45rem;
     min-height: 30px;
     border: 1px solid var(--line);
+    border-radius: var(--r-control);
     color: var(--body);
     font-size: inherit;
 }
@@ -13030,6 +13077,7 @@ textarea.notes {
     gap: 0.35rem;
     min-height: 30px;
     padding: 0.25rem 0.35rem;
+    border-radius: var(--r-row);
     color: var(--body);
     font-size: 0.7rem;
     white-space: nowrap;
@@ -13407,6 +13455,7 @@ textarea.notes {
     padding: 0.45rem 0.6rem 0.45rem 0.8rem;
     background: var(--panel);
     border: 1px solid var(--err-line);
+    border-radius: var(--r-control);
     color: var(--err);
     animation: popin var(--t-in) var(--ease-out);
 }

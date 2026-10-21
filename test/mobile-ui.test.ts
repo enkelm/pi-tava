@@ -978,6 +978,81 @@ test(
 );
 
 test(
+    "Settings uses the available phone and iPad space without clipping category controls",
+    real,
+    async (t) => {
+        await fresh();
+        await page.evaluate(`(await import('/theme.js')).setPrefs({ motion: 'reduced' });`);
+
+        for (const viewport of [
+            { ...VIEWPORTS.mobile, width: 320, height: 640 },
+            VIEWPORTS.mobile,
+            { ...VIEWPORTS.tablet, width: 700, height: 900 },
+            VIEWPORTS.tablet,
+            { ...VIEWPORTS.tablet, width: 1180, height: 820 },
+        ]) {
+            await t.test(`${viewport.width} × ${viewport.height}`, async () => {
+                await page.setViewport(viewport);
+                await page.evaluate(`(await import('/store.js')).openSheet({ type: 'settings' });`);
+                await reach({ sheet: "settings", layers: 1 }, "Settings open");
+                const bounds = await inPage<{ width: number; height: number; contained: boolean }>(`
+                const rect = document.querySelector('.settings-sheet').getBoundingClientRect();
+
+                return JSON.stringify({
+                    width: rect.width / innerWidth,
+                    height: rect.height / innerHeight,
+                    contained: rect.left >= 0 && rect.right <= innerWidth
+                        && rect.top >= 0 && rect.bottom <= innerHeight,
+                });
+            `);
+
+                assert.ok(bounds.contained, "Settings stays inside the viewport");
+                assert.ok(bounds.width >= 0.85, "Settings makes use of the available width");
+                assert.ok(
+                    bounds.height >= (viewport.width < 700 ? 0.94 : 0.8),
+                    "Settings makes use of the available height",
+                );
+
+                const tabs = await inPage<string[]>(`
+                return JSON.stringify([...document.querySelectorAll('.settings-tabs button')].map(tab => tab.id));
+            `);
+
+                for (const tab of tabs) {
+                    await tap(`#${tab}`);
+                    await until(
+                        () =>
+                            inPage<boolean>(`
+                        return JSON.stringify(!document.querySelector('.settings-panel:not([hidden]) [role="status"].loader'));
+                    `),
+                        `${tab} loaded`,
+                    );
+                    const overflow = await inPage<string[]>(`
+                    const panel = document.querySelector('.settings-panel:not([hidden])');
+                    const bounds = panel.getBoundingClientRect();
+                    const controls = [...panel.querySelectorAll('button, input, select, textarea')]
+                        .filter(control => control.checkVisibility() && !control.closest('.tc-modes'));
+
+                    return JSON.stringify([
+                        ...(panel.scrollWidth > panel.clientWidth + 1 ? ['panel'] : []),
+                        ...controls.filter(control => {
+                            const rect = control.getBoundingClientRect();
+
+                            return rect.left < bounds.left - 1 || rect.right > bounds.right + 1;
+                        }).map(control => control.getAttribute('aria-label') || control.textContent.trim() || control.tagName),
+                    ]);
+                `);
+
+                    assert.deepEqual(overflow, [], `${tab} controls fit horizontally`);
+                }
+
+                await page.press("Escape");
+                await reach({ sheet: null, layers: 0 }, "Settings closed");
+            });
+        }
+    },
+);
+
+test(
     "Settings tabs fit a phone, support keyboard navigation, and back returns to the menu",
     real,
     async () => {

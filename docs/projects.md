@@ -33,7 +33,7 @@ Selected rows can be dragged together or moved using **Move…** in the selectio
 
 ## New threads
 
-**Start new** begins with projects. Select a project and thread type, then Start. Collaborators see only granted projects and use their saved machine and directory, without location, folder or worktree overrides. Only the owner sees **New Project**, **Change**, directory browsing and **Start a one-time chat**. The owner's inherited folder stays in one compact row; **Change** reveals local/SSH destination and worktree options. Changing the folder does not change membership.
+**Start new** begins with projects. Select a project and thread type, then Start. Collaborators see only granted projects and use their saved machine and directory, without location, folder or worktree overrides. Only the owner sees **New Project**, **Change**, directory browsing and **Start a one-time chat**. The owner's inherited folder stays in one compact row; **Change** reveals local/SSH destination controls. **Own Git worktree** is an always-visible checkbox below that row. When the directory controls expand, the checkbox stays below them, just above Start. Changing the folder does not change membership.
 
 Starter choices come from the application-owned WorkItems catalog and current namespaced extension profiles. The project default is the first starter other than core Chat; the declarative built-in order keeps Worker before Researcher. Pausing **Work Item execution** blocks non-Chat built-in starters without unloading profiles or controls. An earlier disabled setting stays paused after upgrade. Ordinary ungrouped Chat and Agent Teams remain independent; see [availability](handoffs.md#availability-and-execution-pause).
 

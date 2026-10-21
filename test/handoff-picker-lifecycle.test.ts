@@ -1,5 +1,5 @@
-// Actual eligibility service + sheet with manually batched hooks and a memory-only element tree.
-// Owns picker recovery, draft and focus behavior; not Preact reconciliation or iPad energy.
+// Actual eligibility service, sheet and controls with batched hooks and a memory-only element tree.
+// Owns picker recovery, drafts, focus and control output; not Preact reconciliation or iPad energy.
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 
@@ -8,6 +8,9 @@ const { createHandoffState } = await import(
 );
 const { createHandoffSheet } = await import(
     new URL("../src/server/work-items/browser/sheet.js", import.meta.url).href
+);
+const { createControls } = await import(
+    new URL("../src/server/work-items/browser/controls.js", import.meta.url).href
 );
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -96,6 +99,82 @@ function textOf(tree: Tree): string {
 
     return typeof tree === "string" || typeof tree === "number" ? String(tree) : "";
 }
+
+test("composer context retains status without thread navigation across handoff histories", () => {
+    // A three-stage history exercises the distinct source and origin links as well as the
+    // retired writer's active-thread link. The browser owner covers sidebar navigation.
+    for (const scenario of ["active", "retired", "new-work"]) {
+        const readOnly = scenario === "retired";
+        const workflow = { managed: true, readOnly, status: "active" };
+        const session = {
+            me: { id: "alice", role: "owner" },
+            id: 3,
+            canSteer: true,
+            conversation: { kind: "session", threadType: "worker" },
+            sessions: [
+                { id: 1, threadType: "worker" },
+                { id: 2, threadType: "reviewer" },
+                { id: 3, threadType: "worker", workflow },
+                { id: 4, threadType: "land" },
+            ],
+            profiles: [{ id: "worker", name: "Worker" }],
+        };
+        const opened: unknown[] = [];
+        const { WorkflowTools, HandoffButton } = createControls(
+            {
+                html,
+                Icon: () => null,
+                AgentProfileTag: () => null,
+                session: () => session,
+                openSheet: (...args: unknown[]) => opened.push(args),
+                requestId: () => "opening-1",
+            },
+            {
+                useContext: () => ({
+                    session,
+                    status: {
+                        data: {
+                            workflow,
+                            workItem: { originThreadId: 1, activeThreadId: readOnly ? 4 : 3 },
+                            handoffs: [
+                                {
+                                    targetThreadId: 3,
+                                    sourceThreadId: 2,
+                                    relationship:
+                                        scenario === "new-work" ? "new-work" : "same-work",
+                                },
+                            ],
+                        },
+                    },
+                }),
+                isCurrent: () => true,
+            },
+        );
+        const context = elements(WorkflowTools());
+        const indicator = context.find((node) => node.props.role === "img");
+
+        assert.ok(indicator, `${scenario}: workspace status must remain visible`);
+        assert.equal(
+            indicator.props["aria-label"],
+            readOnly ? "Read-only workspace" : "Workflow status",
+        );
+        assert.equal(
+            context.filter((node) => node.type === "button" || node.type === "a").length,
+            0,
+            `${scenario}: handoff history must not add composer navigation`,
+        );
+        const header = elements(HandoffButton()).find((node) => node.type === "button");
+
+        if (readOnly) {
+            assert.equal(header, undefined, "retired writers cannot start a handoff");
+        } else {
+            assert.ok(header, "active writers keep the header picker");
+            assert.equal(header.props["aria-label"], "Choose next thread");
+            header.props.onClick();
+            assert.deepEqual(opened, [["handoff", { id: 3, opening: "opening-1" }]]);
+        }
+    }
+});
 
 const eligibility = (reason = "Fresh eligibility") => ({
     workflow: { readOnly: false, profileAvailable: true },
