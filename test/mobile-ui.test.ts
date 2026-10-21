@@ -216,6 +216,94 @@ const feedback = (selector: string) =>
 
 const pauseFeedback = () => new Promise((resolve) => setTimeout(resolve, 220));
 
+test(
+    "streaming Markdown reuses stable blocks without losing image scope, sanitization or mirror isolation",
+    real,
+    async () => {
+        await fresh();
+        const result = await inPage<Record<string, any>>(`
+        const { h, render } = await import("preact");
+        const { marked } = await import("marked");
+        const { Markdown } = await import("/ui.js");
+        const box = document.createElement("div");
+        const prefix = "First **block**.\\n\\n![x](a.png)\\n\\n";
+        const draw = (text, extra = {}) => render(h(Markdown, { text, cache: false, conversationId: 123, ...extra }), box);
+        const parsed = [];
+        const parse = marked.parse;
+
+        marked.parse = (text, options) => { parsed.push(text); return parse(text, options); };
+        try {
+            draw(prefix + "Second");
+            const first = box.querySelector("p");
+            parsed.length = 0;
+            draw(prefix + "Second, longer");
+            const reused = box.querySelector("p") === first;
+            const work = [...parsed];
+            const image = box.querySelector("img").getAttribute("src");
+            draw(prefix + "Second, longer", { conversationId: 456 });
+            const movedImage = box.querySelector("img").getAttribute("src");
+            draw("Title\\n===\\n\\n<script>alert(1)</script>\\n\\n[ref]: https://example.com");
+            const heading = box.querySelector("h1")?.textContent;
+            const safe = !box.querySelector("script");
+            const emptyParts = [...box.children].filter((part) => !part.textContent.trim()).length;
+            draw("![x](secret.png)\\n\\n[local](./secret.txt)", { readOnly: true });
+            const privateImage = box.querySelector("img") !== null;
+            const privateLink = box.querySelector("[data-path], a[href*='secret']") !== null;
+            draw("[link][ref]\\n\\n[ref]: https://example.com", { cache: true });
+            return JSON.stringify({ reused, work, image, movedImage, heading, safe, emptyParts, privateImage, privateLink, finished: box.querySelector("a")?.getAttribute("href") });
+        } finally {
+            marked.parse = parse;
+            render(null, box);
+        }
+    `);
+
+        assert.ok(result.reused, "unchanged prose retains its DOM while the last block grows");
+        assert.deepEqual(result.work, ["Second, longer"], "only changed Markdown is parsed again");
+        assert.equal(result.image, "/api/c/123/file?path=a.png");
+        assert.equal(result.movedImage, "/api/c/456/file?path=a.png");
+        assert.equal(result.heading, "Title");
+        assert.ok(result.safe);
+        assert.equal(result.emptyParts, 0, "link definitions cannot displace the live cursor");
+        assert.equal(result.privateImage, false);
+        assert.equal(result.privateLink, false);
+        assert.equal(result.finished, "https://example.com");
+    },
+);
+
+test(
+    "streaming views leave the sidebar still but catalogue and explicit invalidations redraw it",
+    real,
+    async () => {
+        await fresh();
+        const result = await inPage<{ quiet: number; listed: number; invalidated: number }>(`
+        const { options } = await import("preact");
+        const { store } = await import("/store.js");
+        const settle = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve)));
+        let rows = 0;
+        const diffed = options.diffed;
+        options.diffed = (node) => { rows += node.type?.name === "SessionRow" ? 1 : 0; diffed?.(node); };
+        try {
+            store.set((state) => ({ view: { ...state.view }, pipView: { ...state.pipView } }));
+            await settle();
+            const quiet = rows;
+            store.set((state) => ({ sessions: [...state.sessions] }));
+            await settle();
+            const listed = rows;
+            rows = 0;
+            store.set({});
+            await settle();
+            return JSON.stringify({ quiet, listed, invalidated: rows });
+        } finally {
+            options.diffed = diffed;
+        }
+    `);
+
+        assert.equal(result.quiet, 0);
+        assert.ok(result.listed > 0);
+        assert.ok(result.invalidated > 0, "store.set({}) remains an explicit redraw");
+    },
+);
+
 test("mobile-native inputs stay at least 16px across text preferences", real, async (t) => {
     await fresh();
     const original = await inPage<number>(

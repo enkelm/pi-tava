@@ -7,6 +7,13 @@ import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
 import type { PocketApp } from "../app.ts";
 import type { User } from "../config.ts";
 import { HttpError } from "../errors.ts";
+import {
+    accepted,
+    compressed,
+    compressible,
+    MIN_COMPRESS_BYTES,
+    varyEncoding,
+} from "./compress.ts";
 
 const MAX_JSON = 1_000_000;
 
@@ -69,8 +76,58 @@ export function send(
     type = "text/plain; charset=utf-8",
     headers: Record<string, string> = {},
 ): void {
-    response.writeHead(status, { "content-type": type, "cache-control": "no-store", ...headers });
-    response.end(body);
+    // Header names are case insensitive, including a route's explicitly pre-encoded body.
+    headers = Object.fromEntries(
+        Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+    const text = compressible(type);
+    const encoding =
+        text &&
+        status !== 204 &&
+        status !== 304 &&
+        headers["content-encoding"] === undefined &&
+        response.getHeader("content-encoding") === undefined &&
+        Buffer.byteLength(body) >= MIN_COMPRESS_BYTES
+            ? accepted(response.req)
+            : undefined;
+
+    if (text) {
+        headers.vary = varyEncoding(String(headers.vary ?? response.getHeader("vary") ?? ""));
+    }
+
+    const finish = (answer: string | Buffer, encoded = false) => {
+        // The route returns while zlib works. A departing reader or another completed response
+        // owns the writer now; never send late headers/body after that boundary.
+        if (response.destroyed || response.writableEnded || response.headersSent) {
+            return;
+        }
+
+        response.writeHead(status, {
+            "content-type": type,
+            "cache-control": "no-store",
+            ...headers,
+            ...(encoded
+                ? { "content-encoding": encoding!, "content-length": String(answer.length) }
+                : {}),
+        });
+        response.end(answer);
+    };
+
+    if (encoding === undefined) {
+        finish(body);
+    } else {
+        // Keep send's void interface. Rejection falls back to the unchanged identity payload.
+        void compressed(body, encoding)
+            .then(
+                (answer) => finish(answer, true),
+                () => finish(body),
+            )
+            .catch(() => {
+                // Header/write errors occur after the route's error boundary has returned.
+                // Close this reader rather than turning one bad response into a process rejection.
+                response.destroy();
+            });
+    }
 }
 
 export function json(response: ServerResponse, status: number, value: unknown): void {

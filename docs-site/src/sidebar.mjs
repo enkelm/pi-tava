@@ -64,6 +64,7 @@ export const SIDEBAR = [
         collapsed: true,
         items: [
             ["docs/index.md", "Documentation map"],
+            ["docs/upstream-differences.md", "Fork and upstream differences"],
             ["CONTRIBUTING.md", "Contributing"],
             ["docs/self-editing.md", "Changing the code"],
             ["docs/map.md", "Project map"],

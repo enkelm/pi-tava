@@ -441,7 +441,7 @@ export class Reviews {
     }
 
     async #changes(id: ConversationId, user: User, scope: Scope): Promise<Changes> {
-        const entries = await this.#app.transcripts.allEntries(id, false);
+        const entries = await this.#app.transcripts.editEntries(id, scope.backend.context);
         const changes = await changesIn(scope.cwd, entries, true, {
             backend: scope.backend,
             offline: () => this.#app.workItems.isManaged(id),

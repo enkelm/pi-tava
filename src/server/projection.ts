@@ -574,6 +574,70 @@ export function projectLive(live: LiveState | undefined): ClientLive {
     return out;
 }
 
+/**
+ * Protocol 3 keeps the first `keep` blocks and replaces the rest with `blocks`. Only the first replacement may be an
+ * append: its text extends the block at `keep`, whose current text must have `from` UTF-16 code units. This keeps a
+ * growing answer's wire cost proportional to what it adds, rather than repeating the whole message every 90 ms.
+ */
+export type LiveMessageDelta = {
+    keep: number;
+    blocks: (ClientBlock | { type: "text" | "thinking"; from: number; text: string })[];
+};
+
+/** The live run on the wire: protocol 3 may send a message delta; older clients always get the message whole. */
+export type ClientLiveUpdate = Omit<ClientLive, "generation"> & {
+    generation?: Omit<NonNullable<ClientLive["generation"]>, "message"> & {
+        message?: { blocks: ClientBlock[] } | LiveMessageDelta;
+    };
+};
+
+/** What changed from the blocks this connection last received to the current committed message. */
+export function liveMessageDelta(sent: ClientBlock[], blocks: ClientBlock[]): LiveMessageDelta {
+    let keep = 0;
+
+    while (keep < sent.length && keep < blocks.length && sameBlock(sent[keep]!, blocks[keep]!)) {
+        keep++;
+    }
+
+    const before = sent[keep];
+    const now = blocks[keep];
+
+    if (
+        before !== undefined &&
+        now !== undefined &&
+        now.type !== "toolCall" &&
+        before.type === now.type &&
+        (before.type !== "thinking" || before.redacted === (now as typeof before).redacted) &&
+        now.text.startsWith(before.text)
+    ) {
+        return {
+            keep,
+            blocks: [
+                {
+                    type: now.type,
+                    from: before.text.length,
+                    text: now.text.slice(before.text.length),
+                },
+                ...blocks.slice(keep + 1),
+            ],
+        };
+    }
+
+    return { keep, blocks: blocks.slice(keep) };
+}
+
+function sameBlock(a: ClientBlock, b: ClientBlock): boolean {
+    if (a.type === "toolCall" || b.type === "toolCall") {
+        return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    return (
+        a.type === b.type &&
+        a.text === b.text &&
+        (a.type !== "thinking" || a.redacted === (b as typeof a).redacted)
+    );
+}
+
 export type ClientStats = {
     cost: number;
     /** Share of prompt tokens served from the provider's cache, 0..1; undefined before the first response. */

@@ -7,6 +7,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PocketApp } from "../app.ts";
 import type { User } from "../config.ts";
 import type { Client } from "../room.ts";
+import { accepted, streamCompressor } from "./compress.ts";
 import { conversationId, json } from "./io.ts";
 
 /** How long a poll waits for events before answering empty, and how long an unpolled session lives. */
@@ -79,27 +80,78 @@ export function createEventStreams(app: PocketApp) {
         let written = 0;
         let taken = 0;
         let tookAt = Date.now();
+        let closing = false;
+        let closed = false;
+        let encoding = accepted(request);
+        let compressor: ReturnType<typeof streamCompressor> | undefined;
+
+        try {
+            compressor = encoding === undefined ? undefined : streamCompressor(encoding);
+        } catch {
+            // No encoding has been advertised yet: an unavailable compressor can fall back to identity.
+            encoding = undefined;
+        }
+
+        const pendingBytes = () =>
+            (compressor?.stream.writableLength ?? 0) + (compressor?.stream.readableLength ?? 0);
 
         const write = (text: string) => {
-            written += Buffer.byteLength(text);
-            response.write(text);
+            // Bound admission, not just the next send: a single oversized event must not bypass the cap.
+            if (
+                response.writableLength + pendingBytes() + Buffer.byteLength(text) >
+                MAX_BEHIND_BYTES
+            ) {
+                response.destroy();
+
+                return;
+            }
+
+            if (compressor === undefined) {
+                written += Buffer.byteLength(text);
+                response.write(text);
+            } else {
+                compressor.stream.write(text);
+                compressor.stream.flush(compressor.flush);
+            }
         };
+
+        if (compressor !== undefined) {
+            compressor.stream.on("data", (chunk: Buffer) => (written += chunk.length));
+            compressor.stream.on("error", () => response.destroy());
+            // pipe pauses compressed output when the HTTP writer is full. Input has its own hard cap above.
+            compressor.stream.pipe(response);
+        }
 
         /** Whether the stream may take more: false, and cut off, when it took nothing for long while far behind, or is too far behind. */
         const keepsUp = (): boolean => {
-            if (response.writableEnded || response.destroyed) {
+            if (
+                closing ||
+                closed ||
+                response.writableEnded ||
+                response.destroyed ||
+                compressor?.stream.writableEnded
+            ) {
                 return false;
             }
 
             const behind = response.writableLength;
+            const pending = pendingBytes();
             const now = Date.now();
+            // pipe bounds HTTP's buffer. A blocked writer stranding a large input queue must
+            // still time out; input merely awaiting CPU while output drains must not.
+            const blocked = response.writableNeedDrain && pending > BEHIND_BYTES;
 
-            if (written - behind > taken || behind <= BEHIND_BYTES) {
+            if (written - behind > taken || (behind <= BEHIND_BYTES && !blocked)) {
                 taken = written - behind;
                 tookAt = now;
             }
 
-            if (behind > MAX_BEHIND_BYTES || now - tookAt > STALLED_MS) {
+            // Uncompressed input is held too, but is not evidence that the tab stopped reading compressed bytes.
+            if (
+                behind > MAX_BEHIND_BYTES ||
+                pending > MAX_BEHIND_BYTES ||
+                now - tookAt > STALLED_MS
+            ) {
                 response.destroy();
 
                 return false;
@@ -114,22 +166,50 @@ export function createEventStreams(app: PocketApp) {
             }
         });
 
-        client.close = () => response.end();
+        client.close = () => {
+            if (closing || closed) {
+                return;
+            }
+
+            closing = true;
+
+            if (compressor === undefined) {
+                response.end();
+            } else {
+                compressor.stream.end();
+            }
+        };
+
         response.writeHead(200, {
             "content-type": "text/event-stream; charset=utf-8",
             "cache-control": "no-cache, no-transform",
             connection: "keep-alive",
             "x-accel-buffering": "no",
+            vary: "accept-encoding",
+            ...(encoding === undefined ? {} : { "content-encoding": encoding }),
         });
         write("retry: 1500\n\n");
         // The ping checks too: a tab far behind with nothing new for it would otherwise hold its backlog until the next event.
         const ping = setInterval(() => keepsUp() && write(": ping\n\n"), eventTiming.pingMs);
 
-        request.on("close", () => {
+        const aborted = () => response.destroy();
+
+        request.once("aborted", aborted);
+        response.once("close", () => {
+            closed = true;
             clearInterval(ping);
+            request.off("aborted", aborted);
+            compressor?.stream.destroy();
             app.detach(client);
         });
-        await app.attach(client);
+
+        try {
+            await app.attach(client);
+        } catch (error) {
+            response.destroy();
+
+            throw error;
+        }
     };
 
     // ─── Long polling: the same events as /api/events, for connections that hold back event streams (Cloudflare
@@ -143,7 +223,7 @@ export function createEventStreams(app: PocketApp) {
 
         poller.waiting = undefined;
 
-        if (response !== undefined && !response.writableEnded) {
+        if (response !== undefined && !response.writableEnded && !response.destroyed) {
             json(response, 200, {
                 session: poller.id,
                 events: poller.queue.map(({ seq, event, data }) => ({ seq, event, data })),

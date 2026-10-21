@@ -125,6 +125,7 @@ const sources: Record<string, string> = {
         export const isUnread=()=>false,sessionUnread=()=>false,setUnread=()=>{},stillMoving=moving=>moving;
         export const signOut=()=>{},start=()=>{},filesShown=()=>false,panelsBeside=()=>false,peopleDocked=()=>false;`,
     "ui.js": `export const html=globalThis.groupNavigationFixture.html;
+        export const apartFromViews=component=>component;
         export const APPLE=false,BOTTOM_SHEETS={matches:false},Boot=()=>null,Icon=()=>null,Keys=()=>null,Marked=()=>null,Slide=()=>null,Spinner=()=>null;
         export const shortPath=value=>value,timeAgo=()=>"now",railState=()=>"",scrimPress=()=>()=>{},copyText=()=>{};
         export const contextLevel=()=>"",formatBytes=String,formatTokens=String,modelLabel=()=>"Model";

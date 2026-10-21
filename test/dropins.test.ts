@@ -17,6 +17,8 @@ import {
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { McpClient } from "@earendil-works/pi-mcp";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -126,6 +128,24 @@ test("drop-ins are off until the owner turns them on, and cannot replace a built
         realpathSync(new URL("../types/pocket.d.ts", import.meta.url)),
     );
     assert.deepEqual(module("_pocket.d.ts"), []);
+});
+
+test("drop-ins can import the directly supported MCP client through their package link", async () => {
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    const installed = JSON.parse(
+        readFileSync(
+            new URL("../node_modules/@earendil-works/pi-mcp/package.json", import.meta.url),
+            "utf8",
+        ),
+    );
+
+    assert.equal(manifest.dependencies["@earendil-works/pi-mcp"], installed.version);
+    const source = join(dropIns, "_mcp-import.ts");
+
+    writeFileSync(source, 'export { McpClient } from "@earendil-works/pi-mcp";\n');
+    const imported = await import(pathToFileURL(source).href);
+
+    assert.equal(imported.McpClient, McpClient, "drop-ins and the server use one MCP module");
 });
 
 test("_pocket.d.ts: a link the owner pointed elsewhere stays, and only Pi Pocket's own copy is refreshed", async () => {

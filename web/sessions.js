@@ -45,6 +45,7 @@ export { workspaceOrder } from "./store.js";
 import { isPinned, prefs, setPrefs, togglePin } from "./theme.js";
 import {
     APPLE,
+    apartFromViews,
     html,
     Icon,
     railState,
@@ -488,8 +489,9 @@ function SessionRow({
     const supervisor = me?.role === "owner" ? session.supervisor : undefined;
     const supervising = supervisor?.status === "running";
     const orchestrationLabel = `Open PiP Thread for ${title}`;
-    const workStatus = me?.role === "owner"
-        ? html`<span
+    const workStatus =
+        me?.role === "owner"
+            ? html`<span
               class="work-item-pip-state"
               data-status=${supervising ? "running" : "reclaimed"}
               role="img"
@@ -498,7 +500,7 @@ function SessionRow({
           >
               <${Icon} name="pip" size=${12} />
           </span>`
-        : (WORKFLOW_LABELS[session.workflow?.status] ?? "Active");
+            : (WORKFLOW_LABELS[session.workflow?.status] ?? "Active");
     // Every top-level thread has working context, even without a Coop-created worktree or handoff.
     const details = !member;
     const path = shortPath(session.cwd, server?.home);
@@ -892,7 +894,7 @@ const TABS = [
  */
 const listKept = { query: "", scroll: 0 };
 
-export function SessionList({ compact = false, home = false }) {
+function AllSessions({ compact = false, home = false }) {
     const { sessions, sessionsLoaded, server, me, pinned, projects, projectsLoaded } = store.state;
     const organized = projectsAvailable();
     const tabChoices = organized ? PROJECT_TABS : TABS;
@@ -1704,6 +1706,9 @@ export function SessionList({ compact = false, home = false }) {
     </div>`;
 }
 
+/** Catalogue and local/private state still update; ordinary streamed views do not redraw this off-screen subtree. */
+export const SessionList = apartFromViews(AllSessions);
+
 /**
  * Subagents across the sessions, by state, as the rail counts them: archived sessions only while a subagent works
  * there, as the subagents board shows them.
@@ -1877,7 +1882,7 @@ function RailTiles() {
  * running now, the subagents board, people, providers, the theme) and you. Folded, it holds the sessions too, numbered.
  * In the drawer and on a phone's home screen it does not fold, and Pi is a mark.
  */
-export function RailNav({ foldable = false, folded = false }) {
+function RailNavigation({ foldable = false, folded = false }) {
     const { sessions, board, me } = store.state;
     const canStart = canSteer() && !scoped();
     const busy = sessions.filter((session) => session.busy).length;
@@ -2030,6 +2035,9 @@ export function RailNav({ foldable = false, folded = false }) {
         </button>
     </nav>`;
 }
+
+/** This navigation subtree reads neither the conversation view nor PiP's view. */
+export const RailNav = apartFromViews(RailNavigation);
 
 /** Coop shows either its standalone session list or its folded rail, never a rail beside the list. */
 const LIST_MIN = 260;

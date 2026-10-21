@@ -127,7 +127,7 @@ export class Workspace {
     /**
      * The looks at what a conversation's folder changed that are under way, per reach (its folder only, or its
      * repository). Every tab that shows a session asks (the top bar's count), often together as Pi moves on; those that
-     * ask while a look is under way share it, as each reads the whole history for Pi's edits and runs git. One asked
+     * ask while a look is under way share it, as each reads the new history for Pi's edits and runs git. One asked
      * after it ends looks again, so what it says is never older than the question.
      */
     readonly #changesUnderWay = new SharedWorkspaceReads<Changes>();
@@ -1162,7 +1162,7 @@ export class Workspace {
             this.#app.sshSessions.withWorkspace(id, user, shared, async (backend) =>
                 changesIn(
                     backend.cwd,
-                    await this.#app.transcripts.allEntries(id, false),
+                    await this.#app.transcripts.editEntries(id, backend.context),
                     onlyHere,
                     { backend, offline: () => this.#app.workItems.isManaged(id) },
                 ),

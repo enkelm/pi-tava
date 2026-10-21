@@ -1201,6 +1201,7 @@ export class PocketApp {
     async attach(client: Client): Promise<void> {
         const arriving = !this.#online(client.user.id);
 
+        client.sessionsSent = undefined;
         this.#clients.add(client);
         const hello = await this.hello(client.user);
 
@@ -1209,7 +1210,7 @@ export class PocketApp {
         }
 
         client.send("hello", this.#helloFor(client, hello));
-        client.send("sessions", this.sessions(client.user));
+        this.#sendSessions(client);
         this.#sendPip(client);
 
         if (client.user.role === "owner" && this.themes.failure !== undefined) {
@@ -2071,11 +2072,7 @@ export class PocketApp {
             let board: SubagentEntry[] | undefined;
 
             for (const client of this.#clients) {
-                client.send(
-                    "sessions",
-                    // Project metadata and owner-only imports need each person's own projection.
-                    this.sessions(client.user),
-                );
+                this.#sendSessions(client);
                 this.#sendPip(client);
 
                 if (client.board === true) {
@@ -2091,6 +2088,17 @@ export class PocketApp {
                 client.send("projects", this.projects.list(client.user));
             }
         }, 400);
+    }
+
+    /** Equality is per connection and per person: never reuse another person's catalogue projection. */
+    #sendSessions(client: Client, user = client.user): void {
+        const sessions = this.sessions(user);
+        const json = JSON.stringify(sessions);
+
+        if (json !== client.sessionsSent) {
+            client.send("sessions", sessions);
+            client.sessionsSent = json;
+        }
     }
 
     /** The session list, with who is in each session and its newest chat message. Scoped people see only theirs. */
@@ -2591,7 +2599,7 @@ export class PocketApp {
             }
 
             client.send("hello", this.#helloFor(client, await this.hello(user)));
-            client.send("sessions", this.sessions(user));
+            this.#sendSessions(client, user);
 
             // An open board too: it must not keep subagents of sessions no longer shared.
             if (client.board === true) {

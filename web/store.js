@@ -2,6 +2,7 @@
 import { onRoute, pushRoute } from "./back.js";
 import { sessionForest } from "./session-tree.js";
 import { workItemRows } from "./work-items.js";
+import { liveMessage } from "./live.js";
 
 /** A random id. crypto.randomUUID only exists on https and localhost pages; plain-http network addresses lack it. */
 export function uid() {
@@ -850,6 +851,8 @@ export function signOut() {
 }
 
 let source;
+/** A mismatched live delta requests one full reconnect, cancelled with its owning transport. */
+let liveRetry;
 
 function applyView(data) {
     if (store.state.privateId !== null || data.conversation.id !== store.state.conversationId) {
@@ -891,7 +894,7 @@ function mergeView(current, data) {
         conversation: data.conversation,
         entries,
         order,
-        live: data.live,
+        live: mergeLive(base.live, data.live),
         agent: data.agent,
         stats: data.stats,
         clients: data.clients,
@@ -922,6 +925,35 @@ function mergeView(current, data) {
         // What the folder has checked out: `{ branch }` or `{ detached }`, and null outside a repository.
         branch: data.branch === undefined ? base.branch : data.branch,
     };
+}
+
+/** Rebuild protocol 3 messages; an older server still sends a complete live run. */
+function mergeLive(current, live) {
+    if (live.generation?.message?.keep === undefined) {
+        return live;
+    }
+
+    const had = current.generation?.message;
+    let message = liveMessage(had, live.generation.message);
+
+    if (message === null) {
+        message = had;
+
+        // A poll batch may contain several mismatches. Reconnect once, only while this transport still owns the page.
+        if (liveRetry === undefined && source) {
+            const connection = source;
+
+            liveRetry = setTimeout(() => {
+                liveRetry = undefined;
+
+                if (source === connection) {
+                    connect();
+                }
+            }, 0);
+        }
+    }
+
+    return { ...live, generation: { ...live.generation, message } };
 }
 
 /** The `moving` marks that a session list has not caught up with yet: it still shows those sessions where they were. */
@@ -1060,10 +1092,10 @@ const handlers = {
 
 /**
  * What this code understands of the server's updates, sent with each connection. 2: it keeps the queue when an update
- * leaves it out. The server sends a tab whose code names none (older code, as a tab asleep through an update keeps)
- * the queue with each update.
+ * leaves it out. 3: it takes the message being written as what changed (`mergeLive`). The server sends a tab below 3 the
+ * whole message with each update, and one whose code names none (as a tab asleep through an update keeps) the queue too.
  */
-const PROTOCOL = 2;
+const PROTOCOL = 3;
 const TRANSPORT_KEY = "pocket.transport";
 const local = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/.test(location.hostname);
 /** After an event stream stalls on this address, poll for a day, then try the stream again: one slow start is not forever. */
@@ -1095,6 +1127,8 @@ const awake = () =>
 function suspend() {
     const previous = source;
 
+    clearTimeout(liveRetry);
+    liveRetry = undefined;
     source = null;
     previous?.close();
     store.set({ connection: "closed" });

@@ -1,5 +1,6 @@
 /** Durable handoff grouping and per-thread workflow state; no executable context reset or task ownership. */
 import { defineDoc } from "@earendil-works/pi-durable";
+import { currentStateCheckpoints } from "./doc-checkpoint.ts";
 
 /** Stable stored profile identity. Missing contributions never change it or imply Chat capabilities. */
 export type ThreadType = string;
@@ -61,6 +62,7 @@ export type Workflow = {
 export const WorkflowDoc = defineDoc<Workflow>({
     kind: "pocket.workflow",
     version: 1,
+    ...currentStateCheckpoints,
     scope: "conversation",
     history: "latest",
     fork: "initial",
@@ -143,6 +145,7 @@ export type HandoffsData = {
 export const HandoffsDoc = defineDoc<HandoffsData>({
     kind: "pocket.handoffs",
     version: 1,
+    ...currentStateCheckpoints,
     scope: "session",
     initial: () => ({ workItems: {}, handoffs: {}, requests: {} }),
 });

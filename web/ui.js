@@ -430,13 +430,7 @@ function markdownParts(
         return out;
     }
 
-    rendering = conversationId ?? null;
-    linkBase = readOnly ? null : base;
-    out = partsOf(
-        sanitize(marked.parse(fencePage(text), { async: false, breaks }), cache, readOnly),
-    );
-    rendering = null;
-    linkBase = null;
+    out = renderParts(fencePage(text), conversationId, base, breaks, cache, readOnly);
 
     if (cache && !readOnly) {
         if (markdownCache.size >= MARKDOWN_CACHE) {
@@ -444,6 +438,48 @@ function markdownParts(
         }
 
         markdownCache.set(key, out);
+    }
+
+    return out;
+}
+
+/** Parse and sanitize with conversation-local image/link context, never leaking that context into the next render. */
+function renderParts(text, conversationId, base, breaks, fold, readOnly) {
+    rendering = readOnly ? null : (conversationId ?? null);
+    linkBase = readOnly ? null : base;
+
+    try {
+        return partsOf(sanitize(marked.parse(text, { async: false, breaks }), fold, readOnly));
+    } finally {
+        rendering = null;
+        linkBase = null;
+    }
+}
+
+/**
+ * Re-lex the growing text at block level: later lines can turn a paragraph into a heading or extend a list/fence.
+ * Only changed blocks need parsing, sanitizing and highlighting. References across blocks resolve on completion.
+ */
+function liveBlocks(text, conversationId, base, breaks, readOnly, kept) {
+    const blocks = new marked.Lexer(marked.defaults)
+        .blockTokens(text.replace(/\r\n|\r/g, "\n"), [])
+        .filter((token) => token.type !== "space");
+    const next = new Map();
+    const out = blocks.map((token, key) => {
+        const parts =
+            next.get(token.raw) ??
+            kept.get(token.raw) ??
+            renderParts(token.raw, conversationId, base, breaks, false, readOnly);
+
+        next.set(token.raw, parts);
+
+        return { key, parts };
+    });
+
+    kept.clear();
+
+    for (const [raw, parts] of next) {
+        kept.set(raw, parts);
     }
 
     return out;
@@ -468,9 +504,31 @@ export function Markdown({
     cache = true,
     base = null,
     breaks = true,
-    conversationId,
+    conversationId = currentConversation(),
     readOnly = false,
 }) {
+    const live = useRef(null);
+
+    // Whole HTML pages keep their existing single fenced preview; ordinary Markdown can reuse its stable blocks.
+    if (!cache && fencePage(text) === text) {
+        const settings = `${readOnly ? "mirror" : (conversationId ?? "")}\u0000${base ?? ""}\u0000${breaks}`;
+
+        if (live.current?.settings !== settings) {
+            live.current = { settings, kept: new Map() };
+        }
+
+        const blocks = liveBlocks(text, conversationId, base, breaks, readOnly, live.current.kept);
+
+        return html`<div class=${`md ${className}`}>
+            ${blocks.flatMap(({ key, parts }) =>
+                parts
+                    .filter((part) => part.kind !== undefined || part.html.trim() !== "")
+                    .map((part, index) => drawPart(part, `${key}.${index}`, true, readOnly)),
+            )}
+        </div>`;
+    }
+
+    live.current = null;
     const parts = markdownParts(
         text,
         readOnly ? null : conversationId,
@@ -488,17 +546,19 @@ export function Markdown({
     }
 
     return html`<div class=${`md ${className}`}>
-        ${parts.map((part, index) =>
-            part.kind === undefined || RichBlock === null || readOnly
-                ? html`<div
-                      key=${index}
-                      class="md-part"
-                      dangerouslySetInnerHTML=${{ __html: part.html }}
-                  ></div>`
-                : html`<${RichBlock} key=${index} ...${part} streaming=${!cache} />`,
-        )}
+        ${parts.map((part, index) => drawPart(part, index, !cache, readOnly))}
     </div>`;
 }
+
+/** A sanitized HTML run or an executable rich block (never executable in a private mirror). */
+const drawPart = (part, key, streaming, readOnly) =>
+    part.kind === undefined || RichBlock === null || readOnly
+        ? html`<div
+              key=${key}
+              class="md-part"
+              dangerouslySetInnerHTML=${{ __html: part.html }}
+          ></div>`
+        : html`<${RichBlock} key=${key} ...${part} streaming=${streaming} />`;
 
 /** File types common enough that `name.ext` alone is surely a file, not code like `store.state`. */
 const FILE_TYPES = new Set(
@@ -1294,6 +1354,53 @@ export class Boundary extends Component {
     render({ children }, { failed }) {
         return failed ? null : children;
     }
+}
+
+/** Only these fields change during an ordinary streamed answer. */
+const VIEWS = new Set(["view", "pipView"]);
+
+function onlyViews(before, after) {
+    let views = false;
+
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+        if (before[key] !== after[key]) {
+            if (!VIEWS.has(key)) {
+                return false;
+            }
+
+            views = true;
+        }
+    }
+
+    // store.set({}) is an explicit redraw, not a view-only update.
+    return views;
+}
+
+const sameProps = (a, b) =>
+    Object.keys(a).length === Object.keys(b).length &&
+    Object.keys(a).every((key) => Object.is(a[key], b[key]));
+
+class ApartFromViews extends Component {
+    shouldComponentUpdate(next) {
+        return !(
+            next.component === this.props.component &&
+            onlyViews(this.props.state, next.state) &&
+            sameProps(this.props.props, next.props)
+        );
+    }
+
+    render({ component, props }) {
+        return h(component, props);
+    }
+}
+
+/** For subtrees that read neither view: local state, props and all other store changes still render normally. */
+export function apartFromViews(component) {
+    const Wrapped = (props) => h(ApartFromViews, { component, props, state: store.state });
+
+    Wrapped.displayName = component.name;
+
+    return Wrapped;
 }
 
 /** Phones: sheets from the bottom edge, which drag back down to close, and menus that a swipe closes. */

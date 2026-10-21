@@ -113,6 +113,39 @@ after(async () => {
     cleanUp();
 });
 
+test("session events suppress identical lists per connection, but refresh after a change and reconnect", async () => {
+    const id = await newSession();
+    const tab = fakeTab(id, owner());
+    const again = fakeTab(id, owner());
+    const lists = () => tab.events.filter((event) => event.event === "sessions");
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 600));
+
+    await app.attach(tab.client);
+
+    try {
+        await pause();
+        const before = lists().length;
+
+        // The same person's second tab doesn't change presence in the catalogue.
+        await app.attach(again.client);
+        await pause();
+        assert.equal(lists().length, before);
+
+        await app.commands.updateSession(id, owner(), { title: "Updated catalogue title" });
+        await until(() => lists().length > before, "the changed session list");
+        assert.ok(JSON.stringify(lists().at(-1)?.data).includes("Updated catalogue title"));
+
+        app.detach(tab.client);
+        const detached = lists().length;
+
+        await app.attach(tab.client);
+        assert.equal(lists().length, detached + 1, "every new connection gets an initial list");
+    } finally {
+        app.detach(tab.client);
+        app.detach(again.client);
+    }
+});
+
 test("the artifact tool publishes versions, edits the latest, and serves the body", async () => {
     const id = await newSession();
 

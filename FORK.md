@@ -1,12 +1,16 @@
 # Fork provenance
 
-Pi Coop starts from [Tanner Middleton's Pi Pocket](https://github.com/TannerMidd/pi-pocket), revision `d01f763b02f06ff6144d4366eb966a76dbb35577`, version `0.11.0`.
+Pi Coop originally started from [Tanner Middleton's Pi Pocket](https://github.com/TannerMidd/pi-pocket), revision `d01f763b02f06ff6144d4366eb966a76dbb35577`, version `0.11.0`.
+
+The maintained [fork/upstream comparison](docs/upstream-differences.md) is the canonical status ledger by aspect area. It distinguishes this original starting point from the current `0.14.0` common ancestor and the upstream revision assessed through `0.19.0`, and records adopted changes, deliberate divergence, removals, deferred candidates and validation limits. The MCP/performance batch is locally implemented and independently reviewed, with validation limits recorded in the ledger; it is not committed or deployed. The provenance and earlier intake notes below remain historical records.
 
 The repository retains the upstream Git history, MIT [LICENSE](LICENSE), author metadata, pinned dependency lockfile, bundled asset licenses and tests. The upstream README is preserved at [README.upstream.md](README.upstream.md). Upstream is [TannerMidd/pi-pocket](https://github.com/TannerMidd/pi-pocket); `origin` points to the private [enkelm/pi-coop](https://github.com/enkelm/pi-coop) repository.
 
-Development is on `main`. The project, package and CLI are named `pi-coop`, with Pi Coop as the app's display name. The existing `~/.pi-durable-app` data directory, `PI_POCKET_*` environment variables and internal `pocket.*` identifiers remain unchanged. Inherited guides retain some Pocket terminology. The upstream public website in `site/` and its publishing script have been removed. Desktop-theme and wallpaper synchronization are also removed; the app keeps its bundled palettes and tiled-window appearance. `README.upstream.md` is an archived upstream reference, not this fork's feature list.
+Development is on `main`. The project, package and CLI are named `pi-coop`, with Pi Coop as the app's display name. The existing `~/.pi-durable-app` data directory, `PI_POCKET_*` environment variables and internal `pocket.*` identifiers remain unchanged. Inherited guides retain some Pocket terminology. The upstream public website pages and their publishing script have been removed; `site/shots/` retains archived screenshots. Desktop-theme and wallpaper synchronization are also removed; the app keeps its bundled palettes and tiled-window appearance. `README.upstream.md` is an archived upstream reference, not this fork's feature list.
 
-## Initial changes
+## Initial changes (historical)
+
+This section records the initial importer and subsequent mirror/terminal provenance. The original stop-and-takeover importer was later replaced by [copy-only Pi session continuation](docs/import-implementation.md); it does not describe today's import behavior.
 
 - An owner-only running-session picker for local Herdr Pi sessions, guarded process stop, preview and one-way import. The stopped-file form remains a fallback.
 - One-way conversion of selected-branch history into the existing Durable runtime.
@@ -25,7 +29,7 @@ The first mirror used GPUI only as a reference. The user then chose GPUI's struc
 
 The Node gateway adds pinned `ws` for authenticated WebSocket transport. It does not add a second terminal emulator or source-journal writer. The reference worktrees remain unchanged.
 
-## Selective upstream backports
+## Historical 0.12.2 selective backports
 
 On 2026-10-10, upstream was reviewed through [v0.12.2](https://github.com/TannerMidd/pi-pocket/releases/tag/v0.12.2), revision `e1298a0e8e674211d37ef71ecabef0ec8a9af13c`. This is a selective backport, not a merge of the complete 0.12 UI or a change to the fork's version.
 
@@ -34,12 +38,12 @@ On 2026-10-10, upstream was reviewed through [v0.12.2](https://github.com/Tanner
 - Subagents accept `max` and fit explicit or inherited thinking levels to their selected model (`7feab64`, `fa88cae`). Session configuration and the tool share the same thinking-level definitions.
 - A session-scoped invite cannot change its working directory (`708ff25`). Spend summaries aggregate conversation costs once rather than walking them for each session (`cef6468`).
 
-The upstream session importer is not included: the fork already has bounded saved-history discovery, source archives and guarded Herdr takeover. The new transcript/composer layout, sidebar rail, subagent board/report batching, default-model control and project-trust UI are deferred. Their supporting interfaces should be integrated deliberately, not mixed piecemeal into this fork's private and shared views. Unrelated UI and development-tool dependency upgrades are also left out.
+At that intake, the upstream session importer was left out in favor of the fork's bounded saved-history discovery, source archives and guarded Herdr takeover. The transcript/composer layout, sidebar rail, subagent board/report batching, default-model control and project-trust UI were deferred, along with unrelated UI and development-tool dependency upgrades. These are historical decisions, not a current missing-feature list. The `0.14.0` common ancestor and later fork work now include those layout/reporting/model/trust mechanisms; import has become copy-only. See the [current ledger](docs/upstream-differences.md) for their status and the later selective intake.
 
-After installing the updated dependencies, restart through Menu → Restart server. Do not open live app data in a second server to test the upgrade. Pi's Azure provider key changed from `azure-openai-responses` to `azure`; existing Azure users may need to sign in again through Providers and select the renamed provider's model.
+That dependency upgrade required an owner-requested restart through Menu → Restart server. Live app data must not be opened in a second server for testing. Pi's Azure provider key changed from `azure-openai-responses` to `azure`; users of that older configuration may need to sign in again through Providers and select the renamed provider's model. This historical upgrade note is not an instruction to restart for the current batch.
 
 ## Keeping upstream changes manageable
 
 Keep existing stored document kinds and wire formats stable. Add narrowly scoped modules and fields rather than renaming internal Pocket identifiers throughout the code. The Pi Coop name changes package metadata, the launcher command and app branding, not stored data.
 
-Future merges should run both the upstream tests and the import tests, especially source-format handling, transaction rollback, session visibility and reconnect behavior. Durable and Pi APIs are pinned to the versions in the lockfile; upgrading them needs those checks again.
+Future intakes should selectively port mechanisms rather than merge whole releases. Update the [canonical ledger](docs/upstream-differences.md) at intake, adoption or removal, with exact refs, owner selection, code/review references and actual validation. Run relevant upstream and fork tests, especially source-format handling, transaction rollback, session visibility and reconnect behavior. Durable and Pi APIs are pinned to the versions in the lockfile; upgrading them needs those checks again. An unavailable check remains a limitation, not a pass.

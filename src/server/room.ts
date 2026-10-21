@@ -51,7 +51,11 @@ import {
 import { COMMAND_ENTRY, SHELL_ENTRY } from "./entry-format.ts";
 import { agentInfo } from "./models.ts";
 import {
+    type ClientBlock,
     type ClientEntry,
+    type ClientLive,
+    type ClientLiveUpdate,
+    liveMessageDelta,
     PEEK_LINES,
     type PeekLine,
     peekLines,
@@ -131,10 +135,13 @@ export interface Client {
     /** The JSON of each slow-changing view field this client last got, so updates repeat only those that changed. */
     sentFields?: Map<string, string>;
     /**
-     * What the tab's code understands of updates (`PROTOCOL` in `web/store.js`): 2 keeps the queue an update leaves out.
-     * Older code names none, and gets the queue with each update.
+     * What the tab's code understands of updates (`PROTOCOL` in `web/store.js`): 2 keeps the queue an update leaves out;
+     * 3 also takes the live message as what changed (`liveMessageDelta`). A tab below 3 gets the whole live message with
+     * each update; older code, which names none, also gets the queue.
      */
     readonly protocol?: number;
+    /** The blocks of the live message this connection last received; undefined when it has none. */
+    liveBlocks?: ClientBlock[];
     /**
      * This connection, apart from others of the same tab id: a duplicated browser tab keeps the id, and a reconnect
      * briefly overlaps the old connection. Sent in `hello`; peek lists name it.
@@ -150,6 +157,8 @@ export interface Client {
     boardSeq?: number;
     /** The JSON of the subagents this tab's board last got, so an unchanged list is not sent again. */
     boardSent?: string;
+    /** The JSON of the last session list sent on this connection, so an unchanged list is not sent again. */
+    sessionsSent?: string;
     /**
      * This tab's PiP panel, while open: a view of PiP's conversation beside the one the tab shows, which reaches the tab
      * as `pipview` events (`PocketApp.setPip`).
@@ -297,6 +306,8 @@ export class Room {
     /** HEAD observation per actual tab: callers may have different destination access/results. */
     readonly #heads = new WeakMap<Client, string>();
     readonly #projected = new Map<number, ClientEntry | null>();
+    /** The live run projected once per immutable committed state, shared by room clients and peek tiles. */
+    #live: { from: LiveState | undefined; projected: ClientLive } | undefined;
     /** Each waiting message's bounded cache key and report names; full editable text comes from the inbox. */
     readonly #queued = new Map<number, { text: string; reports: string[] | undefined }>();
     authors: Record<string, string> = {};
@@ -556,6 +567,7 @@ export class Room {
             client.sentEntries.clear();
             client.orderKey = "";
             sentFields.clear();
+            client.liveBlocks = undefined;
         }
 
         const entries: ClientEntry[] = [];
@@ -582,7 +594,6 @@ export class Room {
         client.orderKey = orderKey;
         const agentState = (view.docs["pi.agent"] ?? {}) as AgentState;
         const inbox = (view.docs["pi.inbox"] ?? { items: [] }) as unknown as InboxState;
-        const live = view.docs["pi.live"] as LiveState | undefined;
         // These grow with the session (authors has one item per message) but rarely change: streaming sends an update
         // every 90 ms, which would repeat them all each time. Send each only when it differs from what this client has.
         const queue = this.#inbox(inbox.items);
@@ -699,12 +710,14 @@ export class Room {
             fields.inbox = queue;
         }
 
+        const live = this.#projectLive(view.docs["pi.live"] as LiveState | undefined);
+
         client.send("view", {
             full,
             conversation: this.#app.conversationInfo(this, client.user),
             entries,
             ...(orderChanged || full ? { order } : {}),
-            live: projectLive(live),
+            live: this.#liveFor(client, live),
             agent: agentInfo(
                 this.#app.models,
                 agentState,
@@ -717,6 +730,34 @@ export class Room {
             approvals: this.#app.approvals.forConversation(this.id),
             ...fields,
         });
+        // Do not advance the delta base until the update is built and sent: a throw must not skip unseen characters.
+        client.liveBlocks = live.generation?.message?.blocks;
+    }
+
+    #projectLive(state: LiveState | undefined): ClientLive {
+        if (this.#live === undefined || this.#live.from !== state) {
+            this.#live = { from: state, projected: projectLive(state) };
+        }
+
+        return this.#live.projected;
+    }
+
+    /** Protocol 3 takes only what changed since this connection's last message; older code gets it whole. */
+    #liveFor(client: Client, live: ClientLive): ClientLiveUpdate {
+        const generation = live.generation;
+        const sent = client.liveBlocks;
+
+        if (generation?.message === undefined || sent === undefined || (client.protocol ?? 1) < 3) {
+            return live;
+        }
+
+        return {
+            ...live,
+            generation: {
+                ...generation,
+                message: liveMessageDelta(sent, generation.message.blocks),
+            },
+        };
     }
 
     /** Full submitted text/editing metadata, bounded command previews, attribution and subagent report names. */
@@ -846,7 +887,7 @@ export class Room {
             conversationId: this.id,
             lines: peekLines(
                 recent.reverse(),
-                projectLive(view.docs["pi.live"] as LiveState | undefined),
+                this.#projectLive(view.docs["pi.live"] as LiveState | undefined),
             ),
             // Its own calls waiting for someone; for a session, its subagents' too, as they make the session wait.
             approvals: this.#app.approvals
@@ -992,6 +1033,7 @@ export class Room {
         this.#view?.dispose();
         this.#view = undefined;
         this.#projected.clear();
+        this.#live = undefined;
         this.#queued.clear();
     }
 }

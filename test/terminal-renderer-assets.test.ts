@@ -52,6 +52,10 @@ class Response extends Writable {
         this.headers.set(name.toLowerCase(), value);
     }
 
+    getHeader(name: string) {
+        return this.headers.get(name.toLowerCase());
+    }
+
     writeHead(status: number, headers: Record<string, string>) {
         this.statusCode = status;
         this.headersSent = true;
@@ -81,10 +85,11 @@ before(async () => {
         join(directory, "node_modules"),
     );
     await mkdir(join(directory, "web"));
-    await cp(
-        new URL("../web/theme-surface.js", import.meta.url),
-        join(directory, "web/theme-surface.js"),
-    );
+
+    for (const file of ["theme-surface.js", "review-message.js", "pip-mention-text.js"]) {
+        await cp(new URL(`../web/${file}`, import.meta.url), join(directory, "web", file));
+    }
+
     await writeFile(join(directory, "package.json"), '{"type":"module"}');
 
     for (const [path, body] of fixtures) {

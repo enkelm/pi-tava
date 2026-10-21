@@ -12,6 +12,7 @@ import type {
     EntryRecord,
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
+import { editFacts } from "./changes.ts";
 import type { User } from "./config.ts";
 import { AuthorsDoc } from "./docs.ts";
 import { transcriptMarkdown } from "./export.ts";
@@ -19,9 +20,14 @@ import { homePath } from "./paths.ts";
 import { type ClientEntry, projectEntry } from "./projection.ts";
 
 const context = BACKGROUND_CONTEXT;
+/** Retain only the last 64 sessions' immutable edit facts, never filesystem observations or authority. */
+const EDITS_KEPT = 64;
+
+type EditHistory = { last: number; entries: readonly ClientEntry[] };
 
 export class Transcripts {
     readonly #app: PocketApp;
+    readonly #edits = new Map<ConversationId, EditHistory>();
 
     constructor(app: PocketApp) {
         this.#app = app;
@@ -159,14 +165,29 @@ export class Transcripts {
 
     /** A conversation's whole history, oldest first, as browsers get it (`full`: nothing clipped). */
     async allEntries(id: ConversationId, full: boolean): Promise<ClientEntry[]> {
+        return (await this.entriesAfter(id, 0, full)).entries;
+    }
+
+    /** New immutable history, oldest first, including inherited fork entries; `last` includes unprojected entries. */
+    async entriesAfter(
+        id: ConversationId,
+        after: number,
+        full: boolean,
+        ctx: Context = context,
+    ): Promise<{ entries: ClientEntry[]; last: number }> {
+        ctx.abortSignal?.throwIfAborted();
         const conversation = await this.#app.conversation(id);
+        const query = after > 0 ? { minEntryId: (after + 1) as EntryId } : {};
         const entries: ClientEntry[] = [];
+        let last = after;
         let cursor: Cursor | undefined;
 
         do {
-            const page = await conversation.entries({}, 256, cursor, context);
+            ctx.abortSignal?.throwIfAborted();
+            const page = await conversation.entries(query, 256, cursor, ctx);
 
             for (const entry of page.items) {
+                last = Math.max(last, Number(entry.id));
                 const projected = projectEntry(entry, full);
 
                 if (projected !== undefined) {
@@ -177,7 +198,36 @@ export class Transcripts {
             cursor = page.next;
         } while (cursor !== undefined);
 
-        return entries.reverse();
+        ctx.abortSignal?.throwIfAborted();
+
+        return { entries: entries.reverse(), last };
+    }
+
+    /** Shared by Changes and native Reviews. Callers still authorize each destination read and its result. */
+    async editEntries(id: ConversationId, ctx: Context = context): Promise<readonly ClientEntry[]> {
+        const previous = this.#edits.get(id) ?? { last: 0, entries: [] };
+        const read = await this.entriesAfter(id, previous.last, false, ctx);
+        const current = this.#edits.get(id);
+        // Keep the complete baseline even if other sessions evicted it while this read was pending.
+        const known = current !== undefined && current.last >= previous.last ? current : previous;
+        const added = read.entries.flatMap((entry) => {
+            const facts = entry.id > known.last ? editFacts(entry) : undefined;
+
+            return facts === undefined ? [] : [facts];
+        });
+        const next = {
+            last: Math.max(known.last, read.last),
+            entries: added.length === 0 ? known.entries : [...known.entries, ...added],
+        };
+
+        this.#edits.delete(id);
+        this.#edits.set(id, next);
+
+        if (this.#edits.size > EDITS_KEPT) {
+            this.#edits.delete(this.#edits.keys().next().value!);
+        }
+
+        return next.entries;
     }
 
     /** A session as a Markdown file: its whole history, with who wrote what. */

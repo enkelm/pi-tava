@@ -11,12 +11,19 @@ import {
 } from "node:fs";
 import { open } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { extname, join } from "node:path";
+import { extname, join, posix, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import { APP_ROOT } from "../config.ts";
 import { HttpError } from "../errors.ts";
-import { send } from "./io.ts";
+import {
+    accepted,
+    compressFile,
+    compressible,
+    type Encoding,
+    MIN_COMPRESS_BYTES,
+} from "./compress.ts";
+import { escapeHtml, send } from "./io.ts";
 
 export const WEB = join(APP_ROOT, "web");
 const MODULES = join(APP_ROOT, "node_modules");
@@ -138,7 +145,132 @@ function appPolicy(html: string): string {
     ].join("; ");
 }
 
-/** The app page, with its content security policy. */
+/** Last-read public app bytes, shared by static delivery and the preload graph. */
+interface ReadFile {
+    stamp: string;
+    body: Buffer;
+    hash: string;
+    encoded: Map<Encoding, Promise<Buffer>>;
+    imports?: string[];
+}
+
+const readFiles = new Map<string, ReadFile>();
+const MAX_CACHED_FILE = 2 * 1024 * 1024;
+const MAX_CACHED_BYTES = 16 * 1024 * 1024;
+let cachedBytes = 0;
+
+function forget(file: string): void {
+    const previous = readFiles.get(file);
+
+    if (previous !== undefined) {
+        // Reserve room for identity plus both encodings, including compression overhead.
+        cachedBytes -= previous.body.length * 4;
+        readFiles.delete(file);
+    }
+}
+
+/** Files edited in the last two seconds bypass reuse even on a coarse filesystem clock. */
+function readNow(file: string): ReadFile {
+    const stats = statSync(file, { bigint: true });
+    const stamp = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+    const settled =
+        Date.now() -
+            Number((stats.mtimeNs > stats.ctimeNs ? stats.mtimeNs : stats.ctimeNs) / 1_000_000n) >
+        2000;
+    const known = readFiles.get(file);
+
+    if (known?.stamp === stamp && settled) {
+        readFiles.delete(file);
+        readFiles.set(file, known);
+
+        return known;
+    }
+
+    forget(file);
+    const body = readFileSync(file);
+    const read: ReadFile = {
+        stamp,
+        body,
+        hash: createHash("sha256").update(body).digest("hex").slice(0, 24),
+        encoded: new Map(),
+    };
+
+    // Renderer payloads have a dedicated streaming route. Never retain them in this whole-file cache.
+    if (
+        settled &&
+        body.length <= MAX_CACHED_FILE &&
+        !file.startsWith(join(WEB, "herdr-renderer") + sep)
+    ) {
+        while (cachedBytes + body.length * 4 > MAX_CACHED_BYTES && readFiles.size > 0) {
+            forget(readFiles.keys().next().value!);
+        }
+
+        readFiles.set(file, read);
+        cachedBytes += body.length * 4;
+    }
+
+    return read;
+}
+
+/** Only public app modules and the declared vendored modules participate in the initial graph. */
+function moduleFile(address: string): string | undefined {
+    const vendor = /^\/vendor\/([^/]+)$/.exec(address)?.[1];
+
+    if (vendor !== undefined) {
+        return VENDOR[vendor];
+    }
+
+    return /^\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_-]+\.js$/.test(address) &&
+        !address.startsWith("/herdr-renderer/")
+        ? join(WEB, address)
+        : undefined;
+}
+
+// Static imports and re-exports only, not import(...). App sources use ordinary quoted specifiers.
+const STATIC_IMPORT =
+    /(?:^|\n)\s*(?:import|export)\b[^"'`;()]*?\bfrom\s*["']([^"']+)["']|(?:^|\n)\s*import\s*["']([^"']+)["']/g;
+
+function preloads(imports: Record<string, string>): string[] {
+    const found = new Set<string>();
+
+    const visit = (address: string) => {
+        const file = moduleFile(address);
+
+        if (file === undefined || found.has(address)) {
+            return;
+        }
+
+        found.add(address);
+
+        try {
+            const read = readNow(file);
+
+            read.imports ??= [...read.body.toString("utf8").matchAll(STATIC_IMPORT)].map(
+                (match) => match[1] ?? match[2]!,
+            );
+
+            for (const specifier of read.imports) {
+                const target = specifier.startsWith(".")
+                    ? posix.join(posix.dirname(address), specifier)
+                    : specifier.startsWith("/")
+                      ? specifier
+                      : imports[specifier];
+
+                if (typeof target === "string") {
+                    visit(target);
+                }
+            }
+        } catch {
+            // A missing module retains the browser's ordinary import error, not a broken app document.
+        }
+    };
+
+    visit("/app.js");
+
+    return [...found];
+}
+
+/** The app document keeps its revision and CSP while advertising only the initial static module graph. */
 export function serveApp(response: ServerResponse, webRevision: string): void {
     let body: string;
 
@@ -153,33 +285,94 @@ export function serveApp(response: ServerResponse, webRevision: string): void {
         return;
     }
 
+    const policy = appPolicy(body);
+
+    try {
+        const map = /<script type="importmap">([\s\S]*?)<\/script>/.exec(body)?.[1];
+        const imports = map === undefined ? {} : JSON.parse(map).imports;
+        const links = preloads(imports ?? {})
+            .map((address) => `<link rel="modulepreload" href="${escapeHtml(address)}" />`)
+            .join("\n        ");
+
+        body = body.replace("</head>", () => `${links}\n    </head>`);
+    } catch {
+        // Invalid import-map edits fall back to the browser's ordinary module loading.
+    }
+
     send(response, 200, body, "text/html; charset=utf-8", {
         "cache-control": "no-cache",
-        "content-security-policy": appPolicy(body),
+        "content-security-policy": policy,
     });
 }
 
-export function serveFile(response: ServerResponse, file: string, fallbackType?: string): void {
-    let body: Buffer;
+/** Live-editable static files revalidate by content and compress off the main thread. */
+export async function serveFile(
+    request: IncomingMessage,
+    response: ServerResponse,
+    file: string,
+    fallbackType?: string,
+): Promise<void> {
+    let read: ReadFile;
 
     try {
-        body = readFileSync(file);
+        read = readNow(file);
     } catch {
+        forget(file);
         send(response, 404, "Not found");
 
         return;
     }
 
-    // No caching: the app is edited live, and a reload should always get the newest files.
-    send(
-        response,
-        200,
-        body,
-        fallbackType ?? TYPES[extname(file).toLowerCase()] ?? "application/octet-stream",
-        {
-            "cache-control": "no-cache",
-        },
-    );
+    const type = fallbackType ?? TYPES[extname(file).toLowerCase()] ?? "application/octet-stream";
+    const text = compressible(type);
+    const encoding = text && read.body.length >= MIN_COMPRESS_BYTES ? accepted(request) : undefined;
+    // Weak validation intentionally represents the decoded content across all encodings.
+    const tag = `"${read.hash}"`;
+    const headers: Record<string, string> = {
+        "content-type": type,
+        "cache-control": "no-cache",
+        etag: `W/${tag}`,
+        ...(text ? { vary: "accept-encoding" } : {}),
+    };
+    const tags = String(request.headers["if-none-match"] ?? "")
+        .split(",")
+        .map((candidate) => candidate.trim().replace(/^W\//, ""));
+
+    if (
+        (request.method === "GET" || request.method === "HEAD") &&
+        (tags.includes(tag) || tags.includes("*"))
+    ) {
+        response.writeHead(304, headers);
+        response.end();
+
+        return;
+    }
+
+    let body = read.body;
+
+    if (encoding !== undefined) {
+        let encoded = read.encoded.get(encoding);
+
+        if (encoded === undefined) {
+            encoded = compressFile(read.body, encoding);
+            read.encoded.set(encoding, encoded);
+        }
+
+        try {
+            body = await encoded;
+            headers["content-encoding"] = encoding;
+        } catch {
+            // Keep the identity answer usable; a later request may try compression again.
+            read.encoded.delete(encoding);
+        }
+    }
+
+    if (response.destroyed || response.writableEnded) {
+        return;
+    }
+
+    response.writeHead(200, { ...headers, "content-length": String(body.length) });
+    response.end(request.method === "HEAD" ? undefined : body);
 }
 
 // Only the offline builder's public, content-addressed outputs are immutable. In particular,

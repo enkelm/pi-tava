@@ -42,6 +42,7 @@ A drop-in extension stays when Pi Pocket updates, and the owner can turn it off 
 - [map.md](map.md): where each part of the code is, and how to add the usual things.
 - [architecture.md](architecture.md): how the parts depend on each other, and the orders that they need.
 - [features.md](features.md): what each feature does, as people use it.
+- [upstream-differences.md](upstream-differences.md): the maintained fork/upstream ledger, assessed refs, adoption decisions and validation limits; [FORK.md](../FORK.md) retains historical provenance.
 - [projects.md](projects.md): Projects, typed threads and their durable storage/access contract.
 - [handoffs.md](handoffs.md): Reviewer, Land and Publish handoffs, grouped Work Items and execution rules.
 - [provider-extensions.md](provider-extensions.md): owner-managed Pi provider packages, restart-only activation and recovery.

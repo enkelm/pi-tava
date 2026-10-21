@@ -13,6 +13,7 @@ import {
     type ToolExecutionApi,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { currentStateCheckpoints } from "./doc-checkpoint.ts";
 import type { PocketApp } from "./app.ts";
 import type { ApprovalAnswer } from "./host.ts";
 import { WorkspaceBackend } from "./workspace-backend.ts";
@@ -58,6 +59,7 @@ export type PublicationReceipt = {
 export const PublicationsDoc = defineDoc<{ receipts: Record<string, PublicationReceipt> }>({
     kind: "pocket.workflow-publications",
     version: 1,
+    ...currentStateCheckpoints,
     scope: "conversation",
     history: "latest",
     fork: "initial",
