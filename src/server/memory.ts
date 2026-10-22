@@ -41,6 +41,9 @@ const PROJECT_FOR_MS = 60_000;
 export type Project = { key: string; name: string };
 export type LessonScope = "project" | "everywhere";
 type PrivateScope = NonNullable<Lesson["privateAgent"]>;
+/** An owner-native identity reference, not a conversation alias or a client-provided memory scope. */
+type IdentitySubject = { agentId: string; user: User };
+type MemorySubject = ConversationId | IdentitySubject;
 const scopeKey = (scope: PrivateScope | undefined) =>
     scope === undefined ? "shared" : JSON.stringify([scope.ownerId, scope.agentId]);
 const matchesScope = (lesson: Lesson, scope: PrivateScope | undefined) =>
@@ -137,8 +140,14 @@ export class Memory {
         this.#app = app;
     }
 
-    /** Fail closed: a deleted or retired named conversation must never become a shared-memory reader/writer. */
-    #scope(id: ConversationId): PrivateScope | undefined {
+    /** Fail closed: deleted identities and retired named conversations never become shared-memory subjects. */
+    #scope(id: MemorySubject): PrivateScope | undefined {
+        if (typeof id === "object") {
+            const identity = this.#app.pip.agents.ownedIdentity(id.agentId, id.user);
+
+            return { ownerId: identity.ownerId, agentId: identity.agentId };
+        }
+
         const root = this.#app.rootOf(id);
 
         if (this.#app.sessionMeta(root) === undefined) {
@@ -159,7 +168,7 @@ export class Memory {
         return scope;
     }
 
-    #live(id: ConversationId, scope: PrivateScope | undefined, writer?: Writer): void {
+    #live(id: MemorySubject, scope: PrivateScope | undefined, writer?: Writer): void {
         if (scopeKey(this.#scope(id)) !== scopeKey(scope)) {
             throw new HttpError(409, "Memory identity changed; try again.");
         }
@@ -171,14 +180,17 @@ export class Memory {
 
     /** The project of a conversation working in `cwd`; undefined for PiP and private agents. */
     async project(
-        conversationId: ConversationId,
+        conversationId: MemorySubject,
         cwd: string | undefined,
     ): Promise<Project | undefined> {
         const app = this.#app;
 
         this.#scope(conversationId);
 
-        if (app.sessionMeta(app.rootOf(conversationId))?.pip !== undefined) {
+        if (
+            typeof conversationId === "object" ||
+            app.sessionMeta(app.rootOf(conversationId))?.pip !== undefined
+        ) {
             return undefined;
         }
 
@@ -224,8 +236,8 @@ export class Memory {
         );
     }
 
-    /** Conversation-bound listing for tools: private scope is always server-derived and rechecked after reads. */
-    async list(id: ConversationId, cwd: string | undefined): Promise<Lesson[]> {
+    /** Subject-bound listing: private scope is always server-derived and rechecked after reads. */
+    async list(id: MemorySubject, cwd: string | undefined): Promise<Lesson[]> {
         const scope = this.#scope(id);
         const project = scope === undefined ? await this.project(id, cwd) : undefined;
         const lessons = ordered(
@@ -302,12 +314,13 @@ export class Memory {
     }
 
     /** Cross-project review is for the human owner in their private PiP, before reading any lesson or writing activity. */
-    #requirePendingOwner(writer: Writer, conversationId: ConversationId): void {
+    #requirePendingOwner(writer: Writer, conversationId: MemorySubject): void {
         if (writer.byPi || !this.#isOwner(writer.userId)) {
             throw new HttpError(403, "Only the owner can review all pending lessons.");
         }
 
         if (
+            typeof conversationId === "object" ||
             this.#scope(conversationId) !== undefined ||
             this.#app.sessionMeta(this.#app.rootOf(conversationId))?.pip !== writer.userId
         ) {
@@ -339,7 +352,12 @@ export class Memory {
     }
 
     /** A line in the session's chat, as people see the rest of what changes. */
-    async #activity(tx: Tx, conversationId: ConversationId, writer: Writer, text: string) {
+    async #activity(tx: Tx, conversationId: MemorySubject, writer: Writer, text: string) {
+        // Identity settings may exist before any transcript. Never create a chat just to record a memory edit.
+        if (typeof conversationId === "object") {
+            return;
+        }
+
         const root = this.#app.rootOf(conversationId);
 
         addActivity(
@@ -392,7 +410,7 @@ export class Memory {
         return { doc, scopedKey, fingerprint, saved };
     }
 
-    async #invocation(tx: Tx, id: ConversationId, api: ToolExecutionApi): Promise<void> {
+    async #invocation(tx: Tx, id: MemorySubject, api: ToolExecutionApi): Promise<void> {
         if (api.conversationId !== id) {
             throw new HttpError(
                 403,
@@ -408,7 +426,7 @@ export class Memory {
      * person (or Pi) can act on when it will not do.
      */
     async add(
-        conversationId: ConversationId,
+        conversationId: MemorySubject,
         cwd: string | undefined,
         writer: Writer,
         request: { text: unknown; scope: LessonScope; key?: string; invocation?: ToolExecutionApi },
@@ -422,8 +440,8 @@ export class Memory {
             scope === undefined && request.scope === "project"
                 ? await this.project(conversationId, cwd)
                 : undefined;
-        const root = app.rootOf(conversationId);
-        const meta = app.sessionMeta(root);
+        const root = typeof conversationId === "object" ? undefined : app.rootOf(conversationId);
+        const meta = root === undefined ? undefined : app.sessionMeta(root);
         const by = writer.userId ?? meta?.createdBy ?? "";
         const pending = scope === undefined && this.#held(writer);
 
@@ -550,7 +568,7 @@ export class Memory {
      * tool replay is recognized before that check; a new stale call cannot overwrite later learning.
      */
     async change(
-        conversationId: ConversationId,
+        conversationId: MemorySubject,
         cwd: string | undefined,
         writer: Writer,
         id: string,
@@ -848,18 +866,22 @@ export class Memory {
     }
 
     /** The session's lessons, or the human owner's pending lessons across all projects and everywhere in their private PiP. */
-    async view(id: ConversationId, user: User, pendingOnly = false): Promise<MemoryView> {
+    async view(id: MemorySubject, user: User, pendingOnly = false): Promise<MemoryView> {
         const app = this.#app;
 
         if (pendingOnly) {
             this.#requirePendingOwner(this.#person(user), id);
         }
 
-        app.requireSee(user, id);
-        const owner = user.role === "owner";
+        if (typeof id !== "object") {
+            app.requireSee(user, id);
+        }
+
         const scope = this.#scope(id);
+        const owner = user.role === "owner";
+        const cwd = typeof id === "object" ? undefined : app.cwdOf(id);
         const project =
-            pendingOnly || scope !== undefined ? undefined : await this.project(id, app.cwdOf(id));
+            pendingOnly || scope !== undefined ? undefined : await this.project(id, cwd);
         const applying = pendingOnly
             ? ordered(
                   (await this.#all()).filter(
@@ -868,9 +890,12 @@ export class Memory {
                           (lesson.pending === true || lesson.proposal !== undefined),
                   ),
               )
-            : await this.list(id, app.cwdOf(id));
+            : await this.list(id, cwd);
 
-        app.requireSee(user, id);
+        if (typeof id !== "object") {
+            app.requireSee(user, id);
+        }
+
         this.#live(id, scope, this.#person(user));
         const lessons = applying
             .filter((lesson) => lesson.pending !== true || owner || lesson.by === user.id)
@@ -943,6 +968,44 @@ export class Memory {
                 text: MAX_LESSON,
             },
         };
+    }
+
+    /** Owner-native Memory access, including identities that have never had a chat. */
+    async identityView(agentId: string, user: User): Promise<MemoryView> {
+        return this.view({ agentId, user }, user);
+    }
+
+    /** Uses the same namespace, limits and persistence as learned Memory in this identity's chats. */
+    async identityRemember(
+        agentId: string,
+        user: User,
+        request: { text?: unknown; scope?: unknown },
+    ): Promise<Lesson> {
+        return this.add({ agentId, user }, undefined, this.#person(user), {
+            text: request.text,
+            scope: "everywhere",
+        });
+    }
+
+    /** Identity edits require the same observed revision as edits made from a private chat. */
+    async identityEdit(
+        agentId: string,
+        user: User,
+        lessonId: string,
+        change: { text: unknown } | "remove",
+        expectedRevision?: unknown,
+    ): Promise<Lesson> {
+        return this.change(
+            { agentId, user },
+            undefined,
+            this.#person(user),
+            lessonId,
+            change,
+            undefined,
+            false,
+            undefined,
+            expectedRevision,
+        );
     }
 
     /** A person saves a lesson by hand. */

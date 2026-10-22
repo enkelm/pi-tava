@@ -1,8 +1,5 @@
 /** `/api/c/:id`: one conversation's routes, for people the API has checked may see it. */
-import { randomUUID } from "node:crypto";
-import { createWriteStream, rmSync } from "node:fs";
-import { basename, extname, join, resolve, sep } from "node:path";
-import { pipeline } from "node:stream/promises";
+import { resolve, sep } from "node:path";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -10,11 +7,10 @@ import type { Attachment, SubmitRequest } from "../commands.ts";
 import { HttpError } from "../errors.ts";
 import type { CommandRequest } from "../extension-commands.ts";
 import type { ApplyReviewSuggestion, CommentReview, ResolveReview } from "../reviews.ts";
-import { serveImage, sniffImage, TYPES } from "./assets.ts";
+import { serveImage, sniffImage } from "./assets.ts";
+import { receiveUpload } from "./uploads.ts";
 import { extensionRoute } from "./extension-routes.ts";
 import { type ApiRequest, json, readJson, send, withReadContext } from "./io.ts";
-
-const MAX_UPLOAD = 50 * 1024 * 1024;
 
 const ENTRY_IMAGE_TYPES = new Set([
     "image/png",
@@ -23,14 +19,6 @@ const ENTRY_IMAGE_TYPES = new Set([
     "image/webp",
     "image/bmp",
 ]);
-
-function safeName(name: string): string {
-    const base = basename(name)
-        .replace(/[^\w.\- ()]+/g, "_")
-        .trim();
-
-    return base === "" || base.startsWith(".") ? `upload${base}` : base.slice(0, 120);
-}
 
 export async function conversationRoutes(
     api: ApiRequest,
@@ -701,56 +689,17 @@ async function dispatchConversation(
     if (third === "upload" && method === "POST") {
         app.requireSteer(user);
 
-        if (Number(request.headers["content-length"] ?? 0) > MAX_UPLOAD) {
-            throw new HttpError(413, "Files can be up to 50 MB");
-        }
-
         await app.conversation(id);
-        const name = safeName(url.searchParams.get("name") ?? "upload");
-        const directory = app.workspace.uploadDirectory(id);
-        // Unique, and never written over: pasted images all arrive as image.png, often at once.
-        const file = join(
-            directory,
-            `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${name}`,
+
+        return json(
+            response,
+            200,
+            await receiveUpload(
+                request,
+                app.workspace.uploadDirectory(id),
+                url.searchParams.get("name") ?? "upload",
+            ),
         );
-        let size = 0;
-
-        request.on("data", (chunk: Buffer) => {
-            size += chunk.length;
-
-            if (size > MAX_UPLOAD) {
-                request.destroy(new HttpError(413, "Files can be up to 50 MB"));
-            }
-        });
-
-        try {
-            await pipeline(request, createWriteStream(file, { mode: 0o600, flags: "wx" }));
-        } catch (error) {
-            // A cut-off or oversized upload leaves nothing behind (and a name already taken was never this upload's).
-            // Cut off is the client's doing, not a server error.
-            if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-                rmSync(file, { force: true });
-            }
-
-            if (error instanceof HttpError || request.complete) {
-                throw error;
-            }
-
-            throw new HttpError(400, "The upload stopped before it finished");
-        }
-
-        const mime =
-            String(request.headers["content-type"] ?? "") ||
-            TYPES[extname(name).toLowerCase()] ||
-            "application/octet-stream";
-        const attachment: Attachment = {
-            path: file,
-            name,
-            mime: mime.split(";")[0]!.trim(),
-            size,
-        };
-
-        return json(response, 200, attachment);
     }
 
     throw new HttpError(404, "Unknown API route");

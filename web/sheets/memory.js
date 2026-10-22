@@ -3,13 +3,27 @@ import { useEffect, useState } from "preact/hooks";
 import { api, attempt, closeSheet, navigate, notify, store } from "../store.js";
 import { html, Sheet, timeAgo } from "../ui.js";
 
-/** Memory needs its extension, and a conversation to say which project: `id`, or the one open. */
-export const memoryAvailable = (id) =>
-    (id ?? store.state.conversationId) !== null &&
-    store.state.server?.extensions?.includes("pocket-memory") === true;
+const identityId = (id) =>
+    typeof id === "string" && id.startsWith("agent:") ? id.slice("agent:".length) : null;
 
-const path = (id, rest = "", pendingOnly = false) =>
-    `c/${id}/memory${rest}${pendingOnly ? "?pending=all" : ""}`;
+/** Memory needs its extension and a conversation or owner-private identity; neither creates a chat. */
+export const memoryAvailable = (id) => {
+    const subject = id ?? store.state.conversationId;
+    const agentId = identityId(subject);
+
+    return (
+        subject != null &&
+        (agentId === null || (agentId !== "" && store.state.me?.role === "owner")) &&
+        store.state.server?.extensions?.includes("pocket-memory") === true
+    );
+};
+
+const path = (id, rest = "", pendingOnly = false) => {
+    const agentId = identityId(id);
+    const base = agentId === null ? `c/${id}` : `pip/agents/${encodeURIComponent(agentId)}`;
+
+    return `${base}/memory${rest}${pendingOnly ? "?pending=all" : ""}`;
+};
 
 /**
  * The fetch under way for each conversation, `{ rev, promise }`: the sheet, the menu, and each memory call ask once

@@ -16,13 +16,16 @@ const bridge = {
         get state() {
             return active.state;
         },
+        set: (value: Props) => active.patch(value),
     },
     api: (...args: any[]) => active.api(...args),
     uid: () => active.uid(),
     navigate: (id: number) => active.navigate(id),
     toSessions: () => active.toSessions(),
     openSheet: (sheet: Props) => active.openSheet(sheet),
+    closeSheet: () => active.patch({ sheet: null }),
     projectsAvailable: () => true,
+    sheet: (props: Props) => h("test-sheet", props),
     useChanges: () => ({ changes: active.changes }),
     headLabel: () => "feature/tabs",
     branchAvailable: () => true,
@@ -74,10 +77,14 @@ after(() => {
 const sources: Record<string, string> = {
     "preact/hooks": "export const {useState,useRef,useEffect}=globalThis.agentTabsUiFixture.hooks;",
     "./store.js":
-        "export const {store,api,uid,navigate,openSheet,projectsAvailable}=globalThis.agentTabsUiFixture; export const closeSheet=()=>{};",
+        "export const {store,api,uid,navigate,openSheet,closeSheet,projectsAvailable}=globalThis.agentTabsUiFixture;",
     "./sessions.js": "export const {toSessions}=globalThis.agentTabsUiFixture;",
+    "./named-agents.js":
+        "const b=globalThis.agentTabsUiFixture; export const namedAgentsAvailable=()=>b.store.state.me?.role==='owner' && b.store.state.server?.privateAgents>=4; export const openAgentSettings=(id,agentId,section)=>b.openSheet({type:'named-agent',id,agentId,section});",
+    "./agent-drafts.js":
+        "const b=globalThis.agentTabsUiFixture; const drafts=()=>b.store.state.localDrafts.filter(d=>d.userId===b.store.state.me.id); export const agentDrafts=(agentId)=>drafts().filter(d=>d.agentId===agentId); export const selectedAgentDraft=()=>drafts().find(d=>d.id===b.store.state.agentDraft?.id)??null; export const openAgentDraft=(agentId)=>{const draft={id:b.uid(),userId:b.store.state.me.id,agentId,title:'New chat',draft:true,text:''}; b.store.state.localDrafts.push(draft); b.navigate(null); b.store.state.agentDraft=draft;}; export const closeAgentDraft=(id)=>{b.store.state.localDrafts=b.store.state.localDrafts.filter(d=>d.id!==id);}; export const selectAgentDraft=(id)=>{const draft=drafts().find(d=>d.id===id); b.navigate(null); b.store.state.agentDraft=draft;};",
     "./ui.js":
-        "export const {html,useEdge}=globalThis.agentTabsUiFixture,Icon=()=>null; export const shortPath=(path)=>path,Loader=()=>null,Sheet=()=>null,timeAgo=()=>'';",
+        "export const {html,useEdge}=globalThis.agentTabsUiFixture,Icon=()=>null; export const shortPath=(path)=>path,Loader=()=>null,Sheet=(props)=>globalThis.agentTabsUiFixture.sheet(props),timeAgo=()=>'';",
     "./avatar.js": "export const {folderColor}=globalThis.agentTabsUiFixture;",
     "./diff.js": "export const {useChanges}=globalThis.agentTabsUiFixture;",
     "./sheets/branch.js": "export const {headLabel,branchAvailable}=globalThis.agentTabsUiFixture;",
@@ -99,11 +106,12 @@ const sources: Record<string, string> = {
 
 registerHooks({
     resolve(specifier, context, next) {
-        const source = /\/web\/(?:agent-tabs|named-agents|named-agent-avatar|topbar)\.js$/.test(
-            context.parentURL?.split("?")[0] ?? "",
-        )
-            ? sources[specifier]
-            : undefined;
+        const source =
+            /\/web\/(?:agent-tabs|agent-history|named-agents|named-agent-avatar|topbar)\.js$/.test(
+                context.parentURL?.split("?")[0] ?? "",
+            )
+                ? sources[specifier]
+                : undefined;
 
         return source === undefined
             ? next(specifier, context)
@@ -111,7 +119,9 @@ registerHooks({
     },
 });
 const { AgentTabs } = await import(new URL("../web/agent-tabs.js", import.meta.url).href);
-const { Topbar } = await import(new URL("../web/topbar.js", import.meta.url).href);
+const { Topbar, AgentHeaderSheet } = await import(
+    new URL("../web/topbar.js", import.meta.url).href
+);
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 let owners = 0;
 
@@ -133,11 +143,11 @@ function textOf(value: any): string {
             : "";
 }
 
-function fixture(t: TestContext, Component = AgentTabs) {
+function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
     const fibers = new Map<string, Fiber>();
     const effects: (() => void)[] = [];
     const requests: any[] = [];
-    const navigated: number[] = [];
+    const navigated: (number | null)[] = [];
     const returned: string[] = [];
     const opened: Props[] = [];
     const actions: unknown[][] = [];
@@ -150,7 +160,9 @@ function fixture(t: TestContext, Component = AgentTabs) {
     let attached = new Set<string>();
     const state: Props = {
         me: { id: `tabs-owner-${++owners}`, role: "owner" },
-        server: { privateAgents: 3 },
+        server: { privateAgents: 4, extensions: ["pocket-memory"] },
+        localDrafts: [],
+        agentDraft: null,
         sessions: [],
         conversationId: 19,
         view: { conversation: { id: 19, pipAgentId: "stable-agent" } },
@@ -172,6 +184,9 @@ function fixture(t: TestContext, Component = AgentTabs) {
             },
         ],
     };
+
+    Object.assign(state, initial);
+
     let current: Fiber;
     let dirty = true;
     let tree: any;
@@ -219,21 +234,31 @@ function fixture(t: TestContext, Component = AgentTabs) {
             state.sheet = sheet;
             dirty = true;
         },
-        navigate(id: number) {
+        patch(value: Props) {
+            Object.assign(state, value);
+            dirty = true;
+        },
+        navigate(id: number | null) {
             navigated.push(id);
+            state.agentDraft = null;
             state.conversationId = id;
+            state.sheet = null;
             state.view = { conversation: null };
             dirty = true;
         },
         toSessions() {
             returned.push("sessions");
+            state.agentDraft = null;
             state.conversationId = null;
+            state.sheet = null;
             state.view = { conversation: null };
             dirty = true;
         },
         uid: () => `tab-request-${++sequence}`,
-        api: (path: string, body: Props) =>
-            new Promise((resolve, reject) => requests.push({ path, body, resolve, reject })),
+        api: (path: string, body: Props, options: Props) =>
+            new Promise((resolve, reject) =>
+                requests.push({ path, body, options, resolve, reject }),
+            ),
     };
 
     const resolve = (node: any, path: string, visited: Set<string>): any => {
@@ -299,7 +324,21 @@ function fixture(t: TestContext, Component = AgentTabs) {
 
             nextRefs = new Map();
             attached = new Set();
-            tree = resolve(h(Component, {}), "root", visited);
+            const sheet = state.sheet;
+
+            tree = resolve(
+                [
+                    h(Component, {}),
+                    sheet?.type === "agent-header"
+                        ? h(AgentHeaderSheet, {
+                              key: `${sheet.userId}:${sheet.agentId}:${sheet.source}:${sheet.panel}`,
+                              sheet,
+                          })
+                        : null,
+                ],
+                "root",
+                visited,
+            );
 
             for (const [key, fiber] of fibers) {
                 if (!visited.has(key)) {
@@ -357,11 +396,14 @@ function fixture(t: TestContext, Component = AgentTabs) {
         folders,
         edges,
         focused: () => focused?.props.href ?? null,
+        focusedElement: () => focused,
         focus(node: any) {
             node.element.focus();
         },
         route(id: number, agentId = "stable-agent") {
+            state.agentDraft = null;
             state.conversationId = id;
+            state.sheet = null;
             state.view = { conversation: { id, pipAgentId: agentId } };
             dirty = true;
             render();
@@ -422,110 +464,6 @@ function fixture(t: TestContext, Component = AgentTabs) {
         },
     };
 }
-
-test("pane tabs use the current room identity, exact destinations and a trailing new-chat control", (t) => {
-    const f = fixture(t);
-    const controls = nodes(f.label("Reviewer chats")).filter(
-        (node) => node.type === "a" || node.props["aria-label"] === "New chat with Reviewer",
-    );
-
-    assert.deepEqual(
-        controls.map((node) => node.props.href ?? node.props["aria-label"]),
-        ["/s/7", "/s/19", "New chat with Reviewer"],
-    );
-    assert.equal(controls[1].props["aria-current"], "page");
-    assert.match(f.text(), /Initial setup/);
-    assert.match(f.text(), /Accessibility review/);
-    assert.doesNotMatch(f.text(), /Inbox|Home|Set inbox/);
-    assert.equal(f.requests.length, 0);
-    f.click(controls[0]);
-    assert.deepEqual(f.navigated, [7]);
-    f.patch({ view: { conversation: { id: 19, pipAgentId: "other-agent" } } });
-    assert.equal(f.text(), "", "a sidebar selection cannot bind an unrelated room");
-    f.patch({
-        conversationId: 19,
-        view: { conversation: { id: 19, pipAgentId: "stable-agent" } },
-        server: { privateAgents: 2 },
-    });
-    assert.equal(f.text(), "", "an older running server cannot receive v3 actions");
-    f.patch({ server: { privateAgents: 3 }, me: { id: "guest", role: "guest" } });
-    assert.equal(f.text(), "");
-});
-
-test("the trailing plus creates one same-agent chat directly and opens the acknowledged exact id", async (t) => {
-    const f = fixture(t);
-    const plus = f.label("New chat with Reviewer");
-
-    f.click(plus);
-    f.click(plus);
-    assert.equal(f.requests.length, 1, "double taps cannot create multiple chats");
-    assert.equal(f.requests[0].path, "c/19/private-agent");
-    assert.deepEqual(
-        { ...f.requests[0].body, requestId: "stable" },
-        { action: "new_chat", requestId: "stable" },
-    );
-    assert.equal(f.label("New chat with Reviewer").props.disabled, true);
-    f.requests[0].resolve({ agentId: "stable-agent", id: 29, chatIds: [7, 19, 29] });
-    await f.settle();
-    assert.deepEqual(f.navigated, [29]);
-    assert.equal(f.requests.length, 1, "no settings or onboarding request");
-});
-
-test("uncertain new-chat retries survive reload without replay and retain the original source and receipt", async (t) => {
-    const first = fixture(t);
-
-    first.click(first.label("New chat with Reviewer"));
-    const original = first.requests[0];
-
-    original.reject(new Error("Connection lost"));
-    await first.settle();
-    assert.match(first.text(), /retry the same request/);
-    const owner = first.state.me;
-
-    first.patch({ view: { conversation: null } });
-    const reloaded = await import(new URL("../web/agent-tabs.js?reload", import.meta.url).href);
-    const resumed = fixture(t, reloaded.AgentTabs);
-
-    resumed.patch({
-        me: owner,
-        conversationId: 7,
-        view: { conversation: { id: 7, pipAgentId: "stable-agent" } },
-    });
-    assert.equal(resumed.requests.length, 0, "remount and reload never replay a mutation");
-    resumed.click(resumed.label("Retry new chat with Reviewer"));
-    assert.equal(resumed.requests[0].path, original.path);
-    assert.deepEqual(resumed.requests[0].body, original.body);
-    resumed.requests[0].resolve({ agentId: "stable-agent", id: 32, chatIds: [7, 19, 32] });
-    await resumed.settle();
-    assert.deepEqual(resumed.navigated, [32]);
-    assert.equal(storage.get(`pocket.pipNewChat.${owner.id}.stable-agent`), undefined);
-});
-
-test("switching chats during creation cannot steal navigation or replay the request", async (t) => {
-    const f = fixture(t);
-
-    f.click(f.label("New chat with Reviewer"));
-    f.patch({ conversationId: 7, view: { conversation: { id: 7, pipAgentId: "stable-agent" } } });
-    assert.equal(f.label("New chat with Reviewer").props.disabled, true);
-    f.requests[0].resolve({ agentId: "stable-agent", id: 35, chatIds: [7, 19, 35] });
-    await f.settle();
-    assert.deepEqual(
-        f.navigated,
-        [],
-        "an old acknowledgement cannot redirect the newly chosen chat",
-    );
-    assert.equal(f.requests.length, 1);
-    assert.equal(f.label("New chat with Reviewer").props.disabled, false);
-    const stalePlus = f.label("New chat with Reviewer");
-
-    f.patch({ server: { privateAgents: 2 } });
-    f.click(stalePlus);
-    assert.equal(
-        f.requests.length,
-        1,
-        "a stale button cannot mutate against a downgraded capability",
-    );
-});
 
 function chatLink(f: ReturnType<typeof fixture>, id: number) {
     const link = f.all().find((node) => node.type === "a" && node.props.href === `/s/${id}`);
@@ -681,71 +619,6 @@ test("link keys move focus without activation and Delete dismisses with neighbor
     assert.equal(f.requests.length, 0);
 });
 
-test("closing the source tab retains pending and uncertain plus receipts without late navigation theft", async (t) => {
-    for (const [status, last] of [
-        ["pending", false],
-        ["pending", true],
-        ["uncertain", false],
-        ["uncertain", true],
-    ] as const) {
-        await t.test(`${status}, ${last ? "last tab" : "neighbor"}`, async (t) => {
-            const f = fixture(t);
-            const previous = last ? [] : [7];
-
-            if (last) {
-                f.click(f.label(closeInitial));
-            }
-
-            f.click(f.label("New chat with Reviewer"));
-            const original = f.requests[0];
-            const receiptKey = `pocket.pipNewChat.${f.state.me.id}.stable-agent`;
-            const receipt = storage.get(receiptKey);
-
-            if (status === "uncertain") {
-                original.reject(new Error("Acknowledgement lost"));
-                await f.settle();
-            }
-
-            f.click(f.label(closeActive));
-            assert.equal(
-                storage.get(receiptKey),
-                receipt,
-                "tab dismissal cannot clear the new-chat receipt",
-            );
-            assert.deepEqual(f.navigated, previous);
-            assert.deepEqual(f.returned, last ? ["sessions"] : []);
-            f.route(7);
-
-            if (status === "pending") {
-                original.resolve({ agentId: "stable-agent", id: 40, chatIds: [7, 19, 40] });
-                await f.settle();
-                assert.deepEqual(
-                    f.navigated,
-                    previous,
-                    "the late original acknowledgement cannot steal navigation",
-                );
-                assert.equal(f.requests.length, 1);
-            } else {
-                assert.equal(
-                    f.requests.length,
-                    1,
-                    "closing and reopening do not replay an uncertain request",
-                );
-                f.click(f.label("Retry new chat with Reviewer"));
-                assert.equal(f.requests[1].path, original.path);
-                assert.deepEqual(f.requests[1].body, original.body);
-                f.requests[1].resolve({ agentId: "stable-agent", id: 41, chatIds: [7, 19, 41] });
-                await f.settle();
-                assert.deepEqual(
-                    f.navigated,
-                    [...previous, 41],
-                    "only the explicit retry opening navigates to its new chat",
-                );
-            }
-        });
-    }
-});
-
 test("last-tab dismissal returns focus to visible existing navigation, never under a newer sheet", async (t) => {
     for (const mode of ["agent", "collapsed-group", "folded-sidebar", "newer-sheet"]) {
         await t.test(mode, async (t) => {
@@ -828,78 +701,6 @@ function headerContext(f: ReturnType<typeof fixture>, agent = true) {
     });
 }
 
-test("the real Topbar composes private-agent tabs inside its one header while preserving context and native utilities", (t) => {
-    const f = fixture(t, Topbar);
-
-    headerContext(f);
-    const headers = f.all().filter((node) => node.type === "header");
-    const navigation = f.label("Reviewer chats");
-    const title = f.all().find((node) => node.props.class === "title title-agent");
-    const context = f.all().find((node) => node.props["data-part"] === "topbar-sub");
-
-    assert.equal(headers.length, 1, "tabs do not introduce a second header");
-    assert.equal(f.all().filter((node) => node.type === "nav").length, 1);
-    assert.ok(nodes(headers[0]).includes(navigation));
-    assert.ok(
-        title && nodes(title).includes(navigation),
-        "navigation lives in the existing title area",
-    );
-    assert.ok(title && context && nodes(title).includes(context), "context shares that title area");
-    assert.match(textOf(context), /project/);
-    assert.match(textOf(context), /feature\/tabs/);
-    assert.ok(nodes(context).some((node) => node.props.class === "folder-mark"));
-    assert.ok(f.folders.includes("/repo/project"));
-    assert.ok(f.edges.includes("--topbar-h"), "the ordinary header edge registration remains");
-    const utilities = f.all().filter((node) => node.type === "test-utility");
-
-    for (const utility of [
-        "ThreadTypeTag",
-        "PeeksButton",
-        "FilesButton",
-        "BrowserButton",
-        "PeopleButton",
-    ]) {
-        assert.equal(
-            utilities.filter((node) => node.props.utility === utility).length,
-            1,
-            `${utility} is still invoked exactly once in this header`,
-        );
-    }
-
-    assert.equal(
-        utilities.find((node) => node.props.utility === "ThreadTypeTag")?.props.session,
-        f.state.view.conversation,
-    );
-    assert.equal(
-        utilities.find((node) => node.props.utility === "ExtensionSessionControls")?.props.slot,
-        "header",
-    );
-    assert.ok(nodes(headers[0]).includes(f.label("Menu")));
-    assert.match(headers[0].props["aria-description"], /scroll horizontally.*chats.*tools/i);
-    assert.equal(f.label("Menu").props.class, "icon-button topbar-menu");
-    assert.ok(
-        nodes(f.label("Menu")).some((node) => node.props.class === "agent-header-scroll-hint"),
-    );
-    f.click(f.label("Branch feature/tabs: switch or make a branch"));
-    assert.deepEqual(f.opened.at(-1), { type: "branch" });
-    f.click(f.label("Changes: 1 file, 2 lines added and 1 removed"));
-    assert.deepEqual(
-        f.actions.at(-1),
-        ["files", true, "changes"],
-        "real ChangesButton delegates to the native changes panel",
-    );
-    f.click(f.label("Subagents: 1 working"));
-    assert.deepEqual(f.actions.at(-1), ["subagents"]);
-    f.click(f.label("Artifacts"));
-    assert.deepEqual(f.opened.at(-1), { type: "artifacts" });
-    f.click(f.label("Menu"));
-    assert.deepEqual(f.opened.at(-1), { type: "menu" });
-    assert.equal(f.label("Menu").props["aria-expanded"], true);
-    f.click(f.label("Back to sessions, 1 waiting for you"));
-    assert.deepEqual(f.returned, ["sessions"]);
-    assert.equal(f.requests.length, 0, "header context/actions do not create or activate chats");
-});
-
 test("chat selection requests whole-tab reveal including its sibling Close target", (t) => {
     const f = fixture(t);
 
@@ -923,7 +724,7 @@ test("chat selection requests whole-tab reveal including its sibling Close targe
 test("ordinary and older-server Topbars keep the normal title/menu without tab controls", async (t) => {
     for (const mode of ["ordinary", "older-server"] as const) {
         await t.test(mode, (t) => {
-            const f = fixture(t, Topbar);
+            const f = fixture(t, Topbar, { server: { privateAgents: 3 } });
 
             headerContext(f, mode === "older-server");
 
@@ -957,4 +758,429 @@ test("ordinary and older-server Topbars keep the normal title/menu without tab c
             assert.equal(f.requests.length, 0);
         });
     }
+});
+
+test("saved navigation uses exact selected room identity and capability", (t) => {
+    const f = fixture(t);
+
+    assert.ok(chatLink(f, 7));
+    assert.equal(chatLink(f, 19).props["aria-current"], "page");
+    f.click(chatLink(f, 7));
+    assert.deepEqual(f.navigated, [7]);
+    f.patch({ view: { conversation: { id: 19, pipAgentId: "stable-agent" } } });
+    assert.equal(f.text(), "", "a stale selected view must not bind catalogue identity");
+    f.route(19);
+    const stale = f.label("New chat with Reviewer");
+
+    f.patch({ server: { privateAgents: 3 } });
+    f.click(stale);
+    assert.equal(f.state.localDrafts.length, 0);
+    f.patch({ server: { privateAgents: 4 }, me: { id: "guest", role: "guest" } });
+    f.click(stale);
+    assert.equal(f.text(), "");
+    assert.equal(f.requests.length, 0);
+});
+
+test("plus creates only a local draft and close deletes only that unsent view", (t) => {
+    const f = fixture(t);
+    const retained = structuredClone(f.state.retained);
+    const metadata = structuredClone(f.state.namedAgents);
+
+    f.click(f.label("New chat with Reviewer"));
+    const draft = f.state.agentDraft;
+
+    assert.equal(typeof draft.id, "string");
+    assert.equal(f.state.conversationId, null);
+    assert.equal(f.requests.length, 0, "opening a draft cannot reserve a server conversation");
+    assert.match(f.text(), /New chat/);
+    assert.ok(chatLink(f, 7), "saved chats stay alongside drafts");
+    f.click(f.label("Close New chat draft, chat " + draft.id));
+    assert.equal(f.state.localDrafts.length, 0);
+    assert.equal(f.navigated.at(-1), 19);
+    assert.deepEqual(f.state.retained, retained);
+    assert.deepEqual(f.state.namedAgents, metadata);
+    assert.equal(f.requests.length, 0);
+});
+
+test("draft tab selection uses its local identity rather than a fabricated native route", (t) => {
+    const f = fixture(t);
+
+    f.click(f.label("New chat with Reviewer"));
+    const first = f.state.agentDraft.id;
+
+    f.click(f.label("New chat with Reviewer"));
+    const local = f
+        .all()
+        .find((node) => node.props.role === "button" && node.props["aria-current"] !== "page");
+
+    assert.ok(local);
+    assert.equal(local.props.href, undefined);
+    f.key(local, "Enter");
+    assert.equal(f.state.agentDraft.id, first);
+    assert.equal(f.requests.length, 0);
+});
+
+test("named header excludes workspace utilities while preserving context and the native app menu", (t) => {
+    const f = fixture(t, Topbar);
+
+    headerContext(f);
+    assert.equal(f.all().filter((node) => node.type === "header").length, 1);
+    assert.equal(f.all().filter((node) => node.type === "test-utility").length, 0);
+    assert.deepEqual(f.folders, []);
+    assert.ok(f.edges.includes("--topbar-h"));
+    f.click(f.label("Agent menu"));
+    const menu = f.label("Reviewer actions");
+
+    for (const label of [
+        "Memory",
+        "Goal / purpose",
+        "System prompt",
+        "Rename",
+        "Settings",
+        "History",
+        "All Work Items",
+        "App menu",
+    ]) {
+        assert.match(textOf(menu), new RegExp(label));
+    }
+
+    f.click(nodes(menu).find((node) => node.type === "button" && textOf(node) === "App menu"));
+    assert.deepEqual(f.opened.at(-1), { type: "menu" });
+    assert.ok(
+        f.requests.every((request) => request.body === undefined),
+        "native chrome never activates work",
+    );
+});
+
+test("phone chooser registers outside the header and closes through sheet state", (t) => {
+    const f = fixture(t, Topbar);
+    const opener = f.label("Accessibility review: switch chats");
+
+    f.click(opener);
+    const header = f.all().find((node) => node.type === "header");
+    const sheet = f.all().find((node) => node.type === "test-sheet");
+
+    assert.deepEqual(f.state.sheet, {
+        type: "agent-header",
+        panel: "chats",
+        agentId: "stable-agent",
+        source: 19,
+        userId: f.state.me.id,
+    });
+    assert.equal(f.label("Accessibility review: switch chats").props["aria-expanded"], true);
+    assert.ok(sheet);
+    assert.ok(
+        !nodes(header).some((node) => node.type === "test-sheet"),
+        "the overlay must escape topbar containment",
+    );
+    const choices = f.label("Reviewer open chats");
+    const inactive = nodes(choices).find((node) => node.props["aria-label"] === closeInitial);
+    const selected = nodes(choices).find((node) => node.props.href === "/s/19");
+
+    f.focus(inactive);
+    f.click(inactive);
+    assert.equal(
+        f.focusedElement(),
+        selected.element,
+        "inactive dismissal keeps focus inside the chooser",
+    );
+    assert.equal(f.navigated.length, 0);
+    sheet.props.onClose();
+    assert.ok(!f.all().some((node) => node.type === "test-sheet"));
+    assert.equal(f.state.sheet, null);
+    assert.equal(f.label("Accessibility review: switch chats").props["aria-expanded"], false);
+    assert.equal(f.navigated.length, 0);
+});
+
+test("History retains dismissed chats and reopens their exact routes without new work", (t) => {
+    const f = fixture(t, Topbar);
+
+    f.click(f.label(closeInitial));
+    assert.ok(!f.all().some((node) => node.props.href === "/s/7"));
+    f.click(f.label("History"));
+    const history = f.label("Reviewer saved chats");
+
+    assert.ok(nodes(history).some((node) => node.props.href === "/s/7"));
+    f.click(nodes(history).find((node) => node.props.href === "/s/7"));
+    assert.equal(f.navigated.at(-1), 7);
+    f.route(7);
+    assert.equal(chatLink(f, 7).props["aria-current"], "page");
+    assert.ok(f.requests.every((request) => request.body === undefined));
+});
+
+test("draft context actions address the identity, not the previous saved chat", (t) => {
+    const f = fixture(t, Topbar);
+
+    f.click(f.label("New chat with Reviewer"));
+    f.click(f.label("Goal / purpose"));
+    assert.deepEqual(f.opened.at(-1), {
+        type: "named-agent",
+        id: null,
+        agentId: "stable-agent",
+        section: "focus",
+    });
+    f.click(f.label("System prompt"));
+    assert.equal(f.opened.at(-1).section, "instructions");
+    f.click(f.label("Memory"));
+    assert.deepEqual(f.opened.at(-1), { type: "memory", conversationId: "agent:stable-agent" });
+});
+
+test("selected-chat controller links expose only current rows and complete history keeps unavailable rows inert", async (t) => {
+    const f = fixture(t, Topbar);
+
+    assert.equal(f.requests[0].path, "c/19/private-agent");
+    const data = {
+        id: 19,
+        agentId: "stable-agent",
+        controllers: [
+            {
+                workItemId: 1,
+                conversationId: 30,
+                title: "Current work",
+                state: "active",
+                current: true,
+                accessible: true,
+            },
+            {
+                workItemId: 2,
+                conversationId: 40,
+                title: "Historical work",
+                state: "held",
+                current: false,
+                accessible: true,
+            },
+            {
+                workItemId: 3,
+                conversationId: 50,
+                title: "Do not expose this title",
+                state: "unavailable",
+                current: false,
+                accessible: false,
+            },
+        ],
+    };
+
+    f.requests[0].resolve(data);
+    await f.settle();
+    const strip = f.label("Current orchestrators for this chat");
+
+    assert.match(textOf(strip), /Current work/);
+    assert.doesNotMatch(textOf(strip), /Historical work|Do not expose/);
+    f.click(f.label("1 current orchestrator, 1 active: all Work Items for this chat"));
+    const panelRead = f.requests.at(-1);
+
+    assert.equal(panelRead.path, "c/19/private-agent");
+    panelRead.resolve(data);
+    await f.settle();
+    const complete = f.all().find((node) => node.type === "details");
+
+    assert.match(textOf(complete), /All Work Items for this chat \(3\)/);
+
+    for (const title of ["Current work", "Historical work", "Unavailable Work Item"]) {
+        assert.ok(textOf(complete).includes(title));
+    }
+
+    assert.doesNotMatch(f.text(), /Do not expose this title/);
+    assert.ok(!f.all().some((node) => node.props.href === "/s/50"));
+    f.click(nodes(strip).find((node) => node.props.href === "/s/30"));
+    assert.equal(f.navigated.at(-1), 30);
+    assert.ok(f.requests.every((request) => request.body === undefined));
+});
+
+test("native catalogue control revisions refresh current orchestrators without switching Chats", async (t) => {
+    const f = fixture(t, Topbar);
+
+    f.requests[0].resolve({ id: 19, agentId: "stable-agent", controllers: [] });
+    await f.settle();
+    f.patch({
+        namedAgents: f.state.namedAgents.map((agent: Props) => ({ ...agent, controlRevision: 1 })),
+    });
+    await f.settle();
+    const activated = f.requests.at(-1);
+
+    assert.equal(f.requests.length, 2);
+    assert.equal(activated.path, "c/19/private-agent");
+    activated.resolve({
+        id: 19,
+        agentId: "stable-agent",
+        controllers: [
+            {
+                workItemId: 1,
+                conversationId: 30,
+                title: "Newly delegated",
+                state: "active",
+                current: true,
+                accessible: true,
+            },
+        ],
+    });
+    await f.settle();
+    assert.match(textOf(f.label("Current orchestrators for this chat")), /Newly delegated/);
+    f.patch({
+        namedAgents: f.state.namedAgents.map((agent: Props) => ({ ...agent, controlRevision: 2 })),
+    });
+    await f.settle();
+    assert.equal(f.requests.length, 3);
+    f.requests.at(-1).resolve({
+        id: 19,
+        agentId: "stable-agent",
+        controllers: [
+            {
+                workItemId: 1,
+                conversationId: 30,
+                title: "Newly delegated",
+                state: "human control",
+                current: false,
+                accessible: true,
+            },
+        ],
+    });
+    await f.settle();
+    assert.doesNotMatch(textOf(f.label("Current orchestrators for this chat")), /Newly delegated/);
+    assert.equal(f.state.conversationId, 19);
+    assert.ok(f.requests.every((request) => request.body === undefined));
+});
+
+test("controller reads reject mismatched identities and ignore late departed-source or owner results", async (t) => {
+    for (const mode of ["source", "owner", "mismatch", "failure"]) {
+        await t.test(mode, async (t) => {
+            const f = fixture(t, Topbar);
+            const request = f.requests[0];
+
+            if (mode === "source") {
+                f.route(7);
+            } else if (mode === "owner") {
+                f.patch({ me: { id: "other-owner", role: "owner" } });
+            }
+
+            if (mode === "failure") {
+                request.reject(new Error("Offline"));
+            } else {
+                request.resolve({
+                    id: 19,
+                    agentId: mode === "mismatch" ? "other-agent" : "stable-agent",
+                    controllers: [
+                        {
+                            workItemId: 1,
+                            conversationId: 30,
+                            title: "Stale controller",
+                            state: "active",
+                            current: true,
+                            accessible: true,
+                        },
+                    ],
+                });
+            }
+
+            await f.settle();
+            assert.doesNotMatch(f.text(), /Stale controller/);
+
+            if (mode === "source" || mode === "owner") {
+                assert.ok(request.options.signal.aborted);
+            } else {
+                assert.ok(
+                    f
+                        .all()
+                        .some((node) =>
+                            String(node.props["aria-label"]).startsWith(
+                                "Orchestrators unavailable",
+                            ),
+                        ),
+                );
+            }
+        });
+    }
+});
+
+test("History authoritatively recovers saved chats missing from the catalogue, with passive Refresh", async (t) => {
+    const f = fixture(t, Topbar);
+
+    f.click(f.label("History"));
+    const request = f.requests.at(-1);
+
+    assert.equal(request.path, "pip/agents/stable-agent");
+    assert.match(f.text(), /Loading saved chats/);
+    assert.ok(chatLink(f, 7), "summary chats remain usable while the authoritative read loads");
+    request.resolve({
+        agentId: "stable-agent",
+        chats: [
+            ...f.state.namedAgents[0].chats,
+            { id: 45, title: "Recovered first send", busy: true, updatedAt: 3 },
+        ],
+    });
+    await f.settle();
+    const history = f.label("Reviewer saved chats");
+
+    assert.ok(nodes(history).some((node) => node.props.href === "/s/45"));
+    assert.ok(
+        !f.state.namedAgents[0].chats.some((chat: Props) => chat.id === 45),
+        "this proves the authoritative result, not a catalogue event",
+    );
+    f.click(f.all().find((node) => node.type === "button" && textOf(node) === "Refresh"));
+    const refresh = f.requests.at(-1);
+
+    assert.equal(refresh.path, request.path);
+    refresh.reject(new Error("Offline"));
+    await f.settle();
+    assert.match(f.text(), /Offline.*Showing last known chats/);
+    assert.ok(nodes(f.label("Reviewer saved chats")).some((node) => node.props.href === "/s/45"));
+    f.click(f.all().find((node) => node.props.href === "/s/45"));
+    assert.equal(f.navigated.at(-1), 45);
+    assert.ok(
+        f.requests.every((read) => read.body === undefined),
+        "History never retries a first-send POST",
+    );
+});
+
+test("History fences departed source/owner reads and rejects another identity's chats", async (t) => {
+    for (const mode of ["source", "owner", "identity"]) {
+        await t.test(mode, async (t) => {
+            const f = fixture(t, Topbar);
+
+            f.click(f.label("History"));
+            const request = f.requests.at(-1);
+
+            if (mode === "source") {
+                f.route(7);
+            } else if (mode === "owner") {
+                f.patch({ me: { id: "new-owner", role: "owner" } });
+            }
+
+            request.resolve({
+                agentId: mode === "identity" ? "other-agent" : "stable-agent",
+                chats: [{ id: 45, title: "Stale private history" }],
+            });
+            await f.settle();
+            assert.doesNotMatch(f.text(), /Stale private history/);
+
+            if (mode === "identity") {
+                assert.match(f.text(), /response did not match this agent/);
+            } else {
+                assert.ok(request.options.signal.aborted);
+            }
+        });
+    }
+});
+
+test("Memory cannot open an inert sheet when the extension is unavailable", (t) => {
+    const f = fixture(t, Topbar);
+    const stale = f.label("Memory");
+
+    f.patch({ server: { privateAgents: 4, extensions: [] } });
+    assert.equal(f.label("Memory").props.disabled, true);
+    assert.match(f.label("Memory").props.title, /Enable Memory in Extensions/);
+    f.click(stale);
+    assert.equal(f.opened.length, 0, "a stale enabled control must also recheck availability");
+    f.click(f.label("Agent menu"));
+    const menu = f.label("Reviewer actions");
+    const memory = nodes(menu).find((node) => node.type === "button" && textOf(node) === "Memory");
+
+    assert.equal(memory.props.disabled, true);
+    assert.match(memory.props.title, /Enable Memory in Extensions/);
+    f.click(memory);
+    assert.deepEqual(
+        f.opened.map((sheet) => sheet.type),
+        ["agent-header"],
+        "the registered menu opens, but unavailable Memory does not replace it",
+    );
 });

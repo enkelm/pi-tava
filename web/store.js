@@ -91,6 +91,7 @@ export const store = {
         /** Sessions marked unread in this browser: an id each, until opened again. */
         unread: unreadOf(),
         conversationId: routeConversation(),
+        agentDraft: routeAgentDraft(),
         privateId: routePrivate(),
         sidebarTab: location.pathname.startsWith("/private") ? "private" : "sessions",
         view: emptyView(),
@@ -258,6 +259,13 @@ function routeConversation() {
     const match = /^\/s\/(\d+)\/?$/.exec(location.pathname);
 
     return match ? Number(match[1]) : null;
+}
+
+/** Local draft routes identify only a browser view, never a Durable room. */
+function routeAgentDraft() {
+    const match = /^\/agents\/([A-Za-z0-9_-]+)\/drafts\/([A-Za-z0-9_-]+)$/.exec(location.pathname);
+
+    return match ? { agentId: match[1], id: match[2] } : null;
 }
 
 /** Private pane ids are opaque and never enter a Durable room. */
@@ -1441,14 +1449,19 @@ export function closeSignIn(flowId) {
     store.set((state) => (state.auth?.flowId === flowId ? { auth: null } : {}));
 }
 
-export function navigate(conversationId, { replace = false, sheet = null, privateId = null } = {}) {
+export function navigate(
+    conversationId,
+    { replace = false, sheet = null, privateId = null, agentDraft = null } = {},
+) {
     reviewNavigation++;
     const path =
-        privateId !== null
-            ? `/private/${encodeURIComponent(privateId)}`
-            : conversationId === null
-              ? "/"
-              : `/s/${conversationId}`;
+        agentDraft !== null
+            ? `/agents/${encodeURIComponent(agentDraft.agentId)}/drafts/${encodeURIComponent(agentDraft.id)}`
+            : privateId !== null
+              ? `/private/${encodeURIComponent(privateId)}`
+              : conversationId === null
+                ? "/"
+                : `/s/${conversationId}`;
 
     if (location.pathname !== path || store.state.conversationId !== conversationId) {
         pushRoute(path, { replace });
@@ -1466,6 +1479,8 @@ export function navigate(conversationId, { replace = false, sheet = null, privat
     if (
         store.state.conversationId === conversationId &&
         store.state.privateId === privateId &&
+        store.state.agentDraft?.id === agentDraft?.id &&
+        store.state.agentDraft?.agentId === agentDraft?.agentId &&
         source
     ) {
         if (sheet) {
@@ -1478,6 +1493,7 @@ export function navigate(conversationId, { replace = false, sheet = null, privat
     store.set((state) => ({
         conversationId,
         privateId,
+        agentDraft,
         ...(privateId !== null
             ? { sidebarTab: "private" }
             : conversationId !== null
@@ -1502,12 +1518,19 @@ onRoute(() => {
     reviewNavigation++;
     const id = routeConversation();
     const privateId = routePrivate();
+    const agentDraft = routeAgentDraft();
 
-    if (id !== store.state.conversationId || privateId !== store.state.privateId) {
+    if (
+        id !== store.state.conversationId ||
+        privateId !== store.state.privateId ||
+        agentDraft?.id !== store.state.agentDraft?.id ||
+        agentDraft?.agentId !== store.state.agentDraft?.agentId
+    ) {
         opened(id);
         store.set({
             conversationId: id,
             privateId,
+            agentDraft,
             ...(privateId !== null
                 ? { sidebarTab: "private" }
                 : id !== null
@@ -1812,6 +1835,11 @@ export const actions = {
     updateProject: (id, patch) => api(`projects/${encodeURIComponent(id)}`, patch),
     updateSession: (id, patch) => api(`sessions/${id}`, patch),
     upload: (file) => api(`c/${current()}/upload?name=${encodeURIComponent(file.name)}`, file),
+    uploadAgentDraft: (agentId, file) =>
+        api(
+            `pip/agents/${encodeURIComponent(agentId)}/upload?name=${encodeURIComponent(file.name)}`,
+            file,
+        ),
     fullEntry: (entryId) => api(`c/${current()}/entry/${entryId}`),
     history: (before) => api(`c/${current()}/history?before=${before}`),
 };

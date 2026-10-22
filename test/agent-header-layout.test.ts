@@ -1,6 +1,5 @@
-// Offline CSS contract, not computed geometry/device proof. The production CSS is parsed, not copied
-// into a layout simulator. This is the cheapest available guard for the phone-only overflow repair;
-// component checks in agent-tabs-ui own selection/reveal, native actions and retained tab behavior.
+// Offline responsive CSS contracts, not computed geometry or device proof. Component interaction,
+// dismissal and exact navigation are owned by agent-tabs-ui. No synthetic width-budget simulator.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -51,76 +50,75 @@ tree.iterate({
     },
 });
 
-function phone(selector: string, property: string) {
-    const found = rules.filter(
+function declaration(selector: string, property: string, scope?: string) {
+    const matches = rules.filter(
         (rule) =>
-            rule.selectors.includes(selector) && rule.media.includes("@media (max-width: 699px)"),
+            rule.selectors.includes(selector) &&
+            (scope === undefined
+                ? rule.media.length === 0
+                : rule.media.some((media) => media.includes(scope))),
     );
 
-    assert.ok(found.length > 0, `${selector} needs a phone-only rule`);
+    assert.ok(matches.length > 0, selector + " needs its responsive rule");
 
-    return found.reduce<string | undefined>(
+    return matches.reduce<string | undefined>(
         (value, rule) => rule.declarations.get(property) ?? value,
         undefined,
     );
 }
 
-test("phone headers scroll as one row instead of letting fixed tools and 40% context squeeze the tabs", () => {
-    assert.equal(phone(".topbar.agent-topbar", "overflow-x"), "auto");
-    assert.equal(phone(".topbar.agent-topbar", "flex-wrap"), "nowrap");
-    assert.equal(phone(".topbar.agent-topbar", "scroll-padding-inline"), "52px 72px");
-    assert.equal(phone(".agent-topbar > *", "flex-shrink"), "0");
-    assert.equal(phone(".topbar > .title.title-agent", "flex"), "none");
-    assert.equal(phone(".topbar > .title.title-agent", "margin-left"), "0");
-    assert.equal(phone(".title-agent > .title-sub", "flex"), "none");
-    assert.equal(phone(".title-agent > .title-sub", "max-width"), "none");
-    assert.equal(phone(".title-agent > .agent-tabs", "max-width"), "none");
-    assert.equal(phone(".agent-tabs-strip", "overflow-x"), "visible");
-    assert.equal(phone(".agent-tab-item", "width"), "160px");
-    assert.equal(phone(".agent-tab-close", "width"), "44px");
-    assert.equal(phone(".agent-tab-new", "width"), "44px");
-    assert.equal(phone(".agent-tabs :is(a, button)", "min-height"), "44px");
+test("phones use a bounded compact chooser while only the wider chat rail scrolls", () => {
+    assert.equal(declaration(".topbar.agent-topbar", "flex-wrap"), "nowrap");
+    assert.notEqual(declaration(".topbar.agent-topbar", "overflow-x"), "auto");
+    assert.equal(declaration(".agent-tabs", "min-width"), "0");
+    assert.equal(declaration(".agent-tabs-strip", "display"), "none");
+    assert.equal(declaration(".agent-chat-switch", "display"), "flex");
+    assert.equal(declaration(".agent-tabs-strip", "overflow-x"), "auto");
+    assert.equal(declaration(".agent-tabs-strip", "overscroll-behavior-x"), "contain");
+    assert.equal(declaration(".agent-tab-new", "flex"), "none");
+    assert.equal(declaration(".agent-header-context", "display"), "none");
 });
 
-test("authored 320/360/390/430px width budgets fit the full selected tab between the sticky caps", () => {
-    const tab = Number.parseFloat(phone(".agent-tab-item", "width")!);
-    const close = Number.parseFloat(phone(".agent-tab-close", "width")!);
-    const [leading, trailing] = phone(".topbar.agent-topbar", "scroll-padding-inline")!
-        .split(" ")
-        .map(Number.parseFloat);
-
-    assert.ok(leading !== undefined && trailing !== undefined);
-
-    for (const width of [320, 360, 390, 430]) {
-        assert.ok(tab <= width - leading - trailing, `${width}px must fit a whole selected tab`);
-    }
-
-    assert.ok(
-        close >= 44 && tab - close >= 44,
-        "Close and the chat link each retain a touch target",
+test("tablet panes regain tabs and visible current-controller links without restoring ordinary tools", () => {
+    assert.equal(declaration(".agent-tabs-strip", "display", "min-width: 430px"), "flex");
+    assert.equal(declaration(".agent-chat-switch", "display", "min-width: 430px"), "none");
+    const tabs = rules.find(
+        (rule) =>
+            rule.selectors.includes(".agent-tabs-strip") &&
+            rule.declarations.get("display") === "flex",
     );
+
+    assert.ok(tabs?.media.includes("@media (min-width: 700px)"));
+    assert.equal(
+        declaration(".agent-current-orchestrators:has(a)", "display", "min-width: 700px"),
+        "flex",
+    );
+    assert.equal(declaration(".agent-current-orchestrators", "overflow-x"), "auto");
+    assert.equal(declaration(".agent-header-context", "display", "min-width: 880px"), "flex");
 });
 
-test("phone Back/Menu remain pinned, tools stay reachable and a swipe cue is limited to the phone header", () => {
-    assert.equal(phone(".agent-topbar > .topbar-back", "position"), "sticky");
-    assert.equal(phone(".agent-topbar > .topbar-back", "left"), "4px");
-    assert.equal(phone(".agent-topbar > .topbar-menu", "position"), "sticky");
-    assert.equal(phone(".agent-topbar > .topbar-menu", "right"), "6px");
-    assert.equal(phone(".topbar.agent-topbar > .icon-button", "min-width"), "44px");
-    assert.equal(phone(".topbar.agent-topbar > .icon-button", "min-height"), "44px");
+test("local chrome retains coarse-pointer targets, native scroll, press feedback and keyboard focus", () => {
+    const coarse = "any-pointer: coarse";
 
-    for (const control of [".top-toggle", ".people-button", ".quiet-phone"]) {
-        assert.equal(phone(`.topbar.agent-topbar ${control}`, "display"), "inline-flex");
-    }
-
-    assert.equal(phone(".agent-header-scroll-hint", "display"), "flex");
-    assert.ok(
-        rules.some(
-            (rule) =>
-                rule.selectors.includes(".agent-header-scroll-hint") &&
-                rule.media.length === 0 &&
-                rule.declarations.get("display") === "none",
-        ),
-        "desktop keeps its incumbent controls without a swipe cue",
+    assert.equal(declaration(".agent-topbar button", "min-height", coarse), "44px");
+    assert.equal(declaration(".agent-tab-close", "min-width", coarse), "44px");
+    assert.equal(declaration(".agent-tab-new", "min-width", coarse), "44px");
+    assert.equal(declaration(".agent-chat-choices :is(a, button)", "min-height"), "44px");
+    assert.equal(declaration(".agent-topbar :is(a, button)", "touch-action"), "manipulation");
+    assert.equal(declaration(".agent-header-menu button", "user-select"), "none");
+    assert.equal(declaration(".agent-history-list a", "-webkit-touch-callout"), "none");
+    assert.equal(
+        declaration(".agent-topbar :is(a, button):active", "background"),
+        "var(--pressed)",
     );
+    assert.equal(
+        declaration(".agent-chat-choices :is(a, button):focus-visible", "outline"),
+        "2px solid var(--accent)",
+    );
+
+    for (const rule of rules.filter((rule) =>
+        rule.selectors.some((selector) => selector.includes(":hover")),
+    )) {
+        assert.ok(rule.media.includes("@media (hover: hover) and (pointer: fine)"));
+    }
 });

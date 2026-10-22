@@ -25,6 +25,9 @@ import {
 import type { User } from "../config.ts";
 import type { CreateSessionRequest, SessionPatch } from "../commands.ts";
 import { HttpError } from "../errors.ts";
+import { FileLists } from "../files.ts";
+import { draftUploadDirectory } from "../agent-draft-uploads.ts";
+import { receiveUpload } from "./uploads.ts";
 import type { ImportRequest } from "../pi-sessions.ts";
 import type { PrivateRequest } from "../private-sessions.ts";
 import { runningNow } from "../running.ts";
@@ -57,6 +60,7 @@ function lanAddresses(): string[] {
 export function createApi(options: HttpOptions, auth: Auth) {
     const { app } = options;
     const { events, poll } = createEventStreams(app);
+    const draftFiles = new FileLists();
 
     const requireUser = (request: IncomingMessage): User => {
         const user = auth.user(request);
@@ -318,8 +322,135 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 return json(
                     response,
                     200,
-                    await app.pip.agents.create(user, await readJson(request)),
+                    url.searchParams.get("identityOnly") === "1"
+                        ? await app.pip.agents.createIdentity(user, await readJson(request))
+                        : await app.pip.agents.create(user, await readJson(request)),
                 );
+            }
+        }
+
+        // Identity settings and draft first sends do not require (or create) a home conversation.
+        if (first === "pip" && second === "agents" && third !== undefined) {
+            requireOwner(user);
+            response.setHeader("Cache-Control", "no-store");
+            app.pip.agents.ownedIdentity(third, user);
+
+            if (fourth !== "memory" && parts.length > 4) {
+                throw new HttpError(404, "No such private agent route");
+            }
+
+            if (fourth === undefined && method === "GET") {
+                return json(response, 200, await app.pip.agents.read(third, user));
+            }
+
+            if (fourth === undefined && method === "POST") {
+                return json(
+                    response,
+                    200,
+                    await app.pip.agents.act(third, user, await readJson(request)),
+                );
+            }
+
+            if (fourth === "memory") {
+                const lessonId = parts[4];
+
+                if (parts.length > 6 || (parts[5] !== undefined && parts[5] !== "remove")) {
+                    throw new HttpError(404, "No such memory route");
+                }
+
+                if (lessonId === undefined && method === "GET") {
+                    return json(response, 200, await app.memory.identityView(third, user));
+                }
+
+                if (method === "POST") {
+                    const body = await readJson<{
+                        text?: unknown;
+                        scope?: unknown;
+                        expectedRevision?: unknown;
+                    } | null>(request);
+
+                    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+                        throw new HttpError(400, "Expected memory settings");
+                    }
+
+                    return json(
+                        response,
+                        200,
+                        lessonId === undefined
+                            ? await app.memory.identityRemember(third, user, body)
+                            : await app.memory.identityEdit(
+                                  third,
+                                  user,
+                                  lessonId,
+                                  parts[5] === "remove" ? "remove" : { text: body.text },
+                                  body.expectedRevision,
+                              ),
+                    );
+                }
+            }
+
+            if (fourth === "upload" && method === "POST") {
+                app.pip.agents.ownedIdentity(third, user, true);
+                app.requireSteer(user);
+                const attachment = await receiveUpload(
+                    request,
+                    draftUploadDirectory(app, user, third),
+                    url.searchParams.get("name") ?? "upload",
+                );
+
+                app.pip.agents.ownedIdentity(third, user, true);
+
+                return json(response, 200, attachment);
+            }
+
+            if (fourth === "files" && method === "GET") {
+                app.requireSteer(user);
+                // First-send conversations use this same native local default folder, not a home Chat.
+                const listing = await draftFiles.get(app.defaultCwd);
+
+                app.pip.agents.ownedIdentity(third, user);
+
+                return json(
+                    response,
+                    200,
+                    url.searchParams.get("since") === listing.version
+                        ? { version: listing.version, same: true }
+                        : {
+                              files: listing.files,
+                              version: listing.version,
+                              truncated: listing.truncated,
+                          },
+                );
+            }
+
+            if (fourth === "configure" && method === "POST") {
+                return json(
+                    response,
+                    200,
+                    await app.pip.agents.configureIdentity(third, user, await readJson(request)),
+                );
+            }
+
+            if (fourth === "submit" && method === "POST") {
+                return json(
+                    response,
+                    200,
+                    await app.pip.agents.submitDraft(third, user, await readJson(request)),
+                );
+            }
+
+            if (fourth === "submit" && method === "GET") {
+                const receipt = await app.pip.agents.draftReceipt(
+                    third,
+                    user,
+                    url.searchParams.get("requestId"),
+                );
+
+                if (receipt === undefined) {
+                    throw new HttpError(404, "No accepted input exists for this request");
+                }
+
+                return json(response, 200, receipt);
             }
         }
 

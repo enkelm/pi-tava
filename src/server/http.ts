@@ -95,7 +95,12 @@ export function createHandler(options: HttpOptions) {
             }
 
             // The web app: index.html for app routes, files from web/ otherwise.
-            if (parts.length === 0 || parts[0] === "s" || parts[0] === "private") {
+            if (
+                parts.length === 0 ||
+                parts[0] === "s" ||
+                parts[0] === "private" ||
+                (parts[0] === "agents" && parts[2] === "drafts" && parts.length === 4)
+            ) {
                 return serveApp(response, app.webRevision);
             }
 

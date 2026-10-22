@@ -34,7 +34,17 @@ export type PrivateIdentity = {
 export type AgentIdentities = {
     items: Record<string, PrivateIdentity>;
     /** Never evicted: retry after retirement/deletion cannot resurrect an identity or a chat. */
-    requests: Record<string, { fingerprint: string; agentId: string; chatId: number }>;
+    requests: Record<
+        string,
+        {
+            fingerprint: string;
+            agentId: string;
+            chatId?: number;
+            /** First-send reservation; visibility follows the native input receipt, not HTTP acknowledgement. */
+            firstInputRequestId?: string;
+            accepted?: true;
+        }
+    >;
     calls: Record<string, { fingerprint: string; agentId: string; revision: number }>;
 };
 export const AgentIdentitiesDoc = defineDoc<AgentIdentities>({

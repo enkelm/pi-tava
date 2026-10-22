@@ -1,4 +1,8 @@
-// The ordinary conversation header also contains a named identity's transcript tabs.
+// Named-agent chrome is independent of the ordinary conversation/workspace header.
+import { useEffect, useState } from "preact/hooks";
+import { AgentHistory } from "./agent-history.js";
+import { selectedAgentDraft } from "./agent-drafts.js";
+import { openAgentSettings } from "./named-agents.js";
 import { folderColor } from "./avatar.js";
 import { BrowserButton } from "./browser-panel.js";
 import { PeopleButton } from "./chat.js";
@@ -9,10 +13,10 @@ import { PeeksButton } from "./peeks.js";
 import { toSessions } from "./sessions.js";
 import { branchAvailable, headLabel } from "./sheets/branch.js";
 import { openSubagents } from "./subagents.js";
-import { openSheet, projectsAvailable, store } from "./store.js";
+import { api, closeSheet, navigate, openSheet, projectsAvailable, store } from "./store.js";
 import { ThreadTypeTag } from "./thread-type.js";
 import { conversationLocation } from "./workspace-location.js";
-import { html, Icon, shortPath, useEdge } from "./ui.js";
+import { html, Icon, Sheet, shortPath, useEdge } from "./ui.js";
 import { AgentTabs, tabAgent } from "./agent-tabs.js";
 
 /** What changed in the session's folder: lines added and removed, and how many files. It opens Changes. */
@@ -44,10 +48,9 @@ function ChangesButton() {
     </button>`;
 }
 
-export function Topbar() {
+function ConversationTopbar() {
     const { view, server, conversationId } = store.state;
     const conversation = view.conversation;
-    const agent = tabAgent();
     const artifacts = view.artifacts?.length ?? 0;
     const cwd = view.agent?.cwd ?? conversation?.cwd;
     const location = conversationLocation();
@@ -71,9 +74,8 @@ export function Topbar() {
     const edge = useEdge("--topbar-h", (rect) => rect.bottom);
 
     return html`<header
-        class=${agent ? "topbar agent-topbar" : "topbar"}
+        class="topbar"
         data-part="topbar"
-        aria-description=${agent ? "On phones, scroll horizontally for chats, context and session tools." : undefined}
         ref=${edge}
     >
         <button
@@ -85,22 +87,15 @@ export function Topbar() {
             <${Icon} name="back" size=${22} />
             ${waiting > 0 && html`<span class="badge warn">${waiting}</span>`}
         </button>
-        <div class=${agent ? "title title-agent" : "title"}>
-            ${
-                !agent &&
-                html`<button
+        <div class="title">
+            <button
                 class="title-open"
                 aria-label=${`${title}${destination ? `, ${destination}` : folder ? `, in ${folder}` : ""}: session menu`}
                 title=${destination ?? (cwd ? `${shortPath(cwd, server?.home)}\nSession menu` : "Session menu")}
                 disabled=${!conversation}
                 onClick=${() => openSheet({ type: "menu" })}
-            ></button>`
-            }
-            ${
-                agent
-                    ? html`<${AgentTabs} />`
-                    : html`<span class="title-main" data-part="topbar-title" aria-hidden="true">${title}</span>`
-            }
+            ></button>
+            <span class="title-main" data-part="topbar-title" aria-hidden="true">${title}</span>
             <span class="title-sub" data-part="topbar-sub">
                 ${projectsAvailable() && conversation?.kind === "session" && html`<${ThreadTypeTag} session=${conversation} />`}
                 ${conversation?.imported && html`<span class="muted" title="Copied from a saved Pi session; the original Pi was not stopped">Imported from Pi</span>`}
@@ -120,9 +115,9 @@ export function Topbar() {
                           </span>`
                         : html`${
                               destination
-                                  ? html`<span class="title-destination" aria-hidden=${agent ? undefined : "true"}>${destination}</span>`
+                                  ? html`<span class="title-destination" aria-hidden="true">${destination}</span>`
                                   : folder &&
-                                    html`<span class="title-folder" aria-hidden=${agent ? undefined : "true"}>${folder}</span>`
+                                    html`<span class="title-folder" aria-hidden="true">${folder}</span>`
                           }
                           ${
                               branch &&
@@ -180,20 +175,403 @@ export function Topbar() {
         </button>
         <${PeopleButton} />
         <button
-            class=${agent ? "icon-button topbar-menu" : "icon-button"}
+            class="icon-button"
             aria-label="Menu"
             title="Menu"
             aria-haspopup="dialog"
             aria-expanded=${store.state.sheet?.type === "menu"}
             onClick=${() => openSheet({ type: "menu" })}
         >
-            ${
-                agent &&
-                html`<span class="agent-header-scroll-hint" aria-hidden="true">
-                    <${Icon} name="hand-swipe" size=${16} />
-                </span>`
-            }
             <${Icon} name="more" />
         </button>
     </header>`;
+}
+
+/** A passive read pinned to the selected saved chat and owner; no authority mutations. */
+function useChatOrchestrators({ agent, source, current }) {
+    const [read, setRead] = useState({ loading: true });
+    const [revision, setRevision] = useState(0);
+
+    useEffect(() => {
+        if (!Number.isSafeInteger(source)) {
+            setRead({ loading: false, draft: true });
+
+            return;
+        }
+
+        if (!current()) {
+            return;
+        }
+
+        const stop = new AbortController();
+        let active = true;
+        const live = () => active && !stop.signal.aborted && current();
+
+        setRead({ loading: true });
+        api(`c/${source}/private-agent`, undefined, { signal: stop.signal }).then(
+            (data) => {
+                if (!live()) {
+                    return;
+                }
+
+                if (
+                    data.id !== source ||
+                    data.agentId !== agent.agentId ||
+                    !Array.isArray(data.controllers)
+                ) {
+                    setRead({
+                        loading: false,
+                        error: "The response did not match this chat. Refresh to retry.",
+                    });
+
+                    return;
+                }
+
+                setRead({ loading: false, data });
+            },
+            (failure) => {
+                if (live()) {
+                    setRead({
+                        loading: false,
+                        error: failure.message || "Could not load orchestrators.",
+                    });
+                }
+            },
+        );
+
+        return () => {
+            active = false;
+            stop.abort();
+        };
+    }, [
+        source,
+        agent.agentId,
+        agent.controlRevision,
+        store.state.connection,
+        store.state.server?.pipEnabled,
+        store.state.server?.workItemsEnabled,
+        revision,
+    ]);
+
+    return { read, refresh: () => current() && setRevision((value) => value + 1) };
+}
+
+function ControllerLink({ controller, current, close, compact = false }) {
+    if (controller.accessible === false) {
+        return html`<div class="named-agent-controller-link" aria-disabled="true">
+            <span>Unavailable Work Item</span>
+            <span class="small muted">Unavailable</span>
+        </div>`;
+    }
+
+    return html`<a
+        class=${compact ? "agent-current-controller" : "named-agent-controller-link"}
+        href=${`/s/${controller.conversationId}`}
+        aria-label=${`Open ${compact ? "current " : ""}orchestrator for ${controller.title}, ${controller.state}`}
+        title=${`${controller.title}: ${controller.state}`}
+        onClick=${(event) => {
+            if (!current()) {
+                event.preventDefault();
+
+                return;
+            }
+
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+                return;
+            }
+
+            event.preventDefault();
+            close?.(false);
+            navigate(controller.conversationId);
+        }}
+    >
+        <span>${controller.title}</span>
+        <span class="small muted">${controller.state}</span>
+    </a>`;
+}
+
+function ChatOrchestrators({ agent, source, current, close }) {
+    const { read, refresh } = useChatOrchestrators({ agent, source, current });
+    const all = read.data?.controllers ?? [];
+    const known = all.every((item) => typeof item.current === "boolean");
+    const currentControllers = all.filter(
+        (item) => item.current === true && item.accessible !== false,
+    );
+    const links = (controllers) => html`<ul class="named-agent-controllers">
+        ${controllers.map(
+            (controller) => html`<li key=${controller.workItemId}>
+            <${ControllerLink} controller=${controller} current=${current} close=${close} />
+            ${
+                controller.accessible === false
+                    ? html`<p class="small muted">This Work Item is no longer accessible.</p>`
+                    : controller.reason && html`<p class="small muted">${controller.reason}</p>`
+            }
+        </li>`,
+        )}
+    </ul>`;
+
+    return html`<div class="agent-orchestrators named-agent-form" aria-busy=${read.loading}>
+        <p class="small muted">
+            Links open native conversations without activating work. Current control is scoped to this saved chat.
+        </p>
+        ${read.loading && html`<p role="status">Loading orchestrators…</p>`}
+        ${read.draft && html`<p>This unsent chat has no current orchestrators.</p>`}
+        ${read.error && html`<p role="alert">${read.error}</p>`}
+        ${
+            read.data &&
+            html`<section class="named-agent-section">
+            <h3>Current for this chat</h3>
+            ${
+                !known
+                    ? html`<p class="small muted">Current-chat status is unavailable from this server.</p>`
+                    : currentControllers.length === 0
+                      ? html`<p class="small muted">No current orchestrators for this chat.</p>`
+                      : links(currentControllers)
+            }
+        </section>
+        <details>
+            <summary>All Work Items for this chat (${all.length})</summary>
+            <p class="small muted">
+                Current, historical and passive contacts for this chat; only the current section above represents current control.
+            </p>
+            ${all.length ? links(all) : html`<p class="small muted">No Work Item contacts yet.</p>`}
+        </details>`
+        }
+        ${
+            !read.draft &&
+            html`<button
+            class="button"
+            type="button"
+            disabled=${read.loading}
+            onClick=${refresh}
+        >Refresh</button>`
+        }
+    </div>`;
+}
+
+/** Header actions keep their originating owner, identity and chat even across sheet transitions. */
+function agentHeaderControls({ agent, source, userId, sheet }) {
+    const savedId = Number.isSafeInteger(source) ? source : null;
+    const memoryEnabled = store.state.server?.extensions?.includes("pocket-memory") === true;
+    const unavailable = (label) => label === "Memory" && !memoryEnabled;
+    const actionTitle = (label) =>
+        unavailable(label) ? "Enable Memory in Extensions to use this agent's memory" : label;
+    const current = () =>
+        store.state.me?.id === userId &&
+        tabAgent()?.agentId === agent.agentId &&
+        (selectedAgentDraft()?.id ?? store.state.conversationId) === source &&
+        (!sheet || store.state.sheet === sheet);
+    const close = () => current() && closeSheet();
+    const show = (panel) => {
+        if (current()) {
+            openSheet({ type: "agent-header", panel, agentId: agent.agentId, source, userId });
+        }
+    };
+
+    const settings = (section) => {
+        if (current()) {
+            openAgentSettings(savedId, agent.agentId, section);
+        }
+    };
+
+    const memory = () => {
+        if (current() && store.state.server?.extensions?.includes("pocket-memory") === true) {
+            openSheet({ type: "memory", conversationId: savedId ?? `agent:${agent.agentId}` });
+        }
+    };
+
+    const actions = [
+        ["History", "clock", () => show("history")],
+        ["Memory", "brain", memory],
+        ["Goal / purpose", "target", () => settings("focus")],
+        ["System prompt", "file", () => settings("instructions")],
+        ["Rename", "pencil", () => settings("name")],
+        ["Settings", "settings", () => settings()],
+        ["All Work Items", "pip", () => show("orchestrators")],
+        [
+            "App menu",
+            "menu",
+            () => {
+                if (current()) {
+                    openSheet({ type: "menu" });
+                }
+            },
+        ],
+    ];
+
+    return { current, close, show, settings, actions, unavailable, actionTitle };
+}
+
+function NamedAgentTopbar({ agent, source, userId }) {
+    const edge = useEdge("--topbar-h", (rect) => rect.bottom);
+    const { current, show, settings, actions, unavailable, actionTitle } = agentHeaderControls({
+        agent,
+        source,
+        userId,
+    });
+    const sheet = store.state.sheet;
+    const panel =
+        sheet?.type === "agent-header" &&
+        sheet.agentId === agent.agentId &&
+        sheet.source === source &&
+        sheet.userId === userId
+            ? sheet.panel
+            : null;
+    const { read } = useChatOrchestrators({ agent, source, current });
+    const currentControllers = (read.data?.controllers ?? []).filter(
+        (item) => item.current === true && item.accessible !== false,
+    );
+    const working = currentControllers.filter((item) => item.state === "active").length;
+    const controllerState = read.loading
+        ? "Loading orchestrators"
+        : read.error
+          ? "Orchestrators unavailable"
+          : `${currentControllers.length} current orchestrator${currentControllers.length === 1 ? "" : "s"}${working ? `, ${working} active` : ""}`;
+
+    return html`<>
+        <style>@import url("/named-agents.css") layer(pocket);</style>
+        <header class="topbar agent-topbar" data-part="topbar" ref=${edge}>
+            <button
+                class="icon-button topbar-back"
+                aria-label="Back to sessions"
+                title="Sessions"
+                onClick=${() => current() && toSessions()}
+            ><${Icon} name="back" size=${22} /></button>
+            <button
+                class="agent-header-name"
+                aria-label=${`${agent.name}: settings`}
+                title=${agent.name}
+                onClick=${() => settings()}
+            >${agent.name}</button>
+            <${AgentTabs}
+                onChoose=${() => show("chats")}
+                expanded=${panel === "chats"}
+            />
+            <nav class="agent-current-orchestrators" aria-label="Current orchestrators for this chat">
+                ${currentControllers.map(
+                    (controller) => html`<${ControllerLink}
+                    key=${controller.workItemId}
+                    controller=${controller}
+                    current=${current}
+                    compact=${true}
+                />`,
+                )}
+            </nav>
+            <button
+                class=${`icon-button agent-controller-summary ${working ? "on" : ""}`}
+                aria-label=${`${controllerState}: all Work Items for this chat`}
+                title=${`${controllerState} · All Work Items for this chat`}
+                aria-haspopup="dialog"
+                aria-expanded=${panel === "orchestrators"}
+                onClick=${() => show("orchestrators")}
+            >
+                <${Icon} name="pip" size=${18} />
+                ${!read.loading && !read.error && currentControllers.length > 0 && html`<span class="count">${currentControllers.length}</span>`}
+            </button>
+            <div class="agent-header-context" aria-label="Agent context">
+                ${actions.slice(1, 4).map(
+                    ([label, icon, action]) => html`<button
+                    class="icon-button"
+                    aria-label=${label}
+                    title=${actionTitle(label)}
+                    disabled=${unavailable(label)}
+                    onClick=${action}
+                ><${Icon} name=${icon} size=${18} /></button>`,
+                )}
+            </div>
+            <button
+                class="icon-button agent-header-history"
+                aria-label="History"
+                title="Saved chat history"
+                aria-haspopup="dialog"
+                aria-expanded=${panel === "history"}
+                onClick=${() => show("history")}
+            ><${Icon} name="clock" size=${18} /></button>
+            <button
+                class="icon-button topbar-menu"
+                aria-label="Agent menu"
+                title="Agent menu"
+                aria-haspopup="dialog"
+                aria-expanded=${panel === "menu"}
+                onClick=${() => show("menu")}
+            ><${Icon} name="more" /></button>
+        </header>
+    </>`;
+}
+
+/** Registered by sheets.js so keyboard dismissal, focus and Back share the native modal owner. */
+export function AgentHeaderSheet({ sheet }) {
+    const agent = tabAgent();
+    const { source, userId, panel } = sheet;
+
+    if (
+        !agent ||
+        agent.agentId !== sheet.agentId ||
+        store.state.me?.id !== userId ||
+        (selectedAgentDraft()?.id ?? store.state.conversationId) !== source
+    ) {
+        return null;
+    }
+
+    const { current, close, actions, unavailable, actionTitle } = agentHeaderControls({
+        agent,
+        source,
+        userId,
+        sheet,
+    });
+
+    return html`<${Sheet}
+        title=${
+            panel === "history"
+                ? `${agent.name} · History`
+                : panel === "orchestrators"
+                  ? "Orchestrators"
+                  : panel === "chats"
+                    ? `${agent.name} chats`
+                    : agent.name
+        }
+        onClose=${close}
+    >
+        ${
+            panel === "history"
+                ? html`<${AgentHistory} agent=${agent} source=${source} current=${current} close=${close} />`
+                : panel === "orchestrators"
+                  ? html`<${ChatOrchestrators} agent=${agent} source=${source} current=${current} close=${close} />`
+                  : panel === "chats"
+                    ? html`<${AgentTabs} picker=${true} close=${close} />`
+                    : html`<nav class="agent-header-menu" aria-label=${`${agent.name} actions`}>
+                    ${actions.map(
+                        ([label, icon, action]) => html`<button
+                        class="agent-menu-action"
+                        type="button"
+                        title=${actionTitle(label)}
+                        disabled=${unavailable(label)}
+                        onClick=${action}
+                    >
+                        <${Icon} name=${icon} size=${18} />
+                        <span>${label}</span>
+                        <${Icon} name="chevron" size=${14} />
+                    </button>`,
+                    )}
+                </nav>`
+        }
+    </${Sheet}>`;
+}
+
+export function Topbar() {
+    const agent = tabAgent();
+
+    if (agent) {
+        const { me, conversationId } = store.state;
+        const source = selectedAgentDraft()?.id ?? conversationId;
+
+        return html`<${NamedAgentTopbar}
+            key=${`${me.id}:${agent.agentId}:${source}`}
+            agent=${agent}
+            source=${source}
+            userId=${me.id}
+        />`;
+    }
+
+    return html`<${ConversationTopbar} />`;
 }

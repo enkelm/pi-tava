@@ -17,6 +17,9 @@ import { AgentExecution } from "./agent-execution.ts";
 import { AgentContacts } from "./agent-contacts.ts";
 import { SessionsDoc } from "../docs.ts";
 import { HttpError } from "../errors.ts";
+import { draftAttachments, materializeDraftAttachments } from "../agent-draft-uploads.ts";
+import { clientKey, ownRequest } from "../requests.ts";
+import { clampThinkingLevel, modelSelection } from "../models.ts";
 import { defang } from "../fence.ts";
 import { PIP_EXTENSION } from "../pip.ts";
 import {
@@ -41,11 +44,15 @@ export type PrivateAgentRecord = AgentCharter & {
     chatIds: number[];
     chats: PrivateAgentChat[];
     project?: { id: string; available: boolean; name?: string };
+    model?: { provider: string; modelId: string };
+    thinkingLevel?: ModelThinkingLevel;
     controllers: Awaited<ReturnType<AgentSupervision["controllers"]>>;
 };
+export type PrivateAgentIdentityRecord = Omit<PrivateAgentRecord, "id"> & { id: number | null };
 export type PrivateAgentChat = { id: number; title: string; busy: boolean; updatedAt: number };
 export type PrivateAgentSummary = {
-    id: number;
+    id: number | null;
+    controlRevision: number;
     agentId: string;
     chatIds: number[];
     chats: PrivateAgentChat[];
@@ -141,6 +148,7 @@ export class PipAgents {
     readonly #app: PocketApp;
     #doc: AgentIdentities = { items: {}, requests: {}, calls: {} };
     readonly #inputs = new Map<string, Promise<unknown>>();
+    readonly #draftAdmissions = new Set<number>();
     readonly supervision: AgentSupervision;
     readonly execution: AgentExecution;
     readonly contacts: AgentContacts;
@@ -172,6 +180,7 @@ export class PipAgents {
         await this.execution.recover();
         await this.supervision.recover();
         await this.contacts.recover();
+        await this.#reconcileDrafts();
     }
     async close(): Promise<void> {
         await Promise.all([
@@ -229,9 +238,25 @@ export class PipAgents {
 
         return scope === undefined ? undefined : cloned(this.#doc.items[scope.agentId]!);
     }
-    #owns(id: ConversationId, supplied: User, enabled = false): PrivateIdentity {
+    /** Identity settings need no transcript, and never synthesize a home chat. */
+    ownedIdentity(agentId: string, supplied: User, enabled = false): Readonly<PrivateIdentity> {
         const user = this.#owner(supplied, enabled);
-        const identity = this.identity(id);
+        const identity = this.#doc.items[agentId];
+
+        if (
+            identity === undefined ||
+            identity.deletedAt !== undefined ||
+            identity.ownerId !== user.id
+        ) {
+            throw new HttpError(404, "Private agent not found");
+        }
+
+        return cloned(identity);
+    }
+    #owns(id: ConversationId | string, supplied: User, enabled = false): PrivateIdentity {
+        const user = this.#owner(supplied, enabled);
+        const identity =
+            typeof id === "string" ? this.ownedIdentity(id, user, enabled) : this.identity(id);
 
         if (identity === undefined || identity.ownerId !== user.id) {
             throw new HttpError(
@@ -244,7 +269,7 @@ export class PipAgents {
     }
     #current(
         doc: AgentIdentities,
-        id: ConversationId,
+        id: ConversationId | string,
         user: User,
         enabled = false,
     ): PrivateIdentity {
@@ -255,18 +280,42 @@ export class PipAgents {
             identity === undefined ||
             identity.deletedAt !== undefined ||
             identity.ownerId !== user.id ||
-            !identity.chatIds.includes(Number(id))
+            (typeof id !== "string" && !identity.chatIds.includes(Number(id)))
         ) {
             throw new HttpError(404, "Private agent not found");
         }
 
         return identity;
     }
+    #pendingChats(doc: AgentIdentities, agentId: string): Set<number | undefined> {
+        return new Set(
+            Object.values(doc.requests)
+                .filter(
+                    (request) =>
+                        request.agentId === agentId &&
+                        request.firstInputRequestId !== undefined &&
+                        !request.accepted,
+                )
+                .map((request) => request.chatId),
+        );
+    }
+    #chatCapacity(doc: AgentIdentities, identity: Readonly<PrivateIdentity>): number {
+        const pending = this.#pendingChats(doc, identity.agentId);
+
+        // Retain every reservation for exact retry/recovery, but only saved Chats consume capacity.
+        // An admission in flight holds its slot until its native receipt has been reconciled.
+        return identity.chatIds.filter((id) => !pending.has(id) || this.#draftAdmissions.has(id))
+            .length;
+    }
     #chats(identity: Readonly<PrivateIdentity>): PrivateAgentChat[] {
+        const pending = this.#pendingChats(this.#doc, identity.agentId);
+
         return identity.chatIds.flatMap((id) => {
             const meta = this.#app.sessionMeta(cid(id));
 
-            return meta?.pipAgentId !== identity.agentId || meta.archived === true
+            return pending.has(id) ||
+                meta?.pipAgentId !== identity.agentId ||
+                meta.archived === true
                 ? []
                 : [
                       {
@@ -298,9 +347,10 @@ export class PipAgents {
         return Object.values(this.#doc.items)
             .filter((item) => item.ownerId === user.id && item.deletedAt === undefined)
             .map((item) => ({
-                id: this.#chats(item).at(-1)?.id ?? item.chatIds.at(-1)!,
+                id: this.#chats(item).at(-1)?.id ?? null,
+                controlRevision: this.supervision.projectionRevision,
                 agentId: item.agentId,
-                chatIds: [...item.chatIds],
+                chatIds: this.#chats(item).map((chat) => chat.id),
                 chats: this.#chats(item),
                 name: item.record.name,
                 busy: item.chatIds.some((id) => this.#app.isBusy(cid(id))),
@@ -308,10 +358,15 @@ export class PipAgents {
             }))
             .sort((a, b) => b.updatedAt - a.updatedAt || a.agentId.localeCompare(b.agentId));
     }
-    async read(id: ConversationId, supplied: User): Promise<PrivateAgentRecord> {
+    async read(id: ConversationId, supplied: User): Promise<PrivateAgentRecord>;
+    async read(id: string, supplied: User): Promise<PrivateAgentIdentityRecord>;
+    async read(id: ConversationId | string, supplied: User): Promise<PrivateAgentIdentityRecord>;
+    async read(id: ConversationId | string, supplied: User): Promise<PrivateAgentIdentityRecord> {
         const user = this.#owner(supplied);
 
-        this.#owns(id, user);
+        const captured = this.#owns(id, user);
+
+        await this.#reconcileDrafts(captured.agentId);
         const doc = await this.#app.harness.snapshot(AgentIdentitiesDoc, context);
         const identity = this.#current(doc ?? { items: {}, requests: {}, calls: {} }, id, user);
         const selected = identity.record.projectId;
@@ -320,16 +375,21 @@ export class PipAgents {
                 ? undefined
                 : this.#app.projects.list(user).projects.find((item) => item.id === selected);
 
-        const controllers = await this.supervision.controllers(id, user);
+        const controllers =
+            typeof id === "string" ? [] : await this.supervision.controllers(id, user);
 
         this.#owns(id, user);
 
         return {
-            id: Number(id),
+            id: typeof id === "string" ? (this.#chats(identity).at(-1)?.id ?? null) : Number(id),
             agentId: identity.agentId,
-            chatIds: [...identity.chatIds],
+            chatIds: this.#chats(identity).map((chat) => chat.id),
             chats: this.#chats(identity),
             ...cloned(identity.record),
+            ...(identity.model === undefined ? {} : { model: cloned(identity.model) }),
+            ...(identity.thinkingLevel === undefined
+                ? {}
+                : { thinkingLevel: identity.thinkingLevel }),
             controllers,
             ...(selected === undefined
                 ? {}
@@ -352,6 +412,84 @@ export class PipAgents {
             fingerprint: hash(JSON.stringify(input)),
         };
     }
+    /** Creating an identity is not creating a conversation. Old stored chats remain untouched. */
+    async createIdentity(supplied: User, input: unknown): Promise<PrivateAgentIdentityRecord> {
+        const user = this.#owner(supplied, true);
+        const request = object(input);
+
+        only(request, ["requestId", "projectId", ...fields]);
+        const value = { ...this.blueprint, ...changes(request) };
+        const projectId =
+            request.projectId === null || request.projectId === "" ? undefined : request.projectId;
+
+        if (projectId !== undefined && typeof projectId !== "string") {
+            throw new HttpError(400, "projectId must name an existing project");
+        }
+
+        const receipt = this.#request(user, request.requestId, "identity", { value, projectId });
+        const saved = this.#doc.requests[receipt.key];
+
+        if (saved !== undefined) {
+            if (saved.fingerprint !== receipt.fingerprint) {
+                throw new HttpError(409, "This creation request already has different settings");
+            }
+
+            return this.read(saved.agentId, user);
+        }
+
+        const prepared = this.#app.projects.prepare(user, { projectId, threadType: "chat" });
+        const selection = this.#app.commands.defaultModel();
+        const agentId = await this.#app.harness.commit(async (tx) => {
+            const doc = await tx.doc(AgentIdentitiesDoc);
+            const previous = doc.requests[receipt.key];
+
+            this.#owner(user, true);
+
+            if (previous !== undefined) {
+                if (previous.fingerprint !== receipt.fingerprint) {
+                    throw new HttpError(
+                        409,
+                        "This creation request already has different settings",
+                    );
+                }
+
+                return previous.agentId;
+            }
+
+            if (
+                Object.values(doc.items).filter(
+                    (item) => item.ownerId === user.id && item.deletedAt === undefined,
+                ).length >= 64
+            ) {
+                throw new HttpError(409, "At most 64 private agents may be created");
+            }
+
+            const placement = await this.#app.projects.place(tx, prepared);
+            const record = append(undefined, value, user.id, "owner");
+
+            if (placement.projectId !== undefined) {
+                record.projectId = placement.projectId;
+            }
+
+            const key = randomUUID();
+
+            doc.items[key] = {
+                agentId: key,
+                ownerId: user.id,
+                epoch: 1,
+                chatIds: [],
+                record,
+                ...selection,
+            };
+            doc.requests[receipt.key] = { fingerprint: receipt.fingerprint, agentId: key };
+            this.#owner(user, true);
+
+            return key;
+        }, context);
+
+        return this.read(agentId, user);
+    }
+    /** Compatibility for native callers with an explicitly requested saved chat. The browser uses createIdentity. */
     async create(supplied: User, input: unknown): Promise<PrivateAgentRecord> {
         const user = this.#owner(supplied, true);
         const request = object(input);
@@ -381,6 +519,126 @@ export class PipAgents {
             projectId: selected as string | undefined,
         });
     }
+    async #reconcileDrafts(agentId?: string): Promise<void> {
+        const waiting = (request: AgentIdentities["requests"][string]) =>
+            request.chatId !== undefined &&
+            request.firstInputRequestId !== undefined &&
+            !request.accepted &&
+            (agentId === undefined || request.agentId === agentId);
+
+        if (!Object.values(this.#doc.requests).some(waiting)) {
+            return;
+        }
+
+        await this.#app.harness.commit(async (tx) => {
+            const doc = await tx.doc(AgentIdentitiesDoc);
+            const pending = Object.values(doc.requests).filter(waiting);
+            // Read all native receipts before modifying documents (Durable disallows table reads after writes).
+            const receipts = await Promise.all(
+                pending.map((request) =>
+                    tx.submissionByRequest(cid(request.chatId!), request.firstInputRequestId!),
+                ),
+            );
+
+            for (const [index, request] of pending.entries()) {
+                if (receipts[index]?.type === "input") {
+                    request.accepted = true;
+                }
+            }
+        }, context);
+    }
+    /** Passive first-send recovery uses the same receipt as the ordinary composer, never resends input. */
+    async draftReceipt(agentId: string, supplied: User, requestId: unknown) {
+        const user = this.#owner(supplied);
+
+        this.ownedIdentity(agentId, user);
+        const { key } = this.#request(user, requestId, `first-input:${agentId}`, null);
+        const saved = this.#doc.requests[key];
+
+        if (saved === undefined || saved.agentId !== agentId || saved.chatId === undefined) {
+            return undefined;
+        }
+
+        const receipt = await this.#app.commands.submissionReceipt(
+            cid(saved.chatId),
+            user,
+            requestId,
+        );
+
+        if (receipt === undefined) {
+            return undefined;
+        }
+
+        await this.#reconcileDrafts(agentId);
+        this.ownedIdentity(agentId, user);
+
+        return { id: saved.chatId, agentId, ...receipt };
+    }
+    /** A first user send reserves one exact conversation, then uses native Commands admission and receipts. */
+    async submitDraft(agentId: string, supplied: User, input: unknown) {
+        const user = this.#owner(supplied, true);
+        const identity = this.ownedIdentity(agentId, user, true);
+        const request = object(input);
+
+        only(request, ["text", "requestId", "attachments", "inlineFiles"]);
+        const attachments = draftAttachments(this.#app, user, agentId, request.attachments);
+
+        if (
+            typeof request.text !== "string" ||
+            (request.text.trim() === "" && attachments.length === 0)
+        ) {
+            throw new HttpError(400, "Nothing to send");
+        }
+
+        const reservation = this.#request(user, request.requestId, `first-input:${agentId}`, {
+            agentId,
+            text: request.text,
+            attachments,
+            inlineFiles: request.inlineFiles === true,
+        });
+        const previous = this.#doc.requests[reservation.key];
+
+        if (previous !== undefined && previous.fingerprint !== reservation.fingerprint) {
+            // Retain the fingerprint of text-only reservations written before attachment support.
+            if (
+                attachments.length !== 0 ||
+                request.inlineFiles === true ||
+                previous.fingerprint !== hash(JSON.stringify({ agentId, text: request.text }))
+            ) {
+                throw new HttpError(409, "This first-send request already has different input");
+            }
+
+            reservation.fingerprint = previous.fingerprint;
+        }
+
+        const accepted = await this.draftReceipt(agentId, user, request.requestId);
+
+        if (accepted !== undefined) {
+            return accepted;
+        }
+
+        const model = identity.model;
+
+        if (
+            model === undefined ||
+            this.#app.models.getModel(model.provider, model.modelId) === undefined
+        ) {
+            throw new HttpError(409, "Pick a model for this agent first.");
+        }
+
+        const ownedRequestId = ownRequest(user.id, clientKey(request.requestId as string));
+        const chat = await this.#createChat(user, reservation, undefined, agentId, ownedRequestId);
+        const receipt = await this.#app.commands.submit(cid(chat.id), user, {
+            text: request.text,
+            requestId: request.requestId as string,
+            attachments: materializeDraftAttachments(this.#app, cid(chat.id), attachments),
+            inlineFiles: request.inlineFiles === true,
+        });
+
+        await this.#reconcileDrafts(agentId);
+
+        return { id: chat.id, agentId, ...receipt };
+    }
     async newChat(id: ConversationId, supplied: User, input: unknown): Promise<PrivateAgentRecord> {
         const user = this.#owner(supplied, true);
         const identity = this.#owns(id, user, true);
@@ -397,7 +655,8 @@ export class PipAgents {
         user: User,
         receipt: { key: string; fingerprint: string },
         initial?: { value: AgentCharterFields; projectId?: string },
-        source?: ConversationId,
+        source?: ConversationId | string,
+        firstInputRequestId?: string,
     ): Promise<PrivateAgentRecord> {
         const app = this.#app;
         const saved = (await app.harness.snapshot(AgentIdentitiesDoc, context))?.requests[
@@ -411,6 +670,10 @@ export class PipAgents {
                 throw new HttpError(409, "This creation request already has different settings");
             }
 
+            if (saved.chatId === undefined) {
+                throw new HttpError(409, "This request created an identity, not a chat");
+            }
+
             return this.read(cid(saved.chatId), user);
         }
 
@@ -422,6 +685,10 @@ export class PipAgents {
             source === undefined ? app.commands.defaultModel() : this.#owns(source, user, true);
         const agentId = randomUUID();
         let id: ConversationId;
+
+        if (source !== undefined) {
+            await this.#reconcileDrafts(this.#owns(source, user, true).agentId);
+        }
 
         try {
             const conversation = await app.harness.createConversation(
@@ -448,6 +715,10 @@ export class PipAgents {
                                 );
                             }
 
+                            if (earlier.chatId === undefined) {
+                                throw new HttpError(409, "This request has no chat");
+                            }
+
                             throw new CreatedEarlier(earlier.chatId);
                         }
 
@@ -456,7 +727,7 @@ export class PipAgents {
                         if (source !== undefined) {
                             identity = this.#current(doc, source, user, true);
 
-                            if (identity.chatIds.length >= 128) {
+                            if (this.#chatCapacity(doc, identity) >= 128) {
                                 throw new HttpError(409, "At most 128 chats per agent");
                             }
 
@@ -533,6 +804,7 @@ export class PipAgents {
                             fingerprint: receipt.fingerprint,
                             agentId: identity.agentId,
                             chatId: Number(created),
+                            ...(firstInputRequestId === undefined ? {} : { firstInputRequestId }),
                         };
 
                         if (initial !== undefined) {
@@ -603,7 +875,17 @@ export class PipAgents {
             }
         }
     }
-    async update(id: ConversationId, supplied: User, input: unknown): Promise<PrivateAgentRecord> {
+    async update(id: ConversationId, supplied: User, input: unknown): Promise<PrivateAgentRecord>;
+    async update(
+        id: ConversationId | string,
+        supplied: User,
+        input: unknown,
+    ): Promise<PrivateAgentIdentityRecord>;
+    async update(
+        id: ConversationId | string,
+        supplied: User,
+        input: unknown,
+    ): Promise<PrivateAgentIdentityRecord> {
         const request = object(input);
 
         only(request, ["action", "expectedRevision", ...fields]);
@@ -618,7 +900,17 @@ export class PipAgents {
             ...change,
         }));
     }
-    async undo(id: ConversationId, supplied: User, input: unknown): Promise<PrivateAgentRecord> {
+    async undo(id: ConversationId, supplied: User, input: unknown): Promise<PrivateAgentRecord>;
+    async undo(
+        id: ConversationId | string,
+        supplied: User,
+        input: unknown,
+    ): Promise<PrivateAgentIdentityRecord>;
+    async undo(
+        id: ConversationId | string,
+        supplied: User,
+        input: unknown,
+    ): Promise<PrivateAgentIdentityRecord> {
         const request = object(input);
 
         only(request, ["action", "expectedRevision", "revision"]);
@@ -644,12 +936,12 @@ export class PipAgents {
         );
     }
     async #edit(
-        id: ConversationId,
+        id: ConversationId | string,
         supplied: User,
         expected: unknown,
         change: (record: AgentCharter) => AgentCharterFields,
         source: "owner" | "undo" = "owner",
-    ): Promise<PrivateAgentRecord> {
+    ): Promise<PrivateAgentIdentityRecord> {
         const user = this.#owner(supplied);
 
         this.#owns(id, user);
@@ -681,16 +973,34 @@ export class PipAgents {
 
         return this.read(id, user);
     }
-    async act(id: ConversationId, user: User, input: unknown): Promise<PrivateAgentRecord> {
+    async act(id: ConversationId, user: User, input: unknown): Promise<PrivateAgentRecord>;
+    async act(
+        id: ConversationId | string,
+        user: User,
+        input: unknown,
+    ): Promise<PrivateAgentIdentityRecord>;
+    async act(
+        id: ConversationId | string,
+        user: User,
+        input: unknown,
+    ): Promise<PrivateAgentIdentityRecord> {
         const request = object(input);
 
         if (["attach", "detach", "stop_supervision"].includes(String(request.action))) {
+            if (typeof id === "string") {
+                throw new HttpError(400, "Select the originating chat for work controls");
+            }
+
             await this.supervision.control(id, user, request);
 
             return this.read(id, user);
         }
 
         if (request.action === "new_chat") {
+            if (typeof id === "string") {
+                throw new HttpError(400, "New chats are local drafts until their first message");
+            }
+
             return this.newChat(id, user, request);
         }
 
@@ -720,7 +1030,11 @@ export class PipAgents {
                 if (request.budget === null) {
                     delete identity.maxCost;
                 } else {
-                    identity.maxCost = this.#app.spend.agentSpent(id) + (request.budget as number);
+                    const chat = identity.chatIds[0];
+
+                    identity.maxCost =
+                        (chat === undefined ? 0 : this.#app.spend.agentSpent(cid(chat))) +
+                        (request.budget as number);
                 }
 
                 identity.record = append(identity.record, identity.record, user.id, "owner");
@@ -735,9 +1049,27 @@ export class PipAgents {
 
         return this.update(id, user, request);
     }
+    async configureIdentity(agentId: string, user: User, input: unknown) {
+        const request = object(input);
+
+        only(request, ["model", "thinkingLevel"]);
+        const identity = this.ownedIdentity(agentId, user);
+        const selection = modelSelection(this.#app.models, request);
+        const ref = selection.model ?? identity.model;
+        const model =
+            ref === undefined ? undefined : this.#app.models.getModel(ref.provider, ref.modelId);
+        const level = selection.thinkingLevel ?? identity.thinkingLevel ?? "off";
+
+        await this.configure(agentId, user, {
+            ...(selection.model === undefined ? {} : { model: selection.model }),
+            thinkingLevel: model === undefined ? level : clampThinkingLevel(model, level),
+        });
+
+        return this.read(agentId, user);
+    }
     /** The existing model picker changes the identity and all its chats, never defaults or sibling agents. */
     async configure(
-        id: ConversationId,
+        id: ConversationId | string,
         supplied: User,
         change: {
             model?: { provider: string; modelId: string };
@@ -803,15 +1135,38 @@ export class PipAgents {
                     }
                 }
 
-                await this.#app.harness.commit(async (tx) => {
-                    await this.supervision.acceptInput(tx, id, user, requestId);
+                const draft = this.#pendingChats(this.#doc, identity.agentId).has(Number(root));
 
-                    if (id === root) {
-                        Object.assign(await tx.doc(AgentDoc, id), this.#profile());
+                if (draft) {
+                    this.#draftAdmissions.add(Number(root));
+                }
+
+                try {
+                    await this.#app.harness.commit(async (tx) => {
+                        const doc = await tx.doc(AgentIdentitiesDoc);
+                        const current = this.#current(doc, root, user, true);
+
+                        if (draft && this.#chatCapacity(doc, current) > 128) {
+                            throw new HttpError(409, "At most 128 chats per agent");
+                        }
+
+                        await this.supervision.acceptInput(tx, id, user, requestId);
+
+                        if (id === root) {
+                            Object.assign(await tx.doc(AgentDoc, id), this.#profile());
+                        }
+                    }, context);
+
+                    return await effect();
+                } finally {
+                    if (draft) {
+                        try {
+                            await this.#reconcileDrafts(identity.agentId);
+                        } finally {
+                            this.#draftAdmissions.delete(Number(root));
+                        }
                     }
-                }, context);
-
-                return effect();
+                }
             });
 
         this.#inputs.set(identity.agentId, work);

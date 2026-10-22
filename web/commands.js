@@ -8,6 +8,7 @@ import { togglePeeks } from "./peeks.js";
 import { askPip, openPip, pipAvailable } from "./pip.js";
 import {
     actions,
+    api,
     collab,
     navigate,
     notify,
@@ -138,16 +139,24 @@ function findModels(query) {
     });
 }
 
-async function switchModel(arg) {
+const modelSheet = (agentId, query = "") =>
+    openSheet({ type: "model", ...(agentId ? { agentId } : {}), ...(query ? { query } : {}) });
+const configureModel = (agentId, change) =>
+    agentId
+        ? api(`pip/agents/${encodeURIComponent(agentId)}/configure`, change)
+        : actions.configure(change);
+
+async function switchModel(arg, _requestId, agentId = null) {
     if (arg === "") {
-        return openSheet({ type: "model" });
+        return modelSheet(agentId);
     }
 
     let found = findModels(arg);
 
     // The same model from several providers: keep the current provider.
     if (found.length > 1 && found.every((model) => model.id === found[0].id)) {
-        const current = found.find((model) => model.provider === agent()?.model?.provider);
+        const selected = agentId ? await api(`pip/agents/${encodeURIComponent(agentId)}`) : agent();
+        const current = found.find((model) => model.provider === selected?.model?.provider);
 
         if (current) {
             found = [current];
@@ -159,29 +168,37 @@ async function switchModel(arg) {
             notify("info", `No model matches “${arg}”.`);
         }
 
-        return openSheet({ type: "model", query: found.length === 0 ? "" : arg });
+        return modelSheet(agentId, found.length === 0 ? "" : arg);
     }
 
-    await actions.configure({ model: { provider: found[0].provider, modelId: found[0].id } });
+    await configureModel(agentId, { model: { provider: found[0].provider, modelId: found[0].id } });
 }
 
-async function setThinking(arg) {
+async function setThinking(arg, _requestId, agentId = null) {
     if (arg === "") {
-        return openSheet({ type: "model" });
+        return modelSheet(agentId);
     }
 
-    const levels = agent()?.levels ?? ["off"];
+    const selected = agentId ? await api(`pip/agents/${encodeURIComponent(agentId)}`) : agent();
+    const model = agentId
+        ? store.state.models.find(
+              (item) =>
+                  item.provider === selected?.model?.provider &&
+                  item.id === selected?.model?.modelId,
+          )
+        : selected;
+    const levels = model?.levels ?? ["off"];
     const level = arg.toLowerCase();
 
     if (!levels.includes(level)) {
         throw new Error(
             levels.length > 1
                 ? `Thinking can be ${levels.join(", ")}.`
-                : `${modelLabel(agent())} does not think.`,
+                : `${modelLabel(model)} does not think.`,
         );
     }
 
-    await actions.configure({ thinkingLevel: level });
+    await configureModel(agentId, { thinkingLevel: level });
 }
 
 async function newSession(arg) {
@@ -529,7 +546,9 @@ function extensionCommands() {
 }
 
 const available = () => [
-    ...COMMANDS.filter((command) => command.available?.() ?? true),
+    // Keep native commands recognizable before first Send, even when they need a saved Chat.
+    // Composer gives a contextual refusal instead of treating a command as model input.
+    ...COMMANDS.filter((command) => store.state.agentDraft || (command.available?.() ?? true)),
     ...extensionCommands(),
     ...extensionInputCommands().map((command) => ({ ...command, modelInput: true })),
 ];

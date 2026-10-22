@@ -129,38 +129,109 @@
     background: var(--pressed);
 }
 
-/* Tabs share the normal header with context and utilities, never a second topbar. */
-.title.title-agent {
-    flex-direction: row;
+/* Named agents get one quiet header: no worktree, files or ordinary thread utilities. */
+.topbar.agent-topbar {
+    flex-wrap: nowrap;
+    min-width: 0;
+    gap: 2px;
+}
+
+.topbar.agent-topbar > .icon-button,
+.agent-header-context .icon-button {
+    flex: none;
+    min-width: 40px;
+    width: 40px;
+    height: 40px;
+}
+
+.agent-header-name {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 80px;
+    min-height: 40px;
+    padding: 6px;
+    border: 0;
+    border-radius: var(--r-row);
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-align: start;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-header-context {
+    display: none;
+    flex: none;
+    align-items: center;
+}
+
+/* Current controllers stay visible beside tabs on wider panes; the count/disclosure remains on phones. */
+.agent-current-orchestrators {
+    display: none;
+    flex: 0 1 28%;
     align-items: center;
     min-width: 0;
+    max-width: 300px;
     gap: 4px;
-    padding: 0;
-    margin-left: 4px;
-}
-
-.title-agent > .title-sub {
-    flex: 0 1 40%;
-    max-width: 220px;
-    min-height: 44px;
     overflow-x: auto;
     overscroll-behavior-x: contain;
-    scrollbar-width: none;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
 }
 
-.title-agent > .title-sub::-webkit-scrollbar {
-    display: none;
+.agent-current-controller {
+    display: grid;
+    flex: 0 0 auto;
+    align-content: center;
+    min-width: 80px;
+    max-width: 160px;
+    min-height: 40px;
+    gap: 2px;
+    padding: 4px 8px;
+    border-radius: var(--r-row);
+    color: var(--text);
+    font-size: 0.78rem;
+    text-decoration: none;
 }
 
-/* Native horizontal scrolling keeps tabs, their close buttons and trailing + reachable. */
+.agent-current-controller > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.topbar.agent-topbar > .agent-controller-summary {
+    width: auto;
+    gap: 4px;
+    padding-inline: 6px;
+}
+
+@container topbar (min-width: 700px) {
+    .agent-current-orchestrators:has(a) {
+        display: flex;
+    }
+}
+
+@container topbar (max-width: 359px) {
+    .agent-header-name {
+        display: none;
+    }
+}
+
+/* Phone navigation stays within the pane. Only the tablet/desktop tabs scroll. */
 .agent-tabs {
+    display: flex;
     flex: 1;
+    align-items: center;
     min-width: 0;
     max-width: 100%;
 }
 
 .agent-tabs-strip {
-    display: flex;
+    display: none;
+    flex: 1;
     align-items: stretch;
     min-width: 0;
     gap: 2px;
@@ -168,6 +239,49 @@
     overscroll-behavior-x: contain;
     scrollbar-width: thin;
     scrollbar-color: var(--line) transparent;
+}
+
+.agent-chat-switch {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
+    min-height: 40px;
+    gap: 6px;
+    padding: 6px;
+    border: 0;
+    border-radius: var(--r-row);
+    background: transparent;
+    color: var(--text);
+    font-size: 0.82rem;
+    text-align: start;
+}
+
+.agent-chat-switch > svg {
+    flex: none;
+}
+
+@media (min-width: 700px) {
+    @container topbar (min-width: 430px) {
+        .agent-tabs-strip {
+            display: flex;
+        }
+
+        .agent-chat-switch {
+            display: none;
+        }
+
+        .agent-header-name {
+            max-width: 120px;
+        }
+    }
+}
+
+@container topbar (min-width: 880px) {
+    .agent-header-context {
+        display: flex;
+    }
 }
 
 .agent-tab-item {
@@ -238,26 +352,124 @@
     background: var(--accent);
 }
 
-.agent-tabs :is(a, button):focus-visible {
+.agent-topbar :is(a, button):focus-visible,
+.agent-chat-choices :is(a, button):focus-visible,
+.agent-header-menu button:focus-visible,
+.agent-history-list a:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -3px;
 }
 
-.agent-tabs :is(a, button):active {
+.agent-topbar :is(a, button):active,
+.agent-chat-choices :is(a, button):active,
+.agent-header-menu button:active,
+.agent-history-list a:active {
     background: var(--pressed);
 }
 
-.agent-tab-new:disabled {
-    opacity: 0.5;
+.agent-chat-choices,
+.agent-header-menu,
+.agent-history-list {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
 }
 
-.agent-tabs-error {
-    max-height: 6em;
-    margin: 0;
-    padding: 8px;
-    color: var(--text);
-    overflow: auto;
+/* Suppress browser tap/callout artifacts only on controls, never on readable sheet content. */
+.agent-topbar :is(a, button),
+.agent-chat-choices :is(a, button),
+.agent-header-menu button,
+.agent-history-list a {
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.agent-chat-choices :is(a, button) {
+    min-height: 44px;
+}
+
+.agent-header-menu button:disabled,
+.agent-header-context button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.agent-chat-choice {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+    border-radius: var(--r-row);
+}
+
+.agent-chat-choice .agent-tab {
+    justify-content: flex-start;
+    text-align: start;
+}
+
+.agent-chat-choice .agent-tab-title {
+    flex: 1;
+    white-space: normal;
     overflow-wrap: anywhere;
+}
+
+.agent-chat-choice.on,
+.agent-history-chat.on {
+    background: var(--hover);
+}
+
+.agent-menu-action,
+.agent-history-chat {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    min-height: 44px;
+    gap: 12px;
+    padding: 10px 8px;
+    border: 0;
+    border-radius: var(--r-row);
+    background: transparent;
+    color: var(--text);
+    text-align: start;
+    text-decoration: none;
+    touch-action: manipulation;
+}
+
+.agent-menu-action > span,
+.agent-history-chat-copy {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.agent-menu-action > svg,
+.agent-history-chat > svg {
+    flex: none;
+    color: var(--muted);
+}
+
+.agent-history-chat-copy {
+    display: grid;
+    gap: 4px;
+}
+
+.agent-chat-history p {
+    overflow-wrap: anywhere;
+}
+
+.agent-orchestrators details {
+    min-width: 0;
+}
+
+.agent-orchestrators .named-agent-controller-link {
+    padding-inline: 8px;
+}
+
+.agent-orchestrators li > p {
+    margin: 0;
+    padding-inline: 8px;
 }
 
 .named-agent-chats summary {
@@ -428,140 +640,23 @@
     overflow-wrap: anywhere;
 }
 
-.agent-header-scroll-hint {
-    display: none;
-}
-
-/* A phone cannot budget for tabs, 40% context and every fixed utility at once. Scroll the
- * one header instead: no nested tab scroller, no shrinking Close/+ and no second row.
- * Back and Menu cap the rail; scroll padding keeps a revealed tab clear of both caps. */
-@media (max-width: 699px) {
-    .topbar.agent-topbar {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        overscroll-behavior-x: contain;
-        scroll-padding-inline: 52px 72px;
-        scrollbar-width: thin;
-        scrollbar-color: var(--line) transparent;
-    }
-
-    .agent-topbar > * {
-        flex-shrink: 0;
-    }
-
-    .topbar > .title.title-agent {
-        flex: none;
-        margin-left: 0;
-    }
-
-    .title-agent > .agent-tabs {
-        display: flex;
-        flex: none;
-        align-items: center;
-        max-width: none;
-        gap: 8px;
-    }
-
-    .agent-tabs-strip {
-        overflow-x: visible;
-    }
-
-    .agent-tab-item {
-        width: 160px;
-        min-width: 160px;
-        max-width: 160px;
-    }
-
-    .agent-tabs :is(a, button) {
+@media (max-width: 699px), (any-pointer: coarse) {
+    .agent-topbar button,
+    .agent-topbar a,
+    .agent-header-context .icon-button,
+    .named-agents button,
+    .named-agents .named-agents-toggle,
+    .named-agent-form :is(button, a, summary) {
         min-height: 44px;
-    }
-
-    .agent-tab-close,
-    .agent-tab-new {
-        width: 44px;
-    }
-
-    .agent-tabs-error {
-        max-width: 240px;
-        max-height: 44px;
-    }
-
-    .title-agent > .title-sub {
-        flex: none;
-        max-width: none;
-        overflow-x: visible;
-    }
-
-    .title-agent .title-sub > :is(.title-folder, .title-destination) {
-        max-width: 160px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-
-    .title-agent .title-sub > .title-branch {
-        flex: none;
-        max-width: 160px;
-    }
-
-    /* Native controls that normally yield to the menu now have room in this same rail. */
-    .topbar.agent-topbar .top-toggle,
-    .topbar.agent-topbar .people-button,
-    .topbar.agent-topbar .quiet-phone {
-        display: inline-flex;
     }
 
     .topbar.agent-topbar > .icon-button,
-    .topbar.agent-topbar > .people-button,
-    .topbar.agent-topbar > .changes-button {
-        min-width: 44px;
-        min-height: 44px;
-    }
-
-    .agent-topbar > .topbar-back,
-    .agent-topbar > .topbar-menu {
-        position: sticky;
-        z-index: 2;
-        background: var(--bg);
-    }
-
-    .agent-topbar > .topbar-back {
-        left: 4px;
-    }
-
-    .agent-topbar > .topbar-menu {
-        right: 6px;
-    }
-
-    /* An always-visible touch cue, not a hover tooltip or another header row. */
-    .agent-header-scroll-hint {
-        position: absolute;
-        inset-block: 0;
-        right: 100%;
-        display: flex;
-        align-items: center;
-        width: 18px;
-        background: var(--bg);
-        color: var(--faint);
-        pointer-events: none;
-    }
-}
-
-@media (any-pointer: coarse) {
-    .named-agents button,
-    .named-agents .named-agents-toggle,
-    .named-agent-form :is(button, a, summary),
-    .agent-tabs :is(a, button) {
-        min-height: 44px;
-    }
-
+    .agent-header-context .icon-button,
     .named-agents-create,
     .agent-tab-close,
     .agent-tab-new {
         min-width: 44px;
-    }
-
-    .title-agent .title-sub > button.title-branch::after {
-        inset: -12px -8px;
+        width: 44px;
     }
 
     .named-agents .icon-button {
@@ -574,7 +669,10 @@
 @media (hover: hover) and (pointer: fine) {
     .named-agents button:hover:not(:active),
     .named-agent-controller-link:hover:not(:active),
-    .agent-tabs :is(a, button):hover:not(:active):not(:disabled) {
+    .agent-topbar :is(a, button):hover:not(:active):not(:disabled),
+    .agent-chat-choices :is(a, button):hover:not(:active),
+    .agent-header-menu button:hover:not(:active):not(:disabled),
+    .agent-history-list a:hover:not(:active) {
         background: var(--hover);
     }
 }

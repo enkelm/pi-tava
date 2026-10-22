@@ -745,7 +745,7 @@ test("archived report origins survive completed coding without rerouting or paid
         "owner has a durable notice at the exact native controller",
     );
     assert.equal(
-        (await app.pip.agents.supervision.controllers(first, owner(app)))[0]!.state,
+        (await app.pip.agents.supervision.controllers(origin, owner(app)))[0]!.state,
         "needs owner",
     );
     const completedEpoch = app.pip.agents.identity(origin)!.epoch;

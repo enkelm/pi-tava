@@ -20,7 +20,12 @@ const caller = () => {
     return user ? JSON.stringify([user.id, user.role, user.sessions ?? null]) : null;
 };
 
-const listKey = () => JSON.stringify([caller(), store.state.conversationId, cwd() ?? null]);
+const listKey = () =>
+    JSON.stringify([
+        caller(),
+        store.state.agentDraft?.agentId ?? store.state.conversationId,
+        cwd() ?? null,
+    ]);
 let userScope = caller();
 let departed = false;
 const awake = () => !departed && !document.hidden && navigator.onLine !== false;
@@ -75,7 +80,8 @@ function prepare(files) {
     return { paths, lower, bases, dirs: dirs.size };
 }
 
-const cwd = () => store.state.view.agent?.cwd;
+const cwd = () =>
+    store.state.agentDraft ? store.state.server?.defaultCwd : store.state.view.agent?.cwd;
 
 /**
  * Get or check the list of files for this conversation's folder, unless one was checked in the last few seconds. With
@@ -84,7 +90,9 @@ const cwd = () => store.state.view.agent?.cwd;
 export function loadFiles({ ifMissing = false } = {}) {
     const id = store.state.conversationId;
 
-    if (id === null || caller() === null || !awake()) {
+    const agentId = store.state.agentDraft?.agentId;
+
+    if ((id === null && !agentId) || caller() === null || !awake()) {
         return;
     }
 
@@ -129,7 +137,9 @@ export function loadFiles({ ifMissing = false } = {}) {
         }
     };
 
-    api(`c/${id}/files${since}`, undefined, { signal: controller.signal }).then((data) => {
+    const path = agentId ? `pip/agents/${encodeURIComponent(agentId)}/files` : `c/${id}/files`;
+
+    api(`${path}${since}`, undefined, { signal: controller.signal }).then((data) => {
         if (!current()) {
             return;
         }

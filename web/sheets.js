@@ -3,7 +3,7 @@
 import { ChatSheet } from "./chat.js";
 import { ExtensionSheet, onExtensionsGone } from "./extension-ui.js";
 import { ShareSheet } from "./share.js";
-import { NamedAgentSheet } from "./named-agents.js";
+import { AgentModelPicker, NamedAgentSheet } from "./named-agents.js";
 import { BranchPicker } from "./sheets/branch.js";
 import { FileSheet } from "./sheets/file.js";
 import { FindSheet } from "./sheets/find.js";
@@ -39,6 +39,7 @@ import { piSessionsAvailable } from "./sheets/pi-sessions.js";
 import { WorkItemLimitsSheet } from "./sheets/work-item-limits.js";
 import { WorktreeSheet } from "./sheets/worktree.js";
 import { TrustSheet } from "./trust.js";
+import { AgentHeaderSheet } from "./topbar.js";
 import { addLayer, goBack, removeLayer } from "./back.js";
 import { actions, store } from "./store.js";
 import { Boundary, html, SheetBack, SheetInfo, usePresence } from "./ui.js";
@@ -58,6 +59,10 @@ const SETTINGS_TABS = {
 
 /** What tells sheets apart: the same one changing (its query, say) stays one step back. */
 const sheetKey = (sheet) => {
+    if (sheet.type === "agent-header") {
+        return `agent-header:${sheet.userId}:${sheet.agentId}:${sheet.source}:${sheet.panel}`;
+    }
+
     const session =
         sheet.type === "new-session" ||
         (sheet.type === "cwd" && sheet.mode === "new") ||
@@ -227,6 +232,9 @@ function sheetBody(sheet) {
         case "named-agent":
             body = html`<${NamedAgentSheet} sheet=${sheet} />`;
             break;
+        case "agent-header":
+            body = html`<${AgentHeaderSheet} sheet=${sheet} />`;
+            break;
         case "sidebar-options":
             body = html`<${SidebarOptions}
                 kind=${sheet.kind}
@@ -253,7 +261,9 @@ function sheetBody(sheet) {
             body = html`<${ShortcutsSheet} />`;
             break;
         case "model":
-            body = html`<${ModelPicker} />`;
+            body = sheet.agentId
+                ? html`<${AgentModelPicker} sheet=${sheet} />`
+                : html`<${ModelPicker} />`;
             break;
         case "pip-model":
             body = html`<${PipModelPicker} target=${sheet.target} agent=${sheet.agent} />`;

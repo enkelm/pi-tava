@@ -2103,7 +2103,7 @@ export class PocketApp {
                 // This person may have a PiP, the assistant over every screen (`pip.ts`).
                 pip: this.pip.available(user),
                 pipSettings: 1,
-                privateAgents: 3,
+                privateAgents: 4,
                 pipEnabled: this.config.pipEnabled,
                 // Shared mentions are separate from the owner's private PiP panel availability.
                 pipMentions: true,

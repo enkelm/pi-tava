@@ -19,7 +19,7 @@ import {
     attempt,
     canSteer,
     collab,
-    drafts,
+    drafts as savedDrafts,
     navigate,
     notify,
     openSheet,
@@ -28,6 +28,12 @@ import {
     uid,
 } from "./store.js";
 import { useDock } from "./dock.js";
+import {
+    sendAgentDraft,
+    updateAgentDraft,
+    updateAgentDraftFiles,
+    updateAgentDraftPastes,
+} from "./agent-drafts.js";
 import { SubagentsBar } from "./subagents.js";
 import { TrustBar } from "./trust.js";
 import { prefs } from "./theme.js";
@@ -509,11 +515,38 @@ function QueuedMessages({ inbox, editing, sending, blocked, onEdit, conversation
     </div>`;
 }
 
-export function Composer() {
-    const { view, conversationId } = store.state;
-    const historyScope = { person: store.state.me?.id, conversation: conversationId };
+export function Composer({ draft = null, onCheckDraft } = {}) {
+    const { view } = store.state;
+    // A local composition scope is never a conversation id or an ordinary/home Chat fallback.
+    const conversationId = draft
+        ? `agent-draft:${draft.userId}:${draft.id}`
+        : store.state.conversationId;
+    const drafts = draft
+        ? {
+              get: () => draft.text,
+              revision: () => draft.revision ?? 0,
+              set: (_id, value) => updateAgentDraft(draft.id, value),
+          }
+        : savedDrafts;
+    const readPastes = () => (draft ? (draft.pastes ?? {}) : loadPastes(conversationId));
+    const keepPastes = (value) =>
+        draft ? updateAgentDraftPastes(draft.id, value) : savePastes(conversationId, value);
+    const historyScope = {
+        person: store.state.me?.id,
+        conversation: draft ? null : conversationId,
+    };
     const [text, setText] = useState(() => drafts.get(conversationId));
-    const [files, setFiles] = useState([]);
+    const [files, setLocalFiles] = useState(() => draft?.files ?? []);
+    const setFiles = (value) =>
+        setLocalFiles((current) => {
+            const next = typeof value === "function" ? value(current) : value;
+
+            if (draft) {
+                updateAgentDraftFiles(draft.id, next);
+            }
+
+            return next;
+        });
     const [steer, setSteer] = useState(true);
     const [sending, setSending] = useState(false);
     // Queued edits never replace the persisted draft or its files and paste placeholders.
@@ -525,7 +558,7 @@ export function Composer() {
     // File mentions: where the caret is, and the mention Escape hid (by where it starts).
     const [caret, setCaret] = useState(() => drafts.get(conversationId).length);
     const [hiddenMention, setHiddenMention] = useState(null);
-    const [pastes, setPastes] = useState(() => loadPastes(conversationId));
+    const [pastes, setPastes] = useState(readPastes);
     // ↑ through what was sent before: where in that list, and the draft ↓ comes back to. Ctrl+R searches it.
     const [browsing, setBrowsing] = useState(null);
     const [searching, setSearching] = useState(false);
@@ -567,9 +600,9 @@ export function Composer() {
     const requestId = useRef(uid());
     // An extension's command while its send is unresolved: sending the same text again finds the first run.
     const commandRequest = useRef(null);
-    const busy = view.live.busy;
-    const stoppable = busy || view.conversation?.workSupervisor?.status === "running";
-    const agent = view.agent;
+    const busy = !draft && view.live.busy;
+    const stoppable = !draft && (busy || view.conversation?.workSupervisor?.status === "running");
+    const agent = draft ? null : view.agent;
 
     useEffect(() => {
         const draft = drafts.get(conversationId);
@@ -578,7 +611,7 @@ export function Composer() {
         setText(draft);
         setCaret(draft.length);
         argumentPicked.current = false;
-        setPastes(loadPastes(conversationId));
+        setPastes(readPastes());
         setBrowsing(null);
         setSearching(false);
     }, [conversationId]);
@@ -647,6 +680,10 @@ export function Composer() {
     }, [text]);
 
     const update = (value, at = value.length) => {
+        if (draft?.requestId) {
+            return;
+        }
+
         setText(value);
         setCaret(at);
 
@@ -666,7 +703,9 @@ export function Composer() {
         }
 
         // A queued edit is not a new message to Pi, and neither is a command.
-        typing(editing || value.trim() === "" || value.startsWith("/") ? null : "pi");
+        if (!draft) {
+            typing(editing || value.trim() === "" || value.startsWith("/") ? null : "pi");
+        }
     };
 
     // Ctrl+R: what was sent before that has the words in the box.
@@ -681,6 +720,11 @@ export function Composer() {
         }
 
         let stopped = false;
+
+        // Session-bound extension callbacks have no native session to act on before first acceptance.
+        if (draft) {
+            return;
+        }
 
         extensionInputSuggestions(text, caret).then((rows) => {
             if (!stopped) {
@@ -770,6 +814,34 @@ export function Composer() {
 
     /** Run a slash command. The text goes away once it worked; attached files stay for the next message. */
     const runCommand = async ({ command, arg }, sent) => {
+        if (draft) {
+            if (["instructions", "name"].includes(command.name)) {
+                openSheet({
+                    type: "named-agent",
+                    agentId: draft.agentId,
+                    userId: draft.userId,
+                    opening: uid(),
+                    section: command.name === "name" ? "name" : "instructions",
+                });
+
+                return;
+            }
+
+            if (
+                command.extension ||
+                !["model", "thinking", "settings", "login", "theme", "resume"].includes(
+                    command.name,
+                )
+            ) {
+                notify(
+                    "info",
+                    "This command needs a saved Chat. Send your first message before running it.",
+                );
+
+                return;
+            }
+        }
+
         let request = null;
 
         if (command.extension) {
@@ -787,7 +859,7 @@ export function Composer() {
         setSending(true);
         const ok = await attempt(async () => {
             try {
-                await command.run(arg, request?.requestId);
+                await command.run(arg, request?.requestId, draft?.agentId);
             } catch (error) {
                 // A 4xx made no run, or refused it for good: the next send is a new request. After a network error
                 // or a 5xx, the run may be there: the same send finds it.
@@ -865,9 +937,11 @@ export function Composer() {
     const queuedItem = editing ? (view.inbox ?? []).find((item) => item.id === editing.id) : null;
     const canSend =
         !sending &&
-        (editing
-            ? queuedItem !== undefined && (text.trim() !== "" || queuedItem.hasAttachments)
-            : !uploading && (text.trim() !== "" || files.some((file) => file.state === "done")));
+        (draft?.requestId ||
+            (editing
+                ? queuedItem !== undefined && (text.trim() !== "" || queuedItem.hasAttachments)
+                : !uploading &&
+                  (text.trim() !== "" || files.some((file) => file.state === "done"))));
 
     const beginEdit = (item) => {
         if (sending || editing || typeof item.editableText !== "string") {
@@ -975,13 +1049,22 @@ export function Composer() {
         }
 
         setPastes({});
-        savePastes(conversationId, {});
+        keepPastes({});
         setBrowsing(null);
         update("");
     };
 
     /** Run `!command` in the session's folder. Its entry shows once it is done; until then, a row says it runs. */
     const runShell = async (full) => {
+        if (draft) {
+            notify(
+                "info",
+                "Shell commands need a saved Chat. Send your first message before running a command; nothing was sent to Pi.",
+            );
+
+            return;
+        }
+
         const command = full.replace(/^!!?/, "").trim();
 
         if (command === "") {
@@ -1036,7 +1119,7 @@ export function Composer() {
 
         const full = expandPastes(text, pastes);
 
-        if (parsed && !parsed.command.modelInput) {
+        if (!draft?.requestId && parsed && !parsed.command.modelInput) {
             if (full.length <= REMEMBER_CHARS) {
                 remember(full, historyScope);
             }
@@ -1044,7 +1127,7 @@ export function Composer() {
             return runCommand(parseCommand(full) ?? parsed, full);
         }
 
-        if (shell) {
+        if (!draft?.requestId && shell) {
             return runShell(full);
         }
 
@@ -1055,21 +1138,32 @@ export function Composer() {
             .filter((file) => file.state === "done")
             .map((file) => file.attachment);
         const ok = await attempt(() =>
-            actions.submit(
-                full,
-                attachments,
-                busy && steer ? "steer" : "followUp",
-                inlineFiles && mentionsFiles,
-                conversationId,
-                undefined,
-                view.pipQuestion?.id,
-            ),
+            draft
+                ? sendAgentDraft(draft.id, {
+                      text: full,
+                      attachments,
+                      inlineFiles: inlineFiles && mentionsFiles,
+                  })
+                : actions.submit(
+                      full,
+                      attachments,
+                      busy && steer ? "steer" : "followUp",
+                      inlineFiles && mentionsFiles,
+                      conversationId,
+                      undefined,
+                      view.pipQuestion?.id,
+                  ),
         );
 
         setSending(false);
 
         if (ok) {
-            sent(full, revision);
+            if (draft) {
+                remember(full, { person: draft.userId, conversation: ok.id });
+            } else {
+                sent(full, revision);
+            }
+
             forget(files);
             setFiles((current) => current.filter((file) => !files.includes(file)));
 
@@ -1139,6 +1233,15 @@ export function Composer() {
     };
 
     const onKey = (event) => {
+        if (draft?.requestId) {
+            if (event.key === "Enter" && !event.shiftKey && !coarse && !event.isComposing) {
+                event.preventDefault();
+                send();
+            }
+
+            return;
+        }
+
         if (editing) {
             if (event.key === "Escape") {
                 cancelEdit(event);
@@ -1303,6 +1406,12 @@ export function Composer() {
     };
 
     const addFiles = (list) => {
+        if (draft?.requestId) {
+            notify("info", "Check or retry the first message before changing its attachments.");
+
+            return;
+        }
+
         if (editing) {
             notify(
                 "info",
@@ -1320,7 +1429,7 @@ export function Composer() {
                 ...current,
                 { key, name: file.name, size: file.size, state: "uploading", preview },
             ]);
-            actions.upload(file).then(
+            (draft ? actions.uploadAgentDraft(draft.agentId, file) : actions.upload(file)).then(
                 (attachment) =>
                     setFiles((current) =>
                         current.map((each) =>
@@ -1341,6 +1450,12 @@ export function Composer() {
     };
 
     const onPaste = (event) => {
+        if (draft?.requestId) {
+            event.preventDefault();
+
+            return;
+        }
+
         const pastedFiles = [...(event.clipboardData?.files ?? [])];
 
         if (pastedFiles.length > 0) {
@@ -1368,7 +1483,7 @@ export function Composer() {
         const next = { ...pastes, [n]: value };
 
         setPastes(next);
-        savePastes(conversationId, next);
+        keepPastes(next);
         const element = event.currentTarget;
         const at = element.selectionStart + label.length;
 
@@ -1429,29 +1544,33 @@ export function Composer() {
             : null;
 
     return html`<footer class="composer-wrap" data-part="composer">
-        <div class="dock" data-part="dock" ref=${dock}>
-            <${TypingLine} where="pi" />
-            ${
-                inbox.length > 0 &&
-                html`<${QueuedMessages}
-                    key=${conversationId}
-                    conversationId=${conversationId}
-                    inbox=${inbox}
-                    editing=${editing}
-                    sending=${sending}
-                    blocked=${blocked}
-                    onEdit=${beginEdit}
-                />`
-            }
-            ${collab() && html`<${DriverBar} />`}
-            <${PlanBar} blocked=${blocked} />
-            <${GoalBar} />
-            <${WatchBar} />
-            <${SubagentsBar} />
-            <${TrustBar} />
-            ${view.pipQuestion && html`<p class="muted small" role="status">Reply to PiP’s question below.</p>`}
-        </div>
-        <${ParentSessionButton} />
+        ${draft?.error && html`<p class="error-box" role="alert">${draft.error}</p>`}
+        ${
+            !draft &&
+            html`<div class="dock" data-part="dock" ref=${dock}>
+                <${TypingLine} where="pi" />
+                ${
+                    inbox.length > 0 &&
+                    html`<${QueuedMessages}
+                        key=${conversationId}
+                        conversationId=${conversationId}
+                        inbox=${inbox}
+                        editing=${editing}
+                        sending=${sending}
+                        blocked=${blocked}
+                        onEdit=${beginEdit}
+                    />`
+                }
+                ${collab() && html`<${DriverBar} />`}
+                <${PlanBar} blocked=${blocked} />
+                <${GoalBar} />
+                <${WatchBar} />
+                <${SubagentsBar} />
+                <${TrustBar} />
+                ${view.pipQuestion && html`<p class="muted small" role="status">Reply to PiP’s question below.</p>`}
+            </div>
+            <${ParentSessionButton} />`
+        }
         ${
             blocked
                 ? html`${
@@ -1499,7 +1618,7 @@ export function Composer() {
                 ${
                     shell &&
                     html`<div class="command-hint">
-                        <span class="command-name">${shell.context ? "!" : "!!"}</span> <span class="muted">· runs in this session's folder · ${shell.context ? "Pi sees the output (!! to keep it from Pi)" : "only the people here see the output"}</span>
+                        <span class="command-name">${shell.context ? "!" : "!!"}</span> <span class="muted">${draft ? "· send your first message before running shell commands" : `· runs in this session's folder · ${shell.context ? "Pi sees the output (!! to keep it from Pi)" : "only the people here see the output"}`}</span>
                     </div>`
                 }
                 ${
@@ -1626,7 +1745,7 @@ export function Composer() {
                         value: text,
                         placeholder,
                         "aria-label": editing ? "Edit queued message" : "Message Pi",
-                        readOnly: editing && sending,
+                        readOnly: (editing && sending) || !!draft?.requestId,
                         onInput: (event) => {
                             setBrowsing(null);
                             update(event.currentTarget.value, event.currentTarget.selectionStart);
@@ -1703,6 +1822,7 @@ export function Composer() {
                                         <button
                                             class="icon-button small"
                                             aria-label=${`Remove ${file.name}`}
+                                            disabled=${!!draft?.requestId}
                                             onClick=${() => {
                                                 forget([file]);
                                                 setFiles((current) =>
@@ -1724,12 +1844,13 @@ export function Composer() {
                     }
                     ${
                         !editing &&
-                        html`<${PlacesButton} />
+                        html`${!draft && html`<${PlacesButton} />`}
                         <button
                             class="icon-button attach-button"
                             data-part="composer-button"
                             aria-label="Attach files"
                             title="Attach files"
+                            disabled=${!!draft?.requestId}
                             onClick=${() => picker.current?.click()}
                         >
                             <${Icon} name="clip" size=${17} />
@@ -1747,16 +1868,17 @@ export function Composer() {
                         <button
                             class=${`model-chip ${agent?.available === false ? "warn" : ""}`}
                             data-part="model-chip"
-                            aria-label=${`Model: ${modelLabel(agent)}${level ? `, thinking ${level}` : ""}`}
+                            aria-label=${draft ? "Agent model (shared across chats)" : `Model: ${modelLabel(agent)}${level ? `, thinking ${level}` : ""}`}
                             title=${`Model and thinking: ${modelLabel(agent)}${level ? `, ${level}` : ""}`}
-                            onClick=${() => openSheet({ type: "model" })}
+                            onClick=${() => openSheet({ type: "model", ...(draft ? { agentId: draft.agentId } : {}) })}
                         >
                             <${Icon} name="sparkle" size=${12} class="model-spark" />
-                            <span class="model-name">${shortModel(agent)}</span>
+                            <span class="model-name">${draft ? "Agent model" : shortModel(agent)}</span>
                             ${level && html`<span class="model-level">${level}</span>`}
                             <${Icon} name="chevron" size=${12} stroke=${2.2} class="model-caret" />
                         </button>
                         ${
+                            !draft &&
                             planAvailable() &&
                             view.conversation?.kind !== "subagent" &&
                             html`<button
@@ -1770,7 +1892,7 @@ export function Composer() {
                                 Plan
                             </button>`
                         }
-                        <${ExtensionSessionControls} slot="composer" />`
+                        ${!draft && html`<${ExtensionSessionControls} slot="composer" />`}`
                     }
                     <span class="grow"></span>
                     ${
@@ -1822,17 +1944,29 @@ export function Composer() {
                                   sending=${sending}
                                   onClick=${send}
                               />`
-                            : html`<${MicButton}
+                            : html`${
+                                  !draft?.requestId &&
+                                  html`<${MicButton}
                                       dictation=${dictation}
                                       class="composer-mic"
                                       part="composer-button"
-                                  />
+                                  />`
+                              }
+                                  ${
+                                      draft?.requestId &&
+                                      html`<button
+                                          class="button small"
+                                          type="button"
+                                          disabled=${sending}
+                                          onClick=${onCheckDraft}
+                                      >Check result</button>`
+                                  }
                                   <button
                                       class=${`send-button ${canSend ? "ready" : ""}`}
                                       data-part="send-button"
                                       data-state=${canSend ? "ready" : undefined}
-                                      aria-label="Send"
-                                      title=${coarse ? "Send" : "Send (Enter)"}
+                                      aria-label=${draft?.requestId ? "Retry first message" : "Send"}
+                                      title=${draft?.requestId ? "Retry the exact first message" : coarse ? "Send" : "Send (Enter)"}
                                       disabled=${!canSend}
                                       onClick=${send}
                                   >
@@ -1847,7 +1981,7 @@ export function Composer() {
                 </${MessageBox}>`
         }
 
-        <${StatusLine} />
+        ${!draft && html`<${StatusLine} />`}
     </footer>`;
 }
 

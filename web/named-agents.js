@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { api, closeSheet, navigate, openSheet, store, uid } from "./store.js";
 import { html, Icon, Loader, Sheet, timeAgo } from "./ui.js";
 import { NamedAgentAvatar } from "./named-agent-avatar.js";
+import { agentDrafts, openAgentDraft, selectAgentDraft } from "./agent-drafts.js";
+import { ModelPicker } from "./sheets/model.js";
 
 const pending = new Map();
 // Keep an uncertain creation's exact body across sheet closes and tab reloads. Only an explicit retry sends it again.
@@ -56,7 +58,7 @@ const openings = new WeakMap();
 const settingsDrafts = new WeakMap();
 
 export const namedAgentsAvailable = () =>
-    store.state.me?.role === "owner" && store.state.server?.privateAgents >= 3;
+    store.state.me?.role === "owner" && store.state.server?.privateAgents >= 4;
 
 const styles = () => html`<style>@import url("/named-agents.css") layer(pocket);</style>`;
 const creationFields = (value) => ({ name: value?.name ?? "", projectId: value?.projectId ?? "" });
@@ -66,9 +68,42 @@ const fieldsOf = (value) => ({
     focus: value?.focus ?? "",
 });
 
-function openSettings(id = null, agentId = null) {
+export function openAgentSettings(id = null, agentId = null, section = null) {
     if (namedAgentsAvailable()) {
-        openSheet({ type: "named-agent", id, agentId, userId: store.state.me.id, opening: uid() });
+        openSheet({
+            type: "named-agent",
+            id,
+            agentId,
+            section,
+            userId: store.state.me.id,
+            opening: uid(),
+        });
+    }
+}
+
+const openSettings = openAgentSettings;
+
+function openIdentity(agent) {
+    if (!namedAgentsAvailable()) {
+        return;
+    }
+
+    if (!(store.state.namedAgents ?? []).some((item) => item.agentId === agent.agentId)) {
+        store.set({ namedAgents: [...(store.state.namedAgents ?? []), { ...agent, busy: false }] });
+    }
+
+    store.set({ sidebarTab: "sessions", drawer: false });
+
+    if (agent.id !== null && agent.id !== undefined) {
+        navigate(agent.id);
+    } else {
+        const draft = agentDrafts(agent.agentId)[0];
+
+        if (draft) {
+            selectAgentDraft(draft.id);
+        } else {
+            openAgentDraft(agent.agentId);
+        }
     }
 }
 
@@ -78,6 +113,11 @@ function openAgent(id) {
         navigate(id);
     }
 }
+
+const agentIsOpen = (agent) =>
+    store.state.agentDraft?.agentId === agent.agentId ||
+    (Number.isSafeInteger(store.state.conversationId) &&
+        (agent.chatIds ?? []).includes(store.state.conversationId));
 
 export function NamedAgents() {
     const [expanded, setExpanded] = useState(true);
@@ -125,12 +165,12 @@ export function NamedAgents() {
                     (agent) => html`<div key=${agent.agentId}>
                     <div class="named-agent-row">
                         <button
-                            class=${`named-agent-open ${(agent.chatIds ?? []).includes(store.state.conversationId) ? "on" : ""}`}
+                            class=${`named-agent-open ${agentIsOpen(agent) ? "on" : ""}`}
                             type="button"
                             data-part="session-button"
                             data-agent-id=${agent.agentId}
-                            aria-current=${store.state.conversationId === agent.id ? "page" : undefined}
-                            onClick=${() => openAgent(agent.id)}
+                            aria-current=${agentIsOpen(agent) ? "page" : undefined}
+                            onClick=${() => openIdentity(agent)}
                             title=${agent.name}
                         >
                             <${NamedAgentAvatar} agentId=${agent.agentId} />
@@ -200,29 +240,41 @@ function ControllerAccess({ data, disabled, refresh, close }) {
             ${controllers.map(
                 (controller) => html`
                 <li key=${controller.workItemId}>
-                    <a
-                        class="named-agent-controller-link"
-                        aria-label=${`Open orchestrator for ${controller.title}`}
-                        href=${`/s/${controller.conversationId}`}
-                        onClick=${(event) => {
-                            if (!namedAgentsAvailable()) {
-                                event.preventDefault();
+                    ${
+                        controller.accessible === false
+                            ? html`<div class="named-agent-controller-link" aria-disabled="true">
+                                <span>Unavailable Work Item</span>
+                                <span class="small muted">Unavailable</span>
+                            </div>`
+                            : html`<a
+                                class="named-agent-controller-link"
+                                aria-label=${`Open orchestrator for ${controller.title}`}
+                                href=${`/s/${controller.conversationId}`}
+                                onClick=${(event) => {
+                                    if (!namedAgentsAvailable()) {
+                                        event.preventDefault();
 
-                                return;
-                            }
+                                        return;
+                                    }
 
-                            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-                                return;
-                            }
+                                    if (
+                                        event.metaKey ||
+                                        event.ctrlKey ||
+                                        event.shiftKey ||
+                                        event.altKey
+                                    ) {
+                                        return;
+                                    }
 
-                            event.preventDefault();
-                            close();
-                            openAgent(controller.conversationId);
-                        }}
-                    >
-                        <span>${controller.title}</span>
-                        <span class="small muted">${controller.state}</span>
-                    </a>
+                                    event.preventDefault();
+                                    close();
+                                    openAgent(controller.conversationId);
+                                }}
+                            >
+                                <span>${controller.title}</span>
+                                <span class="small muted">${controller.state}</span>
+                            </a>`
+                    }
                     ${controller.reason && html`<p class="small muted">${controller.reason}</p>`}
                 </li>
             `,
@@ -239,7 +291,7 @@ function ControllerAccess({ data, disabled, refresh, close }) {
 
 function AgentForm({ sheet, id, userId, close }) {
     const key = `${userId}:${sheet.agentId ?? id ?? "new"}`;
-    const editing = id !== null;
+    const editing = id !== null || sheet.agentId != null;
     const [creation, setCreation] = useState(() => (editing ? null : savedCreation(userId)));
     const [draft, setDraft] = useState(() =>
         editing
@@ -257,7 +309,11 @@ function AgentForm({ sheet, id, userId, close }) {
     const mounted = useRef(false);
     const sending = useRef(false);
     const viewId = useRef(store.state.conversationId);
-    const path = editing ? `c/${encodeURIComponent(id)}/private-agent` : "pip/agents";
+    const path = editing
+        ? id !== null
+            ? `c/${encodeURIComponent(id)}/private-agent`
+            : `pip/agents/${encodeURIComponent(sheet.agentId)}`
+        : "pip/agents?identityOnly=1";
     const live = () =>
         mounted.current &&
         namedAgentsAvailable() &&
@@ -282,7 +338,7 @@ function AgentForm({ sheet, id, userId, close }) {
 
             if (!editing && accepted?.id !== undefined) {
                 close();
-                openAgent(accepted.id);
+                openIdentity(accepted);
 
                 return;
             }
@@ -296,7 +352,10 @@ function AgentForm({ sheet, id, userId, close }) {
                     return;
                 }
 
-                if (editing && result.id !== id) {
+                if (
+                    editing &&
+                    (sheet.agentId ? result.agentId !== sheet.agentId : result.id !== id)
+                ) {
                     throw new Error(
                         "The server returned a different agent. Close and reopen settings.",
                     );
@@ -382,7 +441,7 @@ function AgentForm({ sheet, id, userId, close }) {
 
             if (!editing) {
                 close();
-                openAgent(result.id);
+                openIdentity(result);
             } else {
                 setBlocked(true);
                 replaceDraft.current = true;
@@ -431,6 +490,22 @@ function AgentForm({ sheet, id, userId, close }) {
             }
         }
     };
+
+    useEffect(() => {
+        if (loading || !live() || !sheet.section || typeof document === "undefined") {
+            return;
+        }
+
+        const label = {
+            name: "Agent name",
+            instructions: "Agent instructions",
+            focus: "Agent focus",
+        }[sheet.section];
+
+        if (label) {
+            document.querySelector(`[aria-label="${label}"]`)?.focus();
+        }
+    }, [loading, sheet]);
 
     const locked = loading || busy || (!editing && creation !== null);
     const memoryEnabled = store.state.server?.extensions?.includes("pocket-memory") === true;
@@ -486,7 +561,10 @@ function AgentForm({ sheet, id, userId, close }) {
                             disabled=${!memoryEnabled}
                             onClick=${() => {
                                 if (live() && memoryEnabled) {
-                                    openSheet({ type: "memory", conversationId: id });
+                                    openSheet({
+                                        type: "memory",
+                                        conversationId: `agent:${data.agentId}`,
+                                    });
                                 }
                             }}
                         >Memory</button>
@@ -498,14 +576,9 @@ function AgentForm({ sheet, id, userId, close }) {
                                     return;
                                 }
 
-                                if (store.state.view?.conversation?.pipAgentId === data.agentId) {
-                                    openSheet({ type: "model" });
-                                } else {
-                                    close();
-                                    openAgent(id);
-                                }
+                                openSheet({ type: "model", agentId: data.agentId });
                             }}
-                        >${store.state.view?.conversation?.pipAgentId === data.agentId ? "Model" : "Open chat for model"}</button>
+                        >Model</button>
                     </div>
                     ${!memoryEnabled && html`<p class="small muted">Memory extension is off. Enable it in Extensions to manage lessons.</p>`}
                     <details class="named-agent-chats" aria-label=${`Chats with ${data.name}`}>
@@ -730,6 +803,59 @@ function AgentForm({ sheet, id, userId, close }) {
     </form>`;
 }
 
+export function AgentModelPicker({ sheet }) {
+    const userId = store.state.me?.id;
+    const [data, setData] = useState(null);
+    const [error, setError] = useState("");
+    const live = () =>
+        namedAgentsAvailable() && store.state.me.id === userId && store.state.sheet === sheet;
+    const path = `pip/agents/${encodeURIComponent(sheet.agentId)}`;
+
+    useEffect(() => {
+        let cancelled = false;
+
+        api(path)
+            .then((result) => {
+                if (!cancelled && live()) {
+                    setData(result);
+                }
+            })
+            .catch((failure) => {
+                if (!cancelled && live()) {
+                    setError(failure.message);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [sheet]);
+
+    if (!data) {
+        return html`<${Sheet} title="Agent model" onClose=${closeSheet}>${error ? html`<p role="alert">${error}</p>` : html`<${Loader} label="Loading agent model" />`}</${Sheet}>`;
+    }
+
+    const model = store.state.models.find(
+        (item) => item.provider === data.model?.provider && item.id === data.model?.modelId,
+    );
+
+    return html`<${ModelPicker}
+        title="Agent model (shared across chats)"
+        agent=${{ ...data, reasoning: model?.reasoning, levels: model?.levels }}
+        onConfigure=${async (change) => {
+            if (!live()) {
+                return;
+            }
+
+            const result = await api(`${path}/configure`, change);
+
+            if (live()) {
+                setData(result);
+            }
+        }}
+    />`;
+}
+
 export function NamedAgentSheet({ sheet, id = sheet.id ?? null }) {
     const userId = sheet.userId ?? store.state.me?.id;
 
@@ -747,7 +873,7 @@ export function NamedAgentSheet({ sheet, id = sheet.id ?? null }) {
         }
     };
 
-    return html`<${Sheet} title=${id === null ? "New PiP" : "PiP settings"} onClose=${close}>
+    return html`<${Sheet} title=${id === null && !sheet.agentId ? "New PiP" : "PiP settings"} onClose=${close}>
         ${styles()}
         <${AgentForm} key=${`${userId}:${id}:${openings.get(sheet)}`} sheet=${sheet} id=${id} userId=${userId} close=${close} />
     <//>`;

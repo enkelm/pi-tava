@@ -46,6 +46,7 @@ import { APPLE, Boot, BOTTOM_SHEETS, html, Icon, iconPath, usePresence } from ".
 import { toggleDictation } from "./voice.js";
 import { rowIsOpen, rowOpenId } from "./work-items.js";
 import { Topbar } from "./topbar.js";
+import { AgentDraftPane } from "./agent-draft-pane.js";
 
 /**
  * A notice, as a small tile: a state square in its level's color, the message, and a countdown line until it goes. A
@@ -252,6 +253,8 @@ function App() {
     }
 
     const inConversation = state.conversationId !== null;
+    const inAgentDraft =
+        state.agentDraft !== null && state.me.role === "owner" && state.server?.privateAgents >= 4;
     const inPrivate = state.privateId !== null;
     const rail = prefs().sidebar === "rail";
     // The subagents board, or an extension's page, takes the conversation's place, and the panels beside it give it
@@ -270,7 +273,7 @@ function App() {
     const peekColumn = peeking && PEEK_WIDE.matches && !browsing && !filing && !people;
 
     return html`<div
-        class=${`layout ${inConversation || inPrivate || placed ? "" : "home"} ${inPrivate ? "private-layout" : ""} ${state.me.role === "owner" && state.sidebarTab === "private" ? "private-sidebar" : ""} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
+        class=${`layout ${inConversation || inAgentDraft || inPrivate || placed ? "" : "home"} ${inPrivate ? "private-layout" : ""} ${state.me.role === "owner" && state.sidebarTab === "private" ? "private-sidebar" : ""} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
         data-part="app"
     >
         <aside class="sidebar window" data-part="sidebar">
@@ -296,8 +299,10 @@ function App() {
                       ? html`<${SubagentsBoard} />`
                       : page
                         ? html`<${ExtensionPage} key=${`${state.page.module}:${state.page.id}`} />`
-                        : inConversation
-                          ? html`<${Topbar} />
+                        : inAgentDraft
+                          ? html`<${Topbar} /><${AgentDraftPane} key=${state.agentDraft.id} />`
+                          : inConversation
+                            ? html`<${Topbar} />
                                 ${
                                     peeking &&
                                     tiles.length > 0 &&
@@ -310,7 +315,7 @@ function App() {
                                     !state.missing &&
                                     html`<${Composer} key=${state.conversationId} />`
                                 }`
-                          : html`<div class="home-list"><${SessionList} home=${true} /></div>
+                            : html`<div class="home-list"><${SessionList} home=${true} /></div>
                                 <${Splash} />`
             }
         </div>

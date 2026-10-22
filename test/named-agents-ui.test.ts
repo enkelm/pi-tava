@@ -42,6 +42,7 @@ const bridge = {
     openSheet: (sheet: Props) => bridge.store.set({ sheet }),
     closeSheet: () => bridge.store.set({ sheet: null }),
     navigate: (id: number) => active.navigated.push(id),
+    openAgentDraft: (agentId: string) => active.openedDrafts.push(agentId),
 };
 const descriptor = Object.getOwnPropertyDescriptor(globalThis, "namedAgentsUiFixture");
 const storageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
@@ -74,6 +75,8 @@ const sources: Record<string, string> = {
     "preact/hooks":
         "export const {useState,useRef,useEffect}=globalThis.namedAgentsUiFixture.hooks;",
     "./store.js": `export const {store,api,uid,openSheet,closeSheet,navigate}=globalThis.namedAgentsUiFixture;`,
+    "./agent-drafts.js": `export const {openAgentDraft}=globalThis.namedAgentsUiFixture; export const agentDrafts=()=>[],selectAgentDraft=()=>{};`,
+    "./sheets/model.js": `export const ModelPicker=()=>null;`,
     "./ui.js": `const f=globalThis.namedAgentsUiFixture;
         export const html=f.html,Icon=({name,size})=>f.h('test-icon',{name,size}),Loader=({label})=>f.h('test-loader',{label});
         export const Sheet=({children})=>children,timeAgo=()=>"Recently";`,
@@ -138,9 +141,10 @@ function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet }) 
     const effects: (() => void)[] = [];
     const requests: Request[] = [];
     const navigated: number[] = [];
+    const openedDrafts: string[] = [];
     const state: Props = {
         me: { id: `owner-${++owner}`, role: "owner" },
-        server: { privateAgents: 3, extensions: ["pocket-memory"] },
+        server: { privateAgents: 4, extensions: ["pocket-memory"] },
         namedAgents: [
             {
                 agentId: "agent-reviewer",
@@ -195,6 +199,7 @@ function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet }) 
         state,
         hooks,
         navigated,
+        openedDrafts,
         invalidate: () => {
             dirty = true;
         },
@@ -318,6 +323,7 @@ function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet }) 
             return request;
         },
         navigated,
+        openedDrafts,
         find,
         label,
         settle,
@@ -575,15 +581,15 @@ test("settings have charter and Memory without inbox or attachment configuration
         f.text(),
         /Inbox|Set inbox|New chat|Private notes|Private memory|Old note|Link controller|Detach|Stop supervision/,
     );
-    f.patch({ server: { privateAgents: 3, extensions: [] } });
+    f.patch({ server: { privateAgents: 4, extensions: [] } });
     assert.equal(f.find("button", "Memory").props.disabled, true);
     assert.match(f.text(), /Memory extension is off/);
-    f.patch({ server: { privateAgents: 3, extensions: ["pocket-memory"] } });
+    f.patch({ server: { privateAgents: 4, extensions: ["pocket-memory"] } });
     f.input("Agent instructions", "Keep my unsaved charter");
     const sheet = f.state.sheet;
 
     f.click(f.find("button", "Memory"));
-    assert.deepEqual(f.state.sheet, { type: "memory", conversationId: 7 });
+    assert.deepEqual(f.state.sheet, { type: "memory", conversationId: "agent:agent-reviewer" });
     f.patch({ sheet });
     await f.settle();
     f.request(1).resolve(settings());
@@ -592,8 +598,8 @@ test("settings have charter and Memory without inbox or attachment configuration
     f.click(f.find("button", "Model"));
     assert.deepEqual(
         f.state.sheet,
-        { type: "model" },
-        "uses the existing current-chat model picker",
+        { type: "model", agentId: "agent-reviewer" },
+        "uses the existing model picker with explicit shared identity scope",
     );
     f.patch({ sheet });
     await f.settle();
@@ -610,6 +616,32 @@ test("settings have charter and Memory without inbox or attachment configuration
     f.request(3).resolve(settings(4));
     await f.settle();
     assert.equal(f.label("Agent instructions").props.value, "Review carefully");
+});
+
+test("an identity without saved Chats opens a local draft and edits approved shared settings without creating a Chat", async (t) => {
+    const f = fixture(t);
+
+    f.patch({
+        namedAgents: [
+            { agentId: "agent-reviewer", id: null, chatIds: [], chats: [], name: "Reviewer" },
+        ],
+    });
+    f.click(f.find("button", "ReviewerReady"));
+    assert.deepEqual(f.openedDrafts, ["agent-reviewer"]);
+    assert.deepEqual(f.navigated, []);
+    assert.equal(f.requests.length, 0);
+    f.click(f.label("Edit Reviewer"));
+    await f.settle();
+    assert.equal(f.request(0).path, "pip/agents/agent-reviewer");
+    f.request(0).resolve({ ...settings(), id: null, chatIds: [], chats: [] });
+    await f.settle();
+    assert.equal(f.label("Agent instructions").props.value, "Review carefully");
+    f.input("Agent focus", "A shared purpose before first send");
+    f.submit();
+    assert.equal(f.request(1).path, "pip/agents/agent-reviewer");
+    assert.equal(f.request(1).body?.expectedRevision, 3);
+    assert.equal(f.request(1).body?.focus, "A shared purpose before first send");
+    assert.deepEqual(f.navigated, []);
 });
 
 test("creation asks only for name and optional project and explicitly retries the same uncertain request", async (t) => {
@@ -633,7 +665,7 @@ test("creation asks only for name and optional project and explicitly retries th
     f.submit();
     const first = f.request(1);
 
-    assert.equal(first.path, "pip/agents");
+    assert.equal(first.path, "pip/agents?identityOnly=1");
     assert.deepEqual(
         { ...first.body, requestId: "stable" },
         { requestId: "stable", name: "My PiP", projectId: "chosen-project" },
@@ -657,9 +689,10 @@ test("creation asks only for name and optional project and explicitly retries th
         first.body,
         "retry retains exact id and content even after reopening",
     );
-    f.request(3).resolve({ id: 12 });
+    f.request(3).resolve({ id: null, agentId: "new-pip", name: "My PiP", chats: [] });
     await f.settle();
-    assert.deepEqual(f.navigated, [12]);
+    assert.deepEqual(f.navigated, [], "identity creation never opens a saved conversation");
+    assert.deepEqual(f.openedDrafts, ["new-pip"]);
     assert.equal(f.state.sheet, null);
 });
 
@@ -690,9 +723,12 @@ test("tab reload recovers an uncertain creation without automatically repeating 
     assert.equal(resumed.label("Agent name").props.disabled, true);
     resumed.submit();
     assert.deepEqual(resumed.request(1).body, body);
-    resumed.request(1).resolve({ id: 26 });
+    resumed
+        .request(1)
+        .resolve({ id: null, agentId: "reloaded-pip", name: "Reloaded PiP", chats: [] });
     await resumed.settle();
-    assert.deepEqual(resumed.navigated, [26]);
+    assert.deepEqual(resumed.navigated, []);
+    assert.deepEqual(resumed.openedDrafts, ["reloaded-pip"]);
     assert.equal(storage.get(`pocket.pipCreation.${first.state.me.id}`), undefined);
 });
 
@@ -709,9 +745,10 @@ test("a reopened creation joins the original acknowledgement and opens that exac
     f.click(f.label("New PiP"));
     await f.settle();
     assert.equal(f.requests.length, 2, "the new opening joins the in-flight request");
-    f.request(1).resolve({ id: 27 });
+    f.request(1).resolve({ id: null, agentId: "joined-pip", name: "Still creating", chats: [] });
     await f.settle();
-    assert.deepEqual(f.navigated, [27]);
+    assert.deepEqual(f.navigated, []);
+    assert.deepEqual(f.openedDrafts, ["joined-pip"]);
     assert.equal(f.state.sheet, null);
     assert.equal(f.requests.length, 2);
 });
@@ -739,9 +776,15 @@ test("a rejected project stays correctable and No project creates without the op
         { requestId: "fresh", name: "Independent PiP", projectId: null },
     );
     assert.notEqual(f.request(2).body?.requestId, f.request(1).body?.requestId);
-    f.request(2).resolve({ id: 23 });
+    f.request(2).resolve({
+        id: null,
+        agentId: "no-project-pip",
+        name: "Independent PiP",
+        chats: [],
+    });
     await f.settle();
-    assert.deepEqual(f.navigated, [23]);
+    assert.deepEqual(f.navigated, []);
+    assert.deepEqual(f.openedDrafts, ["no-project-pip"]);
 });
 
 test("settings conflict preserves the draft, requires a fresh revision, and undo is a durable server mutation", async (t) => {
@@ -923,6 +966,14 @@ test("Work Item quick access reports server states and links exact native orches
             state: "failure",
             reason: "Wake failed",
         },
+        {
+            workItemId: "work-gone",
+            conversationId: 46,
+            title: "Unavailable Work Item",
+            state: "unavailable",
+            accessible: false,
+            reason: "This Work Item is no longer accessible.",
+        },
     ];
 
     f.patch({
@@ -950,6 +1001,19 @@ test("Work Item quick access reports server states and links exact native orches
     assert.ok(f.label("Contacted Work Items"));
 
     for (const item of controllers) {
+        if (item.accessible === false) {
+            assert.equal(
+                nodes(f.label("Contacted Work Items")).some(
+                    (node) => node.props.href === `/s/${item.conversationId}`,
+                ),
+                false,
+                "unavailable Work Items must not navigate away from Settings",
+            );
+            assert.match(f.text(), /Unavailable Work ItemUnavailable/);
+
+            continue;
+        }
+
         assert.match(f.text(), new RegExp(`${item.title}${item.state}`));
 
         if (item.reason) {

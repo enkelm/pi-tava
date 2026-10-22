@@ -4,6 +4,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { awaitWithContext, BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
 import {
+    AgentDoc,
     GenerationTask,
     LiveDoc,
     ToolTask,
@@ -25,6 +26,7 @@ import { requestFor } from "../requests.ts";
 import { HttpError, describe } from "../errors.ts";
 import type { ClientEntry } from "../projection.ts";
 import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
+import { AgentContactsDoc } from "./agent-contacts-doc.ts";
 
 const context = BACKGROUND_CONTEXT;
 const AGENT_EPOCH = "private-supervisor-epoch";
@@ -37,6 +39,8 @@ export type AgentAttachment = {
     epoch: number;
     agentEpoch: number;
     active: boolean;
+    /** Historical association origins only; never evidence of a current native controller grant. */
+    chatIds?: number[];
     /** Native execution/controller state already reported; app-authored reports cannot wake themselves. */
     observed?: string;
     /** Last accepted task contact, never the most recently opened/arbitrary chat. */
@@ -143,6 +147,12 @@ export const AgentSupervisionDoc = defineDoc<SupervisionData>({
 });
 
 export class AgentSupervision {
+    #projectionRevision = 0;
+
+    /** Read-side invalidation only; neither a grant nor a stored authority epoch. */
+    get projectionRevision(): number {
+        return this.#projectionRevision;
+    }
     readonly #app: PocketApp;
     readonly #lanes = new Map<string, Promise<void>>();
     #doc: SupervisionData = { agents: {}, requests: {}, controls: {} };
@@ -241,7 +251,12 @@ export class AgentSupervision {
         return {
             agentId: identity.agentId,
             attachments: Object.values(doc.agents[identity.agentId]?.attachments ?? {}).map(
-                (attachment) => ({ ...attachment }),
+                (attachment) => ({
+                    ...attachment,
+                    ...(attachment.chatIds === undefined
+                        ? {}
+                        : { chatIds: [...attachment.chatIds] }),
+                }),
             ),
             reports: Object.values(doc.outbox ?? {})
                 .filter((report) => report.agentId === identity.agentId)
@@ -256,140 +271,242 @@ export class AgentSupervision {
         };
     }
 
+    /** Historical contacts are scoped to this chat; only its live native delegation is current. */
     async controllers(chatId: ConversationId, supplied: User) {
         const user = this.#owner(supplied);
-        const status = await this.status(chatId, user);
+        const { agentId } = this.#scope(chatId, user);
+        const origin = Number(this.#chat(chatId));
+        const controllers = await this.#app.harness.commit(async (tx) => {
+            const identity = await this.#identity(tx, agentId, user);
+            const doc = await tx.doc(AgentSupervisionDoc);
+            const exact = await tx.doc(AgentContactsDoc);
+            const items = (await tx.doc(HandoffsDoc)).workItems;
+            const requests = Object.values(doc.requests).filter(
+                (receipt) =>
+                    receipt.agentId === agentId &&
+                    receipt.ownerId === user.id &&
+                    receipt.chatId === origin,
+            );
+            const contacts = Object.values(exact.contacts).filter(
+                (contact) =>
+                    contact.agentId === agentId &&
+                    contact.ownerId === user.id &&
+                    contact.chatId === origin &&
+                    contact.workItemId !== undefined &&
+                    contact.controllerId !== undefined,
+            );
+            const associated = new Map<string, number>();
 
-        const controllers = [];
-
-        for (const attachment of status.attachments) {
-            const controller = idOf(attachment.controllerId);
-            const item = this.#app.workItems.itemFor(controller);
-
-            if (item === undefined || !this.#app.canSee(user, idOf(item.activeThreadId))) {
-                continue;
+            for (const attachment of Object.values(doc.agents[agentId]?.attachments ?? {})) {
+                if (attachment.chatIds?.includes(origin)) {
+                    associated.set(attachment.workItemId, attachment.controllerId);
+                }
             }
 
-            const work = await this.#app.harness.snapshot(PipWorkDoc, controller, context);
-            const model = await this.#app.agentState(controller);
-            let state =
-                attachment.active && item.supervisor?.status === "running"
-                    ? "active"
-                    : "human control";
-            let reason =
-                work?.reason ??
-                (attachment.exactOnly === true
-                    ? "Exact thread contacts are separate; this orchestrator has not been activated."
-                    : "Attached; awaiting explicit delegated instructions.");
+            for (const receipt of requests) {
+                associated.set(receipt.workItemId, receipt.controllerId);
+            }
 
-            if (work?.question !== undefined) {
-                state = "needs owner";
-                reason = work.question.text;
-            } else if (
-                attachment.active &&
-                (model?.model === undefined ||
-                    this.#app.models.getModel(model.model.provider, model.model.modelId) ===
-                        undefined)
-            ) {
-                state = "held";
-                reason =
-                    "The native controller's selected model is unavailable; no fallback was chosen.";
-            } else if (attachment.active && item.supervisor?.tokenHash !== user.tokenHash) {
-                state = "held";
-                reason =
-                    "The native controller owner's sign-in changed; inspect it under human control.";
-            } else if (
-                attachment.active &&
-                item.supervisor?.maxActions !== undefined &&
-                item.supervisor.actions >= item.supervisor.maxActions
-            ) {
-                state = "held";
-                reason =
-                    "The native Work Item action budget is exhausted; ask the owner to extend it.";
-            } else if (work?.humanPending !== undefined) {
-                state = "human control";
-                reason =
-                    "A direct human instruction is being admitted; parent decisions are fenced.";
-            } else if (
-                attachment.active &&
-                (item.archived || !this.#app.config.pipEnabled || !this.#app.workItems.enabled)
-            ) {
-                state = "held";
-                reason = "Work Item execution or PiP is unavailable, or the item is archived.";
-            } else if (attachment.active) {
-                try {
-                    this.#app.spend.check(user, controller);
-                } catch (error) {
+            for (const contact of contacts) {
+                associated.set(contact.workItemId!, contact.controllerId!);
+            }
+
+            const result = [];
+
+            for (const [workItemId, capturedController] of associated) {
+                const item = items[workItemId];
+                const grant = item?.supervisor;
+                const conversationId = grant?.conversationId ?? capturedController;
+                const controller = idOf(conversationId);
+                const accessible =
+                    item !== undefined &&
+                    grant !== undefined &&
+                    grant.ownerId === user.id &&
+                    this.#app.sessionMeta(controller) !== undefined &&
+                    this.#app.sessionMeta(idOf(item.activeThreadId)) !== undefined &&
+                    this.#app.canSee(user, controller) &&
+                    this.#app.canSee(user, idOf(item.activeThreadId));
+                const attachment = doc.agents[agentId]?.attachments[workItemId];
+                const itemRequests = requests.filter(
+                    (receipt) => receipt.workItemId === workItemId,
+                );
+                const itemContacts = contacts.filter(
+                    (contact) => contact.workItemId === workItemId,
+                );
+                const attached =
+                    attachment?.active === true &&
+                    attachment.agentEpoch === identity.epoch &&
+                    attachment.controllerId === conversationId &&
+                    grant?.agentId === agentId &&
+                    grant.agentEpoch === identity.epoch &&
+                    grant.attachmentEpoch === attachment.epoch;
+                // contextRequestId also advances for read/follow contacts. It is a report origin,
+                // not a controller grant: use the accepted native delegation's controller epoch.
+                const delegated = itemRequests.some(
+                    (receipt) =>
+                        receipt.controllerId === conversationId &&
+                        receipt.status === "accepted" &&
+                        (receipt.action === undefined ||
+                            receipt.action === "delegate" ||
+                            (receipt.action === "send" && receipt.target === conversationId)) &&
+                        receipt.agentEpoch === identity.epoch &&
+                        receipt.attachmentEpoch === attachment?.epoch &&
+                        receipt.tokenHash === user.tokenHash &&
+                        receipt.controllerEpoch !== undefined &&
+                        receipt.controllerEpoch === grant?.epoch,
+                );
+                const work = accessible ? await tx.doc(PipWorkDoc, controller) : undefined;
+                let current =
+                    accessible &&
+                    attached &&
+                    delegated &&
+                    this.#app.config.pipEnabled &&
+                    this.#app.workItems.enabled &&
+                    grant?.ownerId === user.id &&
+                    grant.tokenHash === user.tokenHash &&
+                    grant.status === "running" &&
+                    work?.humanPending === undefined &&
+                    item?.archived !== true;
+                const passive =
+                    !attached &&
+                    itemRequests.length === 0 &&
+                    itemContacts.length > 0 &&
+                    itemContacts.every(
+                        (contact) => contact.action === "read" || contact.action === "follow",
+                    );
+                const observing = itemContacts.some(
+                    (contact) =>
+                        contact.status === "accepted" &&
+                        contact.agentEpoch === identity.epoch &&
+                        contact.tokenHash === user.tokenHash,
+                );
+                let state =
+                    grant?.status === "running"
+                        ? "active"
+                        : passive
+                          ? "observing"
+                          : "human control";
+                let reason =
+                    work?.reason ??
+                    (passive
+                        ? "Passive exact-thread contacts, not a controller grant."
+                        : "Historical contact; no current delegation from this chat.");
+
+                if (!accessible) {
+                    state = "unavailable";
+                    reason = "The native Work Item or orchestrator is unavailable to this owner.";
+                } else if (work?.question !== undefined) {
+                    state = "needs owner";
+                    reason = work.question.text;
+                } else if (work?.humanPending !== undefined) {
+                    state = "human control";
+                    reason =
+                        "A direct human instruction is being admitted; parent decisions are fenced.";
+                } else if (
+                    item?.archived ||
+                    !this.#app.config.pipEnabled ||
+                    !this.#app.workItems.enabled
+                ) {
                     state = "held";
-                    reason = describe(error);
+                    reason = "Work Item execution or PiP is unavailable, or the item is archived.";
+                } else if (passive && !observing) {
+                    state = "held";
+                    reason =
+                        itemContacts.at(-1)?.reason ??
+                        "The observing source authority changed; a fresh owner decision is required.";
+                } else if (attachment?.active && grant?.tokenHash !== user.tokenHash) {
+                    state = "held";
+                    reason =
+                        "The native controller owner's sign-in changed; inspect it under human control.";
+                } else if (grant?.agentId === agentId && !attached) {
+                    state = "held";
+                    reason =
+                        "The native parent attachment or identity changed; a fresh owner decision is required.";
+                } else if (attached) {
+                    const model = await tx.doc(AgentDoc, controller);
+
+                    if (
+                        model?.model === undefined ||
+                        this.#app.models.getModel(model.model.provider, model.model.modelId) ===
+                            undefined
+                    ) {
+                        state = "held";
+                        reason =
+                            "The native controller's selected model is unavailable; no fallback was chosen.";
+                    } else if (
+                        grant?.maxActions !== undefined &&
+                        grant.actions >= grant.maxActions
+                    ) {
+                        state = "held";
+                        reason =
+                            "The native Work Item action budget is exhausted; ask the owner to extend it.";
+                    } else {
+                        try {
+                            this.#app.spend.check(user, controller);
+                        } catch (error) {
+                            state = "held";
+                            reason = describe(error);
+                        }
+                    }
                 }
 
                 if (
+                    accessible &&
                     state !== "held" &&
+                    state !== "needs owner" &&
                     /could not answer|failed|failure|unavailable|interrupted|not admitted/i.test(
                         reason,
                     )
                 ) {
                     state = "failure";
                 }
+
+                const heldReport = [
+                    ...Object.values(doc.outbox ?? {}),
+                    ...Object.values(exact.reports),
+                ].findLast(
+                    (report) =>
+                        report.agentId === agentId &&
+                        report.originChatId === origin &&
+                        report.status === "held" &&
+                        ("workItemId" in report
+                            ? report.workItemId === workItemId
+                            : itemContacts.some(
+                                  (contact) => contact.requestId === report.originRequestId,
+                              )),
+                );
+
+                if (accessible && heldReport !== undefined) {
+                    state = "needs owner";
+                    reason =
+                        heldReport.reason ??
+                        "An observation is held at its exact originating chat.";
+                }
+
+                if (
+                    state === "held" ||
+                    state === "failure" ||
+                    state === "unavailable" ||
+                    heldReport !== undefined
+                ) {
+                    current = false;
+                }
+
+                result.push({
+                    workItemId,
+                    conversationId,
+                    title: accessible ? item!.title : "Unavailable Work Item",
+                    ...(accessible ? { activeThreadId: item!.activeThreadId } : {}),
+                    state,
+                    reason,
+                    attached,
+                    current,
+                    accessible,
+                });
             }
 
-            const heldReport = status.reports?.findLast(
-                (report) => report.workItemId === item.id && report.status === "held",
-            );
-
-            if (attachment.active && heldReport !== undefined) {
-                state = "needs owner";
-                reason =
-                    heldReport.reason ??
-                    "An observation is held at this controller because its originating task/chat is unavailable.";
-            }
-
-            controllers.push({
-                workItemId: item.id,
-                conversationId: attachment.controllerId,
-                title: item.title,
-                activeThreadId: item.activeThreadId,
-                state,
-                reason,
-                attached: attachment.active,
-            });
-        }
-
-        const identity = this.#app.pip.agents.identity(this.#chat(chatId))!;
-        const shown = new Set(controllers.map((entry) => entry.workItemId));
-
-        for (const observation of this.#app.pip.agents.contacts.observations(
-            identity.agentId,
-            identity.epoch,
-        )) {
-            const item = this.#app.workItems.itemFor(idOf(observation.target));
-            const controller = item?.supervisor?.conversationId;
-
-            if (
-                item === undefined ||
-                item.id !== observation.workItemId ||
-                controller === undefined ||
-                shown.has(item.id) ||
-                !this.#app.canSee(user, idOf(observation.target)) ||
-                !this.#app.canSee(user, idOf(controller))
-            ) {
-                continue;
-            }
-
-            controllers.push({
-                workItemId: item.id,
-                conversationId: controller,
-                title: item.title,
-                activeThreadId: item.activeThreadId,
-                state: item.archived || observation.heldReason !== undefined ? "held" : "observing",
-                reason:
-                    observation.heldReason ??
-                    `${item.archived ? "Archived work. " : ""}Passive exact-thread contacts, not a controller grant. This link opens the orchestrator; it does not retarget subscriptions or activate work.`,
-                attached: false,
-            });
-            shown.add(item.id);
-        }
+            return result;
+        }, context);
 
         this.#owner(user);
         this.#scope(chatId, user);
@@ -485,6 +602,12 @@ export class AgentSupervision {
                             epoch,
                             agentEpoch: identity.epoch,
                             active: true,
+                            chatIds: [
+                                ...new Set([
+                                    ...(previous?.chatIds ?? []),
+                                    Number(this.#chat(chatId)),
+                                ]),
+                            ],
                         };
                         grant.agentId = agentId;
                         grant.agentEpoch = identity.epoch;
@@ -1144,6 +1267,12 @@ export class AgentSupervision {
                 ) {
                     previous.exactOnly = previous.exactOnly === true && exactOnly;
                     previous.originInputId = sourceAuthority.inputId;
+                    previous.chatIds = [
+                        ...new Set([
+                            ...(previous.chatIds ?? []),
+                            Number(this.#chat(api.conversationId)),
+                        ]),
+                    ];
 
                     return;
                 }
@@ -1156,6 +1285,12 @@ export class AgentSupervision {
                     epoch,
                     agentEpoch: identity.epoch,
                     active: true,
+                    chatIds: [
+                        ...new Set([
+                            ...(previous?.chatIds ?? []),
+                            Number(this.#chat(api.conversationId)),
+                        ]),
+                    ],
                     originInputId: sourceAuthority.inputId,
                     ...(previous?.reclaimedThrough === undefined
                         ? {}
@@ -1426,6 +1561,7 @@ export class AgentSupervision {
 
     committed(publication: CommitPublication): void {
         let meaningful = false;
+        let projectionChanged = false;
 
         for (const change of publication.changes) {
             if (
@@ -1444,6 +1580,16 @@ export class AgentSupervision {
                 ).items;
             }
 
+            projectionChanged ||=
+                change.type === "document" &&
+                [
+                    AgentSupervisionDoc.definition.kind,
+                    AgentContactsDoc.definition.kind,
+                    HandoffsDoc.definition.kind,
+                    PipWorkDoc.definition.kind,
+                    SessionsDoc.definition.kind,
+                    AgentDoc.definition.kind,
+                ].includes(change.record.kind);
             meaningful ||=
                 change.type === "submission" ||
                 (change.type === "document" &&
@@ -1453,6 +1599,11 @@ export class AgentSupervision {
                         SessionsDoc.definition.kind,
                         AgentIdentitiesDoc.definition.kind,
                     ].includes(change.record.kind));
+        }
+
+        if (projectionChanged) {
+            this.#projectionRevision++;
+            this.#app.scheduleSessions();
         }
 
         if (meaningful) {
