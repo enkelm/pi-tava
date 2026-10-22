@@ -280,7 +280,7 @@ export interface PocketHost {
     /** Repository watches: the triggers extension runs their task; PiP's repo_watch tool sets them up. */
     readonly repoWatches: Pick<RepoWatches, "task">;
     /** Lessons Pi keeps across sessions (`memory.ts`): the memory tool saves them, and its section lists them. */
-    readonly memory: Pick<Memory, "project" | "applying" | "inForce" | "add" | "change">;
+    readonly memory: Pick<Memory, "project" | "applying" | "list" | "inForce" | "add" | "change">;
     /**
      * Text from elsewhere made safe for Pi to read (`fence.ts`): `quoted` gives one line, cut to `max`, without
      * invisible characters or any tag, in quotes it cannot close; `defang` keeps the lines, but no closing tag survives,

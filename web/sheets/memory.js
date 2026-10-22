@@ -11,8 +11,6 @@ export const memoryAvailable = (id) =>
 const path = (id, rest = "", pendingOnly = false) =>
     `c/${id}/memory${rest}${pendingOnly ? "?pending=all" : ""}`;
 
-/** The lessons last fetched, keyed by person, conversation, and view: the menu can show its hint while asking again. */
-let last = null;
 /**
  * The fetch under way for each conversation, `{ rev, promise }`: the sheet, the menu, and each memory call ask once
  * together, PiP's calls and the open session's too.
@@ -29,12 +27,15 @@ function fetchLessons(id, rev, key, pendingOnly) {
     const asked = { rev, promise: api(path(id, "", pendingOnly)) };
 
     asking.set(key, asked);
-    // A fetch that failed is not kept: the next one asks again.
-    asked.promise.catch(() => {
+
+    // Share in-flight reads only; do not retain learned private data after navigation or identity/access changes.
+    const release = () => {
         if (asking.get(key) === asked) {
             asking.delete(key);
         }
-    });
+    };
+
+    asked.promise.then(release, release);
 
     return asked.promise;
 }
@@ -53,7 +54,7 @@ export function useMemory(conversationId, pendingOnly = false) {
 
     useEffect(() => store.subscribe((state) => setRev(revision(state))), []);
     const on = memoryAvailable(id) && (!pendingOnly || me?.role === "owner");
-    const [data, setData] = useState(last?.key === key ? last : null);
+    const [data, setData] = useState(null);
     // Asked again a few times when a fetch fails (a dropped connection, a restart), rather than loading for ever.
     const [retry, setRetry] = useState(0);
 
@@ -69,14 +70,14 @@ export function useMemory(conversationId, pendingOnly = false) {
             (fetched) => {
                 if (live) {
                     // An older running server ignores the new query: never label its scoped view as an all-project queue.
-                    last = {
+                    setData({
                         key,
+                        rev,
                         data:
                             pendingOnly && fetched.pendingAll !== true
                                 ? { restartRequired: true }
                                 : fetched,
-                    };
-                    setData(last);
+                    });
                 }
             },
             () => {
@@ -92,7 +93,7 @@ export function useMemory(conversationId, pendingOnly = false) {
         };
     }, [key, rev, on, retry]);
 
-    return !on ? null : data?.key === key ? data.data : last?.key === key ? last.data : null;
+    return on && data?.key === key && data.rev === rev ? data.data : null;
 }
 
 /** Fetch again after a write here, without waiting for the server's word. */
@@ -104,6 +105,10 @@ function refresh() {
 export function memoryHint(data) {
     if (!data) {
         return "";
+    }
+
+    if (data.privateAgent) {
+        return `${data.lessons.length} private lessons`;
     }
 
     const live = data.lessons.filter((lesson) => !lesson.pending);
@@ -165,15 +170,17 @@ function Source({ lesson }) {
 
 /** Where a lesson applies, said where it waits: everywhere's reach every session and PiP. */
 const reach = (lesson) =>
-    lesson.scope === "everywhere"
-        ? "everywhere: every session, and PiP"
-        : (lesson.projectName ?? "this project");
+    lesson.scope === "private-agent"
+        ? "this private agent only"
+        : lesson.scope === "everywhere"
+          ? "everywhere: every session, and PiP"
+          : (lesson.projectName ?? "this project");
 
 /** One lesson: its text, where it came from, and what this person may do with it. */
 function Lesson({ lesson, data, conversationId, pendingOnly = false }) {
     const id = conversationId ?? store.state.conversationId;
     const [draft, setDraft] = useState(null);
-    const [forgetting, setForgetting] = useState(false);
+    const [forgetting, setForgetting] = useState(null);
     const act = (rest, body = {}, done = "") =>
         attempt(async () => {
             // Fetched again either way: after a refusal (it changed since), the sheet shows what waits now.
@@ -184,7 +191,7 @@ function Lesson({ lesson, data, conversationId, pendingOnly = false }) {
             }
 
             setDraft(null);
-            setForgetting(false);
+            setForgetting(null);
 
             if (done) {
                 notify("info", done);
@@ -199,15 +206,15 @@ function Lesson({ lesson, data, conversationId, pendingOnly = false }) {
                 rows="3"
                 autofocus
                 maxlength=${data.limits.text}
-                value=${draft}
-                onInput=${(event) => setDraft(event.currentTarget.value)}
+                value=${draft.text}
+                onInput=${(event) => setDraft({ ...draft, text: event.currentTarget.value })}
             ></textarea>
             <div class="row lesson-actions">
                 <button class="button small ghost" onClick=${() => setDraft(null)}>Cancel</button>
                 <button
                     class="button small primary"
-                    disabled=${draft.trim() === ""}
-                    onClick=${() => act("", { text: draft })}
+                    disabled=${draft.text.trim() === ""}
+                    onClick=${() => act("", { text: draft.text, expectedRevision: draft.revision })}
                 >
                     Save
                 </button>
@@ -260,7 +267,7 @@ function Lesson({ lesson, data, conversationId, pendingOnly = false }) {
                         lesson.mine &&
                         html`<button
                             class="button small ghost"
-                            onClick=${() => setDraft(lesson.text)}
+                            onClick=${() => setDraft({ text: lesson.text, revision: lesson.revision })}
                         >
                             Edit
                         </button>`
@@ -270,8 +277,11 @@ function Lesson({ lesson, data, conversationId, pendingOnly = false }) {
                         !(approving && lesson.pending) &&
                         html`<button
                             class=${`button small ghost ${forgetting ? "danger" : ""}`}
-                            onClick=${() => (forgetting ? act("/remove") : setForgetting(true))}
-                            onBlur=${() => setForgetting(false)}
+                            onClick=${() =>
+                                forgetting
+                                    ? act("/remove", { expectedRevision: forgetting.revision })
+                                    : setForgetting({ revision: lesson.revision })}
+                            onBlur=${() => setForgetting(null)}
                         >
                             ${forgetting ? "Forget it" : "Forget"}
                         </button>`
@@ -312,7 +322,11 @@ export function MemorySheet({ draft: initial = "", conversationId, pendingOnly =
     const [scope, setScope] = useState("project");
     const [busy, setBusy] = useState(false);
 
-    const title = pendingOnly ? "Pending memories" : "Memory";
+    const title = pendingOnly
+        ? "Pending memories"
+        : data?.privateAgent
+          ? "Private learned memory"
+          : "Memory";
 
     if (pendingOnly && store.state.me?.role !== "owner") {
         return html`<${Sheet} title=${title} onClose=${closeSheet}>
@@ -379,7 +393,11 @@ export function MemorySheet({ draft: initial = "", conversationId, pendingOnly =
 
     return html`<${Sheet} title=${title} onClose=${closeSheet}>
         <p class="muted small">
-            Short lessons Pi keeps across sessions: how to build and test, gotchas, conventions, preferences. ${project ? html`Those for <b>${project.name}</b> go to every session in it, worktrees too; the rest go everywhere.` : "PiP keeps lessons for everywhere."} Pi proposes them as it learns, and the owner approves; yours count at once.
+            ${
+                data.privateAgent
+                    ? "Lessons this private agent learns and maintains automatically across its chats. They take effect immediately, without shared-memory approval. Other agents and shared sessions cannot use them. These lessons are separate from the agent's charter."
+                    : html`Short lessons Pi keeps across sessions: how to build and test, gotchas, conventions, preferences. ${project ? html`Those for <b>${project.name}</b> go to every session in it, worktrees too; the rest go everywhere.` : "PiP keeps lessons for everywhere."} Pi proposes them as it learns, and the owner approves; yours count at once.`
+            }
         </p>
         ${
             data.canWrite &&
@@ -449,8 +467,8 @@ export function MemorySheet({ draft: initial = "", conversationId, pendingOnly =
             />`
         }
         <${Group}
-            title="Everywhere"
-            lessons=${shown.filter((lesson) => lesson.scope === "everywhere")}
+            title=${data.privateAgent ? "This private agent only" : "Everywhere"}
+            lessons=${shown.filter((lesson) => lesson.scope === (data.privateAgent ? "private-agent" : "everywhere"))}
             data=${data}
             conversationId=${id}
             empty="Nothing yet."

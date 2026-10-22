@@ -9,6 +9,7 @@ import { PeeksRailButton } from "./peeks.js";
 import { PipRailButton } from "./pip.js";
 import { sessionForest } from "./session-tree.js";
 import { PrivateList, PrivateTabs } from "./private.js";
+import { NamedAgents } from "./named-agents.js";
 import { projectGroups, rowsInGroups, sessionMatches } from "./project-groups.js";
 import { useSessionHold } from "./session-hold.js";
 import { canMoveSessions, useSessionDrag } from "./session-moves.js";
@@ -1489,6 +1490,7 @@ function AllSessions({ compact = false, home = false }) {
                 </button>`
             }
         </div>
+        <${NamedAgents} />
         <${PrivateTabs} />
         ${
             privateTab

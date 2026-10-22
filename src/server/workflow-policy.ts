@@ -392,6 +392,7 @@ export async function safeWorkflowGit(
 
 const publicationLocks = new WeakMap<PocketApp, Set<string>>();
 const localWriters = new WeakMap<PocketApp, Map<string, number>>();
+const writerWaiters = new WeakMap<PocketApp, Map<string, Set<() => void>>>();
 
 function publicationKey(app: PocketApp, id: ConversationId): string {
     const root = app.rootOf(id);
@@ -430,6 +431,12 @@ export function reserveWorkflowLocalWrite(app: PocketApp, id: ConversationId): (
 
         if (remaining === 0) {
             writers.delete(key);
+
+            for (const settled of writerWaiters.get(app)?.get(key) ?? []) {
+                settled();
+            }
+
+            writerWaiters.get(app)?.delete(key);
         } else {
             writers.set(key, remaining);
         }
@@ -449,6 +456,51 @@ export function workflowExclusiveReason(app: PocketApp, id: ConversationId): str
     }
 
     return undefined;
+}
+
+/** Fence new native writes first; cancellation can then join existing reservations without a race. */
+export async function withWorkflowWriterFence<T>(
+    app: PocketApp,
+    id: ConversationId,
+    run: (join: () => Promise<void>) => Promise<T>,
+): Promise<T> {
+    const key = publicationKey(app, id);
+    let locks = publicationLocks.get(app);
+
+    if (locks === undefined) {
+        locks = new Set();
+        publicationLocks.set(app, locks);
+    }
+
+    if (locks.has(key)) {
+        throw new HttpError(409, "An exclusive native workflow operation is already executing.");
+    }
+
+    locks.add(key);
+
+    try {
+        return await run(async () => {
+            if ((localWriters.get(app)?.get(key) ?? 0) === 0) {
+                return;
+            }
+
+            await new Promise<void>((resolve) => {
+                let waiters = writerWaiters.get(app);
+
+                if (waiters === undefined) {
+                    waiters = new Map();
+                    writerWaiters.set(app, waiters);
+                }
+
+                const waiting = waiters.get(key) ?? new Set();
+
+                waiting.add(resolve);
+                waiters.set(key, waiting);
+            });
+        });
+    } finally {
+        locks.delete(key);
+    }
 }
 
 export async function withWorkflowPublicationLock<T>(
@@ -492,6 +544,7 @@ export function requireWorkflowRequester(
     explicit?: WorkflowRequester,
     readOnly = false,
 ): string {
+    app.pip.agents.contacts.assertEffects(id);
     const requester = explicit?.id ?? app.attribution.requesterOf(id);
     const user = requester === undefined ? undefined : app.config.userById(requester);
 
@@ -533,12 +586,30 @@ export function createWorkflowHooks(app: PocketApp) {
                     requireWorkflowRequester(app, id);
 
                     const args = call.arguments as Record<string, unknown>;
+                    const named = app.sessionMeta(app.rootOf(id))?.pipAgent === true;
                     const readOnly = app.workItems.executionBlocked(id);
 
                     if (app.workItems.isPreparing(id)) {
                         return {
                             block: "The human requested a handoff summary only. Reply with the summary; do not call tools or change workflow.",
                         };
+                    }
+
+                    if (
+                        (named || app.pip.agents.contacts.isDerived(id)) &&
+                        [
+                            "schedule",
+                            "session_schedule",
+                            "watch_pr",
+                            "session_watch_pr",
+                            "repo_watch",
+                        ].includes(call.name)
+                    ) {
+                        return ["list", "status"].includes(String(args.action))
+                            ? undefined
+                            : {
+                                  block: "Private schedule/watch mutations have no accepted source, epoch and exact-origin adapter. Use passive list/status or ask the owner; these legacy owner-account effects cannot inherit private execution authority.",
+                              };
                     }
 
                     if (!readOnly) {
@@ -576,6 +647,30 @@ export function createWorkflowHooks(app: PocketApp) {
                         return {
                             block: "This managed workflow predecessor is read-only. Use handoff status or read-only local inspection.",
                         };
+                    }
+
+                    if (
+                        named &&
+                        [
+                            "agent_execution",
+                            "agent_work",
+                            "agent_charter",
+                            "memory",
+                            "sessions",
+                            "session_read",
+                            "work_context",
+                            "work_review",
+                            "session_start",
+                            "session_send",
+                            "session_follow",
+                            "session_stop",
+                            "session_archive",
+                            "approvals",
+                        ].includes(call.name)
+                    ) {
+                        // Supported exact native contacts retain native authorization. Legacy owner-account
+                        // mutations are refused above or at their native boundary; this is not a coding-tool denial.
+                        return undefined;
                     }
 
                     if (call.name === "review_comment") {
@@ -633,7 +728,7 @@ export function createWorkflowHooks(app: PocketApp) {
                     }
 
                     return {
-                        block: `${call.name} is not permitted in managed workflows. Unknown extension tools may publish or access the network; use publication for supported, individually approved external operations.`,
+                        block: `${call.name} is not permitted in ${named ? "private execution" : "managed workflows"}. This installed extension has no native writer/publication authorization adapter; it may publish or access the network. Use guarded coding tools or supported native intents, and publication for individually approved external operations.`,
                     };
                 } catch (error) {
                     return { block: describe(error) };
@@ -657,6 +752,7 @@ export type ConfinedExec = (
     command: string | readonly string[],
     options: ShellExecOptions | undefined,
     context: Context,
+    writeRoots?: readonly string[],
 ) => Promise<Result<ShellExecResult, ExecutionError>>;
 
 const mutations = new Set([
@@ -723,13 +819,26 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                     let release: (() => void) | undefined;
 
                     try {
-                        const managed = app.workItems.isManaged(id);
+                        const privateEffect = app.pip.agents.execution.applies(id);
+                        const permit = privateEffect
+                            ? await app.pip.agents.execution.authorize(
+                                  id,
+                                  target,
+                                  "exec",
+                                  [command, options],
+                                  context,
+                              )
+                            : undefined;
+                        const managed = app.workItems.isManaged(id) || privateEffect;
 
                         if (managed || identity !== undefined) {
                             requireWorkflowRequester(app, id, identity);
                         }
 
                         if (!managed) {
+                            // Ordinary Chat keeps its existing shell/network capability, but cannot
+                            // race a native/private writer transfer in the same known filesystem.
+                            release = reserveWorkflowLocalWrite(app, id);
                             const result = await target.exec(command, options, context);
 
                             if (identity !== undefined) {
@@ -739,7 +848,7 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                             return result;
                         }
 
-                        const readOnly = app.workItems.executionBlocked(id);
+                        const readOnly = !privateEffect && app.workItems.executionBlocked(id);
 
                         if (typeof command !== "string" && command.length === 0) {
                             return err(new ExecutionError("spawn_error", "Empty command"));
@@ -774,8 +883,25 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                             release = reserveWorkflowLocalWrite(app, id);
                         }
 
-                        const result = await confinedExec(readOnly, command, options, context);
+                        const result = await confinedExec(
+                            readOnly,
+                            command,
+                            permit === undefined
+                                ? options
+                                : {
+                                      ...options,
+                                      env: {
+                                          ...options?.env,
+                                          TMPDIR: permit.scratch,
+                                          TMP: permit.scratch,
+                                          TEMP: permit.scratch,
+                                      },
+                                  },
+                            permit?.context ?? context,
+                            permit?.roots,
+                        );
 
+                        permit?.check();
                         requireWorkflowRequester(app, id, identity);
 
                         return result;
@@ -791,6 +917,17 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                 let release: (() => void) | undefined;
 
                 try {
+                    const permit =
+                        mutations.has(String(property)) && app.pip.agents.execution.applies(id)
+                            ? await app.pip.agents.execution.authorize(
+                                  id,
+                                  target,
+                                  String(property),
+                                  args,
+                                  args.at(-1) as Context,
+                              )
+                            : undefined;
+
                     if (mutations.has(String(property))) {
                         if (app.workItems.isManaged(id) || identity !== undefined) {
                             requireWorkflowRequester(app, id, identity);
@@ -801,7 +938,13 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                         requireWorkflowRequester(app, id, identity, true);
                     }
 
-                    const result = await Reflect.apply(value, target, args);
+                    const result = await Reflect.apply(
+                        value,
+                        target,
+                        permit === undefined ? args : [...args.slice(0, -1), permit.context],
+                    );
+
+                    permit?.check();
 
                     if (app.workItems.isManaged(id) || identity !== undefined) {
                         requireWorkflowRequester(
@@ -835,7 +978,7 @@ export function createWorkflowEnv(
         app,
         id,
         env,
-        async (readOnly, command, options, context) => {
+        async (readOnly, command, options, context, writeRoots) => {
             if (process.platform !== "darwin") {
                 return err(
                     new ExecutionError(
@@ -867,7 +1010,7 @@ export function createWorkflowEnv(
                 [
                     "/usr/bin/sandbox-exec",
                     "-p",
-                    sandboxProfile(readOnly),
+                    sandboxProfile(readOnly, writeRoots),
                     "/usr/bin/env",
                     ...(options?.inheritEnv === false ? ["-i"] : []),
                     ...Object.entries(workloadEnv).map(([key, value]) => `${key}=${value}`),

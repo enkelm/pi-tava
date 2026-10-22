@@ -79,11 +79,41 @@ export type WorkItem = {
     archived?: boolean;
     predecessorWorkItemId?: string;
     createdAt: number;
+    /** Native direct-contact admissions, retained to avoid renewing action budgets on retries. */
+    privateCommands?: Record<
+        string,
+        {
+            agentId: string;
+            epoch: number;
+            action: "send" | "stop" | "intervene";
+            source: number;
+            status: "admitted" | "completed";
+        }
+    >;
+    /** Temporary native writer transfer; private chats remain outside Work Item membership. */
+    intervention?: {
+        id: string;
+        boot: string;
+        chatId: number;
+        agentId: string;
+        ownerId: string;
+        tokenHash: string;
+        agentEpoch: number;
+        attachmentEpoch: number;
+        source: number;
+        /** Pins the actual filesystem destination, independently of the private identity's project remit. */
+        destination: string;
+        phase: "fencing" | "active" | "releasing";
+    };
     /** Private controller grant. Never include this object in shared work-context or room data. */
     supervisor?: {
         conversationId: number;
         ownerId: string;
         tokenHash: string;
+        /** Optional private identity parent; native controller identity and execution membership stay unchanged. */
+        agentId?: string;
+        agentEpoch?: number;
+        attachmentEpoch?: number;
         epoch: number;
         status: "running" | "paused" | "reclaimed";
         /** Cumulative work-spend ceiling. Absent means no Work Item cost cap. */

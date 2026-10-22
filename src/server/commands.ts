@@ -21,6 +21,7 @@ import {
     AgentDoc,
     type ConversationCreateOptions,
     type ConversationId,
+    type ConversationHandle,
     defineTask,
     type EntryId,
     InboxDoc,
@@ -808,6 +809,11 @@ export class Commands {
         }
 
         const before = app.sessionMeta(id);
+
+        if (before?.pipAgent === true) {
+            throw new HttpError(409, "Edit this private PiP from its PiP settings.");
+        }
+
         const placing = Object.hasOwn(patch, "projectId");
 
         if (placing) {
@@ -884,6 +890,7 @@ export class Commands {
         user: User,
         request: SubmitRequest,
         via?: string,
+        nativeSender?: ConversationHandle,
     ): Promise<{
         submissionId: SubmissionId;
         requestId: string;
@@ -891,6 +898,14 @@ export class Commands {
     }> {
         user = { ...user };
         const app = this.#app;
+
+        if (nativeSender !== undefined && (nativeSender.id !== id || via === undefined)) {
+            throw new HttpError(
+                400,
+                "An invocation-bound native sender must retain its exact service recipient.",
+            );
+        }
+
         const initialUser = this.#requireCurrentUser(user);
 
         app.requireSee(initialUser, id);
@@ -1023,7 +1038,9 @@ export class Commands {
                 app.workItems.controllerCurrent(id, grant?.epoch, via !== undefined);
             }
 
-            return conversation.submit(
+            // This is Durable's real invocation-bound admission, not an app preflight called atomic.
+            // Private source/target activation is separately fenced from the already-persisted intent.
+            return (nativeSender ?? conversation).submit(
                 {
                     type: "input",
                     content,
@@ -1034,13 +1051,26 @@ export class Commands {
             );
         };
 
-        const submission =
-            via === undefined
-                ? await app.pip.orchestration.input(id, current, requestId, admit)
-                : await admit();
+        const submission = await app.pip.agents.input(
+            id,
+            current,
+            requestId,
+            () =>
+                via === undefined
+                    ? app.pip.agents.contacts.humanInput(id, () =>
+                          app.pip.orchestration.input(id, current, requestId, admit),
+                      )
+                    : admit(),
+            via !== undefined,
+        );
 
         app.collab.setTyping(id, user, null);
-        await this.#touched(id, typed, text === typed ? undefined : text);
+
+        // Invocation-bound private contacts are fenced at native activation. Do not start the
+        // separate ad-hoc title model (or rename its recipient) outside that accepted run.
+        if (nativeSender === undefined) {
+            await this.#touched(id, typed, text === typed ? undefined : text);
+        }
 
         // A person's own words: linked sessions may message each other again (`linked-sessions.ts`).
         if (via === undefined) {
@@ -1294,7 +1324,12 @@ export class Commands {
             }
         }, context);
 
-        if (provisional !== undefined && (expanded !== undefined || wantsTitle(text))) {
+        // Private chats use the first input itself, not an extra unbound paid title-model lane.
+        if (
+            provisional !== undefined &&
+            !this.#app.pip.agents.isNamed(id) &&
+            (expanded !== undefined || wantsTitle(text))
+        ) {
             void writeTitle(
                 this.#app,
                 id,
@@ -1360,6 +1395,16 @@ export class Commands {
         app.requireSteer(current);
 
         if (via === undefined) {
+            // Fence prepared exact contacts before native abort: a delayed service admission must
+            // not reactivate an ordinary Chat or helper after the human's Stop has finished.
+            await app.harness.commit((tx) => app.pip.agents.contacts.fenceTarget(tx, id), context);
+            await app.pip.agents.contacts.settleRevoked();
+            const privateScope = app.pip.agents.scope(id);
+
+            if (privateScope !== undefined) {
+                await app.pip.agents.supervision.stop(privateScope.agentId, current);
+            }
+
             await app.pip.orchestration.stopped(id, current);
         }
 
@@ -1543,6 +1588,14 @@ export class Commands {
         }
 
         optionalText(request.cwd, "cwd");
+        const namedAgent = app.pip.agents.isNamed(id);
+
+        if (namedAgent && request.cwd !== undefined) {
+            throw new HttpError(
+                409,
+                "A private agent's focus is remit, not a working-directory change.",
+            );
+        }
 
         if (request.cwd !== undefined) {
             app.workItems.requireWritable(id);
@@ -1591,7 +1644,9 @@ export class Commands {
             ...(cwd === undefined ? {} : { cwd }),
         };
 
-        if (request.pipPanel === true) {
+        if (namedAgent) {
+            await app.pip.agents.configure(id, user, change);
+        } else if (request.pipPanel === true) {
             // Check and save together: a turn may have started while the picker was open.
             await app.harness.commit(async (tx) => {
                 const live = await tx.doc(LiveDoc, id);
@@ -1622,7 +1677,7 @@ export class Commands {
             }, context);
         }
 
-        if (ref !== undefined && request.pipPanel !== true) {
+        if (ref !== undefined && request.pipPanel !== true && !namedAgent) {
             app.config.lastModel = { provider: ref.provider, modelId: ref.modelId, thinkingLevel };
         }
 
@@ -1686,6 +1741,13 @@ export class Commands {
 
         if (app.sessionMeta(id) === undefined) {
             throw new HttpError(400, "Only sessions have instructions for Pi");
+        }
+
+        if (app.pip.agents.isNamed(id)) {
+            throw new HttpError(
+                409,
+                "Edit this private PiP's revisioned instructions in PiP settings.",
+            );
         }
 
         const instructions = (optionalText(text, "instructions") ?? "").trim();

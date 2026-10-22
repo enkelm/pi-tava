@@ -159,6 +159,7 @@ export interface Client {
     boardSent?: string;
     /** The JSON of the last session list sent on this connection, so an unchanged list is not sent again. */
     sessionsSent?: string;
+    namedAgentsSent?: string;
     /**
      * This tab's PiP panel, while open: a view of PiP's conversation beside the one the tab shows, which reaches the tab
      * as `pipview` events (`PocketApp.setPip`).

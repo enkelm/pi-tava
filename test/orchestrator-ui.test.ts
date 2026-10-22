@@ -89,6 +89,7 @@ const sources: Record<string, string> = {
 const unrelated = `export const ${[
     "ChatSheet",
     "ShareSheet",
+    "NamedAgentSheet",
     "BranchPicker",
     "FileSheet",
     "FindSheet",

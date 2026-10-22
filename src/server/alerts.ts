@@ -112,7 +112,7 @@ export class Alerts {
         // Global PiP opens its panel; a work supervisor opens its separate private conversation.
         const meta = app.sessionMeta(id);
         const pip = meta?.pip !== undefined;
-        const panel = pip && meta.pipWorkItemId === undefined;
+        const panel = pip && meta.pipWorkItemId === undefined && meta.pipAgent !== true;
         const message: PushMessage = {
             title: pip
                 ? title

@@ -33,6 +33,9 @@ import {
     type Tx,
 } from "@earendil-works/pi-durable";
 import { REPORT_PREFIX, SubagentsDoc } from "../docs.ts";
+import { AgentContactsDoc } from "../pip/agent-contacts-doc.ts";
+import { AgentSupervisionDoc } from "../pip/agent-supervision.ts";
+import { AgentIdentitiesDoc } from "../agent-identity-docs.ts";
 import { describe } from "../errors.ts";
 import type { PocketHost } from "../host.ts";
 import { THINKING_LEVELS } from "../models.ts";
@@ -260,6 +263,101 @@ function reporterFor(Courier: CourierTask, host: Pick<PocketHost, "notice">) {
                     if (report !== undefined && !sentBefore) {
                         const id = runtime.conversationId;
                         const state = await tx.doc(SubagentsDoc, id);
+                        const contacts = await tx.doc(AgentContactsDoc);
+                        const creator = Object.entries(state.reporters).find(
+                            ([, task]) => task === reporter.id,
+                        )?.[0];
+                        const pins = creator === undefined ? [] : (contacts.tools[creator] ?? []);
+                        const privateCreator =
+                            creator === undefined
+                                ? undefined
+                                : (await tx.doc(AgentSupervisionDoc)).toolAuthorities?.[creator];
+
+                        // A private-derived report is observation, never new owner authority. In particular,
+                        // a settled/stopped parent must not be awakened by an unbound courier input.
+                        if (pins.length > 0) {
+                            for (const pin of pins) {
+                                const source = Object.entries(contacts.contacts).find(
+                                    ([, item]) => item.requestId === pin.requestId,
+                                );
+
+                                if (source !== undefined && source[1].report) {
+                                    const key = `helper-return:${reporter.id}:${pin.requestId}`;
+
+                                    contacts.reports[key] ??= {
+                                        key,
+                                        contact: source[0],
+                                        target: Number(reporter.input.conversationId),
+                                        helperReporterId: Number(reporter.id),
+                                        originChatId: pin.chatId,
+                                        originRequestId: pin.requestId,
+                                        agentId: pin.agentId,
+                                        agentEpoch: pin.agentEpoch,
+                                        ownerId: pin.ownerId,
+                                        tokenHash: pin.tokenHash,
+                                        text: `Native helper ${JSON.stringify(reporter.input.name)} (/s/${reporter.input.conversationId}) observed:\n${report.slice(0, 6000)}${report.length > 6000 ? "\n[Excerpt; read the exact helper for full history.]" : ""}`,
+                                        status: "pending",
+                                    };
+                                }
+                            }
+
+                            return {
+                                status: "terminal",
+                                outcome: { status: "completed", result: null },
+                            };
+                        }
+
+                        if (privateCreator !== undefined) {
+                            const identity = (await tx.doc(AgentIdentitiesDoc)).items[
+                                privateCreator.agentId
+                            ];
+                            const current =
+                                identity?.deletedAt === undefined &&
+                                identity?.epoch === privateCreator.epoch;
+                            const text = current
+                                ? `Helper ${JSON.stringify(reporter.input.name)} (/s/${reporter.input.conversationId}) observed:\n${report.slice(0, 6000)}${report.length > 6000 ? "\n[Excerpt; read the exact helper for full history.]" : ""}`
+                                : `Helper observation held after private authority changed. Inspect its exact native history /s/${reporter.input.conversationId}; no paid parent wake was requested.`;
+
+                            await tx.appendEntry(id, {
+                                kind: "pi.assistant",
+                                data: {
+                                    appAuthored: true,
+                                    privateHelperReport: Number(reporter.id),
+                                    held: !current,
+                                },
+                                model: [
+                                    {
+                                        role: "assistant",
+                                        content: [{ type: "text", text }],
+                                        api: "pi-coop",
+                                        provider: "pi-coop",
+                                        model: "app-authored",
+                                        stopReason: "stop",
+                                        timestamp: Date.now(),
+                                        usage: {
+                                            input: 0,
+                                            output: 0,
+                                            cacheRead: 0,
+                                            cacheWrite: 0,
+                                            totalTokens: 0,
+                                            cost: {
+                                                input: 0,
+                                                output: 0,
+                                                cacheRead: 0,
+                                                cacheWrite: 0,
+                                                total: 0,
+                                            },
+                                        },
+                                    },
+                                ],
+                            });
+
+                            return {
+                                status: "terminal",
+                                outcome: { status: "completed", result: null },
+                            };
+                        }
+
                         // Reads first: a commit reads the tables only before it writes one.
                         const queued = await queuedBatch(tx, id, state.sending?.request);
                         const idle = !(await working(tx, state.courier));

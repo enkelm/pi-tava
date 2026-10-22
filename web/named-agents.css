@@ -1,0 +1,580 @@
+/* Persistent private PiPs share the sidebar's group typography and flat navigation states. */
+.named-agents {
+    flex: 0 0 auto;
+    min-width: 0;
+}
+
+/* A single native button outline encloses two semantic sibling controls. */
+.named-agents-head {
+    gap: 0;
+    border: 1px solid transparent;
+    border-radius: var(--r-row);
+}
+
+.named-agents-head:has(.named-agents-toggle[aria-expanded="true"]) {
+    border-color: var(--warn-line);
+    background: var(--warn-soft);
+}
+
+.named-agents-head .named-agents-toggle {
+    justify-content: flex-start;
+    gap: 6px;
+    padding: 6px 8px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    text-align: start;
+}
+
+.named-agents-label {
+    flex: none;
+}
+
+.named-agents-create,
+.named-agent-open {
+    display: flex;
+    align-items: center;
+    min-height: 40px;
+    border: 0;
+    border-radius: var(--r-row);
+    background: transparent;
+    box-shadow: none;
+}
+
+.named-agents-create {
+    flex: none;
+    justify-content: center;
+    min-width: 40px;
+    gap: 4px;
+    padding: 6px 8px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+
+.named-agents-list {
+    max-height: 28dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.named-agent-row {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 4px;
+}
+
+.named-agent-open {
+    flex: 1;
+    min-width: 0;
+    gap: 8px;
+    padding: 6px 8px 6px 28px;
+    color: var(--text);
+    text-align: start;
+}
+
+.named-agents .icon-button {
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    color: var(--muted);
+}
+
+.named-agents button:focus-visible {
+    outline-offset: -2px;
+}
+
+.named-agent-avatar {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+}
+
+.named-agent-avatar:empty {
+    border-radius: var(--r-row);
+    background: var(--hover);
+}
+
+.named-agent-avatar img {
+    display: block;
+}
+
+.named-agent-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.named-agent-status {
+    flex: 0 1 auto;
+    max-width: 35%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.named-agent-open.on {
+    background: var(--hover);
+}
+
+.named-agent-open.on .named-agent-name {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.named-agents button:active {
+    background: var(--pressed);
+}
+
+/* Tabs share the normal header with context and utilities, never a second topbar. */
+.title.title-agent {
+    flex-direction: row;
+    align-items: center;
+    min-width: 0;
+    gap: 4px;
+    padding: 0;
+    margin-left: 4px;
+}
+
+.title-agent > .title-sub {
+    flex: 0 1 40%;
+    max-width: 220px;
+    min-height: 44px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+
+.title-agent > .title-sub::-webkit-scrollbar {
+    display: none;
+}
+
+/* Native horizontal scrolling keeps tabs, their close buttons and trailing + reachable. */
+.agent-tabs {
+    flex: 1;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.agent-tabs-strip {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+    gap: 2px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+}
+
+.agent-tab-item {
+    display: flex;
+    align-items: stretch;
+    flex: 0 0 auto;
+    min-width: 120px;
+    max-width: 220px;
+    border-bottom: 2px solid transparent;
+    border-radius: var(--r-row) var(--r-row) 0 0;
+}
+
+.agent-tab,
+.agent-tab-close,
+.agent-tab-new {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    gap: 8px;
+    border: 0;
+    border-radius: var(--r-row);
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.82rem;
+    text-decoration: none;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
+.agent-tab {
+    flex: 1;
+    min-width: 56px;
+    padding: 6px 8px;
+}
+
+.agent-tab-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-tab-item.on {
+    border-bottom-color: var(--accent);
+    background: var(--panel);
+}
+
+.agent-tab.on {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.agent-tab-close,
+.agent-tab-new {
+    flex: none;
+    width: 40px;
+    padding: 8px;
+}
+
+.agent-tab-busy {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+}
+
+.agent-tabs :is(a, button):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
+}
+
+.agent-tabs :is(a, button):active {
+    background: var(--pressed);
+}
+
+.agent-tab-new:disabled {
+    opacity: 0.5;
+}
+
+.agent-tabs-error {
+    max-height: 6em;
+    margin: 0;
+    padding: 8px;
+    color: var(--text);
+    overflow: auto;
+    overflow-wrap: anywhere;
+}
+
+.named-agent-chats summary {
+    padding-block: 4px;
+    cursor: pointer;
+}
+
+.named-agent-chats ul {
+    max-height: min(32dvh, 320px);
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    list-style: none;
+}
+
+.named-agent-chats a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px;
+    border-radius: var(--r-row);
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.named-agent-form {
+    display: grid;
+    min-width: 0;
+    gap: 16px;
+}
+
+.named-agent-form p {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.named-agent-form .field {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+}
+
+.named-agent-form :is(input, textarea, select) {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    font-size: max(16px, 1em);
+}
+
+.named-agent-form textarea {
+    resize: vertical;
+}
+
+.named-agent-form :is(button, summary),
+.named-agents button {
+    min-height: 40px;
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.named-agent-form summary {
+    padding-block: 10px;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+
+.named-agent-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.named-agent-actions .button,
+.named-agent-history .button {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.named-agent-section {
+    display: grid;
+    min-width: 0;
+    gap: 12px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--line);
+}
+
+.named-agent-section h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.named-agent-controllers {
+    display: grid;
+    min-width: 0;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.named-agent-controller-link {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
+    min-height: 40px;
+    gap: 12px;
+    padding-block: 6px;
+    border-radius: var(--r-row);
+    color: var(--text);
+    text-underline-offset: 3px;
+    touch-action: manipulation;
+    overflow-wrap: anywhere;
+}
+
+.named-agent-controller-link .small {
+    flex: none;
+    max-width: 45%;
+    text-align: end;
+}
+
+.named-agent-controller-link:active {
+    background: var(--pressed);
+}
+
+.named-agent-form :is(button, a, summary):focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.named-agent-proposal-body {
+    display: grid;
+    min-width: 0;
+    gap: 12px;
+    padding-block: 8px;
+}
+
+.named-agent-history {
+    min-width: 0;
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
+}
+
+.named-agent-history > details {
+    margin-top: 8px;
+    border-top: 1px solid var(--line);
+}
+
+.named-agent-history dl {
+    margin: 12px 0;
+}
+
+.named-agent-history dt {
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.named-agent-history dd {
+    margin: 4px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.agent-header-scroll-hint {
+    display: none;
+}
+
+/* A phone cannot budget for tabs, 40% context and every fixed utility at once. Scroll the
+ * one header instead: no nested tab scroller, no shrinking Close/+ and no second row.
+ * Back and Menu cap the rail; scroll padding keeps a revealed tab clear of both caps. */
+@media (max-width: 699px) {
+    .topbar.agent-topbar {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scroll-padding-inline: 52px 72px;
+        scrollbar-width: thin;
+        scrollbar-color: var(--line) transparent;
+    }
+
+    .agent-topbar > * {
+        flex-shrink: 0;
+    }
+
+    .topbar > .title.title-agent {
+        flex: none;
+        margin-left: 0;
+    }
+
+    .title-agent > .agent-tabs {
+        display: flex;
+        flex: none;
+        align-items: center;
+        max-width: none;
+        gap: 8px;
+    }
+
+    .agent-tabs-strip {
+        overflow-x: visible;
+    }
+
+    .agent-tab-item {
+        width: 160px;
+        min-width: 160px;
+        max-width: 160px;
+    }
+
+    .agent-tabs :is(a, button) {
+        min-height: 44px;
+    }
+
+    .agent-tab-close,
+    .agent-tab-new {
+        width: 44px;
+    }
+
+    .agent-tabs-error {
+        max-width: 240px;
+        max-height: 44px;
+    }
+
+    .title-agent > .title-sub {
+        flex: none;
+        max-width: none;
+        overflow-x: visible;
+    }
+
+    .title-agent .title-sub > :is(.title-folder, .title-destination) {
+        max-width: 160px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .title-agent .title-sub > .title-branch {
+        flex: none;
+        max-width: 160px;
+    }
+
+    /* Native controls that normally yield to the menu now have room in this same rail. */
+    .topbar.agent-topbar .top-toggle,
+    .topbar.agent-topbar .people-button,
+    .topbar.agent-topbar .quiet-phone {
+        display: inline-flex;
+    }
+
+    .topbar.agent-topbar > .icon-button,
+    .topbar.agent-topbar > .people-button,
+    .topbar.agent-topbar > .changes-button {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    .agent-topbar > .topbar-back,
+    .agent-topbar > .topbar-menu {
+        position: sticky;
+        z-index: 2;
+        background: var(--bg);
+    }
+
+    .agent-topbar > .topbar-back {
+        left: 4px;
+    }
+
+    .agent-topbar > .topbar-menu {
+        right: 6px;
+    }
+
+    /* An always-visible touch cue, not a hover tooltip or another header row. */
+    .agent-header-scroll-hint {
+        position: absolute;
+        inset-block: 0;
+        right: 100%;
+        display: flex;
+        align-items: center;
+        width: 18px;
+        background: var(--bg);
+        color: var(--faint);
+        pointer-events: none;
+    }
+}
+
+@media (any-pointer: coarse) {
+    .named-agents button,
+    .named-agents .named-agents-toggle,
+    .named-agent-form :is(button, a, summary),
+    .agent-tabs :is(a, button) {
+        min-height: 44px;
+    }
+
+    .named-agents-create,
+    .agent-tab-close,
+    .agent-tab-new {
+        min-width: 44px;
+    }
+
+    .title-agent .title-sub > button.title-branch::after {
+        inset: -12px -8px;
+    }
+
+    .named-agents .icon-button {
+        flex-basis: 44px;
+        width: 44px;
+        height: 44px;
+    }
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .named-agents button:hover:not(:active),
+    .named-agent-controller-link:hover:not(:active),
+    .agent-tabs :is(a, button):hover:not(:active):not(:disabled) {
+        background: var(--hover);
+    }
+}

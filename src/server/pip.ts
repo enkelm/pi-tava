@@ -1,6 +1,7 @@
 /**
- * PiP, "Pi in Pocket": the owner's assistant, which looks after their other sessions. PiP is a conversation of its own,
- * kept out of the session list and shown in a small panel over whatever is open (`web/pip.js`). Its core registration
+ * PiP, "Pi in Pocket": the owner's assistant, which looks after their other sessions. Generic PiP has its own
+ * conversation and quick popup (`web/pip.js`); named agents (`pip/agents.ts`) use separate full conversations.
+ * All stay out of Collab's session list. Its core registration
  * (`pip/private-agent.ts`) is selected there only, and gives it tools to list, read, start, message, stop, archive, and
  * schedule sessions, to see the calls waiting for approval and deny them (never allow: that stays a person's), and to
  * follow a session until its run ends. Every tool acts as PiP's person, with exactly their rights: the checks are the
@@ -41,6 +42,7 @@ import {
 import type { PocketApp } from "./app.ts";
 import type { WorkReadInput } from "./work-items/context.ts";
 import { PipSupervision } from "./pip/supervision.ts";
+import { PipAgents } from "./pip/agents.ts";
 import type { User } from "./config.ts";
 import { AuthorsDoc, FollowsDoc, PipAskedDoc, SessionsDoc, type PipMentionSource } from "./docs.ts";
 import { NOTE_ENTRY } from "./entry-format.ts";
@@ -79,7 +81,17 @@ export const PIP_EXTENSIONS = [
     "pocket-memory",
 ];
 /** Pi Durable's coding tools PiP goes without: it reads files, and changes nothing itself. */
-export const PIP_WITHOUT = ["bash", "write", "edit", "work_handoff", "work_supervise"];
+export const PIP_WITHOUT = [
+    "bash",
+    "write",
+    "edit",
+    "work_handoff",
+    "work_supervise",
+    "private_notes",
+    "agent_charter",
+    "agent_work",
+    "agent_execution",
+];
 /** How reports from followed sessions start, so PiP knows what they are. */
 export const REPORT_HEAD = "[report] ";
 /** Sessions PiP may start in an hour, so a confused loop cannot fill the list. */
@@ -145,6 +157,7 @@ export type PipSession = {
     readOnly: boolean;
     paused: boolean;
     workItem?: { id: string; title: string; activeThreadId?: number };
+    controller?: { id: number; url: string; status: "active" | "human control" };
 };
 
 /** What a tab's PiP button shows: whether PiP works, and when it last answered. */
@@ -200,6 +213,7 @@ export class Pip {
     readonly #reviewer: PipReviewer;
     readonly #mentions: PipMentions;
     readonly orchestration: PipSupervision;
+    readonly agents: PipAgents;
     /** A PiP being made, by person, so two tabs opening it at once make one. */
     readonly #creating = new Map<string, Promise<ConversationId>>();
     /** When each PiP started its recent sessions, and made its recent messages and follows: for the hourly limits. */
@@ -222,6 +236,7 @@ export class Pip {
         this.#reviewer = new PipReviewer(app);
         this.#mentions = new PipMentions(app);
         this.orchestration = new PipSupervision(app);
+        this.agents = new PipAgents(app);
         this.task = defineTask<FollowInput, FollowState, null>({
             name: "pocket.pip-follow",
             version: 1,
@@ -409,10 +424,10 @@ export class Pip {
         return this.#app.config.pipEnabled && this.#app.config.userById(user.id)?.role === "owner";
     }
 
-    /** The conversation of this person's PiP, once they have one. */
+    /** This person's generic popup PiP, never a named agent or Work Item controller. */
     idOf(userId: string): ConversationId | undefined {
         for (const [id, meta] of Object.entries(this.#app.sessionCatalogue())) {
-            if (meta.pip === userId && meta.pipWorkItemId === undefined) {
+            if (meta.pip === userId && meta.pipWorkItemId === undefined && meta.pipAgent !== true) {
                 return Number(id) as unknown as ConversationId;
             }
         }
@@ -428,6 +443,7 @@ export class Pip {
         const app = this.#app;
 
         await this.#mentions.stop();
+        const fenced = new Set<string>();
 
         for (const [key, meta] of Object.entries(app.sessionCatalogue())) {
             if (meta.pip === undefined) {
@@ -435,8 +451,19 @@ export class Pip {
             }
 
             const id = Number(key) as unknown as ConversationId;
+            const identity = this.agents.identity(id);
 
             try {
+                if (identity !== undefined && !fenced.has(identity.agentId)) {
+                    const owner = app.config.userById(identity.ownerId);
+
+                    if (owner?.role === "owner") {
+                        await this.agents.supervision.stop(identity.agentId, owner);
+                    }
+
+                    fenced.add(identity.agentId);
+                }
+
                 await (await app.conversation(id)).abort(context);
 
                 for (const compaction of (await app.harness.snapshot(LiveDoc, id, context))
@@ -451,7 +478,17 @@ export class Pip {
 
     /** The person whose PiP a conversation is; undefined for every other conversation. */
     ownerOf(conversationId: ConversationId): string | undefined {
-        return this.#app.sessionMeta(conversationId)?.pip;
+        const root = this.#app.rootOf(conversationId);
+
+        return (
+            this.#app.sessionMeta(conversationId)?.pip ??
+            (this.agents.isNamed(root) ? this.#app.sessionMeta(root)?.pip : undefined)
+        );
+    }
+
+    /** Native descendants retain their private identity, never global PiP's control path. */
+    isNamedCaller(id: ConversationId): boolean {
+        return this.agents.isNamed(this.#app.rootOf(id));
     }
 
     /** The name of the person whose PiP a conversation is; undefined for every other conversation. */
@@ -680,6 +717,12 @@ export class Pip {
             throw new Error("PiP is turned off in Settings → PiP.");
         }
 
+        if (this.isNamedCaller(pipId) && this.agents.scope(this.#app.rootOf(pipId)) === undefined) {
+            throw new Error(
+                "This old private agent is inert. Inspect its state with the owner before resetting it.",
+            );
+        }
+
         if (this.orchestration.isScoped(pipId)) {
             this.#app.workItems.controllerCurrent(pipId, undefined, false);
         }
@@ -695,7 +738,12 @@ export class Pip {
             throw new Error("That is your own conversation.");
         }
 
-        if (this.#app.sessionMeta(id)?.pip !== undefined) {
+        const target = this.#app.sessionMeta(id);
+
+        if (
+            target?.pip !== undefined &&
+            !(this.isNamedCaller(pipId) && target.pipWorkItemId !== undefined)
+        ) {
             throw new Error(`There is no session ${String(sessionId)}.`);
         }
 
@@ -1018,6 +1066,10 @@ export class Pip {
             .filter((session) => scope === undefined || session.workItemId === scope)
             .map((session): PipSession => {
                 const counts = session.subagents;
+                const controller = this.isNamedCaller(pipId)
+                    ? this.orchestration.navigation(session.id as unknown as ConversationId, user)
+                          .supervisor
+                    : undefined;
 
                 return {
                     id: session.id,
@@ -1031,6 +1083,18 @@ export class Pip {
                     threadType: session.threadType,
                     readOnly: session.workflow.readOnly,
                     paused: session.workflow.paused,
+                    ...(controller === undefined
+                        ? {}
+                        : {
+                              controller: {
+                                  id: controller.conversationId,
+                                  url: `/s/${controller.conversationId}`,
+                                  status:
+                                      controller.status === "running"
+                                          ? ("active" as const)
+                                          : ("human control" as const),
+                              },
+                          }),
                     ...(session.workItemId === undefined
                         ? {}
                         : {
@@ -1333,6 +1397,7 @@ export class Pip {
             {
                 ...(folder === undefined ? {} : { cwd: folder }),
                 ...(request.title === undefined ? {} : { title: request.title }),
+                ...(this.isNamedCaller(pipId) ? { threadType: "worker" } : {}),
                 worktree: request.worktree === true,
             },
             { projectDefaults: model === undefined },
@@ -1362,6 +1427,8 @@ export class Pip {
     ): Promise<{ requestId: string }> {
         const user = this.#person(pipId);
         const id = this.#session(pipId, user, sessionId);
+
+        this.#requireLegacyIntent(pipId, "legacy direct messaging; use registered native contact");
 
         return {
             requestId: await this.#submit(pipId, id, user, message, key, steer, async () => {
@@ -1503,8 +1570,19 @@ export class Pip {
     }
 
     /** Watch a session's pull request for PiP's person: its branch's, or `pr` (a number, address, or owner/name#12). */
+    /** Legacy owner-account mutations have no private accepted-source/epoch or origin adapter. */
+    #requireLegacyIntent(pipId: ConversationId, operation: string): void {
+        if (this.isNamedCaller(pipId)) {
+            throw new Error(
+                `Private ${operation} requires a native source-authority and origin-pinned adapter. This legacy owner-account operation is unavailable to named agents; use the native human controls.`,
+            );
+        }
+    }
+
     async watchPr(pipId: ConversationId, sessionId: number, pr: string | undefined, key: string) {
         const user = this.#person(pipId);
+
+        this.#requireLegacyIntent(pipId, "PR-watch creation");
         const id = this.#session(pipId, user, sessionId);
 
         // A replayed call finds the watch it started; anything else is looked at first.
@@ -1528,6 +1606,7 @@ export class Pip {
         const id = this.#session(pipId, user, sessionId);
 
         if (stop) {
+            this.#requireLegacyIntent(pipId, "PR-watch cancellation");
             this.#requireLooked(pipId, sessionId, "stop the PR watch of");
         }
 
@@ -1541,6 +1620,8 @@ export class Pip {
         key: string,
     ): Promise<RepoWatchView> {
         const user = this.#person(pipId);
+
+        this.#requireLegacyIntent(pipId, "repository-watch creation");
         const { to, ...rest } = request;
 
         // Strangers' issues and pull requests are let in by a person, in the hooks sheet, never by PiP.
@@ -1578,7 +1659,11 @@ export class Pip {
     }
 
     async removeRepoWatch(pipId: ConversationId, id: string): Promise<RepoWatchView> {
-        return this.#app.repoWatches.remove(this.#person(pipId), id);
+        const user = this.#person(pipId);
+
+        this.#requireLegacyIntent(pipId, "repository-watch cancellation");
+
+        return this.#app.repoWatches.remove(user, id);
     }
 
     /** Stop a session's run. */
@@ -1601,6 +1686,8 @@ export class Pip {
     /** Archive a session, or bring it back. */
     async archive(pipId: ConversationId, sessionId: number, archived: boolean): Promise<void> {
         const user = this.#person(pipId);
+
+        this.#requireLegacyIntent(pipId, "session archival");
         const id = this.#session(pipId, user, sessionId);
 
         // Bringing one back hides nothing; archiving it hides what may still need its person.
@@ -1639,6 +1726,8 @@ export class Pip {
     async deny(pipId: ConversationId, approvalId: string): Promise<boolean> {
         const user = this.#person(pipId);
 
+        this.#requireLegacyIntent(pipId, "approval cancellation");
+
         return this.#app.answerApproval(approvalId, false, this.#through(user));
     }
 
@@ -1658,6 +1747,8 @@ export class Pip {
     ) {
         const app = this.#app;
         const user = this.#person(pipId);
+
+        this.#requireLegacyIntent(pipId, "cross-session scheduling");
         const id = this.#session(pipId, user, sessionId);
 
         await app.requireDriver(id, user);
@@ -1687,6 +1778,8 @@ export class Pip {
     async cancelSchedule(pipId: ConversationId, sessionId: number, scheduleId: string) {
         const app = this.#app;
         const user = this.#person(pipId);
+
+        this.#requireLegacyIntent(pipId, "cross-session schedule cancellation");
         const id = this.#session(pipId, user, sessionId);
 
         await app.requireDriver(id, user);
@@ -1796,17 +1889,31 @@ export class Pip {
     async reportsOn(sessionId: ConversationId, userId: string): Promise<boolean> {
         const app = this.#app;
         const user = app.config.userById(userId);
-        const pip = this.idOf(userId);
 
-        if (
-            user === undefined ||
-            pip === undefined ||
-            !this.available(user) ||
-            app.spend.heldBack(pip, userId) !== undefined
-        ) {
+        if (user === undefined || !this.available(user)) {
             return false;
         }
 
+        for (const [key, meta] of Object.entries(app.sessionCatalogue())) {
+            if (meta.pip !== userId || meta.pipWorkItemId !== undefined) {
+                continue;
+            }
+
+            const pip = Number(key) as ConversationId;
+
+            if (
+                app.spend.heldBack(pip, userId) === undefined &&
+                (await this.#reportsFrom(pip, sessionId))
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    async #reportsFrom(pip: ConversationId, sessionId: ConversationId): Promise<boolean> {
+        const app = this.#app;
         const now = Date.now();
         const follows = Object.values(
             (await app.harness.snapshot(FollowsDoc, pip, context))?.items ?? {},

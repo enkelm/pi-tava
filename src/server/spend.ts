@@ -279,6 +279,18 @@ export class Spend {
         return spent;
     }
 
+    /** Private identity reasoning across all chats, without double-counting native Work Item costs. */
+    agentSpent(id: ConversationId): number {
+        const identity = this.#app.pip.agents.identity(id);
+
+        return identity === undefined
+            ? this.sessionSpent(this.#app.rootOf(id))
+            : identity.chatIds.reduce(
+                  (sum, chat) => sum + this.sessionSpent(chat as ConversationId),
+                  0,
+              );
+    }
+
     /** All execution roots and the separate supervisor, including historical and auxiliary usage once each. */
     workSpent(id: ConversationId): number {
         const app = this.#app;
@@ -342,6 +354,10 @@ export class Spend {
      * started linked sessions, theirs too, as `#reached` counts it.
      */
     budgetSpent(root: ConversationId): number {
+        if (this.#app.pip.agents.isNamed(root)) {
+            return this.agentSpent(root);
+        }
+
         return this.teamRoot(root) === root ? this.#teamSpent(root) : this.sessionSpent(root);
     }
 
@@ -357,6 +373,11 @@ export class Spend {
         const app = this.#app;
         const root = app.rootOf(id);
         const budget = app.sessionMeta(root)?.budget;
+        const identity = app.pip.agents.identity(root);
+
+        if (identity?.maxCost !== undefined && this.agentSpent(root) >= identity.maxCost) {
+            return { budget: identity.maxCost };
+        }
 
         if (budget !== undefined && this.sessionSpent(root) >= budget) {
             return { budget };
@@ -489,6 +510,13 @@ export class Spend {
         requireOwner(user);
         const amount = budgetOf(budget);
 
+        if (this.#app.pip.agents.isNamed(id)) {
+            await this.#app.pip.agents.setBudget(id, user, amount);
+            this.#limitsChanged();
+
+            return;
+        }
+
         await this.#app.harness.commit(async (tx) => {
             const meta = (await tx.doc(SessionsDoc)).items[String(id)];
 
@@ -555,18 +583,39 @@ export class Spend {
                 ...(budget === undefined ? {} : { budget }),
             };
         });
-        // PiP is out of the session list, not out of the spending: its person sees what it cost.
-        const pip = app.pip.idOf(user.id);
 
-        if (pip !== undefined) {
-            // With its limit, like any session's: the owner sees it, and can clear it.
-            const budget = app.sessionMeta(pip)?.budget;
+        // Reuse the identity's available-chat projection; an archived trailing chat is not a home.
+        const destinations = new Map(
+            owner
+                ? app.pip.agents.list(user).map((agent) => [agent.agentId, agent.id] as const)
+                : [],
+        );
+
+        // Private agents are out of Collab, not out of spending. Each retains its own limits.
+        for (const [key, meta] of Object.entries(app.sessionCatalogue())) {
+            const pip = Number(key) as ConversationId;
+
+            if (
+                meta.pip !== user.id ||
+                meta.pipWorkItemId !== undefined ||
+                !app.canSee(user, pip)
+            ) {
+                continue;
+            }
+
+            const identity = app.pip.agents.identity(pip);
+
+            if (identity !== undefined && destinations.get(identity.agentId) !== Number(pip)) {
+                continue;
+            }
+
+            const cap = identity?.maxCost ?? meta.budget;
 
             sessions.push({
                 id: Number(pip),
-                title: "PiP",
-                spent: byRoot.get(pip) ?? 0,
-                ...(budget === undefined ? {} : { budget }),
+                title: identity?.record.name ?? meta.title ?? "PiP",
+                spent: identity === undefined ? (byRoot.get(pip) ?? 0) : this.agentSpent(pip),
+                ...(cap === undefined ? {} : { budget: cap }),
             });
         }
 

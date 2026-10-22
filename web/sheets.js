@@ -3,6 +3,7 @@
 import { ChatSheet } from "./chat.js";
 import { ExtensionSheet, onExtensionsGone } from "./extension-ui.js";
 import { ShareSheet } from "./share.js";
+import { NamedAgentSheet } from "./named-agents.js";
 import { BranchPicker } from "./sheets/branch.js";
 import { FileSheet } from "./sheets/file.js";
 import { FindSheet } from "./sheets/find.js";
@@ -223,6 +224,9 @@ function sheetBody(sheet) {
         case "project":
             body = html`<${ProjectSheet} projectId=${sheet.projectId} />`;
             break;
+        case "named-agent":
+            body = html`<${NamedAgentSheet} sheet=${sheet} />`;
+            break;
         case "sidebar-options":
             body = html`<${SidebarOptions}
                 kind=${sheet.kind}
@@ -339,14 +343,16 @@ function sheetBody(sheet) {
                 ? store.state.sessions.find((each) => each.id === sheet.id)
                 : view.conversation;
 
-            body = session
-                ? html`<${TextSheet}
+            body = session?.pipAgent
+                ? html`<${NamedAgentSheet} sheet=${sheet} id=${session.id} />`
+                : session
+                  ? html`<${TextSheet}
                 title="Rename"
                 label="Session title"
                 initial=${session.title ?? ""}
                 submit=${(value) => actions.updateSession(session.id, { title: value })}
             />`
-                : null;
+                  : null;
             break;
         }
 
@@ -405,15 +411,17 @@ function sheetBody(sheet) {
             />`;
             break;
         case "instructions":
-            body = html`<${TextSheet}
-                title="Instructions for Pi"
-                hint="Pi gets these with every message in this session, after its own instructions. Everyone here can see them. Leave empty for none."
-                label="Instructions"
-                initial=${view.agent?.instructions ?? ""}
-                placeholder="e.g. Use pnpm, not npm. Ask before adding dependencies."
-                multiline=${true}
-                submit=${(value) => actions.setInstructions(value)}
-            />`;
+            body = view.conversation?.pipAgent
+                ? html`<${NamedAgentSheet} sheet=${sheet} id=${view.conversation.id} />`
+                : html`<${TextSheet}
+                      title="Instructions for Pi"
+                      hint="Pi gets these with every message in this session, after its own instructions. Everyone here can see them. Leave empty for none."
+                      label="Instructions"
+                      initial=${view.agent?.instructions ?? ""}
+                      placeholder="e.g. Use pnpm, not npm. Ask before adding dependencies."
+                      multiline=${true}
+                      submit=${(value) => actions.setInstructions(value)}
+                  />`;
             break;
         case "compact":
             body = html`<${TextSheet}

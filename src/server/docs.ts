@@ -21,6 +21,14 @@ import type { Changes } from "./changes.ts";
 import type { ThreadType } from "./workflow-docs.ts";
 import type { WorkspaceLocation } from "./workspace-location.ts";
 
+export {
+    PrivateAgentDoc,
+    PrivateAgentCreatesDoc,
+    PrivateAgentCallsDoc,
+} from "./private-agent-docs.ts";
+export { AgentIdentitiesDoc } from "./agent-identity-docs.ts";
+export { MemoryReceiptsDoc } from "./private-memory-docs.ts";
+
 export type SessionMeta = {
     title?: string;
     cwd: string;
@@ -54,6 +62,10 @@ export type SessionMeta = {
      * kept out of the session list; an older Pi Pocket, which does not know this field, lists it as a session.
      */
     pip?: string;
+    /** Private-agent chat marker. Old unbound chats remain inert until an explicit owner reset. */
+    pipAgent?: true;
+    /** Stable persistent private identity; never inferred from a title or conversation ID. */
+    pipAgentId?: string;
     /** Separate private work controller, not execution membership and not the global PiP panel. */
     pipWorkItemId?: string;
 };
@@ -854,6 +866,9 @@ export type Lesson = {
     /** Short and stable: what Pi and people use to change or remove it. */
     id: string;
     text: string;
+    /** Private learned memory, derived only by the server from the bound chat. Never shared lessons. */
+    privateAgent?: { ownerId: string; agentId: string };
+    revision?: number;
     /** The project it is for (`memory.ts`: the repository's shared git folder, or the folder); absent: everywhere. */
     project?: string;
     /** The project's folder name, for people to read. */

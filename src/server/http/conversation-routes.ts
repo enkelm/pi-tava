@@ -58,6 +58,20 @@ async function dispatchConversation(
         return extensionRoute(api, parts.slice(3), id);
     }
 
+    if (third === "private-agent" && fourth === undefined) {
+        response.setHeader("cache-control", "no-store");
+
+        if (method === "GET") {
+            return json(response, 200, await app.pip.agents.read(id, user));
+        }
+
+        if (method === "POST") {
+            const body = await readJson<{ action?: unknown } | null>(request);
+
+            return json(response, 200, await app.pip.agents.act(id, user, body));
+        }
+    }
+
     if (third === "orchestrator" && fourth === undefined) {
         if (method === "GET") {
             response.setHeader("cache-control", "no-store");
@@ -374,11 +388,15 @@ async function dispatchConversation(
 
     if (third === "memory" && fourth !== undefined && method === "POST") {
         const action = parts[4];
+        const body =
+            action === undefined || action === "remove"
+                ? await readJson<{ text?: unknown; expectedRevision?: unknown }>(request)
+                : undefined;
         const change =
             action === "remove" || action === "approve" || action === "discard"
                 ? action
                 : action === undefined
-                  ? { text: (await readJson<{ text?: unknown }>(request)).text }
+                  ? { text: body?.text }
                   : undefined;
 
         // An approval says what the person saw: it holds only if that is still what waits.
@@ -406,7 +424,15 @@ async function dispatchConversation(
             return json(
                 response,
                 200,
-                await app.memory.edit(id, user, fourth, change, undefined, pendingMemory),
+                await app.memory.edit(
+                    id,
+                    user,
+                    fourth,
+                    change,
+                    undefined,
+                    pendingMemory,
+                    body?.expectedRevision,
+                ),
             );
         }
     }

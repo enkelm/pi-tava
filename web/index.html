@@ -105,7 +105,14 @@
                     "preact/hooks": "/vendor/preact-hooks.mjs",
                     "htm": "/vendor/htm.mjs",
                     "marked": "/vendor/marked.mjs",
-                    "dompurify": "/vendor/purify.mjs"
+                    "dompurify": "/vendor/purify.mjs",
+                    "blobatar/react": "/vendor/blobatar-react.mjs"
+                },
+                "scopes": {
+                    "/vendor/blobatar-react.mjs": {
+                        "react": "/vendor/preact-compat.mjs",
+                        "react/jsx-runtime": "/vendor/preact-jsx-runtime.mjs"
+                    }
                 }
             }
         </script>

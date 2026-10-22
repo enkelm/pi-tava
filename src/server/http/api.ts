@@ -302,6 +302,27 @@ export function createApi(options: HttpOptions, auth: Auth) {
             return json(response, 200, app.subagents(user));
         }
 
+        // Named private conversations are separate from the persona-free popup and shared mentions.
+        if (first === "pip" && second === "agents" && third === undefined) {
+            requireOwner(user);
+            response.setHeader("Cache-Control", "no-store");
+
+            if (method === "GET") {
+                return json(response, 200, {
+                    agents: app.pip.agents.list(user),
+                    blueprint: app.pip.agents.blueprint,
+                });
+            }
+
+            if (method === "POST") {
+                return json(
+                    response,
+                    200,
+                    await app.pip.agents.create(user, await readJson(request)),
+                );
+            }
+        }
+
         // Native PiP settings never load or unload its private tools and recovery tasks.
         if (first === "pip" && second === "settings" && fourth === undefined) {
             requireOwner(user);

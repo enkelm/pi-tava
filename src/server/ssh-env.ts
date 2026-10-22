@@ -1349,8 +1349,9 @@ export class SshExecutionEnv implements ExecutionEnv {
         command: string | readonly string[],
         options: ShellExecOptions | undefined,
         context: Context,
+        writeRoots?: readonly string[],
     ): Promise<Result<ShellExecResult, ExecutionError>> {
-        return this.#exec(command, options, context, readOnly);
+        return this.#exec(command, options, context, readOnly, writeRoots);
     }
 
     async #exec(
@@ -1358,6 +1359,7 @@ export class SshExecutionEnv implements ExecutionEnv {
         options: ShellExecOptions | undefined,
         context: Context,
         readOnly?: boolean,
+        writeRoots?: readonly string[],
     ): Promise<Result<ShellExecResult, ExecutionError>> {
         if (context.abortSignal?.aborted) {
             return err(new ExecutionError("aborted", "Aborted before connecting"));
@@ -1450,7 +1452,7 @@ export class SshExecutionEnv implements ExecutionEnv {
         // Caller environment belongs beneath seatbelt. The unsandboxed transport supervisor gets
         // only PATH/HOME, uses fixed native executables, and never evaluates workload startup files.
         const invoke = managed
-            ? `/usr/bin/sandbox-exec -p ${q(sandboxProfile(readOnly === true))} /usr/bin/env ${options?.inheritEnv === false ? '-i PATH="$PATH" HOME="$HOME" ' : ""}${environment} /bin/bash --noprofile --norc -c ${q(body)}`
+            ? `/usr/bin/sandbox-exec -p ${q(sandboxProfile(readOnly === true, writeRoots))} /usr/bin/env ${options?.inheritEnv === false ? '-i PATH="$PATH" HOME="$HOME" ' : ""}${environment} /bin/bash --noprofile --norc -c ${q(body)}`
             : chatInvoke;
         // Job control creates a separate group for this command. EOF on the control pipe attempts
         // TERM, then STOP/KILL of that group, including ordinary descendants, not unrelated SSH sessions.

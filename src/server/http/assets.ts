@@ -31,6 +31,9 @@ const MODULES = join(APP_ROOT, "node_modules");
 export const VENDOR: Record<string, string> = {
     "preact.mjs": join(MODULES, "preact", "dist", "preact.mjs"),
     "preact-hooks.mjs": join(MODULES, "preact", "hooks", "dist", "hooks.mjs"),
+    "preact-compat.mjs": join(MODULES, "preact", "compat", "dist", "compat.mjs"),
+    "preact-jsx-runtime.mjs": join(MODULES, "preact", "jsx-runtime", "dist", "jsxRuntime.mjs"),
+    "blobatar-react.mjs": join(MODULES, "blobatar", "dist", "react.js"),
     "htm.mjs": join(MODULES, "htm", "dist", "htm.module.js"),
     "marked.mjs": join(MODULES, "marked", "lib", "marked.esm.js"),
     "purify.mjs": join(MODULES, "dompurify", "dist", "purify.es.mjs"),

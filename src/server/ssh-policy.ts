@@ -14,8 +14,8 @@ export function protectSshEnv(
         app,
         id,
         env,
-        (readOnly, command, options, context) =>
-            env.execConfined(readOnly, command, options, context),
+        (readOnly, command, options, context, writeRoots) =>
+            env.execConfined(readOnly, command, options, context, writeRoots),
         requester,
     );
 }

@@ -4,15 +4,16 @@
  * any repository. Pi saves lessons with its memory tool and gets those that apply in its system prompt
  * (`extensions/memory.ts`); people see, add, change, and remove them in the Memory sheet.
  *
- * A lesson added or changed for someone who is not the owner waits for the owner's approval before Pi uses it: a guest
- * could otherwise write instructions into every later session.
+ * Shared learning waits for owner approval: a guest or untrusted content must not inject instructions into later
+ * sessions. Private agents instead automatically maintain their own learned namespace across their chats; neither
+ * their lessons nor their request receipts can be reached from shared Memory or another private identity.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { basename, dirname, posix, resolve } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ConversationId, Tx } from "@earendil-works/pi-durable";
+import type { ConversationId, ToolExecutionApi, Tx } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import { addActivity } from "./collab.ts";
 import type { User } from "./config.ts";
@@ -21,6 +22,7 @@ import { HttpError } from "./errors.ts";
 import { INVISIBLE_CLASS } from "./fence.ts";
 import { git } from "./git.ts";
 import { snippet } from "./projection.ts";
+import { MemoryReceiptsDoc } from "./private-memory-docs.ts";
 
 const context: Context = BACKGROUND_CONTEXT;
 
@@ -38,6 +40,11 @@ const PROJECT_FOR_MS = 60_000;
 
 export type Project = { key: string; name: string };
 export type LessonScope = "project" | "everywhere";
+type PrivateScope = NonNullable<Lesson["privateAgent"]>;
+const scopeKey = (scope: PrivateScope | undefined) =>
+    scope === undefined ? "shared" : JSON.stringify([scope.ownerId, scope.agentId]);
+const matchesScope = (lesson: Lesson, scope: PrivateScope | undefined) =>
+    scopeKey(lesson.privateAgent) === scopeKey(scope);
 
 /** Who writes: a person, or Pi working for one (`userId` undefined when nobody is known). */
 export type Writer = { userId: string | undefined; byPi: boolean; name: string };
@@ -46,7 +53,9 @@ export type Writer = { userId: string | undefined; byPi: boolean; name: string }
 export type LessonView = {
     id: string;
     text: string;
-    scope: LessonScope;
+    scope: LessonScope | "private-agent";
+    /** Observed version required to update or remove a private lesson; shared approval semantics are unchanged. */
+    revision?: number;
     /** The lesson's project label in the owner's all-project pending queue. */
     projectName?: string;
     byPi: boolean;
@@ -66,6 +75,8 @@ export type LessonView = {
 export type MemoryView = {
     /** Present only for the all-project pending queue, so an older server's scoped view is not mistaken for it. */
     pendingAll?: true;
+    /** Learned memory for this private identity, never its editable charter or shared Memory. */
+    privateAgent?: true;
     /** This session's project; null for PiP or the all-project pending queue. */
     project: { name: string } | null;
     lessons: LessonView[];
@@ -119,17 +130,53 @@ export class Memory {
     readonly #app: PocketApp;
     readonly #projects = new Map<string, { at: number; project: Promise<Project> }>();
     #timer: NodeJS.Timeout | undefined;
+    #known: Map<string, { json: string; scope: string }> | undefined;
+    readonly #dirty = new Set<string>();
 
     constructor(app: PocketApp) {
         this.#app = app;
     }
 
-    /** The project of a conversation working in `cwd`; undefined for PiP, which has lessons for everywhere only. */
+    /** Fail closed: a deleted or retired named conversation must never become a shared-memory reader/writer. */
+    #scope(id: ConversationId): PrivateScope | undefined {
+        const root = this.#app.rootOf(id);
+
+        if (this.#app.sessionMeta(root) === undefined) {
+            throw new HttpError(404, "Memory conversation not found.");
+        }
+
+        const agents = this.#app.pip.agents;
+        const scope = agents.scope(root);
+
+        if (agents.isNamed(root) && scope === undefined) {
+            throw new HttpError(404, "Private agent memory is no longer available.");
+        }
+
+        if (scope !== undefined && this.#app.config.userById(scope.ownerId)?.role !== "owner") {
+            throw new HttpError(403, "Private agent memory owner is no longer authorized.");
+        }
+
+        return scope;
+    }
+
+    #live(id: ConversationId, scope: PrivateScope | undefined, writer?: Writer): void {
+        if (scopeKey(this.#scope(id)) !== scopeKey(scope)) {
+            throw new HttpError(409, "Memory identity changed; try again.");
+        }
+
+        if (scope !== undefined && writer !== undefined && writer.userId !== scope.ownerId) {
+            throw new HttpError(403, "This memory belongs only to its private agent's owner.");
+        }
+    }
+
+    /** The project of a conversation working in `cwd`; undefined for PiP and private agents. */
     async project(
         conversationId: ConversationId,
         cwd: string | undefined,
     ): Promise<Project | undefined> {
         const app = this.#app;
+
+        this.#scope(conversationId);
 
         if (app.sessionMeta(app.rootOf(conversationId))?.pip !== undefined) {
             return undefined;
@@ -161,6 +208,8 @@ export class Memory {
     async #all(): Promise<Lesson[]> {
         const doc = await this.#app.harness.snapshot(MemoryDoc, context);
 
+        this.#prime(doc?.items ?? {});
+
         return Object.values(doc?.items ?? {});
     }
 
@@ -168,20 +217,50 @@ export class Memory {
     async applying(project: Project | undefined): Promise<Lesson[]> {
         return ordered(
             (await this.#all()).filter(
-                (lesson) => lesson.project === undefined || lesson.project === project?.key,
+                (lesson) =>
+                    lesson.privateAgent === undefined &&
+                    (lesson.project === undefined || lesson.project === project?.key),
             ),
         );
+    }
+
+    /** Conversation-bound listing for tools: private scope is always server-derived and rechecked after reads. */
+    async list(id: ConversationId, cwd: string | undefined): Promise<Lesson[]> {
+        const scope = this.#scope(id);
+        const project = scope === undefined ? await this.project(id, cwd) : undefined;
+        const lessons = ordered(
+            (await this.#all()).filter(
+                (lesson) =>
+                    matchesScope(lesson, scope) &&
+                    (scope !== undefined ||
+                        lesson.project === undefined ||
+                        lesson.project === project?.key),
+            ),
+        );
+
+        this.#live(id, scope);
+
+        return lessons;
     }
 
     /** What Pi's prompt has: the lessons in force for a conversation working in `cwd`, and its project. */
     async inForce(
         conversationId: ConversationId,
         cwd: string | undefined,
-    ): Promise<{ project: Project | undefined; lessons: Lesson[] }> {
-        const project = await this.project(conversationId, cwd);
-        const lessons = (await this.applying(project)).filter((lesson) => lesson.pending !== true);
+    ): Promise<{ project: Project | undefined; lessons: Lesson[]; privateAgent?: true }> {
+        const scope = this.#scope(conversationId);
+        const project = scope === undefined ? await this.project(conversationId, cwd) : undefined;
+        const lessons = (await this.list(conversationId, cwd)).filter(
+            (lesson) => lesson.pending !== true,
+        );
 
-        return { project, lessons };
+        this.#live(conversationId, scope);
+
+        return {
+            project,
+            lessons,
+            ...(scope === undefined ? {} : { privateAgent: true as const }),
+        };
     }
 
     #isOwner(userId: string | undefined): boolean {
@@ -200,17 +279,20 @@ export class Memory {
     /** A 409 when a project's (or everywhere's) approved lessons are full. */
     #roomFor(
         doc: { items: Record<string, Lesson> },
-        lesson: Pick<Lesson, "project" | "projectName">,
+        lesson: Pick<Lesson, "project" | "projectName" | "privateAgent">,
     ) {
         const max = lesson.project === undefined ? MAX_EVERYWHERE_LESSONS : MAX_PROJECT_LESSONS;
         const kept = Object.values(doc.items).filter(
-            (item) => item.project === lesson.project && item.pending !== true,
+            (item) =>
+                matchesScope(item, lesson.privateAgent) &&
+                item.project === lesson.project &&
+                item.pending !== true,
         ).length;
 
         if (kept >= max) {
             throw new HttpError(
                 409,
-                `${lesson.project === undefined ? "Lessons for everywhere" : `${lesson.projectName ?? "This project"}'s lessons`} are full (${String(max)}): forget one first, or fold two into one.`,
+                `${lesson.privateAgent !== undefined ? "This private agent's lessons" : lesson.project === undefined ? "Lessons for everywhere" : `${lesson.projectName ?? "This project"}'s lessons`} are full (${String(max)}): forget one first, or fold two into one.`,
             );
         }
     }
@@ -225,7 +307,10 @@ export class Memory {
             throw new HttpError(403, "Only the owner can review all pending lessons.");
         }
 
-        if (this.#app.sessionMeta(this.#app.rootOf(conversationId))?.pip !== writer.userId) {
+        if (
+            this.#scope(conversationId) !== undefined ||
+            this.#app.sessionMeta(this.#app.rootOf(conversationId))?.pip !== writer.userId
+        ) {
             throw new HttpError(403, "Review all pending lessons from your private PiP.");
         }
     }
@@ -236,6 +321,7 @@ export class Memory {
         project: Project | undefined,
         id: string,
         allProjects = false,
+        scope?: PrivateScope,
     ): Lesson {
         const key = id.trim().replace(/^\[|\]$/g, "");
         // Own keys only: `constructor` or `__proto__` is no lesson.
@@ -243,6 +329,7 @@ export class Memory {
 
         if (
             lesson === undefined ||
+            !matchesScope(lesson, scope) ||
             (!allProjects && lesson.project !== undefined && lesson.project !== project?.key)
         ) {
             throw new HttpError(404, `There is no lesson ${id} here.`);
@@ -281,6 +368,41 @@ export class Memory {
         return lesson;
     }
 
+    async #receipt(
+        tx: Tx,
+        scope: PrivateScope | undefined,
+        key: string | undefined,
+        input: unknown,
+    ) {
+        if (scope === undefined || key === undefined) {
+            return undefined;
+        }
+
+        const doc = await tx.doc(MemoryReceiptsDoc);
+        const hash = (value: unknown) =>
+            createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        const scopedKey = hash([scope.ownerId, scope.agentId, key]);
+        const fingerprint = hash(input);
+        const saved = Object.hasOwn(doc.items, scopedKey) ? doc.items[scopedKey] : undefined;
+
+        if (saved !== undefined && saved.fingerprint !== fingerprint) {
+            throw new HttpError(409, "This memory call already has different input.");
+        }
+
+        return { doc, scopedKey, fingerprint, saved };
+    }
+
+    async #invocation(tx: Tx, id: ConversationId, api: ToolExecutionApi): Promise<void> {
+        if (api.conversationId !== id) {
+            throw new HttpError(
+                403,
+                "Private learned memory requires this chat's native invocation.",
+            );
+        }
+
+        await this.#app.pip.agents.supervision.requireInvocation(tx, api);
+    }
+
     /**
      * Save a lesson. The same `key` saves it once: a tool call run again finds the one it made. Throws an HttpError a
      * person (or Pi) can act on when it will not do.
@@ -289,24 +411,56 @@ export class Memory {
         conversationId: ConversationId,
         cwd: string | undefined,
         writer: Writer,
-        request: { text: unknown; scope: LessonScope; key?: string },
+        request: { text: unknown; scope: LessonScope; key?: string; invocation?: ToolExecutionApi },
     ): Promise<Lesson> {
         const app = this.#app;
+        const scope = this.#scope(conversationId);
+
+        this.#live(conversationId, scope, writer);
         const text = this.#text(request.text);
         const project =
-            request.scope === "project" ? await this.project(conversationId, cwd) : undefined;
+            scope === undefined && request.scope === "project"
+                ? await this.project(conversationId, cwd)
+                : undefined;
         const root = app.rootOf(conversationId);
         const meta = app.sessionMeta(root);
         const by = writer.userId ?? meta?.createdBy ?? "";
-        const pending = this.#held(writer);
+        const pending = scope === undefined && this.#held(writer);
 
         return app.harness.commit(async (tx) => {
             const doc = await tx.doc(MemoryDoc);
+
+            this.#live(conversationId, scope, writer);
+
+            if (scope !== undefined && request.invocation !== undefined) {
+                await this.#invocation(tx, conversationId, request.invocation);
+            }
+
+            this.#prime(doc.items);
+            const receipt = await this.#receipt(tx, scope, request.key, { action: "add", text });
+
+            this.#live(conversationId, scope, writer);
+
+            if (receipt?.saved !== undefined) {
+                const lesson = this.#find(doc, project, receipt.saved.lessonId, false, scope);
+
+                if (lesson.revision !== receipt.saved.revision) {
+                    throw new HttpError(409, "This memory changed after that call; list it again.");
+                }
+
+                return copy(lesson);
+            }
+
             const items = Object.values(doc.items);
             const same =
                 request.key === undefined
                     ? undefined
-                    : items.find((item) => item.key === request.key);
+                    : items.find(
+                          (item) =>
+                              scope === undefined &&
+                              matchesScope(item, scope) &&
+                              item.key === request.key,
+                      );
 
             if (same !== undefined) {
                 return copy(same);
@@ -314,8 +468,10 @@ export class Memory {
 
             if (
                 pending &&
-                items.filter((item) => item.pending === true && item.by === by).length >=
-                    MAX_PENDING
+                items.filter(
+                    (item) =>
+                        item.privateAgent === undefined && item.pending === true && item.by === by,
+                ).length >= MAX_PENDING
             ) {
                 throw new HttpError(
                     409,
@@ -325,21 +481,27 @@ export class Memory {
 
             if (!pending) {
                 this.#roomFor(doc, {
+                    ...(scope === undefined ? {} : { privateAgent: scope }),
                     ...(project === undefined
                         ? {}
                         : { project: project.key, projectName: project.name }),
                 });
             }
 
-            let id = randomUUID().slice(0, 5);
+            const freshId = () => (scope === undefined ? randomUUID().slice(0, 5) : randomUUID());
+            let id = freshId();
 
-            while (Object.hasOwn(doc.items, id)) {
-                id = randomUUID().slice(0, 5);
+            while (
+                Object.hasOwn(doc.items, id) ||
+                Object.values(receipt?.doc.items ?? {}).some((saved) => saved.lessonId === id)
+            ) {
+                id = freshId();
             }
 
             const lesson: Lesson = {
                 id,
                 text,
+                ...(scope === undefined ? {} : { privateAgent: scope, revision: 1 }),
                 ...(project === undefined
                     ? {}
                     : { project: project.key, projectName: project.name }),
@@ -354,12 +516,23 @@ export class Memory {
             };
 
             doc.items[id] = lesson;
+
+            if (receipt !== undefined) {
+                receipt.doc.items[receipt.scopedKey] = {
+                    fingerprint: receipt.fingerprint,
+                    lessonId: id,
+                    revision: lesson.revision!,
+                };
+            }
+
             await this.#activity(
                 tx,
                 conversationId,
                 writer,
-                `saved a lesson for ${project === undefined ? "everywhere" : project.name}: “${snippet(text, 80)}”${pending ? ", for the owner to approve" : ""}`,
+                `saved a lesson for ${scope !== undefined ? "this private agent" : project === undefined ? "everywhere" : project.name}: “${snippet(text, 80)}”${pending ? ", for the owner to approve" : ""}`,
             );
+
+            this.#live(conversationId, scope, writer);
 
             return copy(lesson);
         }, context);
@@ -373,6 +546,8 @@ export class Memory {
      * An approval says what the owner saw (`expected`): what waits can change between their look and their tap, so
      * approving holds only when it would make true what they saw. `pendingOnly` is a cross-project review mode for the
      * human owner in their private PiP, limited to approving or discarding lessons that still wait; the Pi tool never sets it.
+     * Private update/remove instead require the observed `expectedRevision`, checked transactionally. An exact successful
+     * tool replay is recognized before that check; a new stale call cannot overwrite later learning.
      */
     async change(
         conversationId: ConversationId,
@@ -382,8 +557,14 @@ export class Memory {
         change: { text: unknown } | "remove" | "approve" | "discard",
         expected?: { text?: string; forget?: boolean },
         pendingOnly = false,
+        requestKey?: string,
+        expectedRevision?: unknown,
+        invocation?: ToolExecutionApi,
     ): Promise<Lesson> {
         const app = this.#app;
+        const scope = this.#scope(conversationId);
+
+        this.#live(conversationId, scope, writer);
 
         // Never let Pi, a guest, or a shared-session review use the cross-project lookup.
         if (pendingOnly) {
@@ -395,7 +576,10 @@ export class Memory {
         }
 
         const text = typeof change === "object" ? this.#text(change.text) : undefined;
-        const project = pendingOnly ? undefined : await this.project(conversationId, cwd);
+        const project =
+            pendingOnly || scope !== undefined
+                ? undefined
+                : await this.project(conversationId, cwd);
         const said = (tx: Tx, line: string) => this.#activity(tx, conversationId, writer, line);
 
         return app.harness.commit(async (tx) => {
@@ -406,7 +590,89 @@ export class Memory {
                 this.#requirePendingOwner(writer, conversationId);
             }
 
-            const lesson = this.#find(doc, project, id, pendingOnly);
+            this.#live(conversationId, scope, writer);
+
+            if (scope !== undefined && invocation !== undefined) {
+                await this.#invocation(tx, conversationId, invocation);
+            }
+
+            this.#prime(doc.items);
+            const receipt = await this.#receipt(tx, scope, requestKey, {
+                action: change,
+                id: id.trim().replace(/^\[|\]$/g, ""),
+                expectedRevision,
+            });
+
+            this.#live(conversationId, scope, writer);
+            const lesson = this.#find(doc, project, id, pendingOnly, scope);
+
+            if (receipt?.saved !== undefined) {
+                if (
+                    lesson.id !== receipt.saved.lessonId ||
+                    lesson.revision !== receipt.saved.revision
+                ) {
+                    throw new HttpError(409, "This memory changed after that call; list it again.");
+                }
+
+                return copy(lesson);
+            }
+
+            if (scope !== undefined) {
+                if (change === "approve" || change === "discard") {
+                    throw new HttpError(
+                        400,
+                        "Private learned memory does not use shared approvals.",
+                    );
+                }
+
+                if (
+                    !Number.isSafeInteger(expectedRevision) ||
+                    expectedRevision !== (lesson.revision ?? 1)
+                ) {
+                    throw new HttpError(
+                        409,
+                        "This private memory needs its current observed revision; list or reload it before changing or forgetting it.",
+                    );
+                }
+
+                const before = copy(lesson);
+
+                if (change === "remove") {
+                    delete doc.items[lesson.id];
+
+                    if (receipt !== undefined) {
+                        receipt.doc.items[receipt.scopedKey] = {
+                            fingerprint: receipt.fingerprint,
+                            lessonId: lesson.id,
+                            revision: lesson.revision ?? 1,
+                        };
+                    }
+
+                    await said(tx, "forgot a lesson for this private agent");
+                    this.#live(conversationId, scope, writer);
+
+                    return before;
+                }
+
+                if (lesson.text !== text) {
+                    lesson.text = text!;
+                    lesson.revision = (lesson.revision ?? 1) + 1;
+                    lesson.updatedAt = app.now();
+                    await said(tx, "changed a lesson for this private agent");
+                }
+
+                if (receipt !== undefined) {
+                    receipt.doc.items[receipt.scopedKey] = {
+                        fingerprint: receipt.fingerprint,
+                        lessonId: lesson.id,
+                        revision: lesson.revision ?? 1,
+                    };
+                }
+
+                this.#live(conversationId, scope, writer);
+
+                return copy(lesson);
+            }
 
             if (pendingOnly && lesson.pending !== true && lesson.proposal === undefined) {
                 throw new HttpError(409, "This lesson changed since you looked: check it again.");
@@ -591,14 +857,21 @@ export class Memory {
 
         app.requireSee(user, id);
         const owner = user.role === "owner";
-        const project = pendingOnly ? undefined : await this.project(id, app.cwdOf(id));
+        const scope = this.#scope(id);
+        const project =
+            pendingOnly || scope !== undefined ? undefined : await this.project(id, app.cwdOf(id));
         const applying = pendingOnly
             ? ordered(
                   (await this.#all()).filter(
-                      (lesson) => lesson.pending === true || lesson.proposal !== undefined,
+                      (lesson) =>
+                          lesson.privateAgent === undefined &&
+                          (lesson.pending === true || lesson.proposal !== undefined),
                   ),
               )
-            : await this.applying(project);
+            : await this.list(id, app.cwdOf(id));
+
+        app.requireSee(user, id);
+        this.#live(id, scope, this.#person(user));
         const lessons = applying
             .filter((lesson) => lesson.pending !== true || owner || lesson.by === user.id)
             .map((lesson): LessonView => {
@@ -612,7 +885,15 @@ export class Memory {
                 return {
                     id: lesson.id,
                     text: lesson.text,
-                    scope: lesson.project === undefined ? "everywhere" : "project",
+                    ...(lesson.privateAgent === undefined
+                        ? {}
+                        : { revision: lesson.revision ?? 1 }),
+                    scope:
+                        lesson.privateAgent !== undefined
+                            ? "private-agent"
+                            : lesson.project === undefined
+                              ? "everywhere"
+                              : "project",
                     ...(pendingOnly && lesson.projectName !== undefined
                         ? { projectName: lesson.projectName }
                         : {}),
@@ -651,6 +932,7 @@ export class Memory {
 
         return {
             ...(pendingOnly ? { pendingAll: true as const } : {}),
+            ...(scope === undefined ? {} : { privateAgent: true as const }),
             project: project === undefined ? null : { name: project.name },
             lessons,
             owner,
@@ -688,6 +970,7 @@ export class Memory {
         change: { text: unknown } | "remove" | "approve" | "discard",
         expected?: { text?: string; forget?: boolean },
         pendingOnly = false,
+        expectedRevision?: unknown,
     ): Promise<Lesson> {
         const app = this.#app;
 
@@ -706,22 +989,74 @@ export class Memory {
             change,
             expected,
             pendingOnly,
+            undefined,
+            expectedRevision,
         );
     }
 
     // ─── Tabs ──────────────────────────────────────────────────────────────
 
-    /** Lessons changed: tabs showing them fetch them again. */
-    committed(): void {
-        if (this.#timer !== undefined) {
+    #index(items: Record<string, Lesson>) {
+        return new Map(
+            Object.values(items).map((lesson) => [
+                lesson.id,
+                { json: JSON.stringify(lesson), scope: scopeKey(lesson.privateAgent) },
+            ]),
+        );
+    }
+
+    #prime(items: Record<string, Lesson>): void {
+        this.#known ??= this.#index(items);
+    }
+
+    /** Invalidate only authorized tabs in changed namespaces; never broadcast private memory activity. */
+    committed(value: unknown): void {
+        const items = (value as { items?: Record<string, Lesson> } | null)?.items ?? {};
+        const next = this.#index(items);
+
+        for (const [id, item] of this.#known ?? []) {
+            if (next.get(id)?.json !== item.json) {
+                this.#dirty.add(item.scope);
+            }
+        }
+
+        for (const [id, item] of next) {
+            if (this.#known?.get(id)?.json !== item.json) {
+                this.#dirty.add(item.scope);
+            }
+        }
+
+        this.#known = next;
+
+        if (this.#timer !== undefined || this.#dirty.size === 0) {
             return;
         }
 
         this.#timer = setTimeout(() => {
             this.#timer = undefined;
+            const dirty = new Set(this.#dirty);
+
+            this.#dirty.clear();
 
             for (const client of this.#app.clients) {
-                client.send("memory", {});
+                const id = client.conversationId;
+
+                if (id === undefined || !this.#app.canSee(client.user, id)) {
+                    continue;
+                }
+
+                try {
+                    const scope = this.#scope(id);
+
+                    if (
+                        dirty.has(scopeKey(scope)) &&
+                        (scope === undefined || scope.ownerId === client.user.id)
+                    ) {
+                        client.send("memory", {});
+                    }
+                } catch {
+                    // A deleted/retired identity receives no invalidation, just as it receives no memory.
+                }
             }
         }, 200);
         this.#timer.unref();

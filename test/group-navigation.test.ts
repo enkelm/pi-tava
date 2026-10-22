@@ -143,6 +143,8 @@ const sources: Record<string, string> = {
     "pip.js":
         "export const PipRailButton=()=>null,PipHost=()=>null,openPip=()=>{},closePip=()=>{},pipAvailable=()=>false,togglePip=()=>{};",
     "private.js": "export const PrivateList=()=>null,PrivateTabs=()=>null,PrivatePane=()=>null;",
+    "named-agents.js": "export const NamedAgents=()=>null;",
+    "agent-tabs.js": "export const AgentTabs=()=>null;",
     "session-hold.js": "export const useSessionHold=()=>({hold:null,consumeClick:()=>false});",
     "session-moves.js":
         "export const canMoveSessions=()=>false,useSessionDrag=()=>({busy:false,consumeClick:()=>false});",
@@ -182,6 +184,7 @@ const sources: Record<string, string> = {
     "subagents.js": "export const openSubagents=()=>{},SubagentsBar=()=>null;",
     "subagents-board.js": "export const SubagentsBoard=()=>null;",
     "transcript.js": "export const Transcript=()=>null;",
+    "topbar.js": "export const Topbar=()=>null;",
     "workspace-location.js": "export const conversationLocation=()=>null;",
     "terminal-renderer-assets.js": "export const startTerminalRendererPrefetch=()=>{};",
     "voice.js":

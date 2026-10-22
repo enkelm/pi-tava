@@ -63,6 +63,7 @@ import {
     DecisionsDoc,
     FolderFavoritesDoc,
     MemoryDoc,
+    AgentIdentitiesDoc,
     ProjectsDoc,
     type SessionMeta,
     SessionsDoc,
@@ -572,7 +573,14 @@ export class PocketApp {
                     ...this.workItems.tasks,
                 ],
                 sections: this.workItems.sections,
-                hooks: [...createWorkflowHooks(this), ...this.pip.reviewHooks],
+                hooks: [
+                    ...createWorkflowHooks(this),
+                    ...this.pip.reviewHooks,
+                    ...this.pip.agents.supervision.hooks,
+                    ...this.pip.agents.execution.hooks,
+                    ...this.pip.agents.contacts.hooks,
+                ],
+                wraps: [...this.pip.agents.execution.wraps, ...this.pip.agents.contacts.wraps],
             }),
         );
         const host: PocketHost = {
@@ -713,6 +721,8 @@ export class PocketApp {
         });
 
         await this.pip.orchestration.open();
+        await this.pip.agents.supervision.open();
+        await this.pip.agents.contacts.open();
 
         if (this.guardOn()) {
             void this.guard.warm().catch(() => {});
@@ -796,6 +806,7 @@ export class PocketApp {
 
         await this.attribution.repair(unrecorded);
         await this.workItems.recover();
+        await this.pip.agents.recover();
 
         return conversations;
     }
@@ -862,6 +873,9 @@ export class PocketApp {
         }
 
         this.pip.orchestration.committed(publication);
+        this.pip.agents.supervision.committed(publication);
+        this.pip.agents.execution.changed();
+        this.pip.agents.contacts.committed(publication);
 
         if (sessionsChanged) {
             this.browsers.reconcilePolicy();
@@ -959,8 +973,11 @@ export class PocketApp {
             this.folderFavorites.committed(
                 change.value as { users: Record<string, string[]> } | null,
             );
+        } else if (kind === AgentIdentitiesDoc.definition.kind) {
+            this.pip.agents.committed(change.value);
+            sessionsChanged = true;
         } else if (kind === MemoryDoc.definition.kind) {
-            this.memory.committed();
+            this.memory.committed(change.value);
         } else if (kind === HandoffsDoc.definition.kind) {
             this.workItems.committed(change.value);
             sessionsChanged = true;
@@ -1202,6 +1219,7 @@ export class PocketApp {
         const arriving = !this.#online(client.user.id);
 
         client.sessionsSent = undefined;
+        client.namedAgentsSent = undefined;
         this.#clients.add(client);
         const hello = await this.hello(client.user);
 
@@ -2043,6 +2061,7 @@ export class PocketApp {
                 // This person may have a PiP, the assistant over every screen (`pip.ts`).
                 pip: this.pip.available(user),
                 pipSettings: 1,
+                privateAgents: 3,
                 pipEnabled: this.config.pipEnabled,
                 // Shared mentions are separate from the owner's private PiP panel availability.
                 pipMentions: true,
@@ -2098,6 +2117,18 @@ export class PocketApp {
         if (json !== client.sessionsSent) {
             client.send("sessions", sessions);
             client.sessionsSent = json;
+        }
+
+        const current = this.config.userById(user.id);
+        const agents =
+            current?.role === "owner" && current.tokenHash === user.tokenHash
+                ? this.pip.agents.list(user)
+                : [];
+        const privateJson = JSON.stringify(agents);
+
+        if (privateJson !== client.namedAgentsSent) {
+            client.send("namedAgents", agents);
+            client.namedAgentsSent = privateJson;
         }
     }
 
@@ -2262,6 +2293,7 @@ export class PocketApp {
             archived: meta?.archived === true,
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
+            ...(meta?.pipAgent === true ? { pipAgent: true, pipAgentId: meta.pipAgentId } : {}),
             ...(workSupervisor?.conversationId === Number(room.id) ? { workSupervisor } : {}),
             workflow: this.workItems.projection(room.id).workflow,
             ...(meta === undefined
@@ -3381,6 +3413,7 @@ export class PocketApp {
         this.#closing ??= (async () => {
             const headsClosed = this.#destinationHeads.close();
             const sshClosed = this.sshSessions.close();
+            const agentsClosed = this.pip.agents.close();
 
             clearTimeout(this.#sessionsTimer);
             this.alerts.close();
@@ -3411,6 +3444,7 @@ export class PocketApp {
             this.providers.close();
             this.languages.close();
             await headsClosed;
+            await agentsClosed;
 
             await sshClosed;
             await this.privateTerminals.close();

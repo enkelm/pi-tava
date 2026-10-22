@@ -78,6 +78,8 @@ export const store = {
         guard: null,
         server: null,
         sessions: [],
+        /** Owner-private named agents, separate from both Collab and the generic PiP popup. */
+        namedAgents: [],
         /** This person's favorite folders, in shortcut order, sent by the server to every signed-in device. */
         folderFavorites: [],
         projects: [],
@@ -1013,6 +1015,9 @@ const handlers = {
         reconcileWeb(data.server);
         store.set({
             me: data.user,
+            ...(data.user?.role === "owner" && data.user.id === store.state.me?.id
+                ? {}
+                : { namedAgents: [] }),
             users: data.users,
             folderFavorites: data.folderFavorites ?? [],
             models: data.models,
@@ -1034,6 +1039,8 @@ const handlers = {
         }));
         handoffSessionsChanged(sessions);
     },
+    namedAgents: (agents) =>
+        store.set({ namedAgents: store.state.me?.role === "owner" ? agents : [] }),
     "folder-favorites": (folderFavorites) => store.set({ folderFavorites }),
     projects: (data) => store.set({ projects: data.projects, projectsLoaded: true }),
     models: (models) => store.set({ models }),
@@ -1249,7 +1256,7 @@ function streamEvents(query) {
 
             if (error.status === 401) {
                 connection.close();
-                store.set({ me: null });
+                store.set({ me: null, namedAgents: [] });
 
                 return;
             }
@@ -1310,7 +1317,7 @@ function pollEvents(query) {
 
                 if (response.status === 401) {
                     stopped = true;
-                    store.set({ me: null });
+                    store.set({ me: null, namedAgents: [] });
 
                     return;
                 }

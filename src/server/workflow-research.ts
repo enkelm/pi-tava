@@ -26,10 +26,11 @@ export function requireResearch(app: PocketApp, id: ConversationId): string {
 
     if (
         !app.workItems.isManaged(id) ||
-        !ROLES.has(app.sessionMeta(app.rootOf(id))?.threadType ?? "worker")
+        (app.sessionMeta(app.rootOf(id))?.pipAgent !== true &&
+            !ROLES.has(app.sessionMeta(app.rootOf(id))?.threadType ?? "worker"))
     ) {
         throw new Error(
-            "Research is available only to active Worker, Researcher and Follow-up workflows and their helpers.",
+            "Research is available only to active Worker, Researcher, Follow-up and persistent private-agent execution, including their helpers.",
         );
     }
 

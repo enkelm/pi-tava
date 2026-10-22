@@ -359,7 +359,8 @@ export function MenuSheet({ places = true }) {
     const { view, me, server } = store.state;
     const conversation = view.conversation;
     const steer = canSteer();
-    const session = conversation?.kind === "session";
+    const namedAgent = conversation?.pipAgent === true;
+    const session = conversation?.kind === "session" && !namedAgent;
     const location = conversationLocation();
     const workItem =
         handoffsAvailable() &&
@@ -398,6 +399,7 @@ export function MenuSheet({ places = true }) {
                         : "one person drives Pi at a time",
                 )
             }
+            ${namedAgent && steer && item("PiP settings", () => openSheet({ type: "named-agent", id: conversation.id }), "private instructions, notes and history")}
             ${session && steer && item("Rename", () => openSheet({ type: "rename" }))}
             ${
                 session &&
@@ -430,6 +432,7 @@ export function MenuSheet({ places = true }) {
                           conversation.worktree.branch,
                       )
                     : conversation &&
+                      !namedAgent &&
                       me?.role === "owner" &&
                       driving &&
                       item(

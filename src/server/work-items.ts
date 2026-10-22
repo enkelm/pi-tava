@@ -6,6 +6,7 @@ import {
     defineTool,
     section,
     type ConversationId,
+    type Cursor,
     type TaskId,
     type Tx,
 } from "@earendil-works/pi-durable";
@@ -14,7 +15,7 @@ import type { Context } from "@earendil-works/chord";
 import { WorkContext } from "./work-items/context.ts";
 import type { PocketApp } from "./app.ts";
 import { APP_ROOT, type User } from "./config.ts";
-import { PipWorkDoc, SessionsDoc, TurnsDoc } from "./docs.ts";
+import { PipWorkDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
 import { HttpError } from "./errors.ts";
 import { Handoffs, humanDirection } from "./handoffs.ts";
 export type { HandoffResult } from "./handoffs.ts";
@@ -202,6 +203,10 @@ export class WorkItems {
             );
         }
 
+        if (grant.agentId !== undefined && !this.#app.pip.agents.supervision.current(item)) {
+            throw new HttpError(409, "The private supervisor attachment changed; human control.");
+        }
+
         this.#requireMembers(
             unpublished
                 ? {
@@ -225,6 +230,7 @@ export class WorkItems {
                 grant.status !== "running" ||
                 epoch !== grant.epoch ||
                 item.archived === true ||
+                item.intervention !== undefined ||
                 (source !== undefined && item.activeThreadId !== Number(source)))
         ) {
             throw new HttpError(
@@ -274,6 +280,17 @@ export class WorkItems {
         }
 
         const user = this.#controllerUser(item, controllerId, epoch, source, mutation, true);
+        const grant = item!.supervisor!;
+
+        if (grant.agentId !== undefined) {
+            await this.#app.pip.agents.supervision.requireAttachment(
+                tx,
+                controllerId,
+                grant.agentId,
+                grant.agentEpoch!,
+                grant.attachmentEpoch!,
+            );
+        }
 
         if (mutation && (await tx.doc(PipWorkDoc, controllerId)).question !== undefined) {
             throw new HttpError(409, "Wait for the answer to the pending human question.");
@@ -292,6 +309,86 @@ export class WorkItems {
     }
     requireFetchIdle(...args: Parameters<Handoffs["requireFetchIdle"]>) {
         return this.#handoffs.requireFetchIdle(...args);
+    }
+
+    /**
+     * Native writer intervention, not an ordinary Stop: the caller must already have fenced this
+     * Work Item. Capture its complete membership/helper graph, cancel background work too, and JOIN
+     * before returning. Never hold withControl while joining tools which may need that same lock.
+     */
+    async interrupt(id: ConversationId): Promise<void> {
+        const captured = await this.#app.harness.commit(async (tx) => {
+            const item = this.itemFor(id);
+            const current =
+                item === undefined ? undefined : (await tx.doc(HandoffsDoc)).workItems[item.id];
+
+            if (current?.intervention === undefined) {
+                throw new HttpError(409, "Fence the native writer before interrupting execution.");
+            }
+
+            const pending = this.members(id).slice();
+
+            if (current.supervisor !== undefined) {
+                pending.push(current.supervisor.conversationId as ConversationId);
+            }
+
+            const conversations = new Set<ConversationId>();
+            const tasks = new Set<TaskId>();
+
+            while (pending.length > 0) {
+                const conversation = pending.pop()!;
+
+                if (conversations.has(conversation)) {
+                    continue;
+                }
+
+                conversations.add(conversation);
+                const agents = await tx.doc(SubagentsDoc, conversation);
+
+                pending.push(...Object.values(agents.agents).map((agent) => agent.conversationId));
+                let cursor: Cursor | undefined;
+
+                do {
+                    const page = await tx.scanTasks({ conversationId: conversation }, 256, cursor);
+
+                    for (const task of page.items) {
+                        if (task.state.status !== "terminal") {
+                            tasks.add(task.id);
+                        }
+                    }
+
+                    cursor = page.next;
+                } while (cursor !== undefined);
+            }
+
+            return { conversations: [...conversations], tasks: [...tasks] };
+        }, context);
+
+        await Promise.all(
+            captured.conversations.map(async (conversation) => {
+                await (
+                    await this.#app.conversation(conversation)
+                ).abort(context, { background: true });
+            }),
+        );
+        await Promise.all(
+            captured.tasks.map(async (task) => {
+                await this.#app.harness.abortTask(task, context);
+                await this.#app.harness.waitForTask(task, context);
+            }),
+        );
+        await this.#app.harness.commit(async (tx) => {
+            for (const conversation of captured.conversations) {
+                const agents = await tx.doc(SubagentsDoc, conversation);
+
+                // Intervention explicitly discards the stopped execution's pending reports. They
+                // must not wake a retired command after the temporary writer has been admitted.
+                agents.outbox = [];
+                delete agents.sending;
+            }
+
+            await this.requireIdle(tx, id);
+        }, context);
     }
 
     get enabled(): boolean {
@@ -340,7 +437,12 @@ export class WorkItems {
 
     /** Execution gates use this live for roots and helpers; retirement and unknown profiles stay distinct. */
     executionBlocked(id: ConversationId): boolean {
-        return this.isReadOnly(id) || this.#profileUnavailable(id) || this.#isPaused(id);
+        return (
+            this.isReadOnly(id) ||
+            this.itemFor(id)?.intervention !== undefined ||
+            this.#profileUnavailable(id) ||
+            this.#isPaused(id)
+        );
     }
 
     #isPaused(id: ConversationId): boolean {
@@ -486,6 +588,8 @@ export class WorkItems {
         const state = this.#workflows.get(root);
 
         return (
+            this.#app.sessionMeta(root)?.pipAgent === true ||
+            this.#app.pip.agents.contacts.isDerived(id) ||
             this.isPreparing(root) ||
             this.#profileUnavailable(root) ||
             this.#app.sessionMeta(root)?.workItemId !== undefined ||
@@ -523,6 +627,18 @@ export class WorkItems {
     }
 
     requireWritable(id: ConversationId): void {
+        this.#app.pip.agents.execution.requireNativeWrite(id);
+
+        if (
+            !this.#app.pip.agents.execution.isWriter(id) &&
+            this.itemFor(id)?.intervention !== undefined
+        ) {
+            throw new HttpError(
+                409,
+                "The native writer is fenced for a private agent intervention; wait for writer authority to return.",
+            );
+        }
+
         if (this.#isPaused(id)) {
             throw new HttpError(409, "Work Item execution is paused; ask the owner to resume it");
         }
