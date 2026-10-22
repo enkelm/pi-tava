@@ -993,7 +993,9 @@ export type PipWorkQuestion = {
         by: string;
         requestId: string;
         at: number;
-        /** Native composer identity; absent on historical orchestration-form answers. */
+        /** Explicit non-human author; `by` remains the accountable owner, not an authorship claim. */
+        agent?: { agentId: string; name: string; chatId: number };
+        /** Native input identity; absent on historical orchestration-form answers. */
         submissionRequestId?: string;
         /** Authority fence when the immutable reply was saved, before native admission. */
         epoch?: number;

@@ -145,6 +145,8 @@ const sources: Record<string, string> = {
     "folder.js":
         "export const FolderPicker=()=>null,recentLabels=paths=>paths.map(path=>path.split('/').at(-1));",
     "sidebar-context.js": "export const openSidebarOptions=()=>{};",
+    "agent-tabs.js": "export const tabAgent=()=>null;",
+    "topbar.js": "export const AgentMenuItems=()=>null;",
     "sessions.js": "export const selectFromList=()=>{},setArchived=()=>{};",
     "theme.js": `export const isPinned=()=>false,togglePin=()=>{};
         export const BASE_LOOK='pocket',chooseLook=()=>{},chooseTheme=()=>{},folderPaletteIds=()=>[],lookIds=()=>[];

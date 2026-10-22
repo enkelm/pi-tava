@@ -75,6 +75,16 @@ function declaration(selector: string, property: string, scope?: string) {
     );
 }
 
+test("the PiPs heading uses source-tab typography and selected versus muted colors", () => {
+    const heading = ".named-agents-head .named-agents-toggle";
+
+    assert.equal(declaration(heading, "font-size"), "12.5px");
+    assert.equal(declaration(heading, "font-weight"), "500");
+    assert.equal(declaration(heading, "color"), "var(--muted)");
+    assert.equal(declaration(".named-agents-head.on .named-agents-toggle", "color"), "var(--text)");
+    assert.equal(declaration(".named-agent-status .spinner", "display"), "block");
+});
+
 test("phones use a bounded compact chooser while only the wider chat rail scrolls", () => {
     assert.equal(declaration(".topbar.agent-topbar", "flex-wrap"), "nowrap");
     assert.notEqual(declaration(".topbar.agent-topbar", "overflow-x"), "auto");
@@ -113,7 +123,9 @@ test("local chrome retains coarse-pointer targets, native scroll, press feedback
     assert.equal(declaration(".agent-tab-new", "min-width", coarse), "44px");
     assert.equal(declaration(".agent-chat-choices :is(a, button)", "min-height"), "44px");
     assert.equal(declaration(".agent-topbar :is(a, button)", "touch-action"), "manipulation");
-    assert.equal(declaration(".agent-header-menu button", "user-select"), "none");
+    assert.equal(declaration(".agent-topbar :is(a, button)", "user-select"), "none");
+    assert.equal(declaration(".named-agents-head.on", "box-shadow"), "inset 0 -2px var(--accent)");
+    assert.equal(declaration(".named-agent-open", "width"), "100%");
     assert.equal(declaration(".agent-history-list a", "-webkit-touch-callout"), "none");
     assert.equal(
         declaration(".agent-topbar :is(a, button):active", "background"),

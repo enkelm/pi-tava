@@ -54,6 +54,8 @@ import {
     FILE_BLOCK,
     FROM_PREFIX,
     NOTE_ENTRY,
+    isWorkItemEvent,
+    type WorkItemEvent,
     splitAttachments,
 } from "./entry-format.ts";
 import { WorkflowDoc } from "./workflow-docs.ts";
@@ -891,6 +893,7 @@ export class Commands {
         request: SubmitRequest,
         via?: string,
         nativeSender?: ConversationHandle,
+        appEvent?: WorkItemEvent,
     ): Promise<{
         submissionId: SubmissionId;
         requestId: string;
@@ -903,6 +906,16 @@ export class Commands {
             throw new HttpError(
                 400,
                 "An invocation-bound native sender must retain its exact service recipient.",
+            );
+        }
+
+        if (
+            appEvent !== undefined &&
+            (via === undefined || !app.pip.orchestration.isScoped(id) || !isWorkItemEvent(appEvent))
+        ) {
+            throw new HttpError(
+                400,
+                "Application events require a native Work Item supervisor input.",
             );
         }
 
@@ -992,7 +1005,12 @@ export class Commands {
             request.inlineFiles === true
                 ? await this.#mentionedFiles(id, user, typed, model.input.includes("image"))
                 : [];
-        const parts: (TextContent | ImageContent)[] = [{ type: "text", text: body }, ...mentioned];
+        const first: TextContent & { pocketAppEvent?: WorkItemEvent } = {
+            type: "text",
+            text: body,
+            ...(appEvent === undefined ? {} : { pocketAppEvent: appEvent }),
+        };
+        const parts: (TextContent | ImageContent)[] = [first, ...mentioned];
 
         for (const file of attachments) {
             if (
@@ -1010,7 +1028,7 @@ export class Commands {
             }
         }
 
-        const content = parts.length === 1 ? body : parts;
+        const content = parts.length === 1 && appEvent === undefined ? body : parts;
         const requestId =
             via === undefined
                 ? ownRequest(user.id, clientKey(request.requestId))
@@ -1514,6 +1532,13 @@ export class Commands {
             }
 
             const main = queuedInputText(item.content);
+
+            if (main.readOnly) {
+                throw new HttpError(
+                    409,
+                    "Application events and agent answers are immutable service input. Send a new message instead.",
+                );
+            }
 
             if (text.trim() === "" && !main.hasAttachments) {
                 throw new HttpError(400, "Nothing to send");

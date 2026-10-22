@@ -489,6 +489,7 @@ function SessionRow({
     const orchestratable = session.members && me?.role === "owner" && !session.archived;
     const supervisor = me?.role === "owner" ? session.supervisor : undefined;
     const supervising = supervisor?.status === "running";
+    const controlLabel = supervising ? "PiP active" : "Human control";
     const orchestrationLabel = `Open PiP Thread for ${title}`;
     const workStatus =
         me?.role === "owner"
@@ -496,10 +497,10 @@ function SessionRow({
               class="work-item-pip-state"
               data-status=${supervising ? "running" : "reclaimed"}
               role="img"
-              aria-label=${supervising ? "PiP active" : "Human control"}
-              title=${supervising ? "PiP active" : "Human control"}
+              aria-label=${controlLabel}
+              title=${controlLabel}
           >
-              <${Icon} name="pip" size=${12} />
+              <${Icon} name="pip" size=${supervisor ? 14 : 12} />
           </span>`
             : (WORKFLOW_LABELS[session.workflow?.status] ?? "Active");
     // Every top-level thread has working context, even without a Coop-created worktree or handoff.
@@ -530,10 +531,19 @@ function SessionRow({
     const counts = session.subagents ?? {};
     const live = (counts.working ?? 0) + (counts.waiting ?? 0);
     const failed = failing(counts);
-    // Subagents at work, or failed ones nobody dealt with, but not over a call waiting for you: that says more.
-    const fork = !session.waiting && (live > 0 || failed > 0);
+    // The primary dial owns an actively controlled parent's activity. Keep attention visible;
+    // exact children and human-controlled/ordinary rows still show their execution indicators.
+    const pipControlled = session.members && supervising;
+    const forkCounts = pipControlled ? { ...counts, working: 0 } : counts;
+    const forkCount = pipControlled ? (counts.waiting ?? 0) + Math.max(0, failed) : live || failed;
+    const forkFailed = pipControlled ? failed > 0 : live === 0;
+    const fork = !session.waiting && forkCount > 0;
     const person = collab() ? (session.people ?? []).find((each) => each.id !== me?.id) : undefined;
-    const mark = stateMark(session, live > 0, marked);
+    const mark = stateMark(
+        pipControlled && session.failed ? { ...session, busy: false } : session,
+        pipControlled && session.failed ? false : live > 0,
+        marked,
+    );
     // Finished since this browser last looked: its result is unread, so its title reads bold.
     const unseen = sessionResultUnread(session);
     // Options joins the existing archive, pin and mark-unread hover actions.
@@ -571,7 +581,7 @@ function SessionRow({
                 : html`<${Highlight} text=${title} needle=${needle} />`
         }
     </span>`;
-    const disclosureLabel = `${closed ? "Expand" : "Collapse"} Work Item ${session.title} · ${threadTypeLabel(session)}`;
+    const disclosureLabel = `${closed ? "Expand" : "Collapse"} Work Item ${session.title} · ${supervisor ? controlLabel : threadTypeLabel(session)}`;
 
     return html`<div
         class=${`session-row ${details ? "with-details" : ""} ${session.members ? "work-item-head" : ""} ${member ? "work-item-member" : ""} ${open ? "active" : ""} ${selected ? "selected" : ""} ${hold ? "pressing" : ""} ${moving ? "moving" : ""} ${dnd.drag?.ids.includes(session.id) ? "dragging" : ""} ${marked ? "marked-unread" : ""} ${unseen ? "unseen" : ""} ${["no-acts", "one-act", "", "three-acts", "four-acts"][acts]}`}
@@ -602,7 +612,7 @@ function SessionRow({
                 aria-expanded=${!closed}
                 onClick=${onToggle}
             >
-                <${ThreadTypeTag} session=${session} iconOnly=${true} />
+                ${supervisor ? workStatus : html`<${ThreadTypeTag} session=${session} iconOnly=${true} />`}
                 <${Icon} class="work-item-chevron" name=${closed ? "chevron" : "down"} size=${12} />
             </button>`
         }
@@ -631,7 +641,7 @@ function SessionRow({
                             ${
                                 session.members &&
                                 html`<span class="work-item-status">
-                                    ${workStatus} · ${session.members.length} threads
+                                    ${!supervisor && workStatus}${!supervisor && " · "}${session.members.length} threads
                                 </span>`
                             }
                             <span class="mono"><${Highlight} text=${path} needle=${needle} /></span>
@@ -651,14 +661,18 @@ function SessionRow({
                 ${
                     fork &&
                     html`<span
-                        class=${`session-fork ${live > 0 ? "" : "failed"}`}
-                        title=${subagentsTip(counts)}
+                        class=${`session-fork ${forkFailed ? "failed" : ""}`}
+                        title=${subagentsTip(forkCounts)}
                     >
-                        <${Icon} name="fork" size=${10} />${live > 0 ? live : failed}
+                        <${Icon} name="fork" size=${10} />${forkCount}
                     </span>`
                 }
                 ${!fork && person && html`<${Avatar} person=${person} size=${18} />`}
-                ${(session.members || member || projectsAvailable()) && state}
+                ${
+                    (session.members || member || projectsAvailable()) &&
+                    (!pipControlled || mark.shape !== "working" || selected) &&
+                    state
+                }
                 ${
                     session.waiting &&
                     html`<span class="session-needs" title="Waiting for approval">
@@ -719,7 +733,7 @@ function SessionRow({
                         data-session-hold-action="true"
                         title=${orchestrationLabel}
                         aria-label=${orchestrationLabel}
-                        aria-description=${supervising ? "PiP active" : "Human control"}
+                        aria-description=${controlLabel}
                         disabled=${moving || orchestrationBusy}
                         onClick=${() => {
                             const current = store.state;

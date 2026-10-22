@@ -44,7 +44,7 @@ test("restart recovers an accepted work wake before its cursor settles, without 
         const runtime = args[1];
         const commit = runtime.commit.bind(runtime);
 
-        t.mock.method(runtime, "commit", async (...[change, ctx]: Parameters<typeof commit>) => {
+        const interruptedCommit = async (...[change, ctx]: Parameters<typeof commit>) => {
             const state = await runtime.snapshot(PipWorkDoc, runtime.conversationId, ctx);
             const pending = state?.pending;
 
@@ -62,9 +62,11 @@ test("restart recovers an accepted work wake before its cursor settles, without 
             }
 
             return commit(change, ctx);
-        });
+        };
 
-        return original(...args);
+        // Diagnostics exposes a read-only runtime facade: mocking its own property is ignored.
+        // Override only this phase's commit boundary; native receipts/admission stay real.
+        return original(args[0], { ...runtime, commit: interruptedCommit }, args[2]);
     });
 
     t.after(async () => {
@@ -104,7 +106,7 @@ test("restart recovers an accepted work wake before its cursor settles, without 
     }, "native wake receipt recovery");
     assert.equal(calls, 2, "recovery must not regenerate an already answered event");
     const inputs = (await app.transcripts.allEntries(controller, true)).filter(
-        (entry) => entry.kind === "user",
+        (entry) => entry.kind === "user" || entry.kind === "appEvent",
     );
 
     assert.equal(inputs.length, 2, "the owner instruction and exactly one event wake remain");

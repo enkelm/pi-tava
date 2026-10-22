@@ -163,7 +163,15 @@ export function transcriptMarkdown(input: ExportInput): string {
             continue;
         }
 
-        if (entry.kind === "user") {
+        if (entry.kind === "appEvent") {
+            sections.push(
+                `**Application event · Work Item · Execution ${entry.state}** — [Source /s/${entry.source}](/s/${entry.source})\n\n<details><summary>Technical details (not proof of success)</summary>\n\n${fence(entry.text)}\n\n</details>`,
+            );
+        } else if (entry.kind === "agentAnswer") {
+            sections.push(
+                `**Agent answer · ${entry.actor.name.replace(/([\\`*_[\]<>])/g, "\\$1").replace(/\s/g, " ")}** — [Origin /s/${entry.actor.chatId}](/s/${entry.actor.chatId})\n\n${entry.text}`,
+            );
+        } else if (entry.kind === "user") {
             sections.push(userMarkdown(entry, input.authors[entry.id]));
         } else if (entry.kind === "compaction") {
             sections.push(

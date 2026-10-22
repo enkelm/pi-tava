@@ -1,6 +1,7 @@
 // Unsaved Chats reuse the native Composer without opening a Durable room.
 import { useEffect, useState } from "preact/hooks";
 import { Composer } from "./composer.js";
+import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import { html } from "./ui.js";
 import { store } from "./store.js";
 import { recoverAgentDraft, selectedAgentDraft } from "./agent-drafts.js";
@@ -27,13 +28,23 @@ export function AgentDraftPane() {
             )
             .catch((failure) => setError(failure.message));
 
-    return html`<div class="transcript agent-draft-empty">
-        <div class="empty">
-            <h2>New chat with ${agent?.name ?? "your PiP"}</h2>
-            <p>Memory and instructions are shared across this PiP's chats.</p>
-            <p class="small muted">Saved to History when your first message is accepted. Closing an unused draft discards it.</p>
-            ${error && html`<p class="error-box" role="alert">${error}</p>`}
+    return html`<main class="scroller">
+        <div class="transcript agent-draft-empty">
+            <div class="empty">
+                ${
+                    agent &&
+                    html`<${NamedAgentAvatar}
+                        key=${agent.agentId}
+                        agentId=${agent.agentId}
+                        size=${48}
+                    />`
+                }
+                <h2>New chat with ${agent?.name ?? "your PiP"}</h2>
+                <p>Memory and instructions are shared across this PiP's chats.</p>
+                <p class="small muted">Saved to History when your first message is accepted. Closing an unused draft discards it.</p>
+                ${error && html`<p class="error-box" role="alert">${error}</p>`}
+            </div>
         </div>
-    </div>
+    </main>
     <${Composer} draft=${draft} onCheckDraft=${check} />`;
 }

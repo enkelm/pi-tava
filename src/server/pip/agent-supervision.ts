@@ -22,7 +22,7 @@ import type { User } from "../config.ts";
 import { AgentIdentitiesDoc, type PrivateIdentity } from "../agent-identity-docs.ts";
 import { currentStateCheckpoints } from "../doc-checkpoint.ts";
 import { PipWorkDoc, SessionsDoc, SubagentsDoc } from "../docs.ts";
-import { requestFor } from "../requests.ts";
+import { requestFor, requestPerson } from "../requests.ts";
 import { HttpError, describe } from "../errors.ts";
 import type { ClientEntry } from "../projection.ts";
 import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
@@ -74,6 +74,12 @@ export type AgentContactIntent = {
     text: string;
     requestId: string;
     controllerEpoch?: number;
+    /** Actual source invocation for new exact controller messages. Legacy delegations omit it. */
+    sourceConversationId?: number;
+    sourceTaskId?: number;
+    sourceCallId?: string;
+    sourceInputId?: number;
+    sourceAdmissionSerial?: number;
     /** Absent only on stored legacy controller delegations. */
     action?: AgentContactAction;
     target?: number;
@@ -86,6 +92,34 @@ export type AgentContactIntent = {
     reason?: string;
 };
 type IntentReceipt = AgentContactIntent;
+/** A question reply is a native service intent, never an owner-written chat input. */
+export type AgentQuestionAnswerIntent = {
+    fingerprint: string;
+    requestId: string;
+    questionId: string;
+    text: string;
+    agentId: string;
+    agentName: string;
+    agentEpoch: number;
+    ownerId: string;
+    tokenHash: string;
+    chatId: number;
+    sourceConversationId: number;
+    sourceTaskId: number;
+    sourceCallId: string;
+    sourceInputId?: number;
+    sourceAdmissionSerial?: number;
+    workItemId: string;
+    controllerId: number;
+    source: number;
+    attachmentEpoch: number;
+    controllerEpoch: number;
+};
+type QuestionAnswerReceipt = AgentQuestionAnswerIntent & {
+    status: "pending" | "accepted" | "blocked";
+    submissionId?: number;
+    reason?: string;
+};
 type Report = {
     sequence: number;
     fingerprint: string;
@@ -107,6 +141,8 @@ type Report = {
     reason?: string;
 };
 type InputAuthority = {
+    /** Native request identity permits checking actual acceptance, not preflight alone. */
+    requestId?: string;
     agentId: string;
     epoch: number;
     tokenHash: string;
@@ -123,6 +159,7 @@ type SupervisionData = {
     sequence?: number;
     agents: Record<string, { attachments: Record<string, AgentAttachment> }>;
     requests: Record<string, IntentReceipt>;
+    questionAnswers?: Record<string, QuestionAnswerReceipt>;
     controls: Record<string, { fingerprint: string; result: SupervisionStatus }>;
 };
 type ReportStatus = {
@@ -797,6 +834,7 @@ export class AgentSupervision {
         const doc = await tx.doc(AgentSupervisionDoc);
         const key = hash([Number(chat), requestId]);
         const pin: InputAuthority = {
+            requestId,
             agentId: identity.agentId,
             epoch: identity.epoch,
             tokenHash: user.tokenHash,
@@ -997,11 +1035,20 @@ export class AgentSupervision {
         defineTool({
             name: "agent_work",
             description:
-                "Discover accessible native work for the current human task, inspect contact status, or contact an exact existing orchestrator, execution thread, accessible ordinary Chat or literal helper. Input queues normally; explicit steer retains native semantics. A Work Item contact associates its existing native controller automatically; no manual linking prerequisite. Discovery never activates work. Replies/reporting remain tied to this originating task chat, not an inbox or open tab. Native writer, question, model, spend and publication gates remain in force.",
+                "Discover accessible native work, inspect contact status or contact an exact native recipient. Input queues normally; steer only on explicit human instruction. Work Item contacts associate an existing controller automatically, without activating it. Use answer only for an exact pending question on your current attached controller, grounded in prior owner scope; it is attributed to this agent, never new owner input or publication approval. If unsure, visibly ask the owner and leave affected orchestration waiting. Replies remain tied to the originating chat. Native writer, model, spend and publication gates remain in force.",
             replay: "safe",
             executionMode: "sequential",
             parameters: Type.Union([
                 Type.Object({ action: Type.Literal("status") }, { additionalProperties: false }),
+                Type.Object(
+                    {
+                        action: Type.Literal("answer"),
+                        session: Type.Integer({ description: "The exact current controller ID" }),
+                        questionId: Type.String({ minLength: 1, maxLength: 200 }),
+                        text: Type.String({ minLength: 1, maxLength: 16000 }),
+                    },
+                    { additionalProperties: false },
+                ),
                 Type.Object(
                     {
                         action: Type.Literal("discover"),
@@ -1042,12 +1089,458 @@ export class AgentSupervision {
                         ? await this.status(api.conversationId, user)
                         : args.action === "discover"
                           ? this.#app.pip.sessions(api.conversationId, args)
-                          : await this.contact(api, args, ctx);
+                          : args.action === "answer"
+                            ? await this.#answerQuestion(api, args, ctx)
+                            : await this.contact(api, args, ctx);
 
                 return { content: [{ type: "text", text: JSON.stringify(result) }] };
             },
         }),
     ];
+
+    /** No association or takeover: answering needs this exact already-current parent grant. */
+    async #answerQuestion(
+        api: ToolExecutionApi,
+        args: { action: "answer"; session: number; questionId: string; text: string },
+        ctx: Context,
+    ) {
+        if (
+            !Number.isSafeInteger(args.session) ||
+            !args.questionId ||
+            args.questionId.length > 200 ||
+            !args.text.trim() ||
+            args.text.length > 16000 ||
+            this.#chat(api.conversationId) !== api.conversationId
+        ) {
+            throw new HttpError(
+                400,
+                "Answer the exact question from the private agent's main chat.",
+            );
+        }
+
+        return this.perform(api.conversationId, async () => {
+            const scope = this.#app.pip.agents.scope(api.conversationId)!;
+            const key = hash([
+                scope.agentId,
+                Number(api.conversationId),
+                Number(api.taskId),
+                api.callId,
+            ]);
+            const fingerprint = hash(args);
+            let rejected: string | undefined;
+            const intent = await api.commit(async (tx) => {
+                await this.requireInvocation(tx, api);
+                const user = this.#owner(this.#app.config.userById(scope.ownerId)!);
+                const identity = await this.#identity(tx, scope.agentId, user);
+                const source = await this.#source(tx, api, identity);
+                const doc = await tx.doc(AgentSupervisionDoc);
+                const previous = doc.questionAnswers?.[key];
+
+                if (previous !== undefined) {
+                    if (previous.fingerprint !== fingerprint || previous.status === "blocked") {
+                        throw new HttpError(
+                            409,
+                            "This exact question reply was changed or rejected; do not replay it.",
+                        );
+                    }
+
+                    const {
+                        status: _status,
+                        submissionId: _submission,
+                        reason: _reason,
+                        ...saved
+                    } = previous;
+
+                    await this.requireQuestionAnswer(tx, saved, previous.status !== "accepted");
+
+                    return saved;
+                }
+
+                const itemId = this.#app.workItems.itemFor(idOf(args.session))?.id;
+                const item =
+                    itemId === undefined
+                        ? undefined
+                        : (await tx.doc(HandoffsDoc)).workItems[itemId];
+                const grant = item?.supervisor;
+                const attachment =
+                    item === undefined
+                        ? undefined
+                        : doc.agents[identity.agentId]?.attachments[item.id];
+
+                if (grant?.conversationId !== args.session || attachment?.active !== true) {
+                    throw new HttpError(
+                        409,
+                        "Answer only on the exact controller already attached to this agent.",
+                    );
+                }
+
+                if (Object.keys(doc.questionAnswers ?? {}).length >= 1000) {
+                    throw new HttpError(
+                        413,
+                        "The private agent question-reply receipt limit was reached.",
+                    );
+                }
+
+                const saved: AgentQuestionAnswerIntent = {
+                    fingerprint,
+                    requestId: `agent-answer-${key}`,
+                    questionId: args.questionId,
+                    text: args.text,
+                    agentId: identity.agentId,
+                    agentName: identity.record.name,
+                    agentEpoch: identity.epoch,
+                    ownerId: user.id,
+                    tokenHash: user.tokenHash,
+                    chatId: Number(api.conversationId),
+                    sourceConversationId: Number(api.conversationId),
+                    sourceTaskId: Number(api.taskId),
+                    sourceCallId: api.callId,
+                    sourceInputId: source.inputId,
+                    sourceAdmissionSerial: source.admissionSerial,
+                    workItemId: item!.id,
+                    controllerId: args.session,
+                    source: item!.activeThreadId,
+                    attachmentEpoch: attachment.epoch,
+                    controllerEpoch: grant.epoch,
+                };
+
+                doc.questionAnswers ??= {};
+                doc.questionAnswers[key] = { ...saved, status: "pending" };
+
+                try {
+                    await this.requireQuestionAnswer(tx, saved);
+                } catch (error) {
+                    rejected = describe(error);
+                    doc.questionAnswers[key]!.status = "blocked";
+                    doc.questionAnswers[key]!.reason = rejected;
+                }
+
+                return saved;
+            }, ctx);
+
+            if (rejected !== undefined) {
+                throw new HttpError(409, rejected);
+            }
+
+            try {
+                const user = this.#owner(this.#app.config.userById(intent.ownerId)!);
+                const sender = await api.conversation(idOf(intent.controllerId), ctx);
+
+                if (sender === undefined) {
+                    throw new HttpError(
+                        409,
+                        "The exact native controller is unavailable to this invocation.",
+                    );
+                }
+
+                const accepted = await this.#app.pip.orchestration.answerFromAgent(
+                    idOf(intent.controllerId),
+                    user,
+                    intent,
+                    sender,
+                );
+
+                await api.commit(async (tx) => {
+                    const receipt = (await tx.doc(AgentSupervisionDoc)).questionAnswers![key]!;
+
+                    receipt.status = "accepted";
+                    receipt.submissionId = Number(accepted.submissionId);
+                }, ctx);
+
+                return {
+                    status: "accepted",
+                    questionId: intent.questionId,
+                    requestId: intent.requestId,
+                    submissionId: Number(accepted.submissionId),
+                    controllerId: intent.controllerId,
+                };
+            } catch (error) {
+                // Lost acknowledgements are not rejection. Recover only actual native acceptance;
+                // otherwise retain a rejected-intent tombstone, never silently dispatch again.
+                const recovered = await this.#app.harness.commit(async (tx) => {
+                    const receipt = (await tx.doc(AgentSupervisionDoc)).questionAnswers![key]!;
+                    const accepted = await tx.submissionByRequest(
+                        idOf(intent.controllerId),
+                        intent.requestId,
+                    );
+
+                    if (accepted !== undefined) {
+                        receipt.status = "accepted";
+                        receipt.submissionId = Number(accepted.id);
+
+                        return Number(accepted.id);
+                    }
+
+                    if (receipt.status !== "accepted") {
+                        receipt.status = "blocked";
+                        receipt.reason = describe(error);
+                    }
+
+                    return undefined;
+                }, context);
+
+                if (recovered !== undefined) {
+                    return {
+                        status: "accepted",
+                        questionId: intent.questionId,
+                        requestId: intent.requestId,
+                        submissionId: recovered,
+                        controllerId: intent.controllerId,
+                    };
+                }
+
+                throw error;
+            }
+        });
+    }
+
+    /** Native controller admission/recovery calls this against the captured durable payload. */
+    async requireQuestionAnswer(
+        tx: Tx,
+        intent: AgentQuestionAnswerIntent,
+        requireSource = true,
+    ): Promise<void> {
+        const key = hash([
+            intent.agentId,
+            intent.sourceConversationId,
+            intent.sourceTaskId,
+            intent.sourceCallId,
+        ]);
+        const doc = await tx.doc(AgentSupervisionDoc);
+        const receipt = doc.questionAnswers?.[key];
+        const user = this.#app.config.userById(intent.ownerId);
+        const identity = (await tx.doc(AgentIdentitiesDoc)).items[intent.agentId];
+        const item = (await tx.doc(HandoffsDoc)).workItems[intent.workItemId];
+        const grant = item?.supervisor;
+        const scope = this.#app.pip.agents.scope(idOf(intent.chatId));
+
+        if (
+            receipt === undefined ||
+            receipt.status === "blocked" ||
+            Object.entries(receipt).some(
+                ([field, value]) =>
+                    !["status", "submissionId", "reason"].includes(field) &&
+                    intent[field as keyof AgentQuestionAnswerIntent] !== value,
+            ) ||
+            receipt.requestId !== `agent-answer-${key}` ||
+            user?.role !== "owner" ||
+            user.tokenHash !== intent.tokenHash ||
+            identity?.ownerId !== user.id ||
+            identity.deletedAt !== undefined ||
+            identity.epoch !== intent.agentEpoch ||
+            scope?.agentId !== intent.agentId ||
+            scope.ownerId !== user.id ||
+            intent.sourceConversationId !== intent.chatId ||
+            grant?.conversationId !== intent.controllerId ||
+            grant.status !== "running" ||
+            grant.epoch !== intent.controllerEpoch ||
+            item!.activeThreadId !== intent.source ||
+            item!.archived ||
+            !this.#app.config.pipEnabled ||
+            !this.#app.workItems.enabled
+        ) {
+            throw new HttpError(
+                409,
+                "This native question reply's source, payload or grant was revoked or changed.",
+            );
+        }
+
+        await this.requireAttachment(
+            tx,
+            idOf(intent.controllerId),
+            intent.agentId,
+            intent.agentEpoch,
+            intent.attachmentEpoch,
+        );
+        this.#app.requireSee(user, idOf(intent.chatId));
+        this.#app.requireSee(user, idOf(intent.controllerId));
+        this.#app.requireSee(user, idOf(intent.source));
+        this.#app.requireSteer(user);
+        this.#app.spend.check(user, idOf(intent.chatId));
+        this.#app.spend.check(user, idOf(intent.controllerId));
+        const work = await tx.doc(PipWorkDoc, idOf(intent.controllerId));
+        const question =
+            work.question?.id === intent.questionId
+                ? work.question
+                : requireSource
+                  ? undefined
+                  : work.questions.find((entry) => entry.id === intent.questionId);
+
+        if (question === undefined || (requireSource && work.humanPending !== undefined)) {
+            throw new HttpError(
+                409,
+                "Only this exact pending question can accept the private agent's reply.",
+            );
+        }
+
+        const sourceTask = await tx.task(intent.sourceTaskId as ToolExecutionApi["taskId"]);
+
+        if (
+            sourceTask?.kind !== ToolTask.definition.name ||
+            sourceTask.conversationId !== idOf(intent.sourceConversationId) ||
+            (sourceTask.input as { callId?: string }).callId !== intent.sourceCallId
+        ) {
+            throw new HttpError(409, "The exact question-answer invocation changed.");
+        }
+
+        const acceptedSource = doc.inputs?.[String(intent.sourceInputId)];
+        const sourceState = sourceTask.state as { status: string; outcome?: { status: string } };
+
+        if (
+            sourceTask.abortRequested ||
+            (sourceState.status === "terminal" && sourceState.outcome?.status !== "completed") ||
+            intent.sourceInputId === undefined ||
+            intent.sourceAdmissionSerial === undefined ||
+            acceptedSource?.agentId !== intent.agentId ||
+            acceptedSource.chatId !== intent.chatId ||
+            acceptedSource.tokenHash !== intent.tokenHash ||
+            acceptedSource.epoch !== intent.agentEpoch ||
+            acceptedSource.admissionSerial !== intent.sourceAdmissionSerial ||
+            (doc.agents[intent.agentId]?.attachments[intent.workItemId]?.reclaimedThrough ?? -1) >=
+                intent.sourceAdmissionSerial
+        ) {
+            throw new HttpError(
+                409,
+                "This question reply's accepted source authority was invalidated.",
+            );
+        }
+
+        // Admissions are prepared before Conversation.submit, so a higher serial alone is
+        // not owner input. Only a later actually accepted human request supersedes this
+        // queued decision; a failed preflight/service report cannot invent new authority.
+        for (const admission of Object.values(doc.admissions ?? {})) {
+            const person = requestPerson(admission.requestId);
+
+            if (
+                admission.agentId === intent.agentId &&
+                (admission.admissionSerial ?? 0) > intent.sourceAdmissionSerial &&
+                person?.wrote === true &&
+                person.userId === intent.ownerId &&
+                (await tx.submissionByRequest(idOf(admission.chatId), admission.requestId!)) !==
+                    undefined
+            ) {
+                throw new HttpError(
+                    409,
+                    "A newer accepted owner input superseded this queued question reply.",
+                );
+            }
+        }
+
+        if (requireSource) {
+            const api = {
+                conversationId: idOf(intent.sourceConversationId),
+                taskId: intent.sourceTaskId as ToolExecutionApi["taskId"],
+            };
+
+            await this.requireInvocation(tx, api);
+            const source = await this.#source(tx, api, identity);
+
+            if (
+                source.inputId !== intent.sourceInputId ||
+                source.admissionSerial !== intent.sourceAdmissionSerial
+            ) {
+                throw new HttpError(
+                    409,
+                    "This question reply belongs to a different accepted owner input.",
+                );
+            }
+        }
+    }
+
+    /** Ordinary exact controller input retains its source and grant; it cannot renew either. */
+    async requireControllerMessage(
+        tx: Tx,
+        intent: AgentContactIntent,
+        requireSource = false,
+    ): Promise<void> {
+        const doc = await tx.doc(AgentSupervisionDoc);
+        const stored = doc.requests[intent.requestId.replace(/^agent-delegation-/, "")];
+        const item = (await tx.doc(HandoffsDoc)).workItems[intent.workItemId];
+        const user = this.#app.config.userById(intent.ownerId);
+        const input = doc.inputs?.[String(intent.sourceInputId)];
+
+        if (
+            stored === undefined ||
+            stored.status === "blocked" ||
+            stored.action !== "send" ||
+            stored.target !== intent.controllerId ||
+            Object.entries(stored).some(
+                ([field, value]) =>
+                    !["status", "submissionId", "result", "reason"].includes(field) &&
+                    intent[field as keyof AgentContactIntent] !== value,
+            ) ||
+            intent.sourceConversationId === undefined ||
+            this.#chat(idOf(intent.sourceConversationId)) !== idOf(intent.chatId) ||
+            intent.sourceTaskId === undefined ||
+            intent.sourceCallId === undefined ||
+            intent.sourceInputId === undefined ||
+            intent.sourceAdmissionSerial === undefined ||
+            user?.role !== "owner" ||
+            user.tokenHash !== intent.tokenHash ||
+            item?.supervisor?.conversationId !== intent.controllerId ||
+            item.supervisor.epoch !== intent.controllerEpoch ||
+            item.supervisor.status !== "running" ||
+            item.activeThreadId !== intent.source ||
+            item.archived ||
+            !this.#app.config.pipEnabled ||
+            !this.#app.workItems.enabled ||
+            input?.agentId !== intent.agentId ||
+            input.chatId !== intent.chatId ||
+            input.epoch !== intent.agentEpoch ||
+            input.tokenHash !== intent.tokenHash ||
+            input.admissionSerial !== intent.sourceAdmissionSerial ||
+            (doc.agents[intent.agentId]?.attachments[intent.workItemId]?.reclaimedThrough ?? -1) >=
+                intent.sourceAdmissionSerial
+        ) {
+            throw new HttpError(
+                409,
+                "This ordinary controller message's source or native grant was revoked or changed.",
+            );
+        }
+
+        await this.requireAttachment(
+            tx,
+            idOf(intent.controllerId),
+            intent.agentId,
+            intent.agentEpoch,
+            intent.attachmentEpoch,
+        );
+        this.#app.requireSee(user, idOf(intent.chatId));
+        this.#app.requireSee(user, idOf(intent.controllerId));
+        this.#app.requireSee(user, idOf(intent.source));
+        this.#app.requireSteer(user);
+        this.#app.spend.check(user, idOf(intent.chatId));
+        this.#app.spend.check(user, idOf(intent.controllerId));
+
+        if ((await tx.doc(PipWorkDoc, idOf(intent.controllerId))).question !== undefined) {
+            throw new HttpError(
+                409,
+                "Ordinary messaging cannot answer the controller's pending exact question.",
+            );
+        }
+
+        const task = await tx.task(intent.sourceTaskId as ToolExecutionApi["taskId"]);
+
+        if (
+            task?.kind !== ToolTask.definition.name ||
+            task.conversationId !== idOf(intent.sourceConversationId) ||
+            (task.input as { callId?: string }).callId !== intent.sourceCallId ||
+            task.abortRequested ||
+            (task.state.status === "terminal" && task.state.outcome.status !== "completed")
+        ) {
+            throw new HttpError(
+                409,
+                "The ordinary controller message's exact source invocation was revoked.",
+            );
+        }
+
+        if (requireSource) {
+            await this.requireInvocation(tx, {
+                conversationId: idOf(intent.sourceConversationId),
+                taskId: task.id,
+            });
+        }
+    }
 
     async contact(api: ToolExecutionApi, args: AgentContact, ctx: Context) {
         const nativeStop =
@@ -1103,7 +1596,8 @@ export class AgentSupervision {
                 receipt = await api.commit(async (tx) => {
                     const identity = await this.#identity(tx, agentId, user);
 
-                    await this.#source(tx, api, identity);
+                    const sourceAuthority = await this.#source(tx, api, identity);
+
                     this.#app.requireSee(user, idOf(args.session));
                     const item = this.#app.workItems.itemFor(idOf(args.session))!;
                     const doc = await tx.doc(AgentSupervisionDoc);
@@ -1154,6 +1648,17 @@ export class AgentSupervision {
                                 args.action === "send" ||
                                 args.action === "follow"),
                         requestId: `agent-delegation-${key}`,
+                        ...(args.action === "send" && isController
+                            ? {
+                                  controllerEpoch: (await tx.doc(HandoffsDoc)).workItems[item.id]!
+                                      .supervisor!.epoch,
+                                  sourceConversationId: Number(api.conversationId),
+                                  sourceTaskId: Number(api.taskId),
+                                  sourceCallId: api.callId,
+                                  sourceInputId: sourceAuthority.inputId,
+                                  sourceAdmissionSerial: sourceAuthority.admissionSerial,
+                              }
+                            : {}),
                         status: "pending",
                     };
 
@@ -1164,7 +1669,7 @@ export class AgentSupervision {
             }
 
             if (receipt.status === "pending") {
-                await this.#deliver(key, receipt);
+                await this.#deliver(key, receipt, api);
                 receipt = (await this.#app.harness.snapshot(AgentSupervisionDoc, ctx))!.requests[
                     key
                 ]!;
@@ -1447,7 +1952,7 @@ export class AgentSupervision {
         return undefined;
     }
 
-    async #deliver(key: string, receipt: IntentReceipt): Promise<void> {
+    async #deliver(key: string, receipt: IntentReceipt, api?: ToolExecutionApi): Promise<void> {
         try {
             const user = this.#app.config.userById(receipt.ownerId);
 
@@ -1459,10 +1964,41 @@ export class AgentSupervision {
             let result: string | undefined;
             const action = receipt.action ?? "delegate";
 
-            if (
-                action === "delegate" ||
-                (action === "send" && receipt.target === receipt.controllerId)
-            ) {
+            if (action === "send" && receipt.target === receipt.controllerId) {
+                const sender =
+                    api === undefined
+                        ? undefined
+                        : await api.conversation(idOf(receipt.controllerId), context);
+
+                if (
+                    sender === undefined &&
+                    (await this.#app.harness.commit(
+                        (tx) =>
+                            tx.submissionByRequest(idOf(receipt.controllerId), receipt.requestId),
+                        context,
+                    )) === undefined
+                ) {
+                    // Reconciliation cannot invent a live source producer. The native source
+                    // tool may replay its exact pending call; passive recovery only finds receipts.
+                    if (api !== undefined) {
+                        throw new HttpError(
+                            409,
+                            "This invocation has no exact native controller sender.",
+                        );
+                    }
+
+                    return;
+                }
+
+                const accepted = await this.#app.pip.orchestration.sendFromAgent(
+                    idOf(receipt.controllerId),
+                    user,
+                    receipt,
+                    sender,
+                );
+
+                submissionId = Number(accepted.submissionId);
+            } else if (action === "delegate") {
                 await this.#app.pip.agents.execution.release(idOf(receipt.chatId));
                 const accepted = await this.#app.pip.orchestration.delegate(
                     idOf(receipt.controllerId),

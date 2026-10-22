@@ -19,7 +19,7 @@ import { SessionsDoc } from "../docs.ts";
 import { HttpError } from "../errors.ts";
 import { draftAttachments, materializeDraftAttachments } from "../agent-draft-uploads.ts";
 import { clientKey, ownRequest } from "../requests.ts";
-import { modelSelection } from "../models.ts";
+import { agentInfo, modelSelection } from "../models.ts";
 import { defang } from "../fence.ts";
 import { PIP_EXTENSION } from "../pip.ts";
 import {
@@ -59,6 +59,8 @@ export type PrivateAgentSummary = {
     name: string;
     busy: boolean;
     updatedAt: number;
+    /** Identity configuration, not a selected chat/default; no workspace or charter text in the catalogue. */
+    modelInfo: Omit<ReturnType<typeof agentInfo>, "cwd" | "instructions">;
 };
 
 function object(value: unknown): Record<string, unknown> {
@@ -348,16 +350,30 @@ export class PipAgents {
 
         return Object.values(this.#doc.items)
             .filter((item) => item.ownerId === user.id && item.deletedAt === undefined)
-            .map((item) => ({
-                id: this.#chats(item).at(-1)?.id ?? null,
-                controlRevision: this.supervision.projectionRevision,
-                agentId: item.agentId,
-                chatIds: this.#chats(item).map((chat) => chat.id),
-                chats: this.#chats(item),
-                name: item.record.name,
-                busy: item.chatIds.some((id) => this.#app.isBusy(cid(id))),
-                updatedAt: item.record.updatedAt,
-            }))
+            .map((item) => {
+                const {
+                    cwd: _cwd,
+                    instructions: _instructions,
+                    ...modelInfo
+                } = agentInfo(
+                    this.#app.models,
+                    { model: item.model, thinkingLevel: item.thinkingLevel },
+                    this.#app.defaultCwd,
+                    this.#app.signInNeeded,
+                );
+
+                return {
+                    id: this.#chats(item).at(-1)?.id ?? null,
+                    controlRevision: this.supervision.projectionRevision,
+                    agentId: item.agentId,
+                    chatIds: this.#chats(item).map((chat) => chat.id),
+                    chats: this.#chats(item),
+                    name: item.record.name,
+                    busy: item.chatIds.some((id) => this.#app.isBusy(cid(id))),
+                    updatedAt: item.record.updatedAt,
+                    modelInfo,
+                };
+            })
             .sort((a, b) => b.updatedAt - a.updatedAt || a.agentId.localeCompare(b.agentId));
     }
     async read(id: ConversationId, supplied: User): Promise<PrivateAgentRecord>;

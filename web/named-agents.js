@@ -1,10 +1,11 @@
 // Owner-only persistent PiP agents use ordinary conversations, not the floating PiP panel.
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api, closeSheet, navigate, openSheet, store, uid } from "./store.js";
-import { html, Icon, Loader, Sheet, timeAgo } from "./ui.js";
+import { html, Icon, Loader, Sheet, Spinner, timeAgo } from "./ui.js";
 import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import { agentDrafts, openAgentDraft, selectAgentDraft } from "./agent-drafts.js";
 import { ModelPicker } from "./sheets/model.js";
+import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
 
 const pending = new Map();
 // Keep an uncertain creation's exact body across sheet closes and tab reloads. Only an explicit retry sends it again.
@@ -119,6 +120,42 @@ const agentIsOpen = (agent) =>
     (Number.isSafeInteger(store.state.conversationId) &&
         (agent.chatIds ?? []).includes(store.state.conversationId));
 
+function NamedAgentRow({ agent }) {
+    const ref = useRef(null);
+    const userId = store.state.me?.id;
+
+    useSidebarContext(
+        ref,
+        (at) => {
+            if (
+                namedAgentsAvailable() &&
+                store.state.me.id === userId &&
+                store.state.namedAgents.some((item) => item.agentId === agent.agentId)
+            ) {
+                openSidebarOptions("named-agent", agent.agentId, at, { userId });
+            }
+        },
+        { longPress: true },
+    );
+
+    return html`<button
+        ref=${ref}
+        class=${`named-agent-open ${agentIsOpen(agent) ? "on" : ""}`}
+        type="button"
+        data-part="session-button"
+        data-agent-id=${agent.agentId}
+        aria-current=${agentIsOpen(agent) ? "page" : undefined}
+        onClick=${() => openIdentity(agent)}
+        title=${agent.name}
+    >
+        <${NamedAgentAvatar} agentId=${agent.agentId} />
+        <span class="named-agent-name">${agent.name}</span>
+        <span class="named-agent-status small muted">
+            ${agent.busy ? html`<${Spinner} />` : agent.updatedAt ? timeAgo(agent.updatedAt) : "Ready"}
+        </span>
+    </button>`;
+}
+
 export function NamedAgents() {
     const [expanded, setExpanded] = useState(true);
     const [listId] = useState(() => `named-pips-${uid()}`);
@@ -131,7 +168,11 @@ export function NamedAgents() {
 
     return html`<section class="named-agents" aria-label="PiPs">
         ${styles()}
-        <div class="project-group-head named-agents-head" role="group" aria-label="PiPs controls">
+        <div
+            class=${`project-group-head named-agents-head${agents.some(agentIsOpen) ? " on" : ""}`}
+            role="group"
+            aria-label="PiPs controls"
+        >
             <button
                 class="group-head named-agents-toggle"
                 data-part="session-group-head"
@@ -141,7 +182,7 @@ export function NamedAgents() {
                 aria-controls=${listId}
                 onClick=${() => setExpanded((value) => !value)}
             >
-                <${Icon} name="pip" size=${16} />
+                <${Icon} name="pip" size=${18} />
                 <span class="named-agents-label">PiPs</span>
             </button>
             <button
@@ -162,34 +203,7 @@ export function NamedAgents() {
             ${
                 expanded &&
                 agents.map(
-                    (agent) => html`<div key=${agent.agentId}>
-                    <div class="named-agent-row">
-                        <button
-                            class=${`named-agent-open ${agentIsOpen(agent) ? "on" : ""}`}
-                            type="button"
-                            data-part="session-button"
-                            data-agent-id=${agent.agentId}
-                            aria-current=${agentIsOpen(agent) ? "page" : undefined}
-                            onClick=${() => openIdentity(agent)}
-                            title=${agent.name}
-                        >
-                            <${NamedAgentAvatar} agentId=${agent.agentId} />
-                            <span class="named-agent-name">${agent.name}</span>
-                            <span class="named-agent-status small muted">
-                                ${agent.busy ? "Working" : agent.updatedAt ? timeAgo(agent.updatedAt) : "Ready"}
-                            </span>
-                        </button>
-                        <button
-                            class="icon-button"
-                            type="button"
-                            aria-label=${`Edit ${agent.name}`}
-                            title=${`Edit ${agent.name}`}
-                            onClick=${() => openSettings(agent.id, agent.agentId)}
-                        >
-                            <${Icon} name="pencil" size=${16} />
-                        </button>
-                    </div>
-                    </div>`,
+                    (agent) => html`<${NamedAgentRow} key=${agent.agentId} agent=${agent} />`,
                 )
             }
         </div>

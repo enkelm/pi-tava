@@ -7,6 +7,8 @@ import { browserAvailable, setBrowserOpen } from "./browser.js";
 import { describeCall, describersRevision } from "./calls.js";
 import { DiffBlock } from "./diff.js";
 import { LinkedSessions } from "./linked-sessions.js";
+import { NamedAgentAvatar } from "./named-agent-avatar.js";
+import { namedAgentsAvailable } from "./named-agents.js";
 import { PipQuestion } from "./pip-question.js";
 import { DiffComments } from "./review-comments.js";
 import { fromServer } from "./seen.js";
@@ -1866,6 +1868,60 @@ function PendingShells({ conversationId, rows }) {
     );
 }
 
+/** Passive native observations are steps, not a person's prompt or a model's answer. */
+function AppEventEntry({ entry }) {
+    const [open, setOpen] = useState(false);
+    const detailsId = `app-event-detail-${entry.id}`;
+
+    return html`<div
+        id=${`entry-${entry.id}`}
+        class=${`step app-event ${open ? "open" : ""}`}
+        data-part="app-event"
+        data-state=${entry.state}
+    >
+        <div class="step-line">
+            <button
+                type="button"
+                class="step-head"
+                data-part="step-head"
+                aria-expanded=${open}
+                aria-controls=${detailsId}
+                onClick=${() => setOpen(!open)}
+            >
+                <span class="step-mark app-event-mark" aria-hidden="true">
+                    <${Icon} name="pulse" size=${13} />
+                </span>
+                <span class="app-event-label">Work Item</span>
+                <span class="app-event-state">Execution ${entry.state}</span>
+                <${Icon} name="chevron" size=${12} />
+            </button>
+            <a class="step-open" href=${`/s/${entry.source}`}>
+                /s/${entry.source}
+            </a>
+        </div>
+        ${
+            open &&
+            html`<div id=${detailsId} class="step-body" data-part="step-detail">
+            <p class="app-event-context">Application observation · not proof of successful completion.</p>
+            <pre class="app-event-details">${entry.text}</pre>
+        </div>`
+        }
+    </div>`;
+}
+
+/** Correlated agent answers remain expanded and never borrow the paying human's avatar. */
+function AgentAnswerEntry({ entry }) {
+    return html`<div id=${`entry-${entry.id}`} class="agent-answer" data-part="agent-answer">
+        <div class="agent-answer-head">
+            <${Icon} name="bot" size=${16} />
+            <strong>${entry.actor.name}</strong>
+            <span>Agent answer</span>
+            <a href=${`/s/${entry.actor.chatId}`}>/s/${entry.actor.chatId}</a>
+        </div>
+        <${Markdown} text=${entry.text} />
+    </div>`;
+}
+
 /** Shared entry rendering. Read-only journals never resolve IDs, images or actions through a Durable room. */
 export function TranscriptEntry({
     entry,
@@ -1876,6 +1932,14 @@ export function TranscriptEntry({
 }) {
     const view = readOnly ? READ_ONLY_VIEW : store.state.view;
     const users = readOnly ? [] : store.state.users;
+
+    if (entry.kind === "appEvent") {
+        return html`<${AppEventEntry} entry=${entry} />`;
+    }
+
+    if (entry.kind === "agentAnswer") {
+        return html`<${AgentAnswerEntry} entry=${entry} />`;
+    }
 
     if (entry.kind === "shell") {
         return html`<${ShellEntry} entry=${entry} readOnly=${readOnly} />`;
@@ -2049,6 +2113,9 @@ function partialEntry(blocks) {
     return partials.get(blocks);
 }
 
+/** Projected native user inputs start turns even when rendered with explicit service provenance. */
+const startsTurn = (entry) => ["user", "appEvent", "agentAnswer"].includes(entry.kind);
+
 /**
  * The transcript's items, each rendered again only when what it shows changed. A group is live while one of its calls
  * works or waits, or while it is the last thing in a run; groups after the last person's message are the newest turn.
@@ -2057,7 +2124,7 @@ function Items({ items, results, slots, approvals, busy, past = false, conversat
     let lastMessage = -1;
 
     items.forEach((item, index) => {
-        if (item.type === "row" && item.entry.kind === "user") {
+        if (item.type === "row" && startsTurn(item.entry)) {
             lastMessage = index;
         }
     });
@@ -2169,7 +2236,7 @@ function runStart(conversationId, entries, busy) {
         return undefined;
     }
 
-    const at = entries.findLastIndex((entry) => entry.kind === "user");
+    const at = entries.findLastIndex(startsTurn);
     const newest = entries[at];
     const finished = (from, to) =>
         entries
@@ -2261,7 +2328,7 @@ function newestThought(generation, entries) {
     for (let index = entries.length - 1; index >= 0; index--) {
         const entry = entries[index];
 
-        if (entry.kind === "user") {
+        if (startsTurn(entry)) {
             break;
         }
 
@@ -2726,6 +2793,12 @@ export function Transcript() {
     const { sessions, sessionsLoaded } = store.state;
     const source =
         conversation.forkedFrom && sessions.find((each) => each.id === conversation.forkedFrom.id);
+    const namedAgent =
+        namedAgentsAvailable() && conversation.id === store.state.conversationId
+            ? (store.state.namedAgents ?? []).find(
+                  (agent) => agent.agentId === conversation.pipAgentId,
+              )
+            : null;
 
     return html`<main class="scroller" ref=${scroller} onScroll=${onScroll}>
         <div class="transcript" data-part="transcript">
@@ -2759,7 +2832,15 @@ export function Transcript() {
                 entries.length === 0 &&
                 !view.live.busy &&
                 html`<div class="empty hint">
-                    <div class="pi">π</div>
+                    ${
+                        namedAgent
+                            ? html`<${NamedAgentAvatar}
+                                  key=${namedAgent.agentId}
+                                  agentId=${namedAgent.agentId}
+                                  size=${48}
+                              />`
+                            : html`<div class="pi">π</div>`
+                    }
                     <p>
                         ${conversation.kind === "subagent" ? "This subagent has no messages yet." : "Ask anything. Pi works in this session's folder, and keeps working if the server restarts."}
                     </p>

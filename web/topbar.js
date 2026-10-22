@@ -1,8 +1,10 @@
 // Named-agent chrome is independent of the ordinary conversation/workspace header.
+import { Fragment } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { AgentHistory } from "./agent-history.js";
 import { selectedAgentDraft } from "./agent-drafts.js";
 import { openAgentSettings } from "./named-agents.js";
+import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import { folderColor } from "./avatar.js";
 import { BrowserButton } from "./browser-panel.js";
 import { PeopleButton } from "./chat.js";
@@ -16,8 +18,8 @@ import { openSubagents } from "./subagents.js";
 import { api, closeSheet, navigate, openSheet, projectsAvailable, store } from "./store.js";
 import { ThreadTypeTag } from "./thread-type.js";
 import { conversationLocation } from "./workspace-location.js";
-import { html, Icon, Sheet, shortPath, useEdge } from "./ui.js";
-import { AgentTabs, tabAgent } from "./agent-tabs.js";
+import { html, Icon, item, Sheet, shortPath, useEdge } from "./ui.js";
+import { AgentTabs, tabAgent, tabChromeAgent } from "./agent-tabs.js";
 
 /** What changed in the session's folder: lines added and removed, and how many files. It opens Changes. */
 function ChangesButton() {
@@ -51,6 +53,10 @@ function ChangesButton() {
 function ConversationTopbar() {
     const { view, server, conversationId } = store.state;
     const conversation = view.conversation;
+    const controller =
+        conversation?.kind === "session" &&
+        conversation.id === conversationId &&
+        Boolean(conversation.workSupervisor);
     const artifacts = view.artifacts?.length ?? 0;
     const cwd = view.agent?.cwd ?? conversation?.cwd;
     const location = conversationLocation();
@@ -95,9 +101,25 @@ function ConversationTopbar() {
                 disabled=${!conversation}
                 onClick=${() => openSheet({ type: "menu" })}
             ></button>
-            <span class="title-main" data-part="topbar-title" aria-hidden="true">${title}</span>
+            <span
+                class="title-main"
+                data-part="topbar-title"
+                aria-hidden=${controller ? undefined : "true"}
+            >
+                ${
+                    controller
+                        ? html`<${ThreadTypeTag} session=${conversation} iconOnly=${true} />
+                          <span aria-hidden="true">${` ${title.replace(/^PiP · /, "· ")}`}</span>`
+                        : title
+                }
+            </span>
             <span class="title-sub" data-part="topbar-sub">
-                ${projectsAvailable() && conversation?.kind === "session" && html`<${ThreadTypeTag} session=${conversation} />`}
+                ${
+                    projectsAvailable() &&
+                    conversation?.kind === "session" &&
+                    !controller &&
+                    html`<${ThreadTypeTag} session=${conversation} />`
+                }
                 ${conversation?.imported && html`<span class="muted" title="Copied from a saved Pi session; the original Pi was not stopped">Imported from Pi</span>`}
                 ${
                     folder &&
@@ -189,6 +211,7 @@ function ConversationTopbar() {
 
 /** A passive read pinned to the selected saved chat and owner; no authority mutations. */
 function useChatOrchestrators({ agent, source, current }) {
+    const available = current();
     const [read, setRead] = useState({ loading: true });
     const [revision, setRevision] = useState(0);
 
@@ -245,6 +268,7 @@ function useChatOrchestrators({ agent, source, current }) {
         };
     }, [
         source,
+        available,
         agent.agentId,
         agent.controlRevision,
         store.state.connection,
@@ -356,15 +380,17 @@ function agentHeaderControls({ agent, source, userId, sheet }) {
     const unavailable = (label) => label === "Memory" && !memoryEnabled;
     const actionTitle = (label) =>
         unavailable(label) ? "Enable Memory in Extensions to use this agent's memory" : label;
-    const current = () =>
+    const sameContext = (identity) =>
         store.state.me?.id === userId &&
-        tabAgent()?.agentId === agent.agentId &&
+        identity?.agentId === agent.agentId &&
         (selectedAgentDraft()?.id ?? store.state.conversationId) === source &&
         (!sheet || store.state.sheet === sheet);
-    const close = () => current() && closeSheet();
+    const current = () => sameContext(tabAgent());
+    const localCurrent = () => sameContext(tabChromeAgent());
+    const close = () => (sheet?.panel === "chats" ? localCurrent() : current()) && closeSheet();
 
     const show = (panel) => {
-        if (current()) {
+        if (panel === "chats" ? localCurrent() : current()) {
             openSheet({ type: "agent-header", panel, agentId: agent.agentId, source, userId });
         }
     };
@@ -382,34 +408,62 @@ function agentHeaderControls({ agent, source, userId, sheet }) {
     };
 
     const actions = [
-        ["History", "clock", () => show("history")],
-        ["Memory", "brain", memory],
-        ["Goal / purpose", "target", () => settings("focus")],
-        ["System prompt", "file", () => settings("instructions")],
-        ["Rename", "pencil", () => settings("name")],
-        ["Settings", "settings", () => settings()],
-        ["All Work Items", "pip", () => show("orchestrators")],
-        [
-            "App menu",
-            "menu",
-            () => {
-                if (current()) {
-                    openSheet({ type: "menu" });
-                }
-            },
-        ],
+        ["History", () => show("history")],
+        ["Memory", memory],
+        ["Goal / purpose", () => settings("focus")],
+        ["System prompt", () => settings("instructions")],
+        ["Rename", () => settings("name")],
+        ["Agent settings", () => settings()],
+        ["All Work Items", () => show("orchestrators")],
     ];
 
-    return { current, close, show, settings, actions, unavailable, actionTitle };
+    return {
+        current,
+        localCurrent,
+        close,
+        show,
+        settings,
+        memory,
+        actions,
+        unavailable,
+        actionTitle,
+    };
+}
+
+/** Named-agent actions live in the native app menu, including before a chat's first Send. */
+export function AgentMenuItems({ sheet = store.state.sheet }) {
+    const agent = tabAgent();
+
+    if (!agent || sheet?.type !== "menu" || store.state.sheet !== sheet) {
+        return null;
+    }
+
+    const source = selectedAgentDraft()?.id ?? store.state.conversationId;
+    const { actions, unavailable, actionTitle } = agentHeaderControls({
+        agent,
+        source,
+        userId: store.state.me.id,
+        sheet,
+    });
+
+    return html`<div class="agent-menu-actions" aria-label=${`${agent.name} actions`}>
+        ${actions.map(([label, action]) =>
+            item(label, action, undefined, {
+                disabled: unavailable(label),
+                title: actionTitle(label),
+            }),
+        )}
+    </div>`;
 }
 
 function NamedAgentTopbar({ agent, source, userId }) {
     const edge = useEdge("--topbar-h", (rect) => rect.bottom);
-    const { current, show, settings, actions, unavailable, actionTitle } = agentHeaderControls({
-        agent,
-        source,
-        userId,
-    });
+    const { current, localCurrent, show, settings, memory, unavailable, actionTitle } =
+        agentHeaderControls({
+            agent,
+            source,
+            userId,
+        });
     const sheet = store.state.sheet;
     const panel =
         sheet?.type === "agent-header" &&
@@ -429,21 +483,21 @@ function NamedAgentTopbar({ agent, source, userId }) {
           ? "Orchestrators unavailable"
           : `${currentControllers.length} current orchestrator${currentControllers.length === 1 ? "" : "s"}${working ? `, ${working} active` : ""}`;
 
-    return html`<>
+    return html`<${Fragment}>
         <style>@import url("/named-agents.css") layer(pocket);</style>
         <header class="topbar agent-topbar" data-part="topbar" ref=${edge}>
             <button
                 class="icon-button topbar-back"
                 aria-label="Back to sessions"
                 title="Sessions"
-                onClick=${() => current() && toSessions()}
+                onClick=${() => localCurrent() && toSessions()}
             ><${Icon} name="back" size=${22} /></button>
             <button
-                class="agent-header-name"
+                class="icon-button agent-header-avatar"
                 aria-label=${`${agent.name}: settings`}
-                title=${agent.name}
+                title=${`${agent.name}: settings`}
                 onClick=${() => settings()}
-            >${agent.name}</button>
+            ><${NamedAgentAvatar} agentId=${agent.agentId} /></button>
             <${AgentTabs}
                 onChoose=${() => show("chats")}
                 expanded=${panel === "chats"}
@@ -470,15 +524,13 @@ function NamedAgentTopbar({ agent, source, userId }) {
                 ${!read.loading && !read.error && currentControllers.length > 0 && html`<span class="count">${currentControllers.length}</span>`}
             </button>
             <div class="agent-header-context" aria-label="Agent context">
-                ${actions.slice(1, 4).map(
-                    ([label, icon, action]) => html`<button
+                <button
                     class="icon-button"
-                    aria-label=${label}
-                    title=${actionTitle(label)}
-                    disabled=${unavailable(label)}
-                    onClick=${action}
-                ><${Icon} name=${icon} size=${18} /></button>`,
-                )}
+                    aria-label="Memory"
+                    title=${actionTitle("Memory")}
+                    disabled=${unavailable("Memory")}
+                    onClick=${memory}
+                ><${Icon} name="brain" size=${18} /></button>
             </div>
             <button
                 class="icon-button agent-header-history"
@@ -490,23 +542,24 @@ function NamedAgentTopbar({ agent, source, userId }) {
             ><${Icon} name="clock" size=${18} /></button>
             <button
                 class="icon-button topbar-menu"
-                aria-label="Agent menu"
-                title="Agent menu"
+                aria-label="Menu"
+                title="Menu"
                 aria-haspopup="dialog"
-                aria-expanded=${panel === "menu"}
-                onClick=${() => show("menu")}
+                aria-expanded=${sheet?.type === "menu"}
+                onClick=${() => current() && openSheet({ type: "menu" })}
             ><${Icon} name="more" /></button>
         </header>
-    </>`;
+    </${Fragment}>`;
 }
 
 /** Registered by sheets.js so keyboard dismissal, focus and Back share the native modal owner. */
 export function AgentHeaderSheet({ sheet }) {
-    const agent = tabAgent();
     const { source, userId, panel } = sheet;
+    const agent = panel === "chats" ? tabChromeAgent() : tabAgent();
 
     if (
         !agent ||
+        !["history", "orchestrators", "chats"].includes(panel) ||
         agent.agentId !== sheet.agentId ||
         store.state.me?.id !== userId ||
         (selectedAgentDraft()?.id ?? store.state.conversationId) !== source
@@ -514,7 +567,7 @@ export function AgentHeaderSheet({ sheet }) {
         return null;
     }
 
-    const { current, close, actions, unavailable, actionTitle } = agentHeaderControls({
+    const { current, close } = agentHeaderControls({
         agent,
         source,
         userId,
@@ -527,9 +580,7 @@ export function AgentHeaderSheet({ sheet }) {
                 ? `${agent.name} · History`
                 : panel === "orchestrators"
                   ? "Orchestrators"
-                  : panel === "chats"
-                    ? `${agent.name} chats`
-                    : agent.name
+                  : `${agent.name} chats`
         }
         onClose=${close}
     >
@@ -538,29 +589,13 @@ export function AgentHeaderSheet({ sheet }) {
                 ? html`<${AgentHistory} agent=${agent} source=${source} current=${current} close=${close} />`
                 : panel === "orchestrators"
                   ? html`<${ChatOrchestrators} agent=${agent} source=${source} current=${current} close=${close} />`
-                  : panel === "chats"
-                    ? html`<${AgentTabs} picker=${true} close=${close} />`
-                    : html`<nav class="agent-header-menu" aria-label=${`${agent.name} actions`}>
-                    ${actions.map(
-                        ([label, icon, action]) => html`<button
-                        class="agent-menu-action"
-                        type="button"
-                        title=${actionTitle(label)}
-                        disabled=${unavailable(label)}
-                        onClick=${action}
-                    >
-                        <${Icon} name=${icon} size=${18} />
-                        <span>${label}</span>
-                        <${Icon} name="chevron" size=${14} />
-                    </button>`,
-                    )}
-                </nav>`
+                  : html`<${AgentTabs} picker=${true} close=${close} />`
         }
     </${Sheet}>`;
 }
 
 export function Topbar() {
-    const agent = tabAgent();
+    const agent = tabChromeAgent();
 
     if (agent) {
         const { me, conversationId } = store.state;

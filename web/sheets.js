@@ -32,6 +32,7 @@ import { NewSessionSheet, SessionActions } from "./sheets/session.js";
 import { ProjectSheet } from "./sheets/project.js";
 import { SessionMoveSheet } from "./sheets/session-move.js";
 import { SidebarOptions } from "./sheets/sidebar-options.js";
+import { NamedAgentOptions } from "./sheets/named-agent-options.js";
 import { ShortcutsSheet } from "./sheets/shortcuts.js";
 import { TextSheet } from "./sheets/text.js";
 import { ArtifactsSheet, ArtifactViewer, ImageViewer } from "./sheets/viewers.js";
@@ -236,11 +237,14 @@ function sheetBody(sheet) {
             body = html`<${AgentHeaderSheet} sheet=${sheet} />`;
             break;
         case "sidebar-options":
-            body = html`<${SidebarOptions}
-                kind=${sheet.kind}
-                id=${sheet.id}
-                at=${sheet.at}
-            />`;
+            body =
+                sheet.kind === "named-agent"
+                    ? html`<${NamedAgentOptions} sheet=${sheet} />`
+                    : html`<${SidebarOptions}
+                          kind=${sheet.kind}
+                          id=${sheet.id}
+                          at=${sheet.at}
+                      />`;
             break;
         case "move-sessions":
             body = html`<${SessionMoveSheet} key=${sheet.ids.join(",")} ids=${sheet.ids} />`;
@@ -334,7 +338,7 @@ function sheetBody(sheet) {
             />`;
             break;
         case "menu":
-            body = html`<${MenuSheet} places=${!sheet.fromPlaces} />`;
+            body = html`<${MenuSheet} places=${!sheet.fromPlaces} sheet=${sheet} />`;
             break;
         case "session":
             body = store.state.sessions.some((each) => each.id === sheet.id)

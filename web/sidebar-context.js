@@ -2,8 +2,12 @@
 import { useEffect, useRef } from "preact/hooks";
 import { openSheet, store } from "./store.js";
 
-export function openSidebarOptions(kind, id, at, { keepDrawer = false } = {}) {
+export function openSidebarOptions(kind, id, at, { keepDrawer = false, userId } = {}) {
     const sheet = { type: "sidebar-options", kind, id, at };
+
+    if (userId !== undefined) {
+        sheet.userId = userId;
+    }
 
     if (keepDrawer) {
         // Select must still address the source list, as the legacy held-row sheet does.
@@ -92,7 +96,7 @@ export function consumeHeldContact({ identifier, source }) {
     timer = setTimeout(dispose, 30_000);
 }
 
-/** Right-click and keyboard access everywhere; project headers also have a simple touch hold. */
+/** Right-click and keyboard access everywhere; opted-in sidebar surfaces also have a simple touch hold. */
 export function useSidebarContext(ref, onOpen, { longPress = false, enabled = true } = {}) {
     const latest = useRef(onOpen);
 
@@ -170,11 +174,12 @@ export function useSidebarContext(ref, onOpen, { longPress = false, enabled = tr
         const start = (event) => {
             cancel();
 
+            const control = event.target.closest("button:not(.group-head), a");
+
             if (
                 event.touches.length !== 1 ||
-                event.target.closest(
-                    "button:not(.group-head), a, input, textarea, [contenteditable]",
-                ) ||
+                (control && control !== element) ||
+                event.target.closest("input, textarea, select, [contenteditable]") ||
                 getSelection()?.toString()
             ) {
                 return;

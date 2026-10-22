@@ -1,28 +1,38 @@
-/* Persistent private PiPs share the sidebar's group typography and flat navigation states. */
+/* Persistent private PiPs share the source tabs' typography and flat navigation states. */
 .named-agents {
     flex: 0 0 auto;
     min-width: 0;
 }
 
-/* A single native button outline encloses two semantic sibling controls. */
+/* Match the source tabs: selection, not disclosure, earns the accent underline. */
 .named-agents-head {
     gap: 0;
-    border: 1px solid transparent;
-    border-radius: var(--r-row);
+    padding: 3px;
+    border-bottom: 1px solid var(--line);
+    border-radius: var(--r-control);
+    background: var(--card);
 }
 
-.named-agents-head:has(.named-agents-toggle[aria-expanded="true"]) {
-    border-color: var(--warn-line);
-    background: var(--warn-soft);
+.named-agents-head.on {
+    box-shadow: inset 0 -2px var(--accent);
+}
+
+.named-agents-head.on .named-agents-toggle {
+    color: var(--text);
 }
 
 .named-agents-head .named-agents-toggle {
     justify-content: flex-start;
     gap: 6px;
     padding: 6px 8px;
-    font-size: 0.78rem;
+    font-size: 12.5px;
     font-weight: 500;
+    color: var(--muted);
     text-align: start;
+}
+
+.named-agents-head .named-agents-toggle:focus-visible {
+    color: var(--text);
 }
 
 .named-agents-label {
@@ -57,27 +67,13 @@
     overscroll-behavior: contain;
 }
 
-.named-agent-row {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    gap: 4px;
-}
-
 .named-agent-open {
-    flex: 1;
+    width: 100%;
     min-width: 0;
     gap: 8px;
     padding: 6px 8px 6px 28px;
     color: var(--text);
     text-align: start;
-}
-
-.named-agents .icon-button {
-    flex: 0 0 40px;
-    width: 40px;
-    height: 40px;
-    color: var(--muted);
 }
 
 .named-agents button:focus-visible {
@@ -116,6 +112,10 @@
     white-space: nowrap;
 }
 
+.named-agent-status .spinner {
+    display: block;
+}
+
 .named-agent-open.on {
     background: var(--hover);
 }
@@ -142,23 +142,6 @@
     min-width: 40px;
     width: 40px;
     height: 40px;
-}
-
-.agent-header-name {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 80px;
-    min-height: 40px;
-    padding: 6px;
-    border: 0;
-    border-radius: var(--r-row);
-    background: transparent;
-    color: var(--muted);
-    font-size: 0.78rem;
-    text-align: start;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 .agent-header-context {
@@ -214,12 +197,6 @@
     }
 }
 
-@container topbar (max-width: 359px) {
-    .agent-header-name {
-        display: none;
-    }
-}
-
 /* Phone navigation stays within the pane. Only the tablet/desktop tabs scroll. */
 .agent-tabs {
     display: flex;
@@ -270,10 +247,6 @@
 
         .agent-chat-switch {
             display: none;
-        }
-
-        .agent-header-name {
-            max-width: 120px;
         }
     }
 }
@@ -354,7 +327,6 @@
 
 .agent-topbar :is(a, button):focus-visible,
 .agent-chat-choices :is(a, button):focus-visible,
-.agent-header-menu button:focus-visible,
 .agent-history-list a:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -3px;
@@ -362,13 +334,11 @@
 
 .agent-topbar :is(a, button):active,
 .agent-chat-choices :is(a, button):active,
-.agent-header-menu button:active,
 .agent-history-list a:active {
     background: var(--pressed);
 }
 
 .agent-chat-choices,
-.agent-header-menu,
 .agent-history-list {
     display: grid;
     min-width: 0;
@@ -378,7 +348,6 @@
 /* Suppress browser tap/callout artifacts only on controls, never on readable sheet content. */
 .agent-topbar :is(a, button),
 .agent-chat-choices :is(a, button),
-.agent-header-menu button,
 .agent-history-list a {
     touch-action: manipulation;
     user-select: none;
@@ -391,7 +360,6 @@
     min-height: 44px;
 }
 
-.agent-header-menu button:disabled,
 .agent-header-context button:disabled {
     opacity: 0.5;
     cursor: default;
@@ -420,7 +388,6 @@
     background: var(--hover);
 }
 
-.agent-menu-action,
 .agent-history-chat {
     display: flex;
     align-items: center;
@@ -437,14 +404,12 @@
     touch-action: manipulation;
 }
 
-.agent-menu-action > span,
 .agent-history-chat-copy {
     flex: 1;
     min-width: 0;
     overflow-wrap: anywhere;
 }
 
-.agent-menu-action > svg,
 .agent-history-chat > svg {
     flex: none;
     color: var(--muted);
@@ -658,20 +623,17 @@
         min-width: 44px;
         width: 44px;
     }
-
-    .named-agents .icon-button {
-        flex-basis: 44px;
-        width: 44px;
-        height: 44px;
-    }
 }
 
 @media (hover: hover) and (pointer: fine) {
+    .named-agents-head .named-agents-toggle:hover {
+        color: var(--text);
+    }
+
     .named-agents button:hover:not(:active),
     .named-agent-controller-link:hover:not(:active),
     .agent-topbar :is(a, button):hover:not(:active):not(:disabled),
     .agent-chat-choices :is(a, button):hover:not(:active),
-    .agent-header-menu button:hover:not(:active):not(:disabled),
     .agent-history-list a:hover:not(:active) {
         background: var(--hover);
     }

@@ -602,7 +602,26 @@ export function Composer({ draft = null, onCheckDraft } = {}) {
     const commandRequest = useRef(null);
     const busy = !draft && view.live.busy;
     const stoppable = !draft && (busy || view.conversation?.workSupervisor?.status === "running");
-    const agent = draft ? null : view.agent;
+    // A draft has no Durable room. Its model belongs to the exact current private identity,
+    // never the room still in view or the server's default selection.
+    const draftSource =
+        draft &&
+        store.state.me?.role === "owner" &&
+        store.state.me.id === draft.userId &&
+        store.state.server?.privateAgents >= 4 &&
+        store.state.agentDraft?.id === draft.id &&
+        store.state.agentDraft.agentId === draft.agentId;
+    const draftAgent = draftSource
+        ? store.state.namedAgents?.find((item) => item.agentId === draft.agentId)
+        : null;
+    const draftModel = draftAgent?.modelInfo;
+    const agent = draft ? (draftModel?.model === undefined ? null : draftModel) : view.agent;
+    const modelName =
+        draft && !agent
+            ? draftSource && !Array.isArray(store.state.namedAgents)
+                ? "Loading agent model"
+                : "Agent model unavailable"
+            : modelLabel(agent);
 
     useEffect(() => {
         const draft = drafts.get(conversationId);
@@ -1539,7 +1558,7 @@ export function Composer({ draft = null, onCheckDraft } = {}) {
     const turns = view.turns;
     const blocked = collab() && turns?.on && turns.driver !== me?.id;
     const level =
-        agent?.thinkingLevel && agent.thinkingLevel !== "off" && agent.reasoning
+        agent?.thinkingLevel && agent.thinkingLevel !== "off" && (draft || agent.reasoning)
             ? agent.thinkingLevel
             : null;
 
@@ -1868,12 +1887,13 @@ export function Composer({ draft = null, onCheckDraft } = {}) {
                         <button
                             class=${`model-chip ${agent?.available === false ? "warn" : ""}`}
                             data-part="model-chip"
-                            aria-label=${draft ? "Agent model (shared across chats)" : `Model: ${modelLabel(agent)}${level ? `, thinking ${level}` : ""}`}
-                            title=${`Model and thinking: ${modelLabel(agent)}${level ? `, ${level}` : ""}`}
+                            aria-label=${draft ? `${agent ? `Agent model: ${modelName}` : modelName}${level ? `, thinking ${level}` : ""}${agent?.model && agent.available === false ? ", unavailable" : ""} (shared across chats)` : `Model: ${modelName}${level ? `, thinking ${level}` : ""}`}
+                            title=${`Model and thinking: ${modelName}${level ? `, ${level}` : ""}${agent?.model && agent.available === false ? " (unavailable)" : ""}`}
+                            disabled=${!!draft && !draftAgent}
                             onClick=${() => openSheet({ type: "model", ...(draft ? { agentId: draft.agentId } : {}) })}
                         >
                             <${Icon} name="sparkle" size=${12} class="model-spark" />
-                            <span class="model-name">${draft ? "Agent model" : shortModel(agent)}</span>
+                            <span class="model-name">${draft && !agent ? modelName : shortModel(agent)}</span>
                             ${level && html`<span class="model-level">${level}</span>`}
                             <${Icon} name="chevron" size=${12} stroke=${2.2} class="model-caret" />
                         </button>

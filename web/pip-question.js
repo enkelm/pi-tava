@@ -20,15 +20,18 @@ export function PipQuestion({
         ${
             question.answer &&
             html`<div>
-                <p class="muted small">Your saved reply</p>
+                <p class="muted small">${question.answer.agent ? `${question.answer.agent.name}’s saved agent reply` : "Your saved reply"}</p>
                 <${Markdown} text=${question.answer.text} />
                 ${
+                    !question.answer.agent &&
                     !question.answer.legacy &&
                     html`<p class="muted small">
                         After Stop or a Limits change, send a new reply below to make a new decision.
                     </p>`
                 }
-                <button
+                ${
+                    !question.answer.agent &&
+                    html`<button
                     class="button"
                     disabled=${sending}
                     onClick=${async () => {
@@ -44,7 +47,8 @@ export function PipQuestion({
                     }}
                 >
                     ${sending ? "Sending…" : "Retry saved reply"}
-                </button>
+                </button>`
+                }
             </div>`
         }
     </section>`;

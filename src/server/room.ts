@@ -641,6 +641,9 @@ export class Room {
                                     answer: {
                                         text: this.pipQuestion.answer.text,
                                         requestId: this.pipQuestion.answer.requestId,
+                                        ...(this.pipQuestion.answer.agent === undefined
+                                            ? {}
+                                            : { agent: this.pipQuestion.answer.agent }),
                                         legacy:
                                             this.pipQuestion.answer.submissionRequestId ===
                                             undefined,
@@ -801,7 +804,7 @@ export class Room {
                 id,
                 mode: item.mode,
                 text,
-                editableText: main.editableText,
+                ...(main.readOnly ? {} : { editableText: main.editableText }),
                 hasAttachments: main.hasAttachments,
                 ...submitter,
                 // A person's message is not one of reports, whatever it starts with.

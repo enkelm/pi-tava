@@ -1,8 +1,15 @@
 /** Read and replace a queued input's main text without changing its speaker, attachments, or other content parts. */
 import type { UserInput } from "@earendil-works/pi-durable";
-import { ATTACHMENTS_HEADING, FILE_BLOCK, FROM_PREFIX } from "./entry-format.ts";
+import {
+    ATTACHMENTS_HEADING,
+    FILE_BLOCK,
+    FROM_PREFIX,
+    isAgentAnswer,
+    isWorkItemEvent,
+} from "./entry-format.ts";
 
 export function queuedInputText(content: UserInput): {
+    readOnly: boolean;
     text: string;
     editableText: string;
     hasAttachments: boolean;
@@ -23,8 +30,14 @@ export function queuedInputText(content: UserInput): {
     const at = attachmentOnly ? prefix.length : text.indexOf(ATTACHMENTS_HEADING, prefix.length);
     const tail = at < 0 ? "" : text.slice(at);
     const editableText = text.slice(prefix.length, at < 0 ? undefined : at);
+    const metadata = (typeof content === "string" ? undefined : content[0]) as
+        { pocketAppEvent?: unknown; pocketAgentAnswer?: unknown } | undefined;
+    // Editing the body cannot retain trusted service authorship or its immutable decision receipt.
+    const readOnly =
+        isWorkItemEvent(metadata?.pocketAppEvent) || isAgentAnswer(metadata?.pocketAgentAnswer);
 
     return {
+        readOnly,
         text,
         editableText,
         hasAttachments:

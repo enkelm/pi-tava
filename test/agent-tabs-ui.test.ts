@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { after, test, type TestContext } from "node:test";
-import { h } from "preact";
+import { h, render as renderPreact } from "preact";
 
 const html = (await import(import.meta.resolve("htm"))).default.bind(h);
 
@@ -10,6 +10,8 @@ type Props = Record<string, any>;
 type Slot = { value?: any; deps?: unknown[]; cleanup?: () => void };
 type Fiber = { slots: Slot[]; cursor: number };
 let active: Props;
+const listeners = new Set<() => void>();
+const notify = () => listeners.forEach((listener) => listener());
 const bridge = {
     html,
     store: {
@@ -17,6 +19,11 @@ const bridge = {
             return active.state;
         },
         set: (value: Props) => active.patch(value),
+        subscribe(listener: () => void) {
+            listeners.add(listener);
+
+            return () => listeners.delete(listener);
+        },
     },
     api: (...args: any[]) => active.api(...args),
     uid: () => active.uid(),
@@ -26,6 +33,10 @@ const bridge = {
     closeSheet: () => active.patch({ sheet: null }),
     projectsAvailable: () => true,
     sheet: (props: Props) => h("test-sheet", props),
+    avatar: (props: Props) => h("test-avatar", props),
+    icon: (props: Props) => h("test-icon", props),
+    item: (label: string, run: () => void, _hint: string, options: Props) =>
+        h("button", { class: "list-item", onClick: run, ...options }, label),
     useChanges: () => ({ changes: active.changes }),
     headLabel: () => "feature/tabs",
     branchAvailable: () => true,
@@ -84,7 +95,9 @@ const sources: Record<string, string> = {
     "./agent-drafts.js":
         "const b=globalThis.agentTabsUiFixture; const drafts=()=>b.store.state.localDrafts.filter(d=>d.userId===b.store.state.me.id); export const agentDrafts=(agentId)=>drafts().filter(d=>d.agentId===agentId); export const selectedAgentDraft=()=>drafts().find(d=>d.id===b.store.state.agentDraft?.id)??null; export const openAgentDraft=(agentId)=>{const draft={id:b.uid(),userId:b.store.state.me.id,agentId,title:'New chat',draft:true,text:''}; b.store.state.localDrafts.push(draft); b.navigate(null); b.store.state.agentDraft=draft;}; export const closeAgentDraft=(id)=>{b.store.state.localDrafts=b.store.state.localDrafts.filter(d=>d.id!==id);}; export const selectAgentDraft=(id)=>{const draft=drafts().find(d=>d.id===id); b.navigate(null); b.store.state.agentDraft=draft;};",
     "./ui.js":
-        "export const {html,useEdge}=globalThis.agentTabsUiFixture,Icon=()=>null; export const shortPath=(path)=>path,Loader=()=>null,Sheet=(props)=>globalThis.agentTabsUiFixture.sheet(props),timeAgo=()=>'';",
+        "export const {html,useEdge,item}=globalThis.agentTabsUiFixture,Icon=(props)=>globalThis.agentTabsUiFixture.icon(props); export const shortPath=(path)=>path,Loader=()=>null,Sheet=(props)=>globalThis.agentTabsUiFixture.sheet(props),timeAgo=()=>'';",
+    "./named-agent-avatar.js":
+        "export const NamedAgentAvatar=(props)=>globalThis.agentTabsUiFixture.avatar(props);",
     "./avatar.js": "export const {folderColor}=globalThis.agentTabsUiFixture;",
     "./diff.js": "export const {useChanges}=globalThis.agentTabsUiFixture;",
     "./sheets/branch.js": "export const {headLabel,branchAvailable}=globalThis.agentTabsUiFixture;",
@@ -100,14 +113,12 @@ const sources: Record<string, string> = {
         "export const {setFilesOpen}=globalThis.agentTabsUiFixture,filesAvailable=()=>true,FilesButton=(props)=>globalThis.agentTabsUiFixture.marker('FilesButton',props);",
     "./extension-ui.js":
         "export const ExtensionSessionControls=(props)=>globalThis.agentTabsUiFixture.marker('ExtensionSessionControls',props);",
-    "./thread-type.js":
-        "export const ThreadTypeTag=(props)=>globalThis.agentTabsUiFixture.marker('ThreadTypeTag',props);",
 };
 
 registerHooks({
     resolve(specifier, context, next) {
         const source =
-            /\/web\/(?:agent-tabs|agent-history|named-agents|named-agent-avatar|topbar)\.js$/.test(
+            /\/web\/(?:agent-tabs|agent-history|named-agents|named-agent-avatar|thread-type|topbar)\.js$/.test(
                 context.parentURL?.split("?")[0] ?? "",
             )
                 ? sources[specifier]
@@ -119,7 +130,7 @@ registerHooks({
     },
 });
 const { AgentTabs } = await import(new URL("../web/agent-tabs.js", import.meta.url).href);
-const { Topbar, AgentHeaderSheet } = await import(
+const { Topbar, AgentHeaderSheet, AgentMenuItems } = await import(
     new URL("../web/topbar.js", import.meta.url).href
 );
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -141,6 +152,55 @@ function textOf(value: any): string {
           : typeof value === "string" || typeof value === "number"
             ? String(value)
             : "";
+}
+
+// Pass resolved component output through real Preact: walking props.children alone can
+// report controls that Preact actually renders as a text node (for example an empty tag).
+function renderedText(value: any): string {
+    const document = {
+        createTextNode: (data: any) => ({ nodeType: 3, data: String(data) }),
+        createElementNS(_namespace: string, localName: string) {
+            const element: any = {
+                localName,
+                ownerDocument: document,
+                childNodes: [],
+                insertBefore(child: any, before: any) {
+                    const previous = element.childNodes.indexOf(child);
+
+                    if (previous !== -1) {
+                        element.childNodes.splice(previous, 1);
+                    }
+
+                    const index = before ? element.childNodes.indexOf(before) : -1;
+
+                    element.childNodes.splice(
+                        index === -1 ? element.childNodes.length : index,
+                        0,
+                        child,
+                    );
+                },
+                removeChild(child: any) {
+                    element.childNodes.splice(element.childNodes.indexOf(child), 1);
+                },
+            };
+
+            return element;
+        },
+    };
+    // Hooks and callbacks belong to the fixture; this sink checks only real text/element rendering.
+    const content = (node: any): any =>
+        Array.isArray(node)
+            ? node.map(content)
+            : node?.props
+              ? h(node.type, null, content(node.props.children))
+              : node;
+    const textContent = (node: any): string =>
+        node.nodeType === 3 ? node.data : node.childNodes.map(textContent).join("");
+    const root = document.createElementNS("", "root");
+
+    renderPreact(content(value), root);
+
+    return textContent(root);
 }
 
 function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
@@ -236,6 +296,7 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
         },
         patch(value: Props) {
             Object.assign(state, value);
+            notify();
             dirty = true;
         },
         navigate(id: number | null) {
@@ -244,6 +305,7 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
             state.conversationId = id;
             state.sheet = null;
             state.view = { conversation: null };
+            notify();
             dirty = true;
         },
         toSessions() {
@@ -252,6 +314,7 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
             state.conversationId = null;
             state.sheet = null;
             state.view = { conversation: null };
+            notify();
             dirty = true;
         },
         uid: () => `tab-request-${++sequence}`,
@@ -334,7 +397,9 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
                               key: `${sheet.userId}:${sheet.agentId}:${sheet.source}:${sheet.panel}`,
                               sheet,
                           })
-                        : null,
+                        : sheet?.type === "menu"
+                          ? h(AgentMenuItems, {})
+                          : null,
                 ],
                 "root",
                 visited,
@@ -405,12 +470,12 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
             state.conversationId = id;
             state.sheet = null;
             state.view = { conversation: { id, pipAgentId: agentId } };
+            notify();
             dirty = true;
             render();
         },
         patch(value: Props) {
-            Object.assign(state, value);
-            dirty = true;
+            active.patch(value);
             render();
         },
         label(name: string) {
@@ -455,6 +520,11 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
             render();
 
             return textOf(tree);
+        },
+        renderedText: (value?: any) => {
+            render();
+
+            return renderedText(value ?? tree);
         },
         async settle() {
             await flush();
@@ -760,6 +830,99 @@ test("ordinary and older-server Topbars keep the normal title/menu without tab c
     }
 });
 
+test("controller titles use one leading native PiP icon without changing native header bindings", async (t) => {
+    for (const [mode, title, expected] of [
+        ["controller", "PiP · Review routing", " · Review routing"],
+        ["renamed-controller", "Keep this renamed title", " Keep this renamed title"],
+        ["ordinary", "PiP · Literal ordinary title", "PiP · Literal ordinary title"],
+    ] as const) {
+        await t.test(mode, (t) => {
+            const f = fixture(t, Topbar, {
+                view: { conversation: { id: 19, kind: "session", title } },
+            });
+            const controller = mode !== "ordinary";
+
+            headerContext(f, false);
+            f.patch({
+                server: {
+                    ...f.state.server,
+                    agentProfiles: [{ id: "worker", name: "Worker", icon: "bot" }],
+                },
+                view: {
+                    ...f.state.view,
+                    conversation: {
+                        ...f.state.view.conversation,
+                        title,
+                        threadType: "worker",
+                        ...(controller
+                            ? { workSupervisor: { workItemId: "exact-item", status: "running" } }
+                            : {}),
+                    },
+                },
+            });
+            const heading = f.all().find((node) => node.props["data-part"] === "topbar-title");
+            const detail = f.all().find((node) => node.props["data-part"] === "topbar-sub");
+            const tags = (node: any) =>
+                nodes(node).filter((child) =>
+                    child.props.class?.split(" ").includes("thread-type"),
+                );
+            const leading = tags(heading);
+
+            assert.equal(
+                textOf(heading),
+                expected,
+                "only the generated controller prefix changes visually",
+            );
+            assert.equal(leading.length, controller ? 1 : 0);
+            assert.equal(
+                tags(detail).length,
+                controller ? 0 : 1,
+                "only the marked controller duplicate disappears",
+            );
+
+            if (controller) {
+                assert.equal(
+                    heading.props["aria-hidden"],
+                    undefined,
+                    "the icon keeps its accessible role",
+                );
+                assert.equal(leading[0].props.role, "img");
+                assert.equal(leading[0].props["aria-label"], "PiP");
+                assert.equal(leading[0].props.title, "PiP");
+                assert.ok(leading[0].props.class.split(" ").includes("icon-only"));
+                const icon = nodes(leading[0]).find((node) => node.type === "test-icon");
+
+                assert.equal(icon.props.name, "pip");
+                assert.equal(
+                    icon.props.size,
+                    14,
+                    "same native icon-only indicator as sidebar threads",
+                );
+            } else {
+                assert.equal(
+                    textOf(tags(detail)[0]),
+                    "Worker",
+                    "ordinary type text remains visible",
+                );
+            }
+
+            assert.equal(
+                f.state.view.conversation.title,
+                title,
+                "display changes never rename the chat",
+            );
+            f.click(f.label(`${title}, in project: session menu`));
+            assert.deepEqual(f.opened.at(-1), { type: "menu" });
+            f.click(f.label("Branch feature/tabs: switch or make a branch"));
+            assert.deepEqual(f.opened.at(-1), { type: "branch" });
+            f.click(f.label("Menu"));
+            assert.deepEqual(f.opened.at(-1), { type: "menu" });
+            assert.equal(f.label("Menu").props["aria-expanded"], true);
+            assert.equal(f.requests.length, 0, "controller chrome only uses native header actions");
+        });
+    }
+});
+
 test("saved navigation uses exact selected room identity and capability", (t) => {
     const f = fixture(t);
 
@@ -824,11 +987,23 @@ test("named header excludes workspace utilities while preserving context and the
     const f = fixture(t, Topbar);
 
     headerContext(f);
+    assert.match(f.renderedText(), /Initial setup.*Accessibility review/s);
+    const avatar = nodes(f.label("Reviewer: settings")).find((node) => node.type === "test-avatar");
+
+    assert.equal(avatar.props.agentId, "stable-agent");
+    assert.equal(textOf(f.label("Reviewer: settings")), "");
+    assert.ok(
+        !f
+            .all()
+            .some((node) => ["Goal / purpose", "System prompt"].includes(node.props["aria-label"])),
+    );
+    assert.doesNotMatch(f.renderedText(), /\[object Object\]/);
     assert.equal(f.all().filter((node) => node.type === "header").length, 1);
     assert.equal(f.all().filter((node) => node.type === "test-utility").length, 0);
     assert.deepEqual(f.folders, []);
     assert.ok(f.edges.includes("--topbar-h"));
-    f.click(f.label("Agent menu"));
+    f.click(f.label("Menu"));
+    assert.deepEqual(f.opened.at(-1), { type: "menu" });
     const menu = f.label("Reviewer actions");
 
     for (const label of [
@@ -836,16 +1011,23 @@ test("named header excludes workspace utilities while preserving context and the
         "Goal / purpose",
         "System prompt",
         "Rename",
-        "Settings",
+        "Agent settings",
         "History",
         "All Work Items",
-        "App menu",
     ]) {
         assert.match(textOf(menu), new RegExp(label));
     }
 
-    f.click(nodes(menu).find((node) => node.type === "button" && textOf(node) === "App menu"));
-    assert.deepEqual(f.opened.at(-1), { type: "menu" });
+    assert.ok(!nodes(menu).some((node) => node.type === "button" && textOf(node) === "App menu"));
+    f.click(
+        nodes(menu).find((node) => node.type === "button" && textOf(node) === "Agent settings"),
+    );
+    assert.deepEqual(f.opened.at(-1), {
+        type: "named-agent",
+        id: 19,
+        agentId: "stable-agent",
+        section: undefined,
+    });
     assert.ok(
         f.requests.every((request) => request.body === undefined),
         "native chrome never activates work",
@@ -869,6 +1051,11 @@ test("phone chooser registers outside the header and closes through sheet state"
     });
     assert.equal(f.label("Accessibility review: switch chats").props["aria-expanded"], true);
     assert.ok(sheet);
+    assert.match(
+        f.renderedText(sheet),
+        /Closing a saved tab.*Initial setup.*Accessibility review/s,
+    );
+    assert.doesNotMatch(f.renderedText(sheet), /\[object Object\]/);
     assert.ok(
         !nodes(header).some((node) => node.type === "test-sheet"),
         "the overlay must escape topbar containment",
@@ -912,14 +1099,30 @@ test("draft context actions address the identity, not the previous saved chat", 
     const f = fixture(t, Topbar);
 
     f.click(f.label("New chat with Reviewer"));
-    f.click(f.label("Goal / purpose"));
+    assert.match(f.renderedText(), /New chat.*Draft/s);
+    assert.doesNotMatch(f.renderedText(), /\[object Object\]/);
+    f.click(f.label("Reviewer: settings"));
+    assert.deepEqual(f.opened.at(-1), {
+        type: "named-agent",
+        id: null,
+        agentId: "stable-agent",
+        section: undefined,
+    });
+    f.click(f.label("Menu"));
+    const action = (label: string) =>
+        nodes(f.label("Reviewer actions")).find(
+            (node) => node.type === "button" && textOf(node) === label,
+        );
+
+    f.click(action("Goal / purpose"));
     assert.deepEqual(f.opened.at(-1), {
         type: "named-agent",
         id: null,
         agentId: "stable-agent",
         section: "focus",
     });
-    f.click(f.label("System prompt"));
+    f.click(f.label("Menu"));
+    f.click(action("System prompt"));
     assert.equal(f.opened.at(-1)?.section, "instructions");
     f.click(f.label("Memory"));
     assert.deepEqual(f.opened.at(-1), { type: "memory", conversationId: "agent:stable-agent" });
@@ -1162,6 +1365,54 @@ test("History fences departed source/owner reads and rejects another identity's 
     }
 });
 
+test("native agent-menu callbacks stay pinned to their owner, chat and logical opening", async (t) => {
+    for (const [mode, label] of [
+        ["source", "Agent settings"],
+        ["owner", "History"],
+        ["opening", "Memory"],
+        ["capability", "All Work Items"],
+    ]) {
+        await t.test(mode, (t) => {
+            const f = fixture(t, Topbar);
+
+            f.click(f.label("Menu"));
+            const opening = f.state.sheet;
+            const stale = nodes(f.label("Reviewer actions")).find(
+                (node) => node.type === "button" && textOf(node) === label,
+            );
+            const count = f.opened.length;
+
+            if (mode === "source") {
+                f.patch({
+                    conversationId: 7,
+                    view: { conversation: { id: 7, pipAgentId: "stable-agent" } },
+                });
+            } else if (mode === "owner") {
+                f.patch({ me: { id: "another-owner", role: "owner" } });
+            } else if (mode === "opening") {
+                f.patch({ sheet: { type: "menu" } });
+            } else {
+                f.patch({ server: { privateAgents: 3, extensions: ["pocket-memory"] } });
+            }
+
+            if (mode !== "opening") {
+                assert.equal(
+                    f.state.sheet,
+                    opening,
+                    "only the tested authority coordinate changes",
+                );
+            }
+
+            f.click(stale);
+            assert.equal(
+                f.opened.length,
+                count,
+                "a departed menu action cannot open or replace a sheet",
+            );
+        });
+    }
+});
+
 test("Memory cannot open an inert sheet when the extension is unavailable", (t) => {
     const f = fixture(t, Topbar);
     const stale = f.label("Memory");
@@ -1171,7 +1422,7 @@ test("Memory cannot open an inert sheet when the extension is unavailable", (t) 
     assert.match(f.label("Memory").props.title, /Enable Memory in Extensions/);
     f.click(stale);
     assert.equal(f.opened.length, 0, "a stale enabled control must also recheck availability");
-    f.click(f.label("Agent menu"));
+    f.click(f.label("Menu"));
     const menu = f.label("Reviewer actions");
     const memory = nodes(menu).find((node) => node.type === "button" && textOf(node) === "Memory");
 
@@ -1180,7 +1431,7 @@ test("Memory cannot open an inert sheet when the extension is unavailable", (t) 
     f.click(memory);
     assert.deepEqual(
         f.opened.map((sheet) => sheet.type),
-        ["agent-header"],
-        "the registered menu opens, but unavailable Memory does not replace it",
+        ["menu"],
+        "the native menu opens, but unavailable Memory does not replace it",
     );
 });

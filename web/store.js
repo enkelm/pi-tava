@@ -1855,6 +1855,8 @@ export const isRow = (entry) =>
         "command",
         "note",
         "pipQuestion",
+        "appEvent",
+        "agentAnswer",
         "fromPi",
     ].includes(entry.kind);
 

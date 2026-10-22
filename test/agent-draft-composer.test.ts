@@ -43,11 +43,11 @@ function fixture() {
         state: {
             me: { id: "owner", role: "owner" },
             server: { privateAgents: 4 },
-            namedAgents: [{ agentId: "ada" }],
+            namedAgents: [{ agentId: "ada" }] as any[],
             agentDraft: null as any,
             conversationId: null,
             models: [] as any[],
-            view: { live: { busy: false }, inbox: [] },
+            view: { live: { busy: false }, inbox: [], agent: null as any },
         },
         set(patch: object) {
             Object.assign(this.state, patch);
@@ -160,7 +160,12 @@ function fixture() {
         pipAvailable: () => false,
         trustAvailable: () => false,
         projectsAvailable: () => false,
-        modelLabel: () => "Choose model",
+        // Execute the native label formatter, not a stub that hides model binding mistakes.
+        modelLabel: runInNewContext(
+            readFileSync(new URL("../web/ui.js", import.meta.url), "utf8")
+                .match(/export function modelLabel\(agent\) \{[\s\S]*?\n\}/)![0]
+                .replace("export ", "") + "; modelLabel;",
+        ),
         formatBytes: (n: number) => String(n),
         APPLE: false,
     };
@@ -168,6 +173,7 @@ function fixture() {
     // Component children are template values. Their DOM behavior is outside this callback test's contract.
     for (const name of [
         "Avatar",
+        "NamedAgentAvatar",
         "TypingLine",
         "MessageBox",
         "SendButton",
@@ -238,8 +244,180 @@ function fixture() {
         }
     };
 
-    return { draft, store, uploads, requests, notices, sheets, input, enter, type, flush, render };
+    const renderCaptured = () => {
+        slots = composerSlots;
+        cursor = 0;
+
+        return context.Composer({ draft });
+    };
+
+    return {
+        draft,
+        store,
+        uploads,
+        requests,
+        notices,
+        sheets,
+        input,
+        enter,
+        type,
+        flush,
+        render,
+        renderCaptured,
+        openDraft: context.openAgentDraft,
+    };
 }
+
+function modelChip(f: ReturnType<typeof fixture>, captured = false) {
+    const chip = templates(captured ? f.renderCaptured() : f.render()).find((each) =>
+        each.strings.some((part) => part.includes('data-part="model-chip"')),
+    );
+
+    assert.ok(chip, "the actual Composer model control is visible");
+    const start = chip.strings.findIndex((part) => part.includes('data-part="model-chip"'));
+    const click = chip.values.find(
+        (_, index) => index >= start && /onClick=\s*$/.test(chip.strings[index]!),
+    ) as () => void;
+
+    return {
+        click,
+        label: bound(chip, "aria-label")[0] as string,
+        classes: bound(chip, "class").find((value) =>
+            String(value).startsWith("model-chip"),
+        ) as string,
+        chip,
+    };
+}
+
+test("draft Composer binds model and thinking to the selected identity catalogue, not prior room or global defaults", () => {
+    const f = fixture();
+    const a = {
+        model: { provider: "test", modelId: "a" },
+        modelName: "Claude Identity A",
+        reasoning: true,
+        thinkingLevel: "high",
+        available: true,
+    };
+    const b = {
+        model: { provider: "test", modelId: "b" },
+        modelName: "Prior room B",
+        reasoning: true,
+        thinkingLevel: "low",
+        available: true,
+    };
+
+    f.store.state.view.agent = b;
+    f.store.state.models.push({ provider: "test", id: "default", name: "Global default" });
+    f.store.state.namedAgents = [
+        { agentId: "ada", modelInfo: a },
+        { agentId: "bea", modelInfo: b },
+    ];
+    assert.equal(
+        modelChip(f).label,
+        "Agent model: Claude Identity A, thinking high (shared across chats)",
+    );
+    assert.ok(
+        templates(modelChip(f).chip)
+            .flatMap((each) => each.values)
+            .includes("identity a"),
+    );
+    const capturedPicker = modelChip(f).click;
+
+    f.openDraft("bea");
+    capturedPicker();
+    assert.equal(
+        f.sheets.at(-1).agentId,
+        "ada",
+        "a captured model control retains its original identity",
+    );
+    modelChip(f).click();
+    assert.equal(f.sheets.at(-1).agentId, "bea");
+    assert.equal(
+        modelChip(f).label,
+        "Agent model: Prior room B, thinking low (shared across chats)",
+    );
+    f.store.state.namedAgents[1].modelInfo = {
+        ...b,
+        modelName: "Updated identity B",
+        thinkingLevel: "medium",
+    };
+    assert.equal(
+        modelChip(f).label,
+        "Agent model: Updated identity B, thinking medium (shared across chats)",
+    );
+    f.store.state.namedAgents[1].modelInfo = { ...b, available: false };
+    assert.match(modelChip(f).classes, /warn/);
+    assert.match(modelChip(f).label, /Prior room B.*thinking low.*unavailable/);
+    f.store.state.namedAgents[1].modelInfo = {
+        ...b,
+        modelName: undefined,
+        reasoning: undefined,
+        available: false,
+    };
+    assert.match(modelChip(f).label, /Agent model: b, thinking low, unavailable/);
+    assert.equal(f.requests.length, 0, "model display needs no second fetch/cache or submission");
+});
+
+test("draft model display is honest about unknown projection and never exposes stale private state after source/access changes", () => {
+    const f = fixture();
+
+    f.store.state.view.agent = {
+        model: { provider: "test", modelId: "wrong" },
+        modelName: "PRIVATE PRIOR MODEL",
+    };
+    assert.match(modelChip(f).label, /Agent model unavailable/);
+    f.store.state.namedAgents[0].modelInfo = {};
+    assert.match(modelChip(f).label, /Agent model unavailable/);
+    f.store.state.namedAgents = undefined as any;
+    assert.match(modelChip(f, true).label, /Loading agent model/);
+    f.store.state.namedAgents = [{ agentId: "ada" }];
+    f.store.state.namedAgents[0].modelInfo = {
+        model: null,
+        available: false,
+        thinkingLevel: "off",
+    };
+    assert.match(modelChip(f).label, /No model/);
+    f.store.state.namedAgents[0].modelInfo = {
+        model: { provider: "test", modelId: "private" },
+        modelName: "PRIVATE IDENTITY MODEL",
+        available: true,
+    };
+
+    for (const change of [
+        () => {
+            f.store.state.me.role = "guest";
+        },
+        () => {
+            f.store.state.me.id = "another-owner";
+        },
+        () => {
+            f.store.state.server.privateAgents = 3;
+        },
+        () => {
+            f.store.state.namedAgents = [];
+        },
+        () => {
+            f.store.state.agentDraft = { id: "different-source", agentId: "bea" };
+        },
+    ]) {
+        f.store.state.me = { id: "owner", role: "owner" };
+        f.store.state.server.privateAgents = 4;
+        f.store.state.agentDraft = { id: f.draft.id, agentId: "ada" };
+        f.store.state.namedAgents = [
+            {
+                agentId: "ada",
+                modelInfo: {
+                    model: { provider: "test", modelId: "private" },
+                    modelName: "PRIVATE IDENTITY MODEL",
+                    available: true,
+                },
+            },
+        ];
+        change();
+        assert.match(modelChip(f, true).label, /Agent model unavailable/);
+        assert.doesNotMatch(modelChip(f, true).label, /PRIVATE|No model/);
+    }
+});
 
 test("draft native Composer stages pasted/dropped images, previews/removes files and expands long pastes on first Send", async () => {
     const f = fixture();
@@ -295,6 +473,12 @@ test("draft native Composer stages pasted/dropped images, previews/removes files
         { path: "/staged/drop.png", name: "drop.png", mime: "image/png", size: 3 },
     ]);
     assert.equal(f.requests[0]?.body.inlineFiles, true);
+    assert.equal(
+        f.requests[0]?.body.model,
+        undefined,
+        "first Send leaves model selection server-authoritative",
+    );
+    assert.equal(f.requests[0]?.body.thinkingLevel, undefined);
     f.requests[0]!.resolve({ id: 101, agentId: "ada", submissionId: 7 });
     await f.flush();
 });

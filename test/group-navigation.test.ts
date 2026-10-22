@@ -59,6 +59,10 @@ const hooks = {
 const fixture = {
     hooks,
     html: htm.bind(h),
+    icon: (props: Props) => h("native-icon", props),
+    spinner: () => h("native-spinner", {}),
+    threadTypeTag: (props: Props) => h("native-thread-type", props),
+    projectsAvailable: false,
     store: {
         state: {} as Props,
         set(patch: Props | ((state: Props) => Props)) {
@@ -121,12 +125,14 @@ const sources: Record<string, string> = {
         export const actions={openWorkPip:async id=>f.mutations.push({id,action:"openPiP"}),controlWorkPip:async(id,action)=>f.mutations.push({id,action}),abort:async()=>f.mutations.push({id:store.state.conversationId,action:"abort"}),updateWorkItem:async(id,patch)=>f.mutations.push({id,...patch}),updateSession:async()=>{}};
         export const drafts={get:()=>"",set:()=>{}},typing=()=>{};
         export const attempt=fn=>fn(),notify=()=>{},openSheet=sheet=>f.opened.push(sheet),dismiss=()=>{},holdNotice=()=>{},uid=()=>"row-opening";
-        export const canSteer=()=>true,collab=()=>false,scoped=()=>false,handoffsAvailable=()=>true,projectsAvailable=()=>false;
+        export const canSteer=()=>true,collab=()=>false,scoped=()=>false,handoffsAvailable=()=>true,projectsAvailable=()=>f.projectsAvailable;
         export const isUnread=()=>false,sessionUnread=()=>false,setUnread=()=>{},stillMoving=moving=>moving;
         export const signOut=()=>{},start=()=>{},filesShown=()=>false,panelsBeside=()=>false,peopleDocked=()=>false;`,
     "ui.js": `export const html=globalThis.groupNavigationFixture.html;
         export const apartFromViews=component=>component;
-        export const APPLE=false,BOTTOM_SHEETS={matches:false},Boot=()=>null,Icon=()=>null,Keys=()=>null,Marked=()=>null,Slide=()=>null,Spinner=()=>null;
+        export const Icon=globalThis.groupNavigationFixture.icon;
+        export const Spinner=globalThis.groupNavigationFixture.spinner;
+        export const APPLE=false,BOTTOM_SHEETS={matches:false},Boot=()=>null,Keys=()=>null,Marked=()=>null,Slide=()=>null;
         export const shortPath=value=>value,timeAgo=()=>"now",railState=()=>"",scrimPress=()=>()=>{},copyText=()=>{};
         export const contextLevel=()=>"",formatBytes=String,formatTokens=String,modelLabel=()=>"Model";
         export const useSlide=()=>null,useSide=()=>"left",usePresence=()=>[],useEdge=()=>null,iconPath=()=>"";`,
@@ -145,13 +151,17 @@ const sources: Record<string, string> = {
     "private.js": "export const PrivateList=()=>null,PrivateTabs=()=>null,PrivatePane=()=>null;",
     "named-agents.js": "export const NamedAgents=()=>null;",
     "agent-tabs.js": "export const AgentTabs=()=>null;",
+    "agent-draft-pane.js": "export const AgentDraftPane=()=>null;",
+    "agent-drafts.js":
+        "export const sendAgentDraft=()=>{},updateAgentDraft=()=>{},updateAgentDraftFiles=()=>{},updateAgentDraftPastes=()=>{};",
     "session-hold.js": "export const useSessionHold=()=>({hold:null,consumeClick:()=>false});",
     "session-moves.js":
         "export const canMoveSessions=()=>false,useSessionDrag=()=>({busy:false,consumeClick:()=>false});",
     "session-seen.js": "export const sessionResultUnread=()=>false;",
     "ssh-status.js": "export const RemoteProjectIcon=()=>null;",
     "sidebar-context.js": "export const openSidebarOptions=()=>{},useSidebarContext=()=>{};",
-    "thread-type.js": 'export const ThreadTypeTag=()=>null,threadTypeLabel=()=>"Worker";',
+    "thread-type.js":
+        'export const ThreadTypeTag=globalThis.groupNavigationFixture.threadTypeTag,threadTypeLabel=()=>"Worker";',
     "browser.js":
         "export const browserAvailable=()=>false,setBrowserOpen=()=>{},toggleBrowser=()=>{};",
     "commands.js":
@@ -299,6 +309,7 @@ function setup(
             {
                 id: 1,
                 title: "Worker",
+                threadType: "worker",
                 workItemId: "work-1",
                 workItemTitle: "Build app",
                 activeThreadId: 2,
@@ -309,6 +320,7 @@ function setup(
             {
                 id: 2,
                 title: "Reviewer",
+                threadType: "reviewer",
                 workItemId: "work-1",
                 workItemTitle: "Build app",
                 activeThreadId: 2,
@@ -316,10 +328,11 @@ function setup(
                 cwd: "/repo",
                 ...supervisor,
             },
-            { id: 3, title: "Other chat", updatedAt: 1, cwd: "/other" },
+            { id: 3, title: "Other chat", threadType: "chat", updatedAt: 1, cwd: "/other" },
         ],
         pinned: [],
         projects: [],
+        projectsLoaded: true,
         sessionsLoaded: true,
         moving: {},
         server: { workItems: 1 },
@@ -328,6 +341,7 @@ function setup(
         view: {},
         launcher: false,
     };
+    fixture.projectsAvailable = false;
     fixture.navigated = [];
     fixture.opening = [];
     fixture.mutations = [];
@@ -489,6 +503,223 @@ test("expanded group opens/selects the controller, children stay exact, and arch
     }
 });
 
+// The public controller state, not execution activity, owns the group's leading indicator.
+for (const [status, executionBusy] of [
+    ["running", false],
+    ["reclaimed", true],
+    ["paused", true],
+] as const) {
+    test(`${status} supervision with execution busy=${executionBusy} owns the primary PiP icon in both disclosure states`, () => {
+        setup(status);
+        fixture.store.state.sessions[1].busy = executionBusy;
+        const list = mount(SessionList);
+
+        try {
+            for (const expanded of [true, false]) {
+                const rows = nodes(list.render()).filter(
+                    (node) => node.props["data-part"] === "session-row",
+                );
+                const head = rows.find((node) => classHas(node, "work-item-head"))!;
+                const disclosure = nodes(head).find((node) =>
+                    classHas(node, "work-item-disclosure"),
+                )!;
+                const indicator = nodes(disclosure).find((node) =>
+                    classHas(node, "work-item-pip-state"),
+                );
+                const state = status === "running" ? "PiP active" : "Human control";
+
+                assert.ok(indicator, "the controller dial replaces the leading latest-role icon");
+                assert.equal(disclosure.props["aria-expanded"], expanded);
+                assert.equal(
+                    disclosure.props["aria-label"],
+                    `${expanded ? "Collapse" : "Expand"} Work Item Build app · ${state}`,
+                );
+                assert.equal(indicator.props["aria-label"], state);
+                assert.equal(indicator.props.role, "img");
+                assert.equal(
+                    indicator.props["data-status"],
+                    status === "running" ? "running" : "reclaimed",
+                );
+                const icon = nodes(indicator).find((node) => node.type === "native-icon")!;
+
+                assert.equal(icon.props.name, "pip");
+                assert.equal(icon.props.size, 14);
+                assert.equal(
+                    nodes(disclosure).some((node) => node.type === "native-thread-type"),
+                    false,
+                );
+                assert.equal(
+                    nodes(head).filter((node) => classHas(node, "work-item-pip-state")).length,
+                    1,
+                    "the primary dial is not duplicated in metadata",
+                );
+                const metadata = nodes(head).find((node) => classHas(node, "session-meta"))!;
+
+                assert.equal(
+                    nodes(metadata).some((node) => classHas(node, "work-item-pip-state")),
+                    false,
+                );
+                assert.deepEqual(
+                    rows
+                        .filter((node) => classHas(node, "work-item-member"))
+                        .map((row) => {
+                            assert.equal(
+                                nodes(row).some((node) => classHas(node, "work-item-pip-state")),
+                                false,
+                            );
+                            const role = nodes(row).find(
+                                (node) => node.type === "native-thread-type",
+                            )!;
+
+                            return [role.props.session.id, role.props.session.threadType];
+                        }),
+                    [
+                        [1, "worker"],
+                        [2, "reviewer"],
+                    ],
+                    "execution children keep their exact role indicators",
+                );
+
+                if (expanded) {
+                    disclosure.props.onClick(click);
+                }
+            }
+
+            assert.deepEqual(fixture.navigated, [], "disclosure still only folds the group");
+            assert.deepEqual(fixture.mutations, []);
+        } finally {
+            list.dispose();
+        }
+    });
+}
+
+test("only an actively PiP-controlled parent omits duplicate execution indicators; children and ordinary rows keep theirs", () => {
+    for (const status of ["running", "reclaimed", "new", "collaborator"] as const) {
+        setup(status);
+        fixture.projectsAvailable = true;
+        Object.assign(fixture.store.state.sessions[1], {
+            busy: true,
+            subagents: { working: 2 },
+        });
+        Object.assign(fixture.store.state.sessions[2], {
+            busy: true,
+            subagents: { working: 1 },
+        });
+        const list = mount(SessionList);
+
+        try {
+            const rows = nodes(list.render()).filter(
+                (node) => node.props["data-part"] === "session-row",
+            );
+            const head = rows.find((node) => classHas(node, "work-item-head"))!;
+            const child = rows.find(
+                (node) => classHas(node, "work-item-member") && node.props["data-id"] === 2,
+            )!;
+            const ordinary = rows.find((node) => node.props["data-id"] === 3)!;
+            const forks = (row: Node) =>
+                nodes(row).filter((node) => classHas(node, "session-fork"));
+            const working = (row: Node) =>
+                nodes(row).filter((node) => node.type === "native-spinner");
+
+            assert.equal(forks(head).length, status === "running" ? 0 : 1, status);
+            assert.equal(working(head).length, status === "running" ? 0 : 1, status);
+            assert.equal(
+                head.props["data-state"],
+                "working",
+                "presentation never clears execution state",
+            );
+            assert.equal(textOf(forks(child)), "2", "the exact execution child keeps its count");
+            assert.equal(working(child).length, 1);
+            assert.equal(textOf(forks(ordinary)), "1");
+            assert.equal(working(ordinary).length, 1);
+            assert.equal(nodes(head).filter((node) => classHas(node, "session-time")).length, 1);
+            assert.deepEqual(fixture.mutations, []);
+        } finally {
+            list.dispose();
+        }
+    }
+});
+
+test("PiP parent simplification keeps failure and waiting attention visible", () => {
+    setup();
+    Object.assign(fixture.store.state.sessions[1], {
+        busy: true,
+        subagents: { working: 2, waiting: 1, failed: 2, dealt: 1 },
+    });
+    const list = mount(SessionList);
+    const head = () => nodes(list.render()).find((node) => classHas(node, "work-item-head"))!;
+
+    try {
+        const attention = nodes(head()).find((node) => classHas(node, "session-fork"))!;
+
+        assert.equal(
+            textOf(attention),
+            "2",
+            "only one waiting and one unhandled failure need attention",
+        );
+        assert.match(attention.props.title, /1 waiting/);
+        assert.match(attention.props.title, /1 failed/);
+        assert.doesNotMatch(attention.props.title, /working/);
+        assert.equal(classHas(attention, "failed"), true);
+        fixture.store.state.sessions[1].waiting = true;
+        const waiting = nodes(head()).find(
+            (node) => node.props["aria-label"] === "Waiting for approval",
+        );
+
+        assert.ok(waiting);
+        assert.match(textOf(head()), /needs you/);
+        fixture.store.state.sessions[1].waiting = false;
+        fixture.store.state.sessions[1].failed = true;
+        assert.ok(nodes(head()).find((node) => node.props["aria-label"] === "Failed"));
+        assert.deepEqual(fixture.mutations, []);
+    } finally {
+        list.dispose();
+    }
+});
+
+test("groups without a public supervisor and standalone threads retain native role indicators", () => {
+    setup("new");
+    fixture.projectsAvailable = true;
+    const list = mount(SessionList);
+
+    try {
+        const rows = nodes(list.render()).filter(
+            (node) => node.props["data-part"] === "session-row",
+        );
+        const head = rows.find((node) => classHas(node, "work-item-head"))!;
+        const disclosure = nodes(head).find((node) => classHas(node, "work-item-disclosure"))!;
+        const primary = nodes(disclosure).find((node) => node.type === "native-thread-type")!;
+
+        assert.equal(primary.props.session.id, 2);
+        assert.equal(primary.props.session.threadType, "reviewer");
+        assert.equal(primary.props.iconOnly, true);
+        assert.equal(
+            nodes(disclosure).some((node) => classHas(node, "work-item-pip-state")),
+            false,
+        );
+        assert.match(disclosure.props["aria-label"], / · Worker$/);
+        const metadata = nodes(head).find((node) => classHas(node, "session-meta"))!;
+
+        assert.equal(
+            nodes(metadata).filter((node) => classHas(node, "work-item-pip-state")).length,
+            1,
+            "non-supervisor metadata remains unchanged",
+        );
+        const standalone = rows.find((node) => node.props["data-id"] === 3)!;
+        const role = nodes(standalone).find((node) => node.type === "native-thread-type")!;
+
+        assert.equal(role.props.session.id, 3);
+        assert.equal(role.props.session.threadType, "chat");
+        assert.equal(role.props.iconOnly, true);
+        assert.equal(
+            nodes(standalone).some((node) => classHas(node, "work-item-pip-state")),
+            false,
+        );
+    } finally {
+        list.dispose();
+    }
+});
+
 function textOf(value: any): string {
     if (Array.isArray(value)) {
         return value.map(textOf).join("");
@@ -626,8 +857,13 @@ test("one normal Stop and double Escape stop active PiP even while it is idle", 
     }
 });
 
-test("collaborator rows expose no orchestration label or owner control", () => {
+test("collaborator rows expose no private indicator or owner control even with stale supervisor metadata", () => {
     setup("collaborator", null);
+
+    for (const session of fixture.store.state.sessions) {
+        session.supervisor = { conversationId: 99, status: "running", epoch: 1 };
+    }
+
     const list = mount(SessionList, { home: true });
 
     try {
@@ -638,6 +874,16 @@ test("collaborator rows expose no orchestration label or owner control", () => {
             false,
         );
         assert.doesNotMatch(textOf(tree), /PiP running|PiP paused|Let PiP take over|Manage PiP/);
+        assert.equal(
+            nodes(tree).some((node) => classHas(node, "work-item-pip-state")),
+            false,
+        );
+        const disclosure = nodes(tree).find((node) => classHas(node, "work-item-disclosure"))!;
+        const role = nodes(disclosure).find((node) => node.type === "native-thread-type")!;
+
+        assert.equal(role.props.session.id, 2);
+        assert.equal(role.props.session.threadType, "reviewer");
+        assert.doesNotMatch(disclosure.props["aria-label"], /PiP active|Human control/);
     } finally {
         list.dispose();
     }

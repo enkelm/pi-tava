@@ -49,6 +49,7 @@ const fixtures: Record<string, string> = {
     "subagents.js": inert("openSubagents"),
     "thread-type.js": inert("ThreadTypeTag"),
     "workspace-location.js": inert("conversationLocation"),
+    "named-agent-avatar.js": inert("NamedAgentAvatar"),
     "named-agents.js": `import {openSheet,store} from './store.js';
         export const namedAgentsAvailable=()=>store.state.me?.role==='owner';
         export const openAgentSettings=(id,agentId,section)=>openSheet({type:'named-agent',id,agentId,section});
@@ -61,7 +62,11 @@ const fixtures: Record<string, string> = {
     "sheets/pi-sessions.js": inert("ImportSheet piSessionsAvailable"),
     "sheets/folder.js": inert("CwdSheet"),
     "sheets/memory.js": inert("MemorySheet"),
-    "sheets/menu.js": inert("MenuSheet PlacesSheet"),
+    "sheets/menu.js": `import {html,Sheet} from '../ui.js';
+        import {AgentMenuItems} from '../topbar.js';
+        import {closeSheet} from '../store.js';
+        export const MenuSheet=({sheet})=>html\`<\${Sheet} title="Menu" onClose=\${closeSheet}><\${AgentMenuItems} sheet=\${sheet} /><//>\`;
+        export const PlacesSheet=()=>null;`,
     "sheets/message.js": inert("MessageSheet"),
     "sheets/model.js": inert("ModelPicker"),
     "sheets/pip.js": inert("PipModelPicker"),
@@ -75,6 +80,7 @@ const fixtures: Record<string, string> = {
     "sheets/project.js": inert("ProjectSheet"),
     "sheets/session-move.js": inert("SessionMoveSheet"),
     "sheets/sidebar-options.js": inert("SidebarOptions"),
+    "sheets/named-agent-options.js": inert("NamedAgentOptions"),
     "sheets/shortcuts.js": inert("ShortcutsSheet"),
     "sheets/text.js": inert("TextSheet"),
     "sheets/viewers.js": inert("ArtifactsSheet ArtifactViewer ImageViewer"),
@@ -330,7 +336,7 @@ test(
 
         await fresh();
         await click(".topbar-menu");
-        await click(".agent-menu-action"); // History from the agent menu.
+        await click(".agent-menu-actions .list-item"); // History directly from the native menu.
         await until(
             `document.querySelector('[role="dialog"]')?.getAttribute('aria-label') === 'Reviewer · History'`,
         );
@@ -361,7 +367,7 @@ test(
             `document.querySelector('[role="dialog"]')?.getAttribute('aria-label') === 'Reviewer · History'`,
         );
         await click(".sheet-back");
-        await until(`document.querySelector('.agent-header-menu') !== null`);
+        await until(`document.querySelector('.agent-menu-actions') !== null`);
         await key("Escape", "Escape");
         assert.deepEqual(
             posts,

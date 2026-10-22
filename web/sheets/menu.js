@@ -1,5 +1,6 @@
 // The menu: what can be done in this session and in the app.
 import { useLayoutEffect, useRef } from "preact/hooks";
+import { tabAgent } from "../agent-tabs.js";
 import { browserAvailable, displayUrl, setBrowserOpen } from "../browser.js";
 import { chatUnread } from "../chat.js";
 import { schedulesAvailable, triggersOn, watchAvailable, watchPr } from "../commands.js";
@@ -27,6 +28,7 @@ import {
     store,
 } from "../store.js";
 import { isPinned, togglePin } from "../theme.js";
+import { AgentMenuItems } from "../topbar.js";
 import { currentTrust, trustAvailable } from "../trust.js";
 import { branchAvailable } from "./branch.js";
 import { memoryAvailable, memoryHint, useMemory } from "./memory.js";
@@ -355,11 +357,12 @@ function trustHint() {
 }
 
 /** The menu; `places` is false when it opens from the places sheet, which just showed the tiles. */
-export function MenuSheet({ places = true }) {
+export function MenuSheet({ places = true, sheet = store.state.sheet }) {
     const { view, me, server } = store.state;
     const conversation = view.conversation;
+    const agent = tabAgent();
     const steer = canSteer();
-    const namedAgent = conversation?.pipAgent === true;
+    const namedAgent = Boolean(agent) || conversation?.pipAgent === true;
     const session = conversation?.kind === "session" && !namedAgent;
     const location = conversationLocation();
     const workItem =
@@ -371,9 +374,10 @@ export function MenuSheet({ places = true }) {
     const instructions = view.agent?.instructions;
     const memory = useMemory();
 
-    return html`<${MenuFrame} title=${conversation?.title ?? "Menu"}>
+    return html`<${MenuFrame} title=${agent?.name ?? conversation?.title ?? "Menu"}>
         ${places && html`<${Places} />`}
         <div class="menu-session">
+            ${agent && html`<${AgentMenuItems} sheet=${sheet} />`}
             ${
                 location?.kind === "ssh" &&
                 html`<div class="workspace-details">
@@ -399,7 +403,6 @@ export function MenuSheet({ places = true }) {
                         : "one person drives Pi at a time",
                 )
             }
-            ${namedAgent && steer && item("PiP settings", () => openSheet({ type: "named-agent", id: conversation.id }), "private instructions, notes and history")}
             ${session && steer && item("Rename", () => openSheet({ type: "rename" }))}
             ${
                 session &&
@@ -461,7 +464,7 @@ export function MenuSheet({ places = true }) {
             ${session && steer && driving && item("Instructions for Pi", () => openSheet({ type: "instructions" }), instructions ? "on" : "none")}
             ${conversation && steer && driving && item("Compact context", () => openSheet({ type: "compact" }), "summarize older messages")}
             ${conversation && steer && driving && item("New context", () => openSheet({ type: "reset" }), "Pi starts fresh; history stays")}
-            ${conversation && memoryAvailable() && item("Memory", () => openSheet({ type: "memory" }), memoryHint(memory))}
+            ${!agent && conversation && memoryAvailable() && item("Memory", () => openSheet({ type: "memory" }), memoryHint(memory))}
             ${schedulesAvailable() && item("Scheduled messages", () => openSheet({ type: "schedules" }), view.schedules.length === 0 ? "none" : `${view.schedules.length} coming`)}
             ${
                 watchAvailable() &&

@@ -83,6 +83,7 @@ const sources: Record<string, string> = {
     "back.js": "export const addLayer=()=>({}),removeLayer=()=>{},goBack=()=>{};",
     "session-moves.js": "export const canMoveSessions=()=>false;",
     "sidebar-context.js": "export const openSidebarOptions=()=>{};",
+    "named-agent-options.js": `export const NamedAgentOptions=({sheet})=>globalThis.orchestratorUiFixture.h('test-agent-options',{sheet});`,
     "sessions.js": "export const selectFromList=()=>{},setArchived=()=>{};",
     "theme.js": "export const isPinned=()=>false,togglePin=()=>{};",
 };
@@ -90,6 +91,8 @@ const unrelated = `export const ${[
     "ChatSheet",
     "ShareSheet",
     "NamedAgentSheet",
+    "AgentHeaderSheet",
+    "AgentModelPicker",
     "BranchPicker",
     "FileSheet",
     "FindSheet",
@@ -435,13 +438,15 @@ function fixture(t: TestContext) {
         navigated,
         render,
         show,
-        menu() {
-            bridge.openSheet({
+        menu(
+            sheet: Props = {
                 type: "sidebar-options",
                 kind: "work-item",
                 id: 1,
                 at: { touch: true },
-            });
+            },
+        ) {
+            bridge.openSheet(sheet);
             render();
         },
         close() {
@@ -493,6 +498,22 @@ function fixture(t: TestContext) {
         },
     };
 }
+
+test("named-agent Options routing preserves the exact owner-bound opening and pointer anchor", (t) => {
+    const f = fixture(t);
+    const sheet = {
+        type: "sidebar-options",
+        kind: "named-agent",
+        id: "inactive-agent",
+        userId: "owner",
+        at: { x: 120, y: 80, touch: false },
+    };
+
+    f.menu(sheet);
+    assert.equal(f.find("test-agent-options").props.sheet, sheet);
+    assert.equal(f.requests.length, 0);
+    assert.deepEqual(f.navigated, []);
+});
 
 test("one PiP click creates or reopens its chat without a goal form or duplicate request", async (t) => {
     const f = fixture(t);

@@ -10,6 +10,7 @@ import {
     defineTask,
     hook,
     type CommitPublication,
+    type ConversationHandle,
     type ConversationId,
     type Cursor,
     type Storage,
@@ -29,7 +30,11 @@ import { createSessionRoot } from "../session-roots.ts";
 import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
 import { fenced, PIP_EXTENSIONS, PIP_NAME } from "../pip.ts";
 import { clientKey, ownRequest, requestFor, requestPerson } from "../requests.ts";
-import { AgentSupervisionDoc } from "./agent-supervision.ts";
+import {
+    AgentSupervisionDoc,
+    type AgentQuestionAnswerIntent,
+    type AgentContactIntent,
+} from "./agent-supervision.ts";
 
 const context = BACKGROUND_CONTEXT;
 const EPOCH = "pip-work-epoch";
@@ -159,6 +164,13 @@ export class PipSupervision {
                                     text: `Work Item event: active execution thread /s/${pending.source} is ${pending.busy ? "already running; attach and observe, do not resend or interrupt its task" : "idle; inspect its actual outcome, questions, failures and evidence before choosing the next action"}. This event is not proof of successful completion. Read work_context status for the active role, history and current handoff options before choosing a continuation. Bounded post-review repairs use eligible Follow-up, not another implementation/review cycle. A blocked or deferred check alone is not a reason to create another thread.`,
                                 },
                                 PIP_NAME,
+                                undefined,
+                                {
+                                    kind: "workItem",
+                                    source: pending.source,
+                                    state: pending.busy ? "running" : "idle",
+                                    fingerprint: pending.fingerprint,
+                                },
                             );
                             accepted = true;
                         } catch (error) {
@@ -276,6 +288,9 @@ export class PipSupervision {
                                         answer: {
                                             text: state.question.answer.text,
                                             requestId: state.question.answer.requestId,
+                                            ...(state.question.answer.agent === undefined
+                                                ? {}
+                                                : { agent: state.question.answer.agent }),
                                         },
                                     }),
                           },
@@ -555,19 +570,33 @@ export class PipSupervision {
      * The durable parent request is accepted before this method; its identity/attachment/source
      * and native controller epoch are revalidated through actual admission, including recovery.
      */
-    async delegate(
+    delegate(id: ConversationId, supplied: User, intent: AgentContactIntent) {
+        return this.#contactFromAgent(id, supplied, intent, false);
+    }
+
+    /** Ordinary messaging queues under the existing grant, never activates or borrows its writer. */
+    sendFromAgent(
         id: ConversationId,
         supplied: User,
-        intent: {
-            requestId: string;
-            text: string;
-            agentId: string;
-            agentName?: string;
-            chatId: number;
-            agentEpoch: number;
-            attachmentEpoch: number;
-            source: number;
-        },
+        intent: AgentContactIntent,
+        sender: ConversationHandle | undefined,
+    ) {
+        if (intent.steer === true) {
+            throw new HttpError(
+                409,
+                "Ordinary controller messages queue; explicit native Stop/takeover is required before interrupting its work.",
+            );
+        }
+
+        return this.#contactFromAgent(id, supplied, intent, true, sender);
+    }
+
+    async #contactFromAgent(
+        id: ConversationId,
+        supplied: User,
+        intent: AgentContactIntent,
+        ordinary: boolean,
+        sender?: ConversationHandle,
     ) {
         const user = this.#owner(supplied);
 
@@ -588,7 +617,10 @@ export class PipSupervision {
                     receipt.source !== intent.source ||
                     receipt.attachmentEpoch !== intent.attachmentEpoch ||
                     receipt.ownerId !== user.id ||
-                    receipt.tokenHash !== user.tokenHash
+                    receipt.tokenHash !== user.tokenHash ||
+                    (ordinary
+                        ? receipt.action !== "send" || receipt.target !== Number(id)
+                        : receipt.action !== undefined && receipt.action !== "delegate")
                 ) {
                     throw new HttpError(
                         403,
@@ -596,11 +628,22 @@ export class PipSupervision {
                     );
                 }
 
+                if (ordinary) {
+                    await this.#app.pip.agents.supervision.requireControllerMessage(tx, intent);
+                }
+
                 return tx.submissionByRequest(id, intent.requestId);
             }, context);
 
             if (accepted !== undefined) {
                 return { submissionId: accepted.id };
+            }
+
+            if (ordinary && (sender === undefined || sender.id !== id)) {
+                throw new HttpError(
+                    409,
+                    "Ordinary controller messaging requires its exact native source-bound sender.",
+                );
             }
 
             this.#app.requireSee(user, id);
@@ -624,6 +667,15 @@ export class PipSupervision {
                 const state = await tx.doc(PipWorkDoc, id);
 
                 this.#owner(user);
+
+                if (ordinary) {
+                    await this.#app.pip.agents.supervision.requireControllerMessage(
+                        tx,
+                        intent,
+                        true,
+                    );
+                }
+
                 await this.#app.pip.agents.supervision.requireAttachment(
                     tx,
                     id,
@@ -644,8 +696,9 @@ export class PipSupervision {
                     state.question !== undefined ||
                     state.humanPending !== undefined ||
                     (turns.on && turns.driver !== user.id) ||
-                    (await tx.doc(LiveDoc, id)).run !== undefined ||
-                    (await tx.doc(InboxDoc, id)).items.length !== 0
+                    (receipt.action !== "send" &&
+                        ((await tx.doc(LiveDoc, id)).run !== undefined ||
+                            (await tx.doc(InboxDoc, id)).items.length !== 0))
                 ) {
                     throw new HttpError(
                         409,
@@ -668,28 +721,40 @@ export class PipSupervision {
                         );
                     }
 
-                    grant!.epoch++;
+                    if (receipt.action === "send") {
+                        if (grant!.status !== "running") {
+                            throw new HttpError(
+                                409,
+                                "Ordinary messaging cannot activate or take over this controller.",
+                            );
+                        }
+                    } else {
+                        grant!.epoch++;
+                        grant!.status = "running";
+                    }
+
                     grant!.actions++;
-                    grant!.status = "running";
                     receipt.controllerEpoch = grant!.epoch;
                     state.observed = observation.fingerprint;
                     state.lastInput = { requestId: intent.requestId, epoch: grant!.epoch };
                 }
 
                 state.reason =
-                    "Private supervisor delegated an instruction through this native controller.";
+                    receipt.action === "send"
+                        ? "Private supervisor queued a normal message without changing native ownership."
+                        : "Private supervisor delegated an instruction through this native controller.";
             }, context);
 
             // Human input uses this same native control lock and subsequently fences/aborts this
             // admission. No ownRequest, command expansion, fake owner turn or active execution send.
             try {
                 const conversation = await this.#app.conversation(id);
-                const submission = await conversation.submit(
+                const submission = await (ordinary ? sender! : conversation).submit(
                     {
                         type: "input",
                         requestId: intent.requestId,
                         whenBusy: "followUp",
-                        content: `[App delegation from private supervisor ${JSON.stringify(intent.agentName ?? intent.agentId)} (agent ${intent.agentId}), origin /s/${intent.chatId}; not a new owner instruction]\n${intent.text}\nContinue only within existing human scope. Native questions, models, budgets, active writer, action and publication gates remain in force.`,
+                        content: `[App ${ordinary ? "message" : "delegation"} from private supervisor ${JSON.stringify(intent.agentName ?? intent.agentId)} (agent ${intent.agentId}), origin /s/${intent.chatId}; not a new owner instruction]\n${intent.text}\nContinue only within existing human scope. Native questions, models, budgets, active writer, action and publication gates remain in force.`,
                     },
                     context,
                 );
@@ -708,6 +773,7 @@ export class PipSupervision {
                         ?.supervisor;
 
                     if (
+                        !ordinary &&
                         grant !== undefined &&
                         grant.epoch === receipt.controllerEpoch &&
                         grant.status === "running"
@@ -727,6 +793,126 @@ export class PipSupervision {
 
                 throw error;
             }
+        });
+    }
+
+    /** A captured private-agent decision is a service input, never a forged owner turn. */
+    async answerFromAgent(
+        id: ConversationId,
+        supplied: User,
+        intent: AgentQuestionAnswerIntent,
+        sender: ConversationHandle,
+    ) {
+        const user = this.#owner(supplied);
+
+        if (
+            Number(id) !== intent.controllerId ||
+            sender?.id !== id ||
+            user.id !== intent.ownerId ||
+            user.tokenHash !== intent.tokenHash
+        ) {
+            throw new HttpError(403, "Answer through the exact captured private-agent invocation.");
+        }
+
+        return this.#app.workItems.withControl(id, async () => {
+            const existing = await this.#app.harness.commit(async (tx) => {
+                const accepted = await tx.submissionByRequest(id, intent.requestId);
+
+                await this.#app.pip.agents.supervision.requireQuestionAnswer(
+                    tx,
+                    intent,
+                    accepted === undefined,
+                );
+                this.#owner(user);
+                await this.#app.workItems.requireController(
+                    tx,
+                    id,
+                    intent.controllerEpoch,
+                    undefined,
+                    false,
+                );
+
+                if (accepted !== undefined) {
+                    await this.#accepted(tx, id, intent.requestId);
+
+                    return accepted;
+                }
+
+                const grant = (await tx.doc(HandoffsDoc)).workItems[intent.workItemId]!.supervisor!;
+
+                if (grant.maxActions !== undefined && grant.actions >= grant.maxActions) {
+                    throw new HttpError(
+                        409,
+                        "The work action budget is exhausted; ask the owner to extend it.",
+                    );
+                }
+
+                const question = (await tx.doc(PipWorkDoc, id)).question!;
+                const previous = question.answer;
+
+                if (
+                    previous !== undefined &&
+                    (previous.submissionRequestId !== intent.requestId ||
+                        previous.text !== intent.text ||
+                        previous.agent?.agentId !== intent.agentId ||
+                        previous.agent.chatId !== intent.chatId ||
+                        previous.agent.name !== intent.agentName ||
+                        previous.epoch !== intent.controllerEpoch)
+                ) {
+                    throw new HttpError(409, "This question already has a different saved answer.");
+                }
+
+                // Validate conflict before admission, but save no answer until native acceptance.
+                return undefined;
+            }, context);
+
+            if (existing !== undefined) {
+                return { submissionId: existing.id, requestId: intent.requestId };
+            }
+
+            const model = await this.#app.agentState(id);
+
+            if (
+                model?.model === undefined ||
+                this.#app.models.getModel(model.model.provider, model.model.modelId) === undefined
+            ) {
+                throw new HttpError(409, "Choose the native controller's model before answering.");
+            }
+
+            this.#app.spend.check(user, id);
+            await this.#app.requireDriver(id, user);
+            // Recheck after asynchronous preparation; Durable's source-bound handle owns admission.
+            // This preflight is not misrepresented as an atomic native callback.
+            await this.#app.harness.commit(
+                (tx) => this.#app.pip.agents.supervision.requireQuestionAnswer(tx, intent),
+                context,
+            );
+            const part = {
+                type: "text" as const,
+                text: `[App answer from private supervisor ${JSON.stringify(intent.agentName)} (agent ${intent.agentId}), origin /s/${intent.chatId}, to exact question ${intent.questionId}; not a new owner instruction or publication approval]\n${intent.text}`,
+                pocketAgentAnswer: {
+                    questionId: intent.questionId,
+                    agentId: intent.agentId,
+                    name: intent.agentName,
+                    chatId: intent.chatId,
+                },
+            };
+            const submission = await sender.submit(
+                {
+                    type: "input",
+                    requestId: intent.requestId,
+                    content: [part],
+                    whenBusy: "followUp",
+                },
+                context,
+            );
+
+            await this.#app.harness.commit(
+                (tx) => this.#accepted(tx, id, intent.requestId),
+                context,
+            );
+
+            return { submissionId: submission.id, requestId: intent.requestId };
         });
     }
 
@@ -821,25 +1007,32 @@ export class PipSupervision {
                     const savedRequestId =
                         answer.submissionRequestId ??
                         ownRequest(answer.by, clientKey(answerKey(questionId, answer.requestId)));
-                    const admitted =
-                        (await tx.submissionByRequest(pipId, savedRequestId)) !== undefined;
+                    const native = await tx.submissionByRequest(pipId, savedRequestId);
+                    const admitted = native !== undefined;
+                    const replaceableAgent =
+                        answer.agent !== undefined &&
+                        (native?.entry === undefined || native.status === "unanswered");
                     const same =
                         answer.text === text &&
                         answer.requestId === requestId &&
                         savedRequestId === nativeRequestId;
 
                     if (!same) {
-                        // A new composer send is a new owner decision, not a retry granting old
-                        // text fresh authority. Only fenced, unadmitted replies may be replaced.
+                        // Human replies keep their existing immutable-admission rules. A fresh
+                        // owner decision may supersede a queued or unanswered agent reply, with
+                        // its original payload/outcome retained in supersededAnswers. A rejected
+                        // stale source must not trap the pending question. Unanswered does NOT
+                        // attest that prior effects were absent or reversed; normal owner input
+                        // still fences the old grant before a fresh decision can run.
                         if (
                             !fromChat ||
                             question !== state.question ||
                             grant === undefined ||
                             answer.epoch === undefined ||
-                            answer.epoch >= grant.epoch ||
+                            (answer.epoch >= grant.epoch && !replaceableAgent) ||
                             answer.requestId === requestId ||
                             savedRequestId === nativeRequestId ||
-                            admitted
+                            (admitted && !replaceableAgent)
                         ) {
                             throw new HttpError(
                                 409,
@@ -1167,6 +1360,66 @@ export class PipSupervision {
     }
 
     async #accepted(tx: Tx, id: ConversationId, requestId: string): Promise<void> {
+        if (requestId.startsWith("agent-answer-")) {
+            const receipt = (await tx.doc(AgentSupervisionDoc)).questionAnswers?.[
+                requestId.slice("agent-answer-".length)
+            ];
+            const native = await tx.submissionByRequest(id, requestId);
+
+            if (
+                receipt?.requestId !== requestId ||
+                receipt.controllerId !== Number(id) ||
+                native === undefined
+            ) {
+                throw new HttpError(
+                    409,
+                    "An agent answer needs its exact actual native acceptance receipt.",
+                );
+            }
+
+            const {
+                status: _status,
+                submissionId: _submission,
+                reason: _reason,
+                ...intent
+            } = receipt;
+
+            await this.#app.pip.agents.supervision.requireQuestionAnswer(tx, intent, false);
+            const state = await tx.doc(PipWorkDoc, id);
+            const question =
+                state.question?.id === intent.questionId
+                    ? state.question
+                    : state.questions.find((entry) => entry.id === intent.questionId);
+            const previous = question?.answer;
+
+            if (
+                question === undefined ||
+                (previous !== undefined &&
+                    (previous.submissionRequestId !== requestId ||
+                        previous.requestId !== requestId ||
+                        previous.text !== intent.text ||
+                        previous.epoch !== intent.controllerEpoch ||
+                        previous.agent?.agentId !== intent.agentId ||
+                        previous.agent.name !== intent.agentName ||
+                        previous.agent.chatId !== intent.chatId))
+            ) {
+                throw new HttpError(
+                    409,
+                    "This exact question already has a different accepted answer.",
+                );
+            }
+
+            question.answer ??= {
+                text: intent.text,
+                by: intent.ownerId,
+                requestId,
+                submissionRequestId: requestId,
+                epoch: intent.controllerEpoch,
+                at: Date.now(),
+                agent: { agentId: intent.agentId, name: intent.agentName, chatId: intent.chatId },
+            };
+        }
+
         await this.#activateAccepted(tx, id, requestId);
         const state = await tx.doc(PipWorkDoc, id);
         const question = state.question;
@@ -1179,9 +1432,20 @@ export class PipSupervision {
                     clientKey(answerKey(question.id, question.answer.requestId)),
                 )) === requestId
         ) {
+            if (
+                question.answer.agent !== undefined &&
+                (await tx.submissionByRequest(id, requestId))?.entry === undefined
+            ) {
+                // Queue acceptance must not release the decision gate while the asking run is active.
+                return;
+            }
+
             state.questions.push(question);
             delete state.question;
-            state.reason = "Your reply was accepted in PiP chat.";
+            state.reason =
+                question.answer.agent === undefined
+                    ? "Your reply was accepted in PiP chat."
+                    : `${question.answer.agent.name}'s agent reply was accepted for this exact question.`;
         }
     }
 
@@ -1191,6 +1455,118 @@ export class PipSupervision {
         }
 
         await this.#app.harness.commit((tx) => this.#accepted(tx, id, requestId), context);
+    }
+
+    /** Native records are read outside Tx; commits verify the exact live input/receipt pair again. */
+    async #inputRequests(
+        id: ConversationId,
+        ctx: Context,
+    ): Promise<Map<number, string | undefined>> {
+        const requests = new Map<number, string | undefined>();
+        const live = await this.#app.harness.snapshot(LiveDoc, id, ctx);
+
+        for (const input of live?.run?.inputs ?? []) {
+            const submission = await (await this.#app.harness.submission(input, ctx))?.status(ctx);
+
+            if (submission?.conversationId !== id) {
+                throw new HttpError(409, "The controller input has no exact native submission.");
+            }
+
+            requests.set(Number(input), submission.requestId);
+        }
+
+        return requests;
+    }
+
+    /** Revalidate placed service inputs, including queued replies crossing Stop/owner-input fences. */
+    async #requireAgentAnswers(
+        tx: Tx,
+        id: ConversationId,
+        requests: ReadonlyMap<number, string | undefined>,
+    ): Promise<void> {
+        for (const input of (await tx.doc(LiveDoc, id)).run?.inputs ?? []) {
+            if (!requests.has(Number(input))) {
+                throw new HttpError(
+                    409,
+                    "The controller's accepted native inputs changed during admission.",
+                );
+            }
+
+            const requestId = requests.get(Number(input));
+
+            if (
+                requestId !== undefined &&
+                (await tx.submissionByRequest(id, requestId))?.id !== input
+            ) {
+                throw new HttpError(
+                    409,
+                    "The controller input no longer matches its exact native request.",
+                );
+            }
+
+            if (requestId?.startsWith("agent-delegation-")) {
+                const receipt = (await tx.doc(AgentSupervisionDoc)).requests[
+                    requestId.slice("agent-delegation-".length)
+                ];
+                const grant = this.#app.workItems.itemFor(id)?.supervisor;
+                const user =
+                    receipt === undefined ? undefined : this.#app.config.userById(receipt.ownerId);
+
+                if (
+                    receipt?.requestId !== requestId ||
+                    receipt.controllerId !== Number(id) ||
+                    receipt.status === "blocked" ||
+                    receipt.controllerEpoch !== grant?.epoch ||
+                    user?.role !== "owner" ||
+                    user.tokenHash !== receipt.tokenHash
+                ) {
+                    throw new HttpError(
+                        409,
+                        "This exact controller input was fenced by a newer native owner decision.",
+                    );
+                }
+
+                if (receipt.action === "send") {
+                    await this.#app.pip.agents.supervision.requireControllerMessage(tx, receipt);
+                } else {
+                    await this.#app.pip.agents.supervision.requireAttachment(
+                        tx,
+                        id,
+                        receipt.agentId,
+                        receipt.agentEpoch,
+                        receipt.attachmentEpoch,
+                    );
+                }
+
+                continue;
+            }
+
+            if (!requestId?.startsWith("agent-answer-")) {
+                continue;
+            }
+
+            const receipt = (await tx.doc(AgentSupervisionDoc)).questionAnswers?.[
+                requestId.slice("agent-answer-".length)
+            ];
+
+            if (
+                receipt === undefined ||
+                receipt.requestId !== requestId ||
+                receipt.controllerId !== Number(id)
+            ) {
+                throw new HttpError(403, "This agent reply has no exact native source receipt.");
+            }
+
+            const {
+                status: _status,
+                submissionId: _submission,
+                reason: _reason,
+                ...intent
+            } = receipt;
+
+            await this.#app.pip.agents.supervision.requireQuestionAnswer(tx, intent, false);
+            await this.#accepted(tx, id, requestId);
+        }
     }
 
     readonly hooks = [
@@ -1226,6 +1602,23 @@ export class PipSupervision {
                                 }
                             }, context),
                         );
+                    }
+
+                    const requests = await this.#inputRequests(api.conversationId, ctx);
+
+                    const confirmInputs = () =>
+                        this.#app.harness.commit(
+                            (tx) => this.#requireAgentAnswers(tx, api.conversationId, requests),
+                            ctx,
+                        );
+
+                    if ([...requests.values()].some((id) => id?.startsWith("agent-answer-"))) {
+                        // Answer hydration changes the pending decision under the control lock.
+                        await this.#app.workItems.withControl(api.conversationId, confirmInputs);
+                    } else {
+                        // A wake can run before its delivery cursor settles. Do not wait on the
+                        // wake phase's settlement lock just to validate immutable native inputs.
+                        await confirmInputs();
                     }
 
                     const user = this.#app.workItems.controllerCurrent(
@@ -1270,6 +1663,12 @@ export class PipSupervision {
                         throw new Error("Work supervision changed before provider dispatch.");
                     }
 
+                    const currentRequests = await this.#inputRequests(api.conversationId, ctx);
+
+                    await this.#app.harness.commit(
+                        (tx) => this.#requireAgentAnswers(tx, api.conversationId, currentRequests),
+                        ctx,
+                    );
                     this.#app.spend.check(user, api.conversationId);
 
                     return undefined;
@@ -1332,9 +1731,11 @@ export class PipSupervision {
 
         const epoch = (await this.epoch(api, ctx))!;
         const id = api.conversationId;
+        const requests = await this.#inputRequests(id, ctx);
 
         return this.#app.workItems.withControl(id, async () => {
             const permitted = await api.commit(async (tx) => {
+                await this.#requireAgentAnswers(tx, id, requests);
                 const state = await tx.doc(PipWorkDoc, id);
                 const key = keyOf(api);
 

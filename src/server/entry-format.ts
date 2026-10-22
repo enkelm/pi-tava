@@ -10,6 +10,58 @@ export const NOTE_ENTRY = "pocket.note";
 /** An immutable question in a Work Item's private PiP chat, written with its decision record. */
 export const PIP_QUESTION_ENTRY = "pocket.pip-question";
 
+/** Server-only provenance persisted on the first native TextContent part, never inferred from prose. */
+export type WorkItemEvent = {
+    kind: "workItem";
+    source: number;
+    state: "running" | "idle";
+    fingerprint: string;
+};
+
+/** A correlated service answer remains visible, separate from passive application observations. */
+export type AgentAnswer = {
+    questionId: string;
+    agentId: string;
+    name: string;
+    chatId: number;
+};
+
+const positiveId = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+const boundedText = (value: unknown, max: number): value is string =>
+    typeof value === "string" && value.trim().length > 0 && value.length <= max;
+
+/** Conservative readers of additive native content metadata; imported entries must reject it separately. */
+export function isWorkItemEvent(value: unknown): value is WorkItemEvent {
+    if (value === null || typeof value !== "object") {
+        return false;
+    }
+
+    const event = value as Record<string, unknown>;
+
+    return (
+        event.kind === "workItem" &&
+        positiveId(event.source) &&
+        (event.state === "running" || event.state === "idle") &&
+        boundedText(event.fingerprint, 256)
+    );
+}
+
+export function isAgentAnswer(value: unknown): value is AgentAnswer {
+    if (value === null || typeof value !== "object") {
+        return false;
+    }
+
+    const actor = value as Record<string, unknown>;
+
+    return (
+        positiveId(actor.chatId) &&
+        boundedText(actor.questionId, 256) &&
+        boundedText(actor.agentId, 256) &&
+        boundedText(actor.name, 200)
+    );
+}
+
 /** Imported context notes have no asserted human author. Metadata is not a visible transcript card. */
 export const IMPORT_NOTE_ENTRY = "pocket.import-note";
 export const IMPORT_META_ENTRY = "pocket.import-meta";

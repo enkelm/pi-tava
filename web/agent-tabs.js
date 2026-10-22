@@ -1,4 +1,5 @@
 // Named identities keep saved chats and unsent local drafts in one compact navigation rail.
+import { Fragment } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { store, navigate } from "./store.js";
 import { html, Icon } from "./ui.js";
@@ -16,6 +17,50 @@ const dismissed = new Map();
 const focusAfterClose = new Map();
 const closedKey = (userId, agentId) => `pocket.pipClosedTabs.${userId}.${agentId}`;
 const titleOf = (chat) => chat.title || (chat.draft ? "New chat" : `Chat ${chat.id}`);
+let pending = null;
+
+/** UI-only tab intent, never authority for settings, Memory, controllers or a loaded conversation. */
+function pendingTabAgent() {
+    const { me, conversationId, privateId, agentDraft, view, namedAgents, missing } = store.state;
+    const agent =
+        pending &&
+        namedAgentsAvailable() &&
+        me.id === pending.userId &&
+        conversationId === pending.source &&
+        privateId == null &&
+        !agentDraft &&
+        view.conversation == null &&
+        missing == null
+            ? namedAgents?.find((item) => item.agentId === pending.agentId)
+            : null;
+
+    if (!agent) {
+        pending = null;
+    }
+
+    return agent ?? null;
+}
+
+// Invalidate on access/catalogue/route changes, even if no chrome renders during that change.
+store.subscribe(() => pending && pendingTabAgent());
+
+function navigateAgentTab(agentId, source) {
+    if (
+        !namedAgentsAvailable() ||
+        !Number.isSafeInteger(source) ||
+        source <= 0 ||
+        !store.state.namedAgents?.some((item) => item.agentId === agentId)
+    ) {
+        return;
+    }
+
+    const userId = store.state.me.id;
+
+    navigate(source);
+    // Native navigation may publish intermediate state before committing its destination.
+    pending = { userId, agentId, source };
+    pendingTabAgent();
+}
 
 function closedTabs(key) {
     if (!dismissed.has(key)) {
@@ -59,7 +104,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
     const selected = visible.find((chat) => chat.id === source);
     const current = () =>
         store.state.me?.id === userId &&
-        tabAgent()?.agentId === agent.agentId &&
+        tabChromeAgent()?.agentId === agent.agentId &&
         (selectedAgentDraft()?.id ?? store.state.conversationId) === source;
 
     const choose = (chat) => {
@@ -72,7 +117,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
         if (chat.draft) {
             selectAgentDraft(chat.id);
         } else {
-            navigate(chat.id);
+            navigateAgentTab(agent.agentId, chat.id);
         }
     };
 
@@ -90,8 +135,9 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
     };
 
     useEffect(() => {
-        // Native navigation and History reopen exactly the saved chat selected by the route.
-        if (typeof source === "number" && closedTabs(tabsKey).has(source)) {
+        // An outgoing passive effect must not undo a close before the queued root navigation renders.
+        // Native navigation and History reopen only the saved chat still selected by the live route.
+        if (current() && typeof source === "number" && closedTabs(tabsKey).has(source)) {
             const ids = new Set(closedTabs(tabsKey));
 
             ids.delete(source);
@@ -150,7 +196,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
             if (next?.draft) {
                 selectAgentDraft(next.id);
             } else if (next) {
-                navigate(next.id);
+                navigateAgentTab(agent.agentId, next.id);
             } else {
                 focusAfterClose.delete(tabsKey);
                 Promise.resolve(toSessions()).then(() => {
@@ -286,14 +332,14 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
     </span>`;
 
     if (picker) {
-        return html`<>
+        return html`<${Fragment}>
             <p class="small muted">
                 Closing a saved tab keeps its chat and running work. Find it again in History.
             </p>
             <nav class="agent-chat-choices" aria-label=${`${agent.name} open chats`}>
                 ${visible.map((chat) => chatItem(chat, true))}
             </nav>
-        </>`;
+        </${Fragment}>`;
     }
 
     return html`<div class="agent-tabs" data-part="topbar-title">
@@ -342,8 +388,11 @@ export function tabAgent() {
     return (namedAgents ?? []).find((item) => item.agentId === identity) ?? null;
 }
 
+/** Local tab chrome may use explicit navigation intent; remote actions still require tabAgent(). */
+export const tabChromeAgent = () => tabAgent() ?? pendingTabAgent();
+
 export function AgentTabs({ picker = false, onChoose, expanded = false, close } = {}) {
-    const agent = tabAgent();
+    const agent = tabChromeAgent();
     const { conversationId, me } = store.state;
 
     if (!agent) {

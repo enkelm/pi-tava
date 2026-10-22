@@ -47,6 +47,26 @@ const bridge = {
 const descriptor = Object.getOwnPropertyDescriptor(globalThis, "namedAgentsUiFixture");
 const storageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
 const storage = new Map<string, string>();
+const browserEvents = new EventTarget();
+const browserDescriptors = new Map(
+    ["document", "getSelection", "addEventListener", "removeEventListener"].map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(globalThis, key),
+    ]),
+);
+
+Object.defineProperties(globalThis, {
+    document: { configurable: true, value: new EventTarget() },
+    getSelection: { configurable: true, value: () => null },
+    addEventListener: {
+        configurable: true,
+        value: browserEvents.addEventListener.bind(browserEvents),
+    },
+    removeEventListener: {
+        configurable: true,
+        value: browserEvents.removeEventListener.bind(browserEvents),
+    },
+});
 
 Object.defineProperty(globalThis, "sessionStorage", {
     configurable: true,
@@ -58,6 +78,14 @@ Object.defineProperty(globalThis, "sessionStorage", {
 });
 Object.defineProperty(globalThis, "namedAgentsUiFixture", { configurable: true, value: bridge });
 after(() => {
+    for (const [key, previous] of browserDescriptors) {
+        if (previous) {
+            Object.defineProperty(globalThis, key, previous);
+        } else {
+            Reflect.deleteProperty(globalThis, key);
+        }
+    }
+
     if (descriptor) {
         Object.defineProperty(globalThis, "namedAgentsUiFixture", descriptor);
     } else {
@@ -79,7 +107,7 @@ const sources: Record<string, string> = {
     "./sheets/model.js": `export const ModelPicker=()=>null;`,
     "./ui.js": `const f=globalThis.namedAgentsUiFixture;
         export const html=f.html,Icon=({name,size})=>f.h('test-icon',{name,size}),Loader=({label})=>f.h('test-loader',{label});
-        export const Sheet=({children})=>children,timeAgo=()=>"Recently";`,
+        export const Sheet=({children})=>children,timeAgo=()=>"Recently",Spinner=props=>f.h('test-spinner',props);`,
 };
 
 const blobatarModule = import.meta.resolve("blobatar/react");
@@ -99,7 +127,7 @@ registerHooks({
             }
         }
 
-        const source = /\/web\/(?:named-agents|named-agent-avatar)\.js$/.test(
+        const source = /\/web\/(?:named-agents|named-agent-avatar|sidebar-context)\.js$/.test(
             context.parentURL?.split("?")[0] ?? "",
         )
             ? sources[specifier]
@@ -110,7 +138,7 @@ registerHooks({
             : { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };
     },
 });
-const { NamedAgents, NamedAgentSheet } = await import(
+const { NamedAgents, NamedAgentSheet, openAgentSettings } = await import(
     new URL("../web/named-agents.js", import.meta.url).href
 );
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -136,12 +164,13 @@ function textOf(value: any): string {
           : "";
 }
 
-function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet }) {
+function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet, openAgentSettings }) {
     const fibers = new Map<string, Fiber>();
     const effects: (() => void)[] = [];
     const requests: Request[] = [];
     const navigated: number[] = [];
     const openedDrafts: string[] = [];
+    const elements = new Map<string, Props>();
     const state: Props = {
         me: { id: `owner-${++owner}`, role: "owner" },
         server: { privateAgents: 4, extensions: ["pocket-memory"] },
@@ -232,7 +261,26 @@ function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet }) 
             return resolve(node.type(node.props), `${key}.child`);
         }
 
-        return { ...node, props: { ...node.props, children: resolve(node.props.children, path) } };
+        const element =
+            elements.get(path) ??
+            Object.assign(new EventTarget(), {
+                closest: () => null,
+                getBoundingClientRect: () => ({ left: 16, bottom: 44 }),
+            });
+
+        elements.set(path, element);
+
+        if (typeof node.ref === "function") {
+            node.ref(element);
+        } else if (node.ref) {
+            node.ref.current = element;
+        }
+
+        return {
+            ...node,
+            element,
+            props: { ...node.props, children: resolve(node.props.children, `${path}.children`) },
+        };
     };
 
     const render = () => {
@@ -243,7 +291,9 @@ function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet }) 
             tree = resolve(
                 [
                     h(components.NamedAgents, {}),
-                    state.sheet ? h(components.NamedAgentSheet, { sheet: state.sheet }) : null,
+                    state.sheet?.type === "named-agent"
+                        ? h(components.NamedAgentSheet, { sheet: state.sheet })
+                        : null,
                 ],
                 "root",
             );
@@ -324,6 +374,23 @@ function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet }) 
         },
         navigated,
         openedDrafts,
+        context(node: any, keyboard?: "F10" | "ContextMenu") {
+            const event = Object.assign(
+                new Event(keyboard ? "keydown" : "contextmenu", { cancelable: true }),
+                keyboard
+                    ? { key: keyboard, shiftKey: keyboard === "F10" }
+                    : { clientX: 120, clientY: 80, button: 2, pointerType: "mouse" },
+            );
+
+            node.element.dispatchEvent(event);
+            render();
+
+            return event.defaultPrevented;
+        },
+        openSettings(agent = state.namedAgents[0]) {
+            components.openAgentSettings(agent.id, agent.agentId);
+            render();
+        },
         find,
         label,
         settle,
@@ -366,7 +433,7 @@ const settings = (revision = 3) => ({
 test("settings keeps exact retained chats available without creating or cancelling work", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.openSettings();
     await f.settle();
     f.request(0).resolve({
         ...settings(),
@@ -402,29 +469,64 @@ test("settings keeps exact retained chats available without creating or cancelli
     );
 });
 
-test("only a capable owner sees agents, with disclosure, exact conversation navigation and pinned edit", async (t) => {
+test("only a capable owner sees agents, with route-based selection, disclosure, navigation and public settings", async (t) => {
     const f = fixture(t);
 
     assert.equal(f.requests.length, 0, "listing uses the realtime catalogue, not polling");
-    assert.match(f.text(), /Long-lived reviewerWorking/);
+    assert.match(f.text(), /Long-lived reviewer/);
     const toggle = f.label("Collapse PiPs");
     const listId = toggle.props["aria-controls"];
 
     assert.ok(listId, "disclosure identifies its controlled list");
     assert.equal(toggle.props["aria-expanded"], true);
+    const groupIsSelected = () => /(?:^|\s)on(?:\s|$)/.test(f.label("PiPs controls").props.class);
+
+    assert.equal(groupIsSelected(), false, "expansion alone does not select PiPs");
     f.click(toggle);
     assert.equal(f.label("Expand PiPs").props["aria-expanded"], false);
+    assert.equal(groupIsSelected(), false);
     assert.equal(
         nodes(f.label("PiPs")).find((node) => node.props.id === listId)?.props.hidden,
         true,
     );
     assert.doesNotMatch(f.text(), /Long-lived reviewer/);
-    f.click(f.label("Expand PiPs"));
     f.patch({ conversationId: 7 });
-    assert.equal(f.find("button", "Long-lived reviewerWorking").props["aria-current"], "page");
-    f.click(f.find("button", "Long-lived reviewerWorking"));
+    assert.equal(groupIsSelected(), true, "a saved PiP chat selects the folded group");
+    f.click(f.label("Expand PiPs"));
+    assert.equal(f.find("button", "Long-lived reviewer").props["aria-current"], "page");
+    f.click(f.find("button", "Long-lived reviewer"));
     assert.deepEqual(f.navigated, [7]);
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.patch({ namedAgents: [{ ...f.state.namedAgents[0], chatIds: [7, 19] }] });
+
+    for (const [patch, selected, reason] of [
+        [{ conversationId: 19 }, true, "any retained saved chat selects its identity"],
+        [
+            { conversationId: null, agentDraft: { id: "local-draft", agentId: "agent-reviewer" } },
+            true,
+            "a local PiP draft selects its identity without a saved chat",
+        ],
+        [
+            { agentDraft: { id: "other-draft", agentId: "another-agent" } },
+            false,
+            "an unrelated draft deselects PiPs",
+        ],
+        [
+            { conversationId: 2, agentDraft: null },
+            false,
+            "an unrelated route is not selected even while expanded",
+        ],
+        [{ conversationId: null }, false, "leaving every saved chat and draft clears selection"],
+    ] as const) {
+        f.patch(patch);
+        assert.equal(groupIsSelected(), selected, reason);
+        assert.equal(
+            f.find("button", "Long-lived reviewer").props["aria-current"],
+            selected ? "page" : undefined,
+            reason,
+        );
+    }
+
+    f.openSettings();
     await f.settle();
     assert.equal(f.request(0).path, "c/7/private-agent");
     f.request(0).resolve(settings());
@@ -442,6 +544,108 @@ test("only a capable owner sees agents, with disclosure, exact conversation navi
     }
 });
 
+test("busy named agents use the shared thread spinner and idle agents keep recency", (t) => {
+    const f = fixture(t);
+    const row = f.find("button", "Long-lived reviewer");
+
+    assert.equal(nodes(row).filter((node) => node.type === "test-spinner").length, 1);
+    assert.doesNotMatch(textOf(row), /Working|Recently|Ready/);
+    f.patch({ namedAgents: [{ ...f.state.namedAgents[0], busy: false }] });
+    const idle = f.find("button", "Long-lived reviewerRecently");
+
+    assert.equal(
+        nodes(idle).some((node) => node.type === "test-spinner"),
+        false,
+    );
+    f.patch({ namedAgents: [{ ...f.state.namedAgents[0], updatedAt: null }] });
+    assert.ok(f.find("button", "Long-lived reviewerReady"));
+});
+
+test("named-agent row touch holds open exact options, cancel for scroll/lift, and consume the held release", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const f = fixture(t);
+    const row = f.find("button", "Long-lived reviewer");
+    const element = (row as any).element as EventTarget & {
+        closest: (selector: string) => unknown;
+    };
+
+    // The gesture target is the row button itself, not an inert container. Nested controls
+    // remain excluded by the native recognizer; only the root row is the hold surface.
+    element.closest = (selector) => (selector.includes("button") ? element : null);
+
+    const touch = (type: string, x = 120, y = 80) => {
+        const finger = { identifier: 7, clientX: x, clientY: y };
+        const event = Object.assign(new Event(type, { cancelable: true }), {
+            touches: type === "touchend" || type === "touchcancel" ? [] : [finger],
+            changedTouches: [finger],
+        });
+
+        element.dispatchEvent(event);
+
+        return event;
+    };
+
+    touch("touchstart");
+    t.mock.timers.tick(449);
+    assert.equal(f.state.sheet, null);
+    touch("touchend");
+    t.mock.timers.tick(1);
+    assert.equal(f.state.sheet, null, "a short tap is not a hold");
+    touch("touchstart");
+    touch("touchmove", 130);
+    t.mock.timers.tick(450);
+    assert.equal(f.state.sheet, null, "scroll intent cancels before opening");
+    touch("touchstart");
+    touch("touchcancel");
+    t.mock.timers.tick(450);
+    assert.equal(f.state.sheet, null, "native cancellation cannot open later");
+    touch("touchstart");
+    t.mock.timers.tick(450);
+    assert.deepEqual(f.state.sheet, {
+        type: "sidebar-options",
+        kind: "named-agent",
+        id: "agent-reviewer",
+        userId: f.state.me.id,
+        at: { x: 120, y: 80, touch: true },
+    });
+    assert.equal(touch("touchend").defaultPrevented, true);
+    const click = Object.assign(new Event("click", { cancelable: true }), { detail: 1 });
+
+    document.dispatchEvent(click);
+    assert.equal(click.defaultPrevented, true, "the held contact cannot click through the menu");
+    assert.deepEqual(f.navigated, []);
+    assert.deepEqual(f.openedDrafts, []);
+});
+
+test("named-agent rows open exact anchored options through right-click and keyboard without navigating", (t) => {
+    const f = fixture(t);
+    const row = f.find("button", "Long-lived reviewer");
+
+    assert.equal(f.context(row), true);
+    assert.deepEqual(f.state.sheet, {
+        type: "sidebar-options",
+        kind: "named-agent",
+        id: "agent-reviewer",
+        userId: f.state.me.id,
+        at: { x: 120, y: 80, touch: false },
+    });
+    assert.equal(f.state.conversationId, 2, "right-click does not select the agent first");
+    assert.deepEqual(f.navigated, []);
+    assert.deepEqual(f.openedDrafts, []);
+    assert.equal(f.requests.length, 0, "opening object options is passive");
+
+    for (const key of ["F10", "ContextMenu"] as const) {
+        f.patch({ sheet: null });
+        assert.equal(f.context(row, key), true);
+        assert.deepEqual(f.state.sheet.at, { x: 32, y: 44, keyboard: true });
+        assert.equal(f.state.sheet.id, "agent-reviewer");
+    }
+
+    f.patch({ sheet: null, me: { id: "guest", role: "guest" } });
+    assert.equal(f.context(row), false, "revoked rows detach their context listener");
+    assert.equal(f.state.sheet, null);
+});
+
 test("the PiPs entry has a leading PiP icon, no count or chevron, and a semantic sibling creation control", (t) => {
     const f = fixture(t);
     const entry = f.label("PiPs controls");
@@ -451,6 +655,11 @@ test("the PiPs entry has a leading PiP icon, no count or chevron, and a semantic
 
     assert.equal(entry.props.role, "group");
     assert.deepEqual(buttons, [toggle, create], "both native controls share the same entry");
+    assert.deepEqual(
+        nodes(f.label("PiPs")).filter((node) => node.type === "button"),
+        [toggle, create, f.find("button", "Long-lived reviewer")],
+        "the sidebar has navigation but no per-agent edit control",
+    );
     assert.equal(entry.props.onClick, undefined, "the shared entry is not a competing toggle");
     assert.equal(textOf(toggle), "PiPs", "no numeric count or empty-count label");
     assert.equal(toggle.props["aria-describedby"], undefined, "no obsolete count reference");
@@ -463,6 +672,7 @@ test("the PiPs entry has a leading PiP icon, no count or chevron, and a semantic
         "the PiP icon is the sole leading icon; no disclosure chevron",
     );
     assert.equal(nodes(toggle)[1]?.type, "test-icon");
+    assert.equal(nodes(toggle)[1]?.props.size, 18, "same leading icon size as the source tabs");
     assert.deepEqual(
         nodes(create)
             .filter((node) => node.type === "test-icon")
@@ -566,14 +776,13 @@ test("genuine Blobatar images keep their identity through rename and remount and
     );
     remounted.click(remounted.find("button", "Long-lived reviewerReady"));
     assert.deepEqual(remounted.navigated, [8], "a failed image cannot disable its PiP");
-    assert.ok(remounted.label("Edit Long-lived reviewer"));
 });
 
 test("settings have charter and Memory without inbox or attachment configuration", async (t) => {
     const f = fixture(t);
 
     f.patch({ conversationId: 7, view: { conversation: { id: 7, pipAgentId: "agent-reviewer" } } });
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.openSettings();
     await f.settle();
     f.request(0).resolve(settings());
     await f.settle();
@@ -630,7 +839,7 @@ test("an identity without saved Chats opens a local draft and edits approved sha
     assert.deepEqual(f.openedDrafts, ["agent-reviewer"]);
     assert.deepEqual(f.navigated, []);
     assert.equal(f.requests.length, 0);
-    f.click(f.label("Edit Reviewer"));
+    f.openSettings();
     await f.settle();
     assert.equal(f.request(0).path, "pip/agents/agent-reviewer");
     f.request(0).resolve({ ...settings(), id: null, chatIds: [], chats: [] });
@@ -790,7 +999,7 @@ test("a rejected project stays correctable and No project creates without the op
 test("settings conflict preserves the draft, requires a fresh revision, and undo is a durable server mutation", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.openSettings();
     await f.settle();
     f.request(0).resolve(settings());
     await f.settle();
@@ -833,7 +1042,7 @@ test("settings conflict preserves the draft, requires a fresh revision, and undo
 test("a definite validation rejection keeps the draft editable for a corrected revisioned save", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.openSettings();
     await f.settle();
     f.request(0).resolve(settings());
     await f.settle();
@@ -878,7 +1087,7 @@ test("advanced settings report project remit availability without a project edit
     ] as const) {
         const f = fixture(t);
 
-        f.click(f.label("Edit Long-lived reviewer"));
+        f.openSettings();
         await f.settle();
         f.request(0).resolve({ ...settings(), project });
         await f.settle();
@@ -897,7 +1106,7 @@ test("advanced settings report project remit availability without a project edit
 test("an inactive instruction proposal only fills the owner's draft until an explicit revisioned save", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.openSettings();
     await f.settle();
     f.request(0).resolve({
         ...settings(),
@@ -992,7 +1201,7 @@ test("Work Item quick access reports server states and links exact native orches
             { id: 93, workItemId: "work-no-controller", title: "Must not create a controller" },
         ],
     });
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.openSettings();
     await f.settle();
     f.request(0).resolve({ ...settings(), controllers });
     await f.settle();
@@ -1050,7 +1259,7 @@ test("a dismissed opening cannot overwrite a new draft or navigate when its muta
     f.input("Agent name", "My PiP");
     f.submit();
     f.click(f.find("button", "Close"));
-    f.click(f.label("Edit Long-lived reviewer"));
+    f.openSettings();
     await f.settle();
     f.request(2).resolve(settings());
     await f.settle();

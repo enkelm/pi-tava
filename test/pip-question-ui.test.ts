@@ -102,6 +102,39 @@ test("private chat shows the complete ask and retries only an explicit immutable
     assert.deepEqual(sends, [[42, question]], "double activation cannot duplicate a pinned reply");
     release();
     await first;
+    await t.test(
+        "an agent's saved answer is attributed to the agent and cannot be retried as a human reply",
+        () => {
+            const agentQuestion = {
+                ...question,
+                answer: {
+                    ...question.answer,
+                    agent: { agentId: "agent-tava", name: "Tava", chatId: 73 },
+                },
+            };
+            const agentTree = PipQuestion({ question: agentQuestion, conversationId: 42 });
+            const rendered = nodes(agentTree);
+            const labels = rendered
+                .filter((node) => node.type === "p")
+                .flatMap((node) => node.props.children)
+                .join("");
+
+            assert.match(labels, /Tava/);
+            assert.doesNotMatch(labels, /Your saved reply/);
+            assert.deepEqual(
+                rendered
+                    .filter((node) => node.type === fixture.Markdown)
+                    .map((node) => node.props.text),
+                [agentQuestion.text, agentQuestion.answer.text],
+            );
+            assert.equal(
+                rendered.some((node) => node.type === "button"),
+                false,
+                "an uncertain native agent answer must not become a new human input through Retry",
+            );
+            assert.equal(sends.length, 1, "display never retries or activates either source");
+        },
+    );
     assert.equal(PipQuestion({ question: null, conversationId: 42 }), null);
     assert.equal(
         PipQuestion({

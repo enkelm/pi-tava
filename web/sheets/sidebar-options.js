@@ -21,7 +21,7 @@ import { copyText, html, Icon, Sheet, SheetInfo } from "../ui.js";
 const NARROW = matchMedia("(max-width: 699px)");
 
 /** Contact-positioned tablet/desktop menu, using the existing popup surface and sheets' Back stack. */
-function OptionsSurface({ title, at, bottom: mobile, children }) {
+export function OptionsSurface({ title, at, bottom: mobile, children }) {
     const ref = useRef(null);
     const [position, setPosition] = useState({ left: at?.x ?? 8, top: at?.y ?? 8 });
     const closing = useContext(SheetInfo)?.closing;

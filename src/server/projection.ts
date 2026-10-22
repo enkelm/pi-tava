@@ -6,6 +6,7 @@ import { estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { EntryRecord, LiveState, UsageState } from "@earendil-works/pi-durable";
 import {
     COMMAND_ENTRY,
+    type AgentAnswer,
     type CommandData,
     FILE_BLOCK,
     FROM_PI_ENTRY,
@@ -13,6 +14,8 @@ import {
     type FromPiData,
     IMPORT_META_ENTRY,
     IMPORT_NOTE_ENTRY,
+    isAgentAnswer,
+    isWorkItemEvent,
     NOTE_ENTRY,
     PIP_QUESTION_ENTRY,
     SHELL_ENTRY,
@@ -77,6 +80,16 @@ export type ClientEntry =
     | ({ id: number; kind: "command"; truncated?: number } & CommandData)
     | { id: number; kind: "note"; text: string; name: string; imported?: boolean }
     | { id: number; kind: "pipQuestion"; text: string; questionId: string }
+    | {
+          id: number;
+          kind: "appEvent";
+          event: "workItem";
+          source: number;
+          state: "running" | "idle";
+          text: string;
+          at?: number;
+      }
+    | { id: number; kind: "agentAnswer"; actor: AgentAnswer; text: string; at?: number }
     | { id: number; kind: "fromPi"; title: string; file: string }
     | { id: number; kind: "other"; entryKind: string };
 
@@ -359,6 +372,47 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
 
             if ((entry.data as { imported?: boolean } | undefined)?.imported === true) {
                 return { id, kind: "user", text, images, ...named, from: "Imported user" };
+            }
+
+            // Only server-created native text parts carry provenance. Never recognize body-text lookalikes,
+            // imported metadata or ambiguous markers. Keep all original instructions inspectable.
+            const first = parts?.[0] as
+                | (ContentPart & {
+                      pocketAppEvent?: unknown;
+                      pocketAgentAnswer?: unknown;
+                  })
+                | undefined;
+
+            if (first?.type === "text" && typeof first.text === "string") {
+                const event = first.pocketAppEvent;
+                const actor = first.pocketAgentAnswer;
+
+                if (actor === undefined && isWorkItemEvent(event)) {
+                    return {
+                        id,
+                        kind: "appEvent",
+                        event: "workItem",
+                        source: event.source,
+                        state: event.state,
+                        text,
+                        ...madeAt(message),
+                    };
+                }
+
+                if (event === undefined && isAgentAnswer(actor)) {
+                    return {
+                        id,
+                        kind: "agentAnswer",
+                        text,
+                        actor: {
+                            questionId: actor.questionId,
+                            agentId: actor.agentId,
+                            name: actor.name,
+                            chatId: actor.chatId,
+                        },
+                        ...madeAt(message),
+                    };
+                }
             }
 
             return prefixed === null
@@ -807,6 +861,14 @@ export function snippet(text: string, max = 280): string {
 
 /** The visible text of a projected entry, as plain text: what a person or Pi wrote. */
 export function entryText(entry: ClientEntry): string {
+    if (entry.kind === "appEvent") {
+        return `Work Item · Execution ${entry.state} · /s/${entry.source}`;
+    }
+
+    if (entry.kind === "agentAnswer") {
+        return `${entry.actor.name} (agent answer): ${entry.text}`;
+    }
+
     if (entry.kind === "user") {
         const [written, files] = splitAttachments(entry.text);
 
@@ -905,6 +967,13 @@ export function peekLines(
 
     for (const entry of entries) {
         switch (entry.kind) {
+            case "appEvent":
+                lines.push({ kind: "event", text: entryText(entry) });
+                break;
+            case "agentAnswer":
+                lines.push({ kind: "event", text: snippet(entryText(entry), PEEK_TEXT) });
+                break;
+
             case "user": {
                 const text = snippet(entryText(entry), PEEK_TEXT);
 

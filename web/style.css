@@ -536,6 +536,10 @@ code {
     transform: translate(calc(100% + 2px), 0);
 }
 
+:root[data-motion="reduced"] .work-item-pip-state {
+    animation: none !important;
+}
+
 :root[data-motion="reduced"] .boot-bar span {
     width: 70%;
 }
@@ -699,6 +703,7 @@ code {
     :root:not([data-motion="full"]) .live-dot,
     :root:not([data-motion="full"]) .agents-dot.working,
     :root:not([data-motion="full"]) .session-working,
+    :root:not([data-motion="full"]) .work-item-pip-state,
     :root:not([data-motion="full"]) .session-placeholder span {
         animation: none !important;
     }
@@ -2192,6 +2197,96 @@ button.title:active:not(:disabled),
 @media (hover: hover) and (pointer: fine) {
     .step-head:hover {
         background: var(--hover);
+    }
+}
+
+/* Passive native events share tool geometry, not human cards or success flashes. */
+.app-event {
+    margin-block: 6px;
+    color: var(--muted);
+}
+
+.app-event .step-head {
+    min-height: 40px;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.app-event-label,
+.app-event-state {
+    font-size: 12px;
+}
+
+.app-event-label {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.app-event-state {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+}
+
+.app-event[data-state="running"] .app-event-state,
+.app-event[data-state="running"] .app-event-mark {
+    color: var(--accent);
+}
+
+.app-event .step-open,
+.agent-answer-head a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    max-width: 45%;
+    overflow-wrap: anywhere;
+    touch-action: manipulation;
+}
+
+.app-event .step-open:focus-visible,
+.agent-answer-head a:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
+.app-event-context {
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.app-event-details {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.agent-answer {
+    margin-block: 14px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.agent-answer-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.agent-answer-head strong {
+    color: var(--text);
+}
+
+@media (pointer: coarse) {
+    .app-event .step-head,
+    .app-event .step-open,
+    .agent-answer-head a {
+        min-height: 44px;
     }
 }
 
@@ -18217,10 +18312,32 @@ pre.gallery-code {
 .work-item-pip-state {
     display: inline-flex;
     vertical-align: middle;
+    color: var(--muted);
 }
 
+/* Controller activation is separate from the execution spinner on the row's right. */
 .work-item-pip-state[data-status="running"] {
     color: var(--accent);
+    animation:
+        work-item-pip-colors 1.6s steps(1, end) infinite,
+        pulse 1.4s ease-in-out infinite;
+}
+
+/* The shared working indicator's ordered palette, without moving the dial or its hit target. */
+@keyframes work-item-pip-colors {
+    0%,
+    100% {
+        color: var(--accent);
+    }
+    25% {
+        color: color-mix(in oklab, var(--accent) 67%, var(--spark));
+    }
+    50% {
+        color: color-mix(in oklab, var(--accent) 33%, var(--spark));
+    }
+    75% {
+        color: var(--spark);
+    }
 }
 
 @media (hover: none), (pointer: coarse) {

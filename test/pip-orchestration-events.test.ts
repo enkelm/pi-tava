@@ -150,10 +150,22 @@ for (const dispatched of [true, false]) {
         );
         await reconcile(app, controller);
         const before = (await app.transcripts.allEntries(controller, true)).filter(
-            (entry) => entry.kind === "user",
+            (entry) => entry.kind === "user" || entry.kind === "appEvent",
         );
 
         assert.equal(before.length, 2, "initial attachment and one settled execution outcome");
+        const event = before.find((entry) => entry.kind === "appEvent");
+
+        assert.ok(
+            event?.kind === "appEvent",
+            "the real wake producer carries native app provenance",
+        );
+        assert.equal(
+            event.source,
+            Number(source),
+            "the observation retains the exact execution source",
+        );
+        assert.equal(event.state, "idle", "a yielded question is idle, not verified success");
         assert.equal(app.workItems.itemFor(source)!.supervisor!.status, "running");
         await app.close();
         app = await openApp(model, directory);
@@ -165,7 +177,7 @@ for (const dispatched of [true, false]) {
         );
         assert.equal(
             (await app.transcripts.allEntries(controller, true)).filter(
-                (entry) => entry.kind === "user",
+                (entry) => entry.kind === "user" || entry.kind === "appEvent",
             ).length,
             before.length,
             "restart cannot submit the settled question twice",

@@ -133,6 +133,76 @@ test("long finding receipts retain exact navigation IDs through bounded public p
     }
 });
 
+test("native Work Item wakes project as neutral application events, never human lookalikes", () => {
+    const marker = { kind: "workItem", source: 27, state: "idle", fingerprint: "a".repeat(64) };
+    const native = (metadata: unknown) =>
+        entry("pi.user", {
+            role: "user",
+            content: [
+                {
+                    type: "text",
+                    text: "[from: Owner] [via PiP] Work Item event: full instructions",
+                    pocketAppEvent: metadata,
+                },
+            ],
+        });
+    const projected = projectEntry(native(marker));
+
+    assert.deepEqual(projected, {
+        id: 1,
+        kind: "appEvent",
+        event: "workItem",
+        source: 27,
+        state: "idle",
+        text: "[from: Owner] [via PiP] Work Item event: full instructions",
+    });
+    assert.doesNotMatch(JSON.stringify(projected), /fingerprint|"from"|success/);
+
+    for (const candidate of [
+        { ...native(marker), data: { imported: true } },
+        native({ ...marker, source: 0 }),
+        native({ ...marker, source: 1.5 }),
+        native({ ...marker, source: "27" }),
+        native({ ...marker, state: "success" }),
+        native({ ...marker, fingerprint: "x".repeat(257) }),
+        entry("pi.user", { role: "user", content: "[via PiP] Work Item event: /s/27 idle" }),
+    ]) {
+        assert.equal(projectEntry(candidate)?.kind, "user");
+    }
+});
+
+test("native agent answers retain expanded service authorship and exact origin, not human identity", () => {
+    const actor = { questionId: "question-1", agentId: "agent-1", name: "Ada", chatId: 42 };
+    const message = {
+        role: "user",
+        content: [{ type: "text", text: "Full answer\nWith evidence", pocketAgentAnswer: actor }],
+    };
+    const native = entry("pi.user", message);
+
+    assert.deepEqual(projectEntry(native), {
+        id: 1,
+        kind: "agentAnswer",
+        actor,
+        text: "Full answer\nWith evidence",
+    });
+
+    for (const candidate of [
+        { ...native, data: { imported: true } },
+        entry("pi.user", {
+            ...message,
+            content: [{ ...message.content[0], pocketAgentAnswer: { ...actor, chatId: -1 } }],
+        }),
+        entry("pi.user", {
+            ...message,
+            content: [
+                { ...message.content[0], pocketAgentAnswer: { ...actor, name: "x".repeat(201) } },
+            ],
+        }),
+    ]) {
+        assert.equal(projectEntry(candidate)?.kind, "user");
+    }
+});
+
 test("stats add the cost of models and tools", () => {
     const usage = {
         models: {
