@@ -138,8 +138,8 @@ function textOf(value: any): string {
         ? value.map(textOf).join("")
         : value?.props
           ? textOf(value.props.children)
-          : typeof value === "string"
-            ? value
+          : typeof value === "string" || typeof value === "number"
+            ? String(value)
             : "";
 }
 

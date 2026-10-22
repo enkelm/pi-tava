@@ -181,6 +181,8 @@ export class PipAgents {
         await this.supervision.recover();
         await this.contacts.recover();
         await this.#reconcileDrafts();
+        // Startup recovery precedes commit subscriptions; adopt reconciled History before serving it.
+        this.committed(await this.#app.harness.snapshot(AgentIdentitiesDoc, context));
     }
     async close(): Promise<void> {
         await Promise.all([

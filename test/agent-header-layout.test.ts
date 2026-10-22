@@ -22,8 +22,16 @@ tree.iterate({
         const media: string[] = [];
 
         for (let parent = node.node.parent; parent; parent = parent.parent) {
-            if (parent.name === "MediaStatement" || parent.name === "ContainerStatement") {
-                media.push(css.slice(parent.from, parent.getChild("Block")!.from).trim());
+            const block = parent.getChild("Block");
+            const prelude = block === null ? "" : css.slice(parent.from, block.from).trim();
+
+            // This CSS grammar parses container queries as generic at-rules.
+            if (
+                parent.name === "MediaStatement" ||
+                parent.name === "ContainerStatement" ||
+                (parent.name === "AtRule" && /^@container\s/.test(prelude))
+            ) {
+                media.push(prelude);
             }
         }
 
