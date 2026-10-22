@@ -40,14 +40,17 @@ function controlModel() {
             );
 
             assert.ok(command, last.text);
+            const action = command[1];
+
+            assert.ok(action);
 
             return fauxAssistantMessage(
                 [
                     fauxToolCall("agent_work", {
-                        action: command[1],
+                        action,
                         session: Number(command[2]),
                         report: false,
-                        ...(command[1] === "delegate"
+                        ...(action === "delegate"
                             ? {
                                   text:
                                       command[3] ??
@@ -120,6 +123,7 @@ test("current controllers follow the exact chat's live delegation, never its his
         entries.map((entry) => entry.workItemId).sort();
     const currentIds = (entries: Awaited<ReturnType<typeof rows>>) =>
         itemIds(entries.filter((entry) => entry.current));
+
     const settle = async (source: ConversationId) => {
         const controller = app.workItems.itemFor(source)!.supervisor!
             .conversationId as ConversationId;

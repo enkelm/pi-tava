@@ -1,7 +1,7 @@
 /** Persistent owner-private agents: one identity, approved charter, model and authority across distinct chats. */
 import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, Type, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
     AgentDoc,
     type ConversationId,
@@ -19,7 +19,7 @@ import { SessionsDoc } from "../docs.ts";
 import { HttpError } from "../errors.ts";
 import { draftAttachments, materializeDraftAttachments } from "../agent-draft-uploads.ts";
 import { clientKey, ownRequest } from "../requests.ts";
-import { clampThinkingLevel, modelSelection } from "../models.ts";
+import { modelSelection } from "../models.ts";
 import { defang } from "../fence.ts";
 import { PIP_EXTENSION } from "../pip.ts";
 import {

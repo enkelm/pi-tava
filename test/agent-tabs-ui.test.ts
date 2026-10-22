@@ -920,7 +920,7 @@ test("draft context actions address the identity, not the previous saved chat", 
         section: "focus",
     });
     f.click(f.label("System prompt"));
-    assert.equal(f.opened.at(-1).section, "instructions");
+    assert.equal(f.opened.at(-1)?.section, "instructions");
     f.click(f.label("Memory"));
     assert.deepEqual(f.opened.at(-1), { type: "memory", conversationId: "agent:stable-agent" });
 });

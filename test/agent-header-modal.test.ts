@@ -122,7 +122,11 @@ async function bundle() {
         ],
     });
 
-    return result.outputFiles[0].text;
+    const output = result.outputFiles[0];
+
+    assert.ok(output);
+
+    return output.text;
 }
 
 test(
@@ -206,6 +210,7 @@ test(
         });
         const send = (method: string, params = {}) =>
             browser.connection.send(method, params, sessionId);
+
         const evaluate = async <T>(expression: string): Promise<T> => {
             const result = await send("Runtime.evaluate", {
                 expression,
@@ -221,6 +226,7 @@ test(
 
             return result.result.value;
         };
+
         const until = async (expression: string) => {
             for (let attempt = 0; attempt < 150; attempt++) {
                 if (await evaluate<boolean>(expression)) {
@@ -232,16 +238,19 @@ test(
 
             assert.fail(`Timed out: ${expression}\n${await evaluate("document.body.innerText")}`);
         };
+
         const click = async (selector: string) => {
             await until(`document.querySelector(${JSON.stringify(selector)}) !== null`);
             await evaluate(
                 `document.querySelector(${JSON.stringify(selector)}).focus(); document.querySelector(${JSON.stringify(selector)}).click()`,
             );
         };
+
         const key = async (key: string, code: string, modifiers = 0) => {
             await send("Input.dispatchKeyEvent", { type: "keyDown", key, code, modifiers });
             await send("Input.dispatchKeyEvent", { type: "keyUp", key, code, modifiers });
         };
+
         let loaded = 0;
 
         browser.connection.listen(sessionId, (method) => {
@@ -311,9 +320,11 @@ test(
         await until(
             `window.modalStore.state.notices.every(n=>!n.message.includes('Press Esc again'))`,
         );
+
         for (let attempt = 0; posts.length === 0 && attempt < 100; attempt++) {
             await new Promise((done) => setTimeout(done, 10));
         }
+
         assert.deepEqual(posts, ["/api/c/19/abort"]);
         posts.length = 0;
 

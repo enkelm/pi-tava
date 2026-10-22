@@ -164,6 +164,7 @@ function fixture() {
         formatBytes: (n: number) => String(n),
         APPLE: false,
     };
+
     // Component children are template values. Their DOM behavior is outside this callback test's contract.
     for (const name of [
         "Avatar",
@@ -203,6 +204,7 @@ function fixture() {
     evaluate("agent-draft-pane", "AgentDraftPane");
     const draft = context.openAgentDraft("ada");
     let tree: Template;
+
     const render = () => {
         slots = paneSlots;
         cursor = 0;
@@ -219,14 +221,17 @@ function fixture() {
 
         return tree;
     };
+
     const input = () => {
         render();
 
         return templates(tree).flatMap((each) => bound(each, "input"))[0] as any;
     };
+
     const enter = () => input().onKeyDown({ key: "Enter", preventDefault() {} });
     const type = (value: string) =>
         input().onInput({ currentTarget: { value, selectionStart: value.length } });
+
     const flush = async () => {
         for (let n = 0; n < 8; n++) {
             await Promise.resolve();

@@ -22,11 +22,13 @@ export async function privateAgentRequest(
         "x-pocket": "1",
         "content-type": "application/json",
     };
+
     output.end = (chunk?: unknown) => {
         text = String(chunk ?? "");
 
         return output;
     };
+
     const handled = createHandler({
         app,
         listen: { host: "127.0.0.1", port: 0 },

@@ -322,6 +322,7 @@ test("owner-private identity History includes retained saved Chats and never ano
         requestId: "first",
         text: "First history",
     });
+
     await (await app.harness.submission(first.submissionId, context))!.wait(context);
     const second = await app.pip.agents.submitDraft(ada.agentId, owner(app), {
         requestId: "second",

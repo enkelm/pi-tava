@@ -362,6 +362,7 @@ function agentHeaderControls({ agent, source, userId, sheet }) {
         (selectedAgentDraft()?.id ?? store.state.conversationId) === source &&
         (!sheet || store.state.sheet === sheet);
     const close = () => current() && closeSheet();
+
     const show = (panel) => {
         if (current()) {
             openSheet({ type: "agent-header", panel, agentId: agent.agentId, source, userId });
