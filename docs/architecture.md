@@ -219,8 +219,8 @@ Subagents leave Agent Teams out of every subagent (`extensions/subagents.ts`), e
 `collab_status`, `collab_failures` and `collab_trace`. Every read checks the actual private
 conversation and running tool task, captures the owner's token, resolves authorized execution
 membership before storage reads, and rechecks ownership, token, PiP availability and membership
-across awaits. Shared agents, shared mentions, helpers and Work Item controllers cannot use this
-reader, even if a tool registration is copied into their selection. Owner scope is explicit;
+across awaits. Named private agents, shared agents, shared mentions, helpers and Work Item controllers
+cannot use this reader, even if a tool registration is copied into their selection. Owner scope is explicit;
 session, Work Item and project scopes exclude all private PiP and hidden mention conversations.
 No HTTP route, shared event or public extension-host database capability is added.
 

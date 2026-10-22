@@ -380,7 +380,7 @@ test("diagnostics remain readable without constructing a broken source SSH envir
     }
 });
 
-test("private reader denies ordinary callers before storage and fences owner revocation after an awaited read", async () => {
+test("private reader denies ordinary and named callers before storage and fences owner revocation after an awaited read", async () => {
     const target = await newSession(app);
     const pip = await privatePip();
     const managed = await newSession(app, undefined, "worker");
@@ -388,6 +388,11 @@ test("private reader denies ordinary callers before storage and fences owner rev
     await app.pip.orchestration.control(managed, owner(app), { action: "open" });
     const controller = (await app.pip.orchestration.inspect(managed, owner(app))).orchestration!
         .conversationId as ConversationId;
+    const named = await app.pip.agents.create(owner(app), {
+        name: "No global diagnostic authority",
+        requestId: "diagnostic-named-denial",
+    });
+    const namedChat = named.id as ConversationId;
     let reads = 0;
     const original = app.harness.snapshot.bind(app.harness);
 
@@ -400,7 +405,7 @@ test("private reader denies ordinary callers before storage and fences owner rev
     }) as typeof app.harness.snapshot;
 
     try {
-        for (const caller of [target, controller, 999999 as ConversationId]) {
+        for (const caller of [target, controller, namedChat, 999999 as ConversationId]) {
             await assert.rejects(
                 app.diagnostics.failures(
                     { conversationId: caller, taskId: 999999 as TaskId },

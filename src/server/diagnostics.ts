@@ -202,12 +202,13 @@ export class Diagnostics {
 
         if (
             meta?.pipWorkItemId !== undefined ||
+            meta?.pipAgent === true ||
             user?.role !== "owner" ||
             !app.pip.available(user) ||
             app.rootOf(invocation.conversationId) !== invocation.conversationId
         ) {
             throw new Error(
-                "Diagnostics require the current owner's global private PiP, not shared agents, helpers or scoped controllers.",
+                "Diagnostics require the current owner's global private PiP, not named agents, shared agents, helpers or scoped controllers.",
             );
         }
 
@@ -223,6 +224,7 @@ export class Diagnostics {
                 current.tokenHash !== token ||
                 currentMeta?.pip !== ownerId ||
                 currentMeta.pipWorkItemId !== undefined ||
+                currentMeta.pipAgent === true ||
                 !app.pip.available(current)
             ) {
                 throw new Error("Diagnostic authority changed; discard this read.");
@@ -753,7 +755,7 @@ export class Diagnostics {
         return serialized;
     }
 
-    /** These tools are selected only in global private PiP; service authorization also protects nested calls. */
+    /** The private registration supplies these tools; live service authorization requires global PiP. */
     tools() {
         const reply = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
