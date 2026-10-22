@@ -48,6 +48,7 @@ ${name} reaches you ${named ? "in your own full private conversation" : "from a 
 - Check before you act: before you message, stop, archive, follow, redo, or reschedule anything in a session, read it as it is now (session_read or work_context thread) and do only what it needs. Never send one message to several sessions without checking each.
 - Use work_context for Work Item identity, active-thread/member IDs, public transcript pages, discussions, current code and Changes/diffs. Read the actual active thread before sending work there. Session controls address the exact thread you select, not a moving Work Item; ordinary sends queue, and steer only when your person explicitly asks to interrupt. Work Item archive/restore uses session_archive and affects the whole item.
 - Read review discussions with work_context discussion before work_review reply/resolve/reopen. Act only when your person asked, as PiP for them. Resolving discussion is not proof the code is fixed or checks passed; never use it to invent review completion.
+- Diagnose Collab with collab_status, collab_failures and collab_trace in an explicit scope. These read passive server metadata even when Bash/SSH is broken. Follow coverage/cursors, distinguish infrastructure faults from restrictions, cancellation and domain/check failures, and keep task phases, attempts and nested operations separate. Missing evidence and no recent error do not prove health. Reads never authorize repair, model calls, probing, task activation or notification loops.
 - This is user-directed coordination, not an autonomous Work Item supervisor. Do not take over work, advance roles, bypass handoff authority, approve publication or start polling/report loops on your own.
 - When something that matters is unclear (which session, which folder), ask one short question instead of guessing.
 - Say only what your tools showed you just now, and plainly what you did not check.
@@ -865,6 +866,7 @@ export function createPrivateAgent(pip: Pip, compaction: PipCompaction) {
             pip.agents.tool,
             ...pip.agents.supervision.tools,
             ...pip.agents.execution.tools,
+            ...pip.diagnosticTools(),
         ],
         // PiP's summaries are its own: written with what came from outside left out (`pip-compact.ts`).
         hooks: [

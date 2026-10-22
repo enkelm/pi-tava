@@ -112,6 +112,10 @@ after asynchronous body arrival; its services are bound to that person and sourc
 assets opt into conversation access, not app-wide route access. Source and browser target the same
 current API without older-host guards or version flags.
 
+For **New Work Item**, the owner can select **Own Git worktree** on the instructions step.
+It is off by default. This is checkout isolation, not parallel dispatch: a successful transfer
+still permanently retires the source writer.
+
 The command supports:
 
 ```text
@@ -123,6 +127,7 @@ The command supports:
 /handoff follow-up
 /handoff researcher
 /handoff pull
+/handoff worker --new --worktree Implement in a separate checkout
 /handoff worker
 /handoff worker --new
 /handoff researcher --new
@@ -178,6 +183,56 @@ Historical records neither grant handoff authority nor replace a current human r
 
 Before requesting a handoff, wait for all delegated helpers and background work. Pending helper reports are work too: the main agent ends its current turn so queued reports can be delivered, then resumes on arrival rather than polling. The transfer checks the full Work Item/descendant task graph, not merely the main thread's visible busy flag. It exempts only the handoff tool's own invocation/run and the exact incoming courier already placed in that run, not unrelated tools, helpers or reports. Recovery of already-accepted summary tasks retains its task exemption. Transfers also count in-flight local writer reservations, including Browser-panel requests waiting for their body or action to settle. The authority-transfer commit holds the workflow mutation lock so no new panel mutation can enter after its final idle check. Panel mutations recheck current access, driver and active write ownership after body arrival and before effects; passive state, frame and console reads remain available to people who can see the thread. An activation never kills an active tool or silently interrupts a run. Invalid or cancelled requests create no thread. This checks Durable's registered runs, tools, descendant agents and background tasks; external terminals or detached daemons are not ownership leases. Stop externally managed writers before activating a handoff.
 
+## Optional handoff worktrees
+
+Same-work handoffs and new-work handoffs normally inherit the source's actual checkout,
+including an existing worktree. Only an explicit owner-selected **new-work + own worktree**
+request allocates another checkout. Use `/handoff worker --new --worktree`, select the checkbox,
+or ask for new work on its own Git worktree in ordinary English. The tool's optional
+`worktree: true` must match an explicit slash route; it cannot silently add isolation to
+`/handoff worker --new`. `--worktree` without `--new`, non-Git/unborn checkouts, denied owner
+access and unsupported native confinement fail explicitly rather than falling back to inheritance.
+Legacy summary recovery and PiP controller handoffs retain their inherited-checkout behavior.
+
+The new checkout stays on the source's pinned destination and in the corresponding repository
+subdirectory. Local worktrees use the app's worktree storage; SSH worktrees use the existing private
+`0700` target directory `~/.pi-coop-worktrees`, never a host-local namesake. The Markdown brief
+remains in that same destination's private temporary directory, readable from the new checkout.
+A destination change is not part of this option.
+
+The snapshot uses existing worktree behavior: HEAD, dirty tracked changes and ordinary nonignored
+untracked files come along. Ignored dependencies such as `node_modules` do not. New files have a
+50 MiB aggregate copy budget; files exceeding the remaining budget are skipped. The tool result
+and handoff record list those skipped paths; the agent must disclose them. The completed checkout
+must also fit the existing safe workflow fingerprint limits (50,000 paths, 64 MiB tracked/untracked
+content, no dirty submodules or escaping paths). This is a bounded snapshot, not an atomic snapshot
+against external editors, terminals or detached daemons; stop them separately.
+
+The explicit choice participates in retry identity. Core reserves stable branch/path coordinates
+durably **before** Git mutations, holds the workflow exclusion lock during preparation and publishing,
+and keeps filesystem/Git work outside Durable transactions. It revalidates the current owner/token,
+source cwd/location/worktree/project, actual source Git root/directory/HEAD, main human input, authority,
+spending and whole-item task idleness before admitting the successor. Source content and the prepared checkout
+have separate fingerprints. A bounded source baseline is captured before copying and compared after
+copying, using the same untracked-file budget planner as Worktrees; changed source content, skipped-file
+metadata or skip choices refuse transfer while retaining the reservation and checkout. Recovery also
+refuses changed source files or a changed target instead of publishing a stale snapshot. Skipped source
+files contribute metadata, not unbounded content bytes. These checks are not an atomic filesystem
+snapshot: edits reverted between inspections, metadata-preserving changes to skipped files and edits
+after the final inspection can remain undetected. Stop external writers separately.
+The target's branch, root and Git common directory must also match the reserved repository. A committed retry
+returns the same successor, snapshot disclosure and delivery identity without running setup again.
+
+An interrupted or failed setup never retires the source by itself. If effects are proven absent
+(path, branch and Git worktree registration), a retry can reuse those exact reserved coordinates.
+A partial, changed or uncertain setup is **retained**, not force-removed or retried: the error names
+its destination, path and branch. Inspect it, preserve all human changes and remove only a confirmed
+abandoned setup using authorized cleanup. Submit a fresh human request after reconciliation.
+An unresolved older setup blocks allocating another own worktree from that source. Cleanup is
+not automatic, and a new request cannot erase uncertainty. Missing SSH access, a lost transport or
+unavailable confinement can prevent even proving absence; resolve that capability before cleanup.
+The app does not delete possible human work merely to make a handoff succeed.
+
 ## Work Items
 
 The first same-work handoff wraps the source thread and its successor in a Work Item. Creating a standalone root or upgrading the app does not enroll it automatically. The sidebar replaces the single row with an expandable item bearing the first thread's title. Its children are the individual conversations; its leading icon and status follow the thread currently responsible for the work. An expand/collapse chevron sits below that icon in the disclosure button. Paths and model metadata stay on one truncated line. Leading stage icons replace duplicate sidebar role badges. A compact workflow status indicator remains inside the chatbox, without predecessor, source or active-thread navigation buttons. Open individual threads from the sidebar’s child rows; the header’s **Choose next thread** and **PiP** controls remain available where applicable.
@@ -228,7 +283,7 @@ periodic status messages. PiP waits between meaningful outcomes, checking alignm
 
 An item can stand alone or belong directly to a project. Move, archive and restore apply to the whole item. Member conversations cannot be archived independently, even through a direct metadata request.
 
-Placement and grouping never grant access. Hidden threads and their full histories remain hidden, and hidden members block whole-item mutations. Moving an item between projects changes organization, not the threads' pinned local/SSH destination or cwd. Both same-work and new-work handoffs inherit the source's pinned destination; access and execution remain the responsibility of the workspace and SSH modules. The destination receives the path to the handoff file, which contains exported source context. A session-scoped invitation is not authority to create unrelated conversations or publish code.
+Placement and grouping never grant access. Hidden threads and their full histories remain hidden, and hidden members block whole-item mutations. Moving an item between projects changes organization, not the threads' pinned local/SSH destination or cwd. Both same-work and new-work handoffs inherit the source's pinned destination; an explicitly selected own worktree changes only the new-work successor's checkout; access and execution remain the responsibility of the workspace and SSH modules. The destination receives the path to the handoff file, which contains exported source context. A session-scoped invitation is not authority to create unrelated conversations or publish code.
 
 ## Durable state
 

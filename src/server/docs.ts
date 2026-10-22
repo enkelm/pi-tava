@@ -20,6 +20,18 @@ import type { Worktree } from "./worktrees.ts";
 import type { Changes } from "./changes.ts";
 import type { ThreadType } from "./workflow-docs.ts";
 import type { WorkspaceLocation } from "./workspace-location.ts";
+import type { DiagnosticJournal } from "./diagnostics/recorder.ts";
+
+/** Private, bounded diagnostic observations; never a room document or inherited fork history. */
+export const DiagnosticsDoc = defineDoc<DiagnosticJournal>({
+    kind: "pocket.diagnostics",
+    version: 1,
+    ...currentStateCheckpoints,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    initial: () => ({ records: [], evicted: 0, since: Date.now() }),
+});
 
 export {
     PrivateAgentDoc,

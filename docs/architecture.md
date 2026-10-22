@@ -82,7 +82,7 @@ Same-work choices are Worker → Reviewer/Researcher, Reviewer → Follow-up/Wor
 
 A handoff successor is an independent user-facing conversation, not a task-owned subagent and not Durable's same-conversation reset/handoff. A durable background task delivers the received source summary with an attributed request ID. Restarted delivery finds the same submission. A model names the destination from that summary; its response memo prevents a completed naming response from being applied or billed twice. Usage, guarded naming and task settlement commit together, and a manual rename wins.
 
-Work Items keep same-work successors together. The first same-work handoff creates membership lazily; standalone roots are not enrolled on creation or upgrade. WorkItems derives membership and placement from the source, and movement/archive/restore update all members together. Hidden members block whole-item mutations; grouping grants no access. Project reassignment changes organization only. Successors retain the source's pinned destination and cwd, including new-work handoffs, and workspace/SSH modules retain destination access and execution checks. Existing document kind/scope/history/fork contracts stay unchanged.
+Work Items keep same-work successors together. The first same-work handoff creates membership lazily; standalone roots are not enrolled on creation or upgrade. WorkItems derives membership and placement from the source, and movement/archive/restore update all members together. Hidden members block whole-item mutations; grouping grants no access. Project reassignment changes organization only. Successors retain the source's pinned destination and normally its cwd, including new-work handoffs, and workspace/SSH modules retain destination access and execution checks. An explicit owner-only new-work `worktree: true` choice changes only the successor checkout on that same destination. `Handoffs` reserves stable coordinates before Git effects, reuses destination-aware Worktrees, holds the workflow exclusion lock, fingerprints source and target outside transactions and revalidates live admission before atomic transfer. Partial/uncertain setup is retained for reconciliation without retiring the source or allocating another checkout; defaults and legacy/controller recovery still inherit. See [optional handoff worktrees](handoffs.md#optional-handoff-worktrees). Existing document kind/scope/history/fork contracts stay unchanged.
 
 Review evidence remains factual context. Reviewer independently assesses code/test quality and wider regressions; Follow-up makes bounded repairs following review or Pull, while Researcher separates sourced findings from hypotheses. Summaries retain actual checks/results, unavailable or deferred checks, provenance and material changes that make earlier evidence stale. Research findings and self-attestation are not independent review. Land admission has no review, readiness, checkpoint or risk-acceptance gate: choosing Land is not a claim that inspection or validation passed and does not authorize a commit, rebase or cleanup. Land performs only human-authorized local integration and reports its actual checkpoint, cleanliness and impact checks. Publish follows Land for approved external delivery, including PR creation and ticket updates. Landed and published remain distinct facts.
 
@@ -212,6 +212,62 @@ Extensions never see `PocketApp`. They get `PocketHost` (`host.ts`), whose funct
 - **Models.** A start copies the source's agent settings (model, thinking, instructions, tools), not its history. It takes only the source's model or an entry in the shared `subagentModels` list; an empty list means source-model only for linked sessions. Thinking is capped at the source's level and fitted at or below that cap, unlike background subagents' nearest-supported fitting. `Providers.problem` asks its provider afresh: nothing is made with a model that is not allowed or cannot be used now.
 
 Subagents leave Agent Teams out of every subagent (`extensions/subagents.ts`), even while it is off, so turning it on later gives no subagent a way to start sessions.
+
+## Private failure diagnostics
+
+`app.diagnostics` owns three passive tools for the current owner's **global private PiP**:
+`collab_status`, `collab_failures` and `collab_trace`. Every read checks the actual private
+conversation and running tool task, captures the owner's token, resolves authorized execution
+membership before storage reads, and rechecks ownership, token, PiP availability and membership
+across awaits. Shared agents, shared mentions, helpers and Work Item controllers cannot use this
+reader, even if a tool registration is copied into their selection. Owner scope is explicit;
+session, Work Item and project scopes exclude all private PiP and hidden mention conversations.
+No HTTP route, shared event or public extension-host database capability is added.
+
+`diagnostics/runtime.ts` decorates the registry's read side, preserving task definitions' stored
+names, versions, checkpoints and replay rules. Its invocation context correlates phase, hook,
+environment construction, tool execution and nested codemode observations. Workspace method
+observations retain local/SSH identity but no host, path or command. The existing model-stream
+wrapper records provider/model response outcomes in this context. Successful execution is not a
+claim that a test passed or a task achieved its goal. Returned tool errors, thrown failures,
+intentional blocks, cancellation, interruption and unknown causes stay distinct. Structural codes
+are used where available; free-form errors are not mined for signatures. Task phases, executions,
+receipts and child operations are separate populations, never summed into an alleged call count.
+The commit coordinator also captures native tool, terminal-task and input-settlement receipts;
+imported tool history without native task attribution is excluded. Receipt status/reason is separate
+from operation identity, so completed and failed receipts have the same population denominator.
+A terminal task marked failed does not establish a domain or infrastructure cause by itself.
+Codemode validation rejected before any hook/execute wrapper is not independently captured;
+environment reader-handle methods and watcher callbacks are also outside coverage. These gaps
+are disclosed in query results rather than treated as zero failures.
+
+Capture retains only identifiers, controlled categories, timestamps, outcomes and evidence links,
+not prompts, reasoning, arguments/results, environment variables, credentials or exception text.
+Unavailable tool names emitted by a model are not trusted registration metadata and are replaced
+with a controlled label, not retained as arbitrary identifiers.
+A best-effort queue holds at most 1,024 observations, coalesces start/end writes by observation ID,
+and upserts into the new conversation-scoped `pocket.diagnostics` document. This document keeps
+256 observations, uses latest history with initial-fork semantics and periodic checkpoints, and
+is not a room document. Observer write failures are counted in process memory and do not fail or
+repeat business work. Records not written before a crash/storage failure cannot be recovered;
+shutdown drains capture before closing Harness, so final interruptions may remain unobserved.
+There is no historical backfill, database/SQL tool, external exporter, repair or notification loop.
+
+Queries scan at most 1,000 cached catalogue/membership entries, then read at most three journals
+(768 retained observations) per page. Status additionally reads at most 24 tasks per nonterminal
+state per selected conversation, outside aggregation; only whitelisted task metadata is extracted.
+The installed storage adapter still materializes selected task records, so this is not a hard bound
+on underlying database I/O for unusually large stored inputs. Output is bounded to 32 KiB with
+explicit omitted-row counts, and reads have a five-second cancellation deadline. Cursors are
+bounded, expiring, process-local and bound to the owner token, caller, scope and membership;
+pages read current state, not one frozen multi-page snapshot. Scope truncation, missing journals,
+eviction, unfinished observations, pending/failed observer writes and output omissions are exposed.
+Failures group by controlled component/stage/operation/cause, with per-population observed
+success/finished denominators, logical IDs when known, and first/last retained sightings. A later
+observed success in an affected session is evidence of recovery at that operation only, not proof
+of repair. No recent failure, idleness or a completed task is a health/correctness certificate.
+Historical active runtime, provider-side retries, complete usage/accounting, retrospective exact
+attempt counts and notifications remain outside this diagnostic slice.
 
 ## PiP's conversation
 

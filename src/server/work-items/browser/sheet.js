@@ -134,6 +134,11 @@ export function createHandoffSheet(pocket, state) {
             !readOnly &&
             source?.workflow?.profileAvailable !== false &&
             data?.workflow?.profileAvailable !== false &&
+            !(
+                selected?.relationship === "new-work" &&
+                draft.worktree === true &&
+                session.me?.role !== "owner"
+            ) &&
             !loading;
 
         const update = (change) => {
@@ -172,7 +177,8 @@ export function createHandoffSheet(pocket, state) {
             const instructions = draft.instructions
                 ? `\n${DIRECTION_PREFIX}${draft.instructions}`
                 : "";
-            const text = `/handoff ${selected.targetType} ${flag}${instructions}`;
+            const ownWorktree = selected.relationship === "new-work" && draft.worktree === true;
+            const text = `/handoff ${selected.targetType} ${flag}${ownWorktree ? " --worktree" : ""}${instructions}`;
 
             submitting.current = true;
             setBusy(true);
@@ -286,7 +292,7 @@ export function createHandoffSheet(pocket, state) {
                                                           checked=${draft.choice === keyOf(each)}
                                                           disabled=${disabled}
                                                           aria-describedby=${sharedIndex >= 0 ? reasonId(sharedIndex) : undefined}
-                                                          onChange=${() => update({ choice: keyOf(each) })}
+                                                          onChange=${() => update({ choice: keyOf(each), worktree: false })}
                                                       />
                                                       <span class="handoff-option-profile">
                                                           <${AgentProfileTag}
@@ -322,6 +328,28 @@ export function createHandoffSheet(pocket, state) {
                                           >${selected?.relationship === "new-work" ? "New Work Item" : "Same Work Item"}</span
                                       >
                                   </div>
+                                  ${
+                                      (session.me?.role === "owner" || draft.worktree === true) &&
+                                      selected?.relationship === "new-work" &&
+                                      html`<label class="handoff-option">
+                                          <input
+                                              type="checkbox"
+                                              checked=${draft.worktree === true}
+                                              disabled=${busy || session.me?.role !== "owner"}
+                                              onChange=${(event) => update({ worktree: event.currentTarget.checked })}
+                                          />
+                                          <span class="handoff-option-copy">
+                                              <strong>Own Git worktree</strong>
+                                              <span class="small muted"
+                                                  >${
+                                                      session.me?.role === "owner"
+                                                          ? "Copy tracked changes and bounded new files; ignored files stay behind. The source thread still becomes read-only."
+                                                          : "Only the owner can choose an own worktree. Go Back and reselect a role to inherit the checkout instead."
+                                                  }</span
+                                              >
+                                          </span>
+                                      </label>`
+                                  }
                                   <div class="handoff-field">
                                       <label class="handoff-label" for="handoff-direction"
                                           >What should the next agent focus on? (optional)</label

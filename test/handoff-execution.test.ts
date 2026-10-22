@@ -16,10 +16,19 @@ import {
 import assert from "node:assert/strict";
 import { awaitWithContext } from "@earendil-works/chord/context";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    truncateSync,
+    writeFileSync,
+} from "node:fs";
 import { after, before, test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import type { ConversationId, JsonObject } from "@earendil-works/pi-durable";
+import { AgentDoc, type ConversationId, type JsonObject } from "@earendil-works/pi-durable";
 import { err, FileError } from "@earendil-works/pi-durable/env";
 import { sshFixture } from "./ssh-fixture.ts";
 import type { Changes } from "../src/server/changes.ts";
@@ -30,6 +39,7 @@ import { TITLE_PROMPT } from "../src/server/titles.ts";
 import { HandoffsDoc, type ThreadType } from "../src/server/workflow-docs.ts";
 import { PublicationsDoc } from "../src/server/workflow-publication.ts";
 import { reserveWorkflowLocalWrite } from "../src/server/workflow-policy.ts";
+import { WorkspaceBackend } from "../src/server/workspace-backend.ts";
 
 let app: App;
 const data = join(root, "handoff-execution");
@@ -227,9 +237,9 @@ after(async () => {
     cleanUp();
 });
 
-async function source(threadType: ThreadType = "worker") {
+async function source(threadType: ThreadType = "worker", cwd = work) {
     const { id } = await app.commands.createSession(owner(app), {
-        cwd: work,
+        cwd,
         threadType,
         title: "Handoff execution",
     });
@@ -739,7 +749,23 @@ test("explicit route mismatches and malformed route prefixes refuse without rese
             /explicit \/handoff route/,
         ],
         ["/handoff --other researcher Invalid leading flag.", start(), /relationship flag/],
-        ["/handoff researcher --same --new Conflicting flags.", start(), /flags must precede/],
+        ["/handoff researcher --same --new Conflicting flags.", start(), /relationship flag/],
+        ["/handoff researcher --worktree Missing new work.", start(), /requires --new/],
+        [
+            "/handoff researcher --new --worktree Explicit isolation.",
+            start("researcher", "new-work"),
+            /explicit \/handoff route/,
+        ],
+        [
+            "/handoff researcher --new No isolation selected.",
+            { ...start("researcher", "new-work"), worktree: true },
+            /explicit \/handoff route/,
+        ],
+        [
+            "Create a separate checkout in this same Work Item.",
+            { ...start(), worktree: true },
+            /requires a new-work/,
+        ],
     ] as const) {
         const id = await source();
         const { scenario } = await run(id, body, [call]);
@@ -1065,5 +1091,490 @@ test("the final Review diff inspection holds the writer lock and rechecks revoke
         assert.equal(app.workItems.isReadOnly(id), false);
     } finally {
         hold.release();
+    }
+});
+
+const gitIn = (cwd: string, ...args: string[]) =>
+    execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+    }).trim();
+
+function repository(label: string) {
+    const repo = join(root, `handoff-worktree-${label}`);
+    const cwd = join(repo, "app");
+
+    mkdirSync(cwd, { recursive: true });
+    gitIn(repo, "init", "-q");
+    gitIn(repo, "config", "user.name", "Fixture");
+    gitIn(repo, "config", "user.email", "fixture@example.invalid");
+    writeFileSync(join(cwd, "code.ts"), "export const answer = 1;\n");
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+    gitIn(repo, "add", ".");
+    gitIn(repo, "commit", "-qm", "baseline");
+    writeFileSync(join(cwd, "code.ts"), "export const answer = 2;\n");
+    writeFileSync(join(cwd, "notes.md"), "untracked context\n");
+    mkdirSync(join(repo, "node_modules"));
+    writeFileSync(join(repo, "node_modules", "ignored.js"), "not copied\n");
+
+    return { repo, cwd };
+}
+
+// This is the primary owner-boundary proof for isolation: real Git/files, actual human input,
+// registered tool, receipt, courier and writer transfer. A mock never creates the asserted checkout.
+test("explicit new-work isolation snapshots Git files once, preserves subdirectory context and retires the source", async () => {
+    const { repo, cwd } = repository("snapshot");
+    const huge = join(cwd, "oversize.bin");
+
+    writeFileSync(huge, "");
+    truncateSync(huge, 51 * 1024 * 1024);
+    const id = await source("worker", cwd);
+    const call = { ...start("worker", "new-work"), worktree: true };
+    const { scenario } = await run(
+        id,
+        "Start a new Worker Work Item on its own Git worktree. Keep this task isolated.",
+        [call, call, { ...call, worktree: false }],
+    );
+
+    assert.equal(scenario.results[0]!.isError, false, scenario.results[0]!.text);
+    assert.equal(scenario.results[1]!.isError, false, scenario.results[1]!.text);
+    assert.deepEqual(JSON.parse(scenario.results[1]!.text), JSON.parse(scenario.results[0]!.text));
+    assert.equal(scenario.results[2]!.isError, true);
+    assert.match(scenario.results[2]!.text, /already started a different handoff/);
+    const [record] = await records(id);
+
+    assert.ok(record?.ownWorktree);
+    assert.equal((await records(id)).length, 1);
+    const target = cid(record.targetThreadId);
+    const meta = app.sessionMeta(target)!;
+
+    assert.ok(meta.worktree);
+    assert.notEqual(app.cwdOf(target), cwd);
+    assert.equal(app.cwdOf(target), join(meta.worktree.path, "app"));
+    assert.equal(meta.worktree.source, cwd);
+    assert.equal(meta.location, undefined);
+    assert.equal(gitIn(app.cwdOf(target), "branch", "--show-current"), meta.worktree.branch);
+    assert.equal(
+        readFileSync(join(app.cwdOf(target), "code.ts"), "utf8"),
+        "export const answer = 2;\n",
+    );
+    assert.equal(readFileSync(join(app.cwdOf(target), "notes.md"), "utf8"), "untracked context\n");
+    assert.equal(existsSync(join(meta.worktree.path, "node_modules")), false);
+    assert.equal(existsSync(join(app.cwdOf(target), "oversize.bin")), false);
+    assert.deepEqual(record.skippedFiles, ["app/oversize.bin"]);
+    assert.deepEqual(JSON.parse(scenario.results[0]!.text).worktree.skipped, ["app/oversize.bin"]);
+    assert.equal(app.cwdOf(id), cwd);
+    assert.equal(app.sessionMeta(id)?.worktree, undefined);
+    assert.equal(app.workItems.isReadOnly(id), true);
+    assert.equal(app.workItems.isReadOnly(target), false);
+    assert.equal(gitIn(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
+    await delivered(target);
+    assert.equal(courierReads.get(record.file!)?.isError, false);
+    assert.equal((await sourceUsers(target)).length, 1);
+    writeFileSync(join(app.cwdOf(target), "target-only.txt"), "separate\n");
+    assert.equal(existsSync(join(cwd, "target-only.txt")), false);
+});
+
+test("new-work without isolation inherits an existing worktree and creates no Git checkout", async () => {
+    const { cwd } = repository("inherit");
+    const { id } = await app.commands.createSession(owner(app), {
+        cwd,
+        threadType: "chat",
+        worktree: true,
+    });
+
+    await app.commands.configure(id, owner(app), {
+        model: { provider: "faux", modelId: "faux-1" },
+    });
+    const initial = structuredClone(app.sessionMeta(id)!.worktree);
+    const { scenario } = await run(id, "/handoff worker --new Keep the current checkout.", [
+        start("worker", "new-work"),
+    ]);
+
+    assert.equal(scenario.results[0]!.isError, false, scenario.results[0]!.text);
+    const [record] = await records(id);
+
+    assert.ok(record);
+    assert.equal(record.ownWorktree, undefined);
+    assert.equal(app.cwdOf(cid(record.targetThreadId)), app.cwdOf(id));
+    assert.deepEqual(app.sessionMeta(cid(record.targetThreadId))!.worktree, initial);
+    assert.equal(gitIn(cwd, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
+    await delivered(cid(record.targetThreadId));
+});
+
+// Different from native checkout success: even denied confinement must not silently inherit a
+// checkout, reserve a successor or retire the writer. The fixture supplies only the denial.
+test("own-worktree requests fail explicitly on denied confinement for every leading flag order", async (t) => {
+    let reads = 0;
+
+    t.mock.method(WorkspaceBackend.prototype, "gitBytes", async () => {
+        reads++;
+
+        throw new Error("Fixture native offline sandbox unavailable");
+    });
+
+    for (const body of [
+        "/handoff worker --new --worktree Use explicit isolation.",
+        "/handoff --worktree --new worker Preserve flag-first selection.",
+        "/handoff --new worker --worktree Preserve mixed selection.",
+    ]) {
+        const id = await source();
+        const { scenario } = await run(id, body, [
+            { ...start("worker", "new-work"), worktree: true },
+        ]);
+
+        assert.equal(scenario.results[0]!.isError, true);
+        assert.match(
+            scenario.results[0]!.text,
+            /requires an accessible Git checkout.*Fixture native offline sandbox unavailable/s,
+        );
+        assert.equal(app.workItems.isReadOnly(id), false);
+        assert.equal((await records(id)).length, 0);
+        const setups = (await app.harness.snapshot(HandoffsDoc, context))?.worktrees ?? {};
+
+        assert.equal(
+            Object.values(setups).some((setup) => setup.sourceThreadId === Number(id)),
+            false,
+        );
+    }
+
+    assert.equal(reads, 3);
+});
+
+test("SSH isolation refuses denied target confinement without a local fallback or successor", async (t) => {
+    const host = "fixture-isolated-handoff-host";
+    const ssh = await sshFixture(host);
+    const remote = await openApp(model, join(ssh.root, "app"));
+    const destinations: string[] = [];
+    const envFor = remote.envFor.bind(remote);
+
+    t.mock.method(remote, "envFor", (...args: Parameters<typeof envFor>) => {
+        const env = envFor(...args);
+        const write = env.writeFile.bind(env);
+
+        return new Proxy(env, {
+            get(target, property) {
+                return property === "writeFile"
+                    ? (...args: Parameters<typeof write>) => {
+                          handoffDirectories.add(dirname(args[0]));
+
+                          return write(...args);
+                      }
+                    : Reflect.get(target, property, target);
+            },
+        });
+    });
+    t.mock.method(WorkspaceBackend.prototype, "gitBytes", async function (this: WorkspaceBackend) {
+        destinations.push(this.id);
+
+        throw new Error("Fixture target-native confinement denied");
+    });
+
+    try {
+        const { id } = await remote.commands.createSession(owner(remote), {
+            cwd: ssh.root,
+            location: { kind: "ssh", host },
+            threadType: "worker",
+        });
+
+        await remote.commands.configure(id, owner(remote), {
+            model: { provider: "faux", modelId: "faux-1" },
+            thinkingLevel: "off",
+        });
+        const originalCwd = remote.cwdOf(id);
+        const body = "/handoff worker --new --worktree Do not use a local namesake.";
+        const scenario = script(body, [{ ...start("worker", "new-work"), worktree: true }]);
+
+        await say(remote, id, body);
+        assert.equal(scenario.results[0]?.isError, true);
+        assert.match(scenario.results[0]?.text ?? "", /Fixture target-native confinement denied/);
+        assert.deepEqual(destinations, [`ssh:${host}`]);
+        const doc = await remote.harness.snapshot(HandoffsDoc, context);
+
+        assert.equal(Object.values(doc?.handoffs ?? {}).length, 0);
+        assert.equal(Object.values(doc?.worktrees ?? {}).length, 0);
+        assert.equal(remote.workItems.isReadOnly(id), false);
+        assert.equal(remote.cwdOf(id), originalCwd);
+        assert.equal(remote.locationOf(id)?.host, host);
+    } finally {
+        await remote.close();
+        await ssh.close();
+    }
+});
+
+test("collaborators cannot allocate a handoff worktree even when new work is otherwise allowed", async () => {
+    const id = await source();
+    const user = app.config.addUser("Handoff collaborator", "guest").user;
+    const body = "/handoff worker --new --worktree Only the owner may change destination.";
+    const scenario = script(body, [{ ...start("worker", "new-work"), worktree: true }]);
+    const accepted = await app.commands.submit(id, user, {
+        text: body,
+        requestId: crypto.randomUUID(),
+    });
+
+    await (await app.harness.submission(accepted.submissionId, context))!.wait(context);
+    assert.equal(scenario.results[0]!.isError, true);
+    assert.match(scenario.results[0]!.text, /Only the owner can choose a new worktree/);
+    assert.equal((await records(id)).length, 0);
+    assert.equal(app.workItems.isReadOnly(id), false);
+});
+
+// These recovery/race scenarios need native sandbox support, just like the real success case.
+// The failure injection surrounds real effects; it does not supply a worktree, receipt or ready state.
+test("a partial reserved setup keeps human changes and a repeated call cannot allocate a second branch", async (t) => {
+    const { repo, cwd } = repository("uncertain");
+    const id = await source("worker", cwd);
+    const copy = WorkspaceBackend.prototype.copyFile;
+    let prepared: string | undefined;
+
+    t.mock.method(
+        WorkspaceBackend.prototype,
+        "copyFile",
+        async function (this: WorkspaceBackend, ...args: Parameters<typeof copy>) {
+            await copy.apply(this, args);
+            prepared = dirname(args[1]);
+            writeFileSync(join(prepared, "human-change.txt"), "must survive uncertain setup\n");
+
+            throw new Error("Fixture lost acknowledgement after a copied file");
+        },
+    );
+    const call = { ...start("worker", "new-work"), worktree: true };
+    const { scenario } = await run(
+        id,
+        "/handoff worker --new --worktree Preserve uncertain setup.",
+        [call, call],
+    );
+
+    assert.ok(prepared, scenario.results[0]?.text ?? "No setup attempt");
+    assert.equal(scenario.results.length, 2);
+    assert.ok(scenario.results.every((result) => result.isError && /uncertain/.test(result.text)));
+    assert.equal(
+        readFileSync(join(prepared, "human-change.txt"), "utf8"),
+        "must survive uncertain setup\n",
+    );
+    assert.equal(gitIn(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
+    assert.equal(gitIn(repo, "branch", "--list", "pocket/*").split("\n").length, 1);
+    assert.equal((await records(id)).length, 0);
+    assert.equal(app.workItems.isReadOnly(id), false);
+    const setups = Object.values(
+        (await app.harness.snapshot(HandoffsDoc, context))!.worktrees!,
+    ).filter((setup) => setup.sourceThreadId === Number(id));
+
+    assert.equal(setups.length, 1);
+    assert.equal(setups[0]!.status, "creating");
+    const fresh = await run(
+        id,
+        "/handoff worker --new --worktree A fresh request must not hide uncertainty.",
+        [call],
+    );
+
+    assert.equal(fresh.scenario.results[0]!.isError, true);
+    assert.match(fresh.scenario.results[0]!.text, /uncertain/);
+    assert.equal(gitIn(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
+});
+
+test("a setup with proven absent effects retries the same reserved coordinates rather than making another branch", async (t) => {
+    const { repo, cwd } = repository("absent");
+    const id = await source("worker", cwd);
+    const git = WorkspaceBackend.prototype.gitBytes;
+    const paths: string[] = [];
+
+    t.mock.method(
+        WorkspaceBackend.prototype,
+        "gitBytes",
+        async function (this: WorkspaceBackend, ...args: Parameters<typeof git>) {
+            if (args[1][0] === "worktree" && args[1][1] === "add") {
+                paths.push(args[1].at(-2)!);
+
+                if (paths.length === 1) {
+                    throw new Error("Fixture failed before Git started");
+                }
+            }
+
+            return git.apply(this, args);
+        },
+    );
+    const call = { ...start("worker", "new-work"), worktree: true };
+    const { scenario } = await run(
+        id,
+        "/handoff worker --new --worktree Reconcile an absent setup.",
+        [call, call],
+    );
+
+    assert.equal(scenario.results[0]!.isError, true);
+    assert.equal(scenario.results[1]!.isError, false, scenario.results[1]!.text);
+    assert.equal(paths.length, 2);
+    assert.equal(paths[0], paths[1]);
+    assert.equal((await records(id)).length, 1);
+    assert.equal(gitIn(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2);
+    await delivered(cid((await records(id))[0]!.targetThreadId));
+});
+
+test("worktree preparation excludes app writers and rechecks a changed source directory before transfer", async (t) => {
+    const { cwd } = repository("source-race");
+    const id = await source("worker", cwd);
+    const copy = WorkspaceBackend.prototype.copyFile;
+    let changed = false;
+    let retained = "";
+
+    t.mock.method(
+        WorkspaceBackend.prototype,
+        "copyFile",
+        async function (this: WorkspaceBackend, ...args: Parameters<typeof copy>) {
+            await copy.apply(this, args);
+            assert.throws(() => reserveWorkflowLocalWrite(app, id), /Publication is executing/);
+            retained = args[1];
+            changed = true;
+            await app.harness.commit(async (tx) => {
+                (await tx.doc(SessionsDoc)).items[String(id)]!.cwd = work;
+                (await tx.doc(AgentDoc, id)).cwd = work;
+            }, context);
+        },
+    );
+    const { scenario } = await run(
+        id,
+        "/handoff worker --new --worktree Recheck the source checkout.",
+        [{ ...start("worker", "new-work"), worktree: true }],
+    );
+
+    assert.equal(changed, true, scenario.results[0]?.text ?? "No setup attempt");
+    assert.equal(scenario.results[0]!.isError, true);
+    assert.equal((await records(id)).length, 0);
+    assert.equal(app.workItems.isReadOnly(id), false);
+    assert.equal(readFileSync(retained, "utf8"), "untracked context\n");
+});
+
+test("source file changes after a durable ready snapshot refuse a stale own-worktree transfer", async (t) => {
+    const { cwd } = repository("source-content-race");
+    const id = await source("worker", cwd);
+    const git = WorkspaceBackend.prototype.gitBytes;
+    let changed = false;
+
+    t.mock.method(
+        WorkspaceBackend.prototype,
+        "gitBytes",
+        async function (this: WorkspaceBackend, ...args: Parameters<typeof git>) {
+            if (!changed && args[0] === cwd && args[1].includes("--show-toplevel")) {
+                const doc = await app.harness.snapshot(HandoffsDoc, context);
+                const ready = Object.values(doc?.worktrees ?? {}).some(
+                    (setup) => setup.sourceThreadId === Number(id) && setup.status === "ready",
+                );
+
+                if (ready) {
+                    changed = true;
+                    writeFileSync(join(cwd, "code.ts"), "human changes after preparation\n");
+                }
+            }
+
+            return git.apply(this, args);
+        },
+    );
+    const { scenario } = await run(
+        id,
+        "/handoff worker --new --worktree Reject a stale snapshot.",
+        [{ ...start("worker", "new-work"), worktree: true }],
+    );
+
+    assert.equal(
+        changed,
+        true,
+        scenario.results[0]?.text ?? "Preparation did not reach ready state",
+    );
+    assert.equal(scenario.results[0]!.isError, true);
+    assert.match(scenario.results[0]!.text, /changed or uncertain/);
+    assert.equal((await records(id)).length, 0);
+    assert.equal(app.workItems.isReadOnly(id), false);
+    assert.equal(readFileSync(join(cwd, "code.ts"), "utf8"), "human changes after preparation\n");
+});
+
+// Durable ready state precedes publication: restart at that exact boundary must reuse the
+// inspected checkout, then commit one successor/courier instead of rerunning worktree creation.
+test("a restart after worktree preparation reuses its durable checkout and delivers only once", async (t) => {
+    const { repo, cwd } = repository("ready-restart");
+    const id = await source("worker", cwd);
+    const body = "/handoff worker --new --worktree Recover the prepared checkout.";
+    const scenario = script(body, [{ ...start("worker", "new-work"), worktree: true }]);
+    const lost = gate();
+    const reached = gate();
+    const invoke = app.workItems.invoke.bind(app.workItems);
+    const git = WorkspaceBackend.prototype.gitBytes;
+    let invocationContext: Parameters<typeof invoke>[2] | undefined;
+    let intercepted = false;
+
+    t.mock.method(app.workItems, "invoke", async (...args: Parameters<typeof invoke>) => {
+        invocationContext = args[2];
+
+        return invoke(...args);
+    });
+    t.mock.method(
+        WorkspaceBackend.prototype,
+        "gitBytes",
+        async function (this: WorkspaceBackend, ...args: Parameters<typeof git>) {
+            if (!intercepted && args[0] === cwd && args[1].includes("--show-toplevel")) {
+                const doc = await app.harness.snapshot(HandoffsDoc, context);
+                const ready = Object.values(doc?.worktrees ?? {}).find(
+                    (setup) => setup.sourceThreadId === Number(id) && setup.status === "ready",
+                );
+
+                if (ready !== undefined) {
+                    intercepted = true;
+                    reached.release();
+                    await awaitWithContext(lost.promise, invocationContext!);
+                }
+            }
+
+            return git.apply(this, args);
+        },
+    );
+    const accepted = await app.commands.submit(id, owner(app), {
+        text: body,
+        requestId: "ready-worktree-restart",
+    });
+
+    try {
+        // If native setup fails, report its actual tool result rather than hang waiting for a phase
+        // this platform cannot reach. This does not substitute weaker execution for confinement.
+        await Promise.race([
+            reached.promise,
+            (await app.harness.submission(accepted.submissionId, context))!
+                .wait(context)
+                .then(() => {
+                    assert.fail(
+                        scenario.results[0]?.text ?? "Preparation did not reach ready state",
+                    );
+                }),
+        ]);
+        const before = Object.values(
+            (await app.harness.snapshot(HandoffsDoc, context))!.worktrees!,
+        ).find((setup) => setup.sourceThreadId === Number(id))!;
+
+        assert.equal(before.status, "ready");
+        assert.equal((await records(id)).length, 0);
+        assert.equal(app.workItems.isReadOnly(id), false);
+        await app.close();
+        lost.release();
+        t.mock.restoreAll();
+        app = await openApp(model, data);
+        await (await app.harness.submission(accepted.submissionId, context))!.wait(context);
+        await until(() => !app.isBusy(id), "prepared worktree recovery settles");
+        assert.equal(scenario.results[0]!.isError, false, scenario.results[0]!.text);
+        const [record] = await records(id);
+
+        assert.ok(record);
+        assert.equal((await records(id)).length, 1);
+        assert.equal(
+            app.sessionMeta(cid(record.targetThreadId))?.worktree?.path,
+            before.worktree.path,
+        );
+        assert.equal(
+            gitIn(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length,
+            2,
+        );
+        await delivered(cid(record.targetThreadId));
+        assert.equal((await sourceUsers(cid(record.targetThreadId))).length, 1);
+    } finally {
+        lost.release();
+        t.mock.restoreAll();
     }
 });

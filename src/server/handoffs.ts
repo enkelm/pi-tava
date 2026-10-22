@@ -1,6 +1,7 @@
 /** Internal WorkItems transfer engine: human admission, atomic successors, durable delivery and recovery. */
 import { isUtf8 } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -20,7 +21,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "./app.ts";
 import type { User } from "./config.ts";
-import { SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
+import { SessionsDoc, SubagentsDoc, TurnsDoc, type SessionMeta } from "./docs.ts";
 import { HttpError } from "./errors.ts";
 import { hasPendingSubagentReports } from "./subagent-reports.ts";
 import { handoffInputKey, parseHandoffCommand } from "./handoff-input.ts";
@@ -33,10 +34,12 @@ import { addUsage, cleanTitle, titleModel, TITLE_PROMPT } from "./titles.ts";
 import { withWorkflowPublicationLock, workflowExclusiveReason } from "./workflow-policy.ts";
 import { type WorkspaceBackend, isMissingWorkspaceFile } from "./workspace-backend.ts";
 import { workflowWorkspaceBackend, userWorkspaceBackend } from "./workspace-backend-factory.ts";
+import { createWorktree, planWorktree, planWorktreeCopy, worktreeStorage } from "./worktrees.ts";
 import {
     type CodeFingerprint,
     type Handoff,
     HandoffsDoc,
+    type HandoffWorktree,
     type Relationship,
     type ThreadType,
     type Workflow,
@@ -46,9 +49,19 @@ import {
 
 const context = BACKGROUND_CONTEXT;
 const finished = { status: "terminal", outcome: { status: "completed", result: null } } as const;
-const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const digest = (value: unknown) =>
+    createHash("sha256")
+        .update(JSON.stringify(value) ?? "undefined")
+        .digest("hex");
+const sourceIdentity = (cwd: string, meta: Readonly<SessionMeta>) =>
+    digest([cwd, meta.location ?? null, meta.worktree ?? null, meta.projectId ?? null]);
 
-export type HandoffResult = { id: number; handoffId: string; workItemId: string };
+export type HandoffResult = {
+    id: number;
+    handoffId: string;
+    workItemId: string;
+    worktree?: { path: string; branch: string; skipped: string[] };
+};
 type HandoffAdmission = {
     kind: ThreadType;
     relation: Relationship;
@@ -62,6 +75,7 @@ type HandoffAdmission = {
     controller?: true;
     targetTitle?: string;
     file?: string;
+    isolated?: Extract<HandoffWorktree, { status: "ready" }>;
 };
 /** Pi Durable implements this transaction read but omits it from its public Tx declaration. */
 type SubmissionTx = Tx & {
@@ -138,8 +152,13 @@ function requireContainedPath(backend: WorkspaceBackend, root: string, path: str
     }
 }
 
-/** Physical files, not normalized Git blobs. This is bounded inspection, not an atomic snapshot. */
-async function fingerprint(backend: WorkspaceBackend): Promise<CodeFingerprint> {
+/** Physical files, not normalized Git blobs. This is bounded inspection, not an atomic snapshot.
+ * Snapshot-omitted files contribute identity/size/mtime, never unbounded bytes; ordinary checkpoints omit none.
+ */
+async function fingerprint(
+    backend: WorkspaceBackend,
+    omitted: ReadonlySet<string> = new Set(),
+): Promise<CodeFingerprint> {
     try {
         const cwd = await backend.canonical(backend.cwd);
         const work = backend.at(cwd);
@@ -252,6 +271,21 @@ async function fingerprint(backend: WorkspaceBackend): Promise<CodeFingerprint> 
                 root,
                 await repository.canonical(backend.paths.dirname(file)),
             );
+
+            if (omitted.has(path)) {
+                hash.update(
+                    JSON.stringify([
+                        path,
+                        info.kind,
+                        info.mode,
+                        info.size,
+                        info.mtimeMs,
+                        "omitted",
+                    ]),
+                );
+                continue;
+            }
+
             size += info.size;
 
             if (!Number.isSafeInteger(info.size) || info.size < 0 || size > 64 * 1024 * 1024) {
@@ -336,6 +370,7 @@ export class Handoffs {
                   action: "start";
                   targetType: string;
                   relationship?: "same-work" | "new-work";
+                  worktree?: boolean;
                   summary: string;
               },
         api: ToolExecutionApi,
@@ -1232,11 +1267,27 @@ export class Handoffs {
     async #startFromInput(
         api: ToolExecutionApi,
         ctx: Context,
-        request: { targetType: unknown; relationship?: unknown; summary: unknown },
+        request: {
+            targetType: unknown;
+            relationship?: unknown;
+            worktree?: unknown;
+            summary: unknown;
+        },
     ): Promise<HandoffResult> {
         const id = api.conversationId;
         const kind = target(request.targetType);
         const relation = relationship(request.relationship ?? "same-work");
+
+        if (request.worktree !== undefined && typeof request.worktree !== "boolean") {
+            throw new HttpError(400, "worktree must be a boolean");
+        }
+
+        const ownWorktree = request.worktree === true;
+
+        if (ownWorktree && relation !== "new-work") {
+            throw new HttpError(400, "An own worktree requires a new-work handoff");
+        }
+
         const brief = text(request.summary, "summary");
         let pin = await api.memo<{ submissionId: number; key: string }>("handoff-input", ctx);
 
@@ -1252,6 +1303,7 @@ export class Handoffs {
 
         const pinned = pin;
         let file: { path: string; host: string | null } | undefined;
+        let isolated: Extract<HandoffWorktree, { status: "ready" }> | undefined;
 
         const activate = async (
             tx: Tx,
@@ -1268,17 +1320,25 @@ export class Handoffs {
 
             if (
                 (route?.targetType !== undefined && route.targetType !== kind) ||
-                (route?.relationship !== undefined && route.relationship !== relation)
+                (route?.relationship !== undefined && route.relationship !== relation) ||
+                (route !== undefined && (route.worktree === true) !== ownWorktree)
             ) {
                 throw new HttpError(
                     409,
-                    "The handoff target and relationship must match the human's explicit /handoff route",
+                    "The handoff target, relationship and worktree choice must match the human's explicit /handoff route",
                 );
             }
 
             const instructions =
                 route === undefined ? text(source.body, "human direction") : route.instructions;
-            const input = digest([kind, relation, brief, instructions ?? null]);
+            // Leave historical inherited-checkout receipts byte-identical.
+            const input = digest([
+                kind,
+                relation,
+                brief,
+                instructions ?? null,
+                ...(ownWorktree ? [true] : []),
+            ]);
             const doc = await tx.doc(HandoffsDoc);
             const saved = doc.requests[source.key];
             const turns = await tx.doc(TurnsDoc, id);
@@ -1301,6 +1361,10 @@ export class Handoffs {
                     id: saved.id,
                     handoffId: saved.handoffId,
                     workItemId: saved.workItemId,
+                    ...this.#worktreeResult(
+                        doc.handoffs[saved.handoffId],
+                        doc.worktrees?.[source.key],
+                    ),
                 };
             }
 
@@ -1312,6 +1376,19 @@ export class Handoffs {
                 throw new HttpError(
                     409,
                     "PiP currently controls this Work Item. Send a new human instruction or use the human handoff controls to reclaim control before handing off here.",
+                );
+            }
+
+            if (ownWorktree && source.user.role !== "owner") {
+                throw new HttpError(403, "Only the owner can choose a new worktree destination");
+            }
+
+            const setup = doc.worktrees?.[source.key];
+
+            if (setup !== undefined && setup.input !== input) {
+                throw new HttpError(
+                    409,
+                    "This human input already reserved a different handoff worktree",
                 );
             }
 
@@ -1364,6 +1441,7 @@ export class Handoffs {
                     key: source.key,
                     requestKey: source.key,
                     input,
+                    ...(isolated === undefined ? {} : { isolated }),
                 },
                 source.allowed,
                 currentDiff,
@@ -1422,6 +1500,10 @@ export class Handoffs {
         }
 
         return (await withWorkflowPublicationLock(this.#app, id, async () => {
+            if (ownWorktree) {
+                isolated = await this.#prepareWorktree(api, ctx, pinned, kind, relation, brief);
+            }
+
             let currentDiff: boolean | undefined;
 
             if (
@@ -1446,6 +1528,363 @@ export class Handoffs {
 
             return api.commit((tx) => activate(tx, true, currentDiff), ctx);
         }))!;
+    }
+
+    #worktreeResult(record: Handoff | undefined, setup: HandoffWorktree | undefined) {
+        return record?.ownWorktree === true && setup?.status === "ready"
+            ? {
+                  worktree: {
+                      path: setup.worktree.path,
+                      branch: setup.worktree.branch,
+                      skipped: setup.skipped,
+                  },
+              }
+            : {};
+    }
+
+    /** Same coordinates on retry; a partial or changed checkout is evidence to reconcile, not replay. */
+    async #prepareWorktree(
+        api: ToolExecutionApi,
+        ctx: Context,
+        pinned: { submissionId: number; key: string },
+        kind: ThreadType,
+        relation: Relationship,
+        brief: string,
+    ): Promise<Extract<HandoffWorktree, { status: "ready" }>> {
+        const id = api.conversationId;
+
+        const admit = async (tx: Tx) => {
+            const source = await this.#humanInput(tx, id, api.taskId, pinned.submissionId);
+            const latest = await this.#humanInput(tx, id, api.taskId);
+
+            if (source.key !== pinned.key || latest.key !== pinned.key) {
+                throw new HttpError(
+                    409,
+                    "Newer human input arrived; clarify the current direction before handing off",
+                );
+            }
+
+            if (source.user.role !== "owner" || relation !== "new-work") {
+                throw new HttpError(403, "Only the owner can select an own worktree for new work");
+            }
+
+            const { meta } = await this.#admit(tx, id, source.user, kind, relation, source.allowed);
+            const agent = await tx.doc(AgentDoc, id);
+            const cwd = agent.cwd ?? meta.cwd;
+
+            if (cwd !== this.#app.cwdOf(id)) {
+                throw new HttpError(409, "Source checkout changed; start a fresh request");
+            }
+
+            this.#app.workItems.requireWritable(id);
+            this.#app.spend.check(source.user, id);
+            const route = parseHandoffCommand(source.body);
+            const instructions =
+                route === undefined ? text(source.body, "human direction") : route.instructions;
+
+            return {
+                person: structuredClone(source.user),
+                source: sourceIdentity(cwd, meta),
+                input: digest([kind, relation, brief, instructions ?? null, true]),
+            };
+        };
+
+        const initial = await api.commit(admit, ctx);
+        const backend = workflowWorkspaceBackend(this.#app, id, ctx);
+        const policy = { backend, offline: true };
+        const common = async (work: WorkspaceBackend) =>
+            work.canonical(
+                (
+                    await fingerprintGit(
+                        work,
+                        "rev-parse",
+                        "--path-format=absolute",
+                        "--git-common-dir",
+                    )
+                ).replace(/\n$/, ""),
+            );
+        const checkout = async () =>
+            digest([
+                backend.id,
+                await backend.canonical(backend.cwd),
+                await fingerprintGit(backend, "rev-parse", "--show-toplevel"),
+                await fingerprintGit(backend, "rev-parse", "--absolute-git-dir"),
+                await common(backend),
+                await fingerprintGit(backend, "rev-parse", "--verify", "HEAD"),
+            ]);
+        let original: string;
+
+        try {
+            original = await checkout();
+        } catch (error) {
+            throw new HttpError(
+                409,
+                `An own worktree requires an accessible Git checkout with a HEAD and supported native offline confinement: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+
+        const reconcile = (worktree: HandoffWorktree["worktree"]) =>
+            new HttpError(
+                409,
+                `Handoff worktree setup is incomplete, changed or uncertain. No successor was created and no files were deleted. Inspect ${worktree.path} and branch ${worktree.branch} on ${backend.id}; preserve all work and remove only a confirmed abandoned setup before submitting a fresh request. Do not blindly repeat setup.`,
+            );
+
+        const absent = async (worktree: HandoffWorktree["worktree"]) => {
+            const info = await backend.lstat(worktree.path).catch((error: unknown) => {
+                if (isMissingWorkspaceFile(error)) {
+                    return undefined;
+                }
+
+                throw error;
+            });
+            const refs = await fingerprintGit(
+                backend,
+                "for-each-ref",
+                "--format=%(refname)",
+                `refs/heads/${worktree.branch}`,
+            );
+            const registered = await fingerprintGit(
+                backend,
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            );
+
+            const canonical = await backend.canonicalWithMissingTail(worktree.path);
+
+            return (
+                info === undefined &&
+                refs === "" &&
+                !registered
+                    .split("\0")
+                    .some(
+                        (entry) =>
+                            entry === `worktree ${worktree.path}` ||
+                            entry === `worktree ${canonical}`,
+                    )
+            );
+        };
+
+        const inspectTarget = async (worktree: HandoffWorktree["worktree"], cwd: string) => {
+            const work = backend.at(cwd);
+            const branch = (
+                await fingerprintGit(work, "symbolic-ref", "--quiet", "--short", "HEAD")
+            ).replace(/\n$/, "");
+            const root = (await fingerprintGit(work, "rev-parse", "--show-toplevel")).replace(
+                /\n$/,
+                "",
+            );
+
+            if (
+                branch !== worktree.branch ||
+                (await work.canonical(root)) !== (await backend.canonical(worktree.path)) ||
+                (await common(work)) !== (await common(backend))
+            ) {
+                throw reconcile(worktree);
+            }
+
+            return fingerprint(work);
+        };
+
+        const read = () =>
+            api.commit(async (tx) => {
+                const current = await admit(tx);
+
+                if (digest(current) !== digest(initial)) {
+                    throw new HttpError(
+                        409,
+                        "The owner or source checkout changed during worktree preparation",
+                    );
+                }
+
+                return (await tx.doc(HandoffsDoc)).worktrees ?? {};
+            }, ctx);
+        const setups = await read();
+
+        for (const [key, previous] of Object.entries(setups)) {
+            if (key === pinned.key || previous.sourceThreadId !== Number(id)) {
+                continue;
+            }
+
+            // Absence in a different checkout says nothing about the reserved repository's
+            // branch/registration. Keep its coordinates until the original source is restored
+            // for reconciliation; never forget evidence merely because the source cwd changed.
+            if (
+                previous.source !== initial.source ||
+                previous.checkout !== original ||
+                !(await absent(previous.worktree))
+            ) {
+                throw reconcile(previous.worktree);
+            }
+
+            await api.commit(async (tx) => {
+                const current = await admit(tx);
+
+                if (digest(current) !== digest(initial)) {
+                    throw new HttpError(
+                        409,
+                        "The owner or source checkout changed during worktree reconciliation",
+                    );
+                }
+
+                const doc = await tx.doc(HandoffsDoc);
+
+                if (
+                    digest(doc.worktrees?.[key]) === digest(previous) &&
+                    doc.requests[key] === undefined
+                ) {
+                    delete doc.worktrees![key];
+                }
+            }, ctx);
+        }
+
+        let setup = setups[pinned.key];
+
+        if (setup === undefined) {
+            const folder = await worktreeStorage(
+                backend,
+                join(this.#app.dataDir, "worktrees"),
+                policy,
+            );
+            const worktree = await planWorktree(backend.cwd, folder, kind, policy, pinned.key);
+
+            setup = await api.commit(async (tx) => {
+                const current = await admit(tx);
+
+                if (digest(current) !== digest(initial)) {
+                    throw new HttpError(
+                        409,
+                        "The owner or source checkout changed during worktree preparation",
+                    );
+                }
+
+                const doc = await tx.doc(HandoffsDoc);
+
+                doc.worktrees ??= {};
+
+                return (doc.worktrees[pinned.key] ??= {
+                    sourceThreadId: Number(id),
+                    requestedBy: initial.person.id,
+                    tokenHash: initial.person.tokenHash,
+                    input: initial.input,
+                    source: initial.source,
+                    checkout: original,
+                    worktree,
+                    status: "creating",
+                });
+            }, ctx);
+        }
+
+        if (
+            setup.input !== initial.input ||
+            setup.source !== initial.source ||
+            setup.requestedBy !== initial.person.id ||
+            setup.tokenHash !== initial.person.tokenHash ||
+            setup.checkout !== original
+        ) {
+            throw reconcile(setup.worktree);
+        }
+
+        if (setup.status === "ready") {
+            try {
+                const actual = await inspectTarget(setup.worktree, setup.cwd);
+
+                if (actual.digest !== setup.fingerprint.digest) {
+                    throw reconcile(setup.worktree);
+                }
+            } catch {
+                throw reconcile(setup.worktree);
+            }
+        } else {
+            if (!(await absent(setup.worktree))) {
+                throw reconcile(setup.worktree);
+            }
+
+            // This reservation already exists durably. An interruption from here on preserves it,
+            // and the next invocation inspects these exact coordinates rather than minting another.
+            try {
+                const root = (
+                    await fingerprintGit(backend, "rev-parse", "--show-toplevel")
+                ).replace(/\n$/, "");
+                const { skipped } = await planWorktreeCopy(root, policy, 50_000);
+                const omitted = new Set(skipped);
+                // Inspect before any copy effects, not after accepting a possibly newer source.
+                // This brackets the copy interval, but does not make filesystem reads atomic.
+                const sourceSnapshot = await fingerprint(backend, omitted);
+                const made = await createWorktree(
+                    backend.cwd,
+                    backend.paths.dirname(setup.worktree.path),
+                    kind,
+                    policy,
+                    setup.worktree,
+                );
+                const snapshot = await inspectTarget(made.worktree, made.cwd);
+                const currentSource = await fingerprint(backend, omitted);
+
+                if (
+                    digest(made.skipped) !== digest(skipped) ||
+                    currentSource.digest !== sourceSnapshot.digest
+                ) {
+                    throw reconcile(setup.worktree);
+                }
+
+                const ready = {
+                    ...setup,
+                    ...made,
+                    status: "ready" as const,
+                    fingerprint: snapshot,
+                    sourceFingerprint: sourceSnapshot,
+                };
+
+                if ((await checkout()) !== original) {
+                    throw reconcile(setup.worktree);
+                }
+
+                await api.commit(async (tx) => {
+                    const current = await admit(tx);
+                    const doc = await tx.doc(HandoffsDoc);
+
+                    if (
+                        digest(current) !== digest(initial) ||
+                        digest(doc.worktrees?.[pinned.key]) !== digest(setup)
+                    ) {
+                        throw reconcile(setup!.worktree);
+                    }
+
+                    doc.worktrees![pinned.key] = ready;
+                }, ctx);
+                setup = ready;
+            } catch (error) {
+                this.#app.log(
+                    `Handoff worktree ${setup.worktree.path} retained after incomplete setup: ${error instanceof Error ? error.message : String(error)}`,
+                );
+
+                const failure = reconcile(setup.worktree);
+
+                throw new HttpError(
+                    409,
+                    `${failure.message} Setup failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
+        }
+
+        await read();
+
+        try {
+            const currentSource = await fingerprint(backend, new Set(setup.skipped));
+
+            if (
+                (await checkout()) !== original ||
+                currentSource.digest !== setup.sourceFingerprint.digest
+            ) {
+                throw reconcile(setup.worktree);
+            }
+        } catch {
+            throw reconcile(setup.worktree);
+        }
+
+        return setup;
     }
 
     #writable(state: Readonly<Workflow>): void {
@@ -1963,6 +2402,26 @@ export class Handoffs {
             throw new HttpError(409, "Source checkout changed; try again");
         }
 
+        const isolated = request.isolated;
+
+        if (
+            isolated !== undefined &&
+            (relation !== "new-work" ||
+                user.role !== "owner" ||
+                user.id !== isolated.requestedBy ||
+                user.tokenHash !== isolated.tokenHash ||
+                isolated.source !== sourceIdentity(cwd, meta) ||
+                isolated.input !== input ||
+                digest(doc.worktrees?.[key]) !== digest(isolated))
+        ) {
+            throw new HttpError(
+                409,
+                "The prepared worktree no longer matches the owner or source checkout",
+            );
+        }
+
+        const targetCwd = isolated?.cwd ?? cwd;
+        const targetWorktree = isolated?.worktree ?? meta.worktree;
         const persisted =
             requestKey === undefined
                 ? await this.#brief(
@@ -2000,14 +2459,14 @@ export class Handoffs {
             request.targetTitle ?? this.#app.workItems.profile(kind)?.title ?? kind;
         const targetId = await createSessionRoot(tx, {
             agent: {
-                cwd,
+                cwd: targetCwd,
                 ...(agent.model === undefined ? {} : { model: agent.model }),
                 ...(agent.thinkingLevel === undefined
                     ? {}
                     : { thinkingLevel: agent.thinkingLevel }),
             },
             meta: {
-                cwd,
+                cwd: targetCwd,
                 ...(meta.location === undefined ? {} : { location: meta.location }),
                 title: initialTitle,
                 createdAt: now,
@@ -2018,7 +2477,7 @@ export class Handoffs {
                 workItemId: item.id,
                 ...(meta.ownerOnly === true ? { ownerOnly: true } : {}),
                 ...(meta.projectId === undefined ? {} : { projectId: meta.projectId }),
-                ...(meta.worktree === undefined ? {} : { worktree: { ...meta.worktree } }),
+                ...(targetWorktree === undefined ? {} : { worktree: { ...targetWorktree } }),
                 ...(meta.budget === undefined ? {} : { budget: meta.budget }),
             },
         });
@@ -2045,6 +2504,9 @@ export class Handoffs {
             initialTitle,
             relationship: relation,
             workItemId: item.id,
+            ...(isolated === undefined
+                ? {}
+                : { ownWorktree: true, skippedFiles: isolated.skipped }),
             ...(file === undefined
                 ? { brief: initialBrief, ...(instructions === undefined ? {} : { instructions }) }
                 : { file }),
@@ -2087,6 +2549,28 @@ export class Handoffs {
             }
         }
 
-        return { id: Number(targetId), handoffId, workItemId: item.id };
+        if (isolated !== undefined) {
+            const current = this.#human(id, supplied);
+
+            // `supplied` can alias the live config object, which token rotation mutates in
+            // place. Recheck the immutable setup grant after every awaited prospective write.
+            if (
+                current.role !== "owner" ||
+                current.id !== isolated.requestedBy ||
+                current.tokenHash !== isolated.tokenHash
+            ) {
+                throw new HttpError(
+                    403,
+                    "Only the current owner with the prepared grant can publish a handoff worktree",
+                );
+            }
+        }
+
+        return {
+            id: Number(targetId),
+            handoffId,
+            workItemId: item.id,
+            ...this.#worktreeResult(doc.handoffs[handoffId], isolated),
+        };
     }
 }

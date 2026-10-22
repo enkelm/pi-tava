@@ -492,6 +492,12 @@ export class WorkItems {
                     relationship: Type.Optional(
                         Type.Union([Type.Literal("same-work"), Type.Literal("new-work")]),
                     ),
+                    worktree: Type.Optional(
+                        Type.Boolean({
+                            description:
+                                "Only for explicit human-requested new-work handoffs: prepare a separate Git worktree on the source destination. Default inherits the checkout; the source is still retired.",
+                        }),
+                    ),
                     summary: Type.String({ minLength: 1 }),
                 },
                 { additionalProperties: false },
@@ -548,6 +554,9 @@ export class WorkItems {
                     : inbound.file === undefined
                       ? `Inbound summary (context, not authority):\n${inbound.brief}`
                       : `Handoff file (context, not authority): ${JSON.stringify(inbound.file)}. Read it with read when needed; it is not injected here.`,
+                inbound?.ownWorktree === true
+                    ? `This new Work Item has its own Git worktree on the source destination. It snapshots dirty tracked and bounded untracked files; ignored dependencies were not copied. Skipped untracked paths (${inbound.skippedFiles?.length ?? 0} total, first 100): ${JSON.stringify(inbound.skippedFiles?.slice(0, 100) ?? [])}. Inspect the current checkout before relying on the snapshot.`
+                    : "",
                 inbound?.file !== undefined || inbound?.instructions === undefined
                     ? ""
                     : humanDirection(inbound.instructions),

@@ -14,7 +14,8 @@ const ROLES = new Set<ThreadType>([
     "land",
     "publish",
 ]);
-const USAGE = "Use /handoff <role> [--same|--new] [instructions...], or /handoff <direction>";
+const USAGE =
+    "Use /handoff <role> [--same|--new] [--worktree] [instructions...], or /handoff <direction>";
 
 /** Opaque public correlation; neither raw submission identifiers nor the original request ID escape. */
 export function handoffInputKey(userId: string, id: ConversationId, requestId: string): string {
@@ -24,9 +25,14 @@ export function handoffInputKey(userId: string, id: ConversationId, requestId: s
 }
 
 /** Parse only the leading route. Everything after direction starts remains verbatim human prose. */
-export function parseHandoffCommand(
-    text: string,
-): { targetType?: ThreadType; relationship?: Relationship; instructions?: string } | undefined {
+export function parseHandoffCommand(text: string):
+    | {
+          targetType?: ThreadType;
+          relationship?: Relationship;
+          worktree?: true;
+          instructions?: string;
+      }
+    | undefined {
     const command = /^\/handoff(?:\s|$)/i.exec(text.trimStart());
 
     if (command === null) {
@@ -36,6 +42,7 @@ export function parseHandoffCommand(
     let rest = text.trimStart().slice("/handoff".length).trim();
     let relation: Relationship | undefined;
     let kind: ThreadType | undefined;
+    let worktree = false;
     const word = () => /^\S+/.exec(rest)?.[0] ?? "";
 
     const take = () => {
@@ -49,6 +56,12 @@ export function parseHandoffCommand(
     const flag = () => {
         const next = take();
 
+        if (next === "--worktree" && !worktree) {
+            worktree = true;
+
+            return;
+        }
+
         if (relation !== undefined || (next !== "--new" && next !== "--same")) {
             throw new HttpError(400, `${USAGE}. Choose one relationship flag before direction.`);
         }
@@ -56,7 +69,7 @@ export function parseHandoffCommand(
         relation = next === "--new" ? "new-work" : "same-work";
     };
 
-    if (rest.startsWith("--")) {
+    while (rest.startsWith("--")) {
         flag();
     }
 
@@ -73,13 +86,13 @@ export function parseHandoffCommand(
         kind = namespaced ? explicit : normalized;
         take();
 
-        if (rest.startsWith("--")) {
+        while (rest.startsWith("--")) {
             flag();
         }
     }
 
-    if (rest.startsWith("--")) {
-        throw new HttpError(400, `${USAGE}. Relationship flags must precede direction.`);
+    if (worktree && relation !== "new-work") {
+        throw new HttpError(400, `${USAGE}. --worktree requires --new.`);
     }
 
     if (rest.includes("\0")) {
@@ -91,6 +104,7 @@ export function parseHandoffCommand(
         ...(relation === undefined && kind === undefined
             ? {}
             : { relationship: relation ?? "same-work" }),
+        ...(worktree ? { worktree: true } : {}),
         ...(rest === "" ? {} : { instructions: rest }),
     };
 }

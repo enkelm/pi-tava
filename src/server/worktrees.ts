@@ -101,16 +101,27 @@ async function repositoryOf(cwd: string, policy: WorktreePolicy): Promise<string
     );
 }
 
-/** Copy the repository's new (untracked, not ignored) files into the worktree. Returns the ones left out for size. */
-async function copyNewFiles(root: string, into: string, policy: WorktreePolicy): Promise<string[]> {
+/** Plan the same untracked-file budget for copying and pre-copy source inspection; no file bytes are read. */
+export async function planWorktreeCopy(
+    root: string,
+    policy: WorktreePolicy,
+    maxPaths = Infinity,
+): Promise<{ files: { path: string; size: number }[]; skipped: string[] }> {
     const backend = policy.backend ?? WorkspaceBackend.local(root);
     const { join } = backend.paths;
+    const paths = (
+        await git(root, ["ls-files", "--others", "--exclude-standard", "-z"], policy)
+    ).split("\0");
+
+    if (paths.filter((path) => path !== "").length > maxPaths) {
+        throw new HttpError(409, "Code exceeds the worktree inspection path limit.");
+    }
+
+    const files: { path: string; size: number }[] = [];
     const skipped: string[] = [];
     let copied = 0;
 
-    for (const path of (
-        await git(root, ["ls-files", "--others", "--exclude-standard", "-z"], policy)
-    ).split("\0")) {
+    for (const path of paths) {
         if (path === "") {
             continue;
         }
@@ -133,25 +144,77 @@ async function copyNewFiles(root: string, into: string, policy: WorktreePolicy):
             continue;
         }
 
-        await backend.copyFile(from, join(into, path), MAX_COPIED_BYTES - copied, policy);
+        files.push({ path, size: stats.size });
         copied += stats.size;
+    }
+
+    return { files, skipped };
+}
+
+/** Copy the repository's new (untracked, not ignored) files into the worktree. Returns the ones left out for size. */
+async function copyNewFiles(root: string, into: string, policy: WorktreePolicy): Promise<string[]> {
+    const backend = policy.backend ?? WorkspaceBackend.local(root);
+    const { join } = backend.paths;
+    const { files, skipped } = await planWorktreeCopy(root, policy);
+    let copied = 0;
+
+    for (const { path, size } of files) {
+        await backend.copyFile(
+            join(root, path),
+            join(into, path),
+            MAX_COPIED_BYTES - copied,
+            policy,
+        );
+        copied += size;
     }
 
     return skipped;
 }
 
+/** Reserve stable coordinates before a durable caller starts any Git mutation. No worktree is created here. */
+export async function planWorktree(
+    cwd: string,
+    folder: string,
+    label: string,
+    policy: WorktreePolicy = {},
+    identity?: string,
+): Promise<Worktree> {
+    const backend = policy.backend ?? WorkspaceBackend.local(cwd);
+    const slug =
+        label
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "")
+            .slice(0, 40) || "session";
+
+    if (identity !== undefined && !/^[0-9a-f]{64}$/.test(identity)) {
+        throw new HttpError(400, "A durable worktree identity must be a SHA-256 request key.");
+    }
+
+    const name = `${slug}-${identity?.slice(0, 32) ?? randomUUID().slice(0, 6)}`;
+
+    return {
+        path: backend.paths.join(await backend.absolute(folder), name),
+        branch: `pocket/${name}`,
+        source: cwd,
+        ...(backend.remote ? { destination: backend.id } : {}),
+    };
+}
+
 /**
  * Make a worktree for a session that works in `cwd`, under `folder`, named after `label`. Returns it, the folder
- * inside it that matches `cwd`, and the new files too big to copy.
+ * inside it that matches `cwd`, and the new files too big to copy. Durable callers can supply reserved coordinates;
+ * failed reserved setups are retained for reconciliation, never force-deleted or silently retried.
  */
 export async function createWorktree(
     cwd: string,
     folder: string,
     label: string,
     policy: WorktreePolicy = {},
+    reserved?: Worktree,
 ): Promise<{ worktree: Worktree; cwd: string; skipped: string[] }> {
     const backend = policy.backend ?? WorkspaceBackend.local(cwd);
-    const { join, resolve } = backend.paths;
+    const { resolve } = backend.paths;
     const root = await repositoryOf(cwd, policy);
 
     if (root === undefined) {
@@ -173,19 +236,17 @@ export async function createWorktree(
         throw new HttpError(400, "The repository has no commits yet: commit once, then try again.");
     }
 
-    const slug =
-        label
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, "-")
-            .replace(/^-+|-+$/g, "")
-            .slice(0, 40) || "session";
-    const name = `${slug}-${randomUUID().slice(0, 6)}`;
-    const worktree: Worktree = {
-        path: join(await backend.absolute(folder), name),
-        branch: `pocket/${name}`,
-        source: cwd,
-        ...(backend.remote ? { destination: backend.id } : {}),
-    };
+    const worktree = reserved ?? (await planWorktree(cwd, folder, label, policy));
+
+    requireWorktreeDestination(worktree, backend);
+
+    if (
+        worktree.source !== cwd ||
+        backend.paths.dirname(worktree.path) !== (await backend.absolute(folder)) ||
+        worktree.branch !== `pocket/${backend.paths.basename(worktree.path)}`
+    ) {
+        throw new HttpError(409, "The reserved worktree does not match this source or storage.");
+    }
 
     await backend.mkdir(folder);
     await git(root, ["worktree", "add", "-b", worktree.branch, worktree.path, "HEAD"], {
@@ -209,7 +270,9 @@ export async function createWorktree(
 
         return { worktree, cwd: resolve(worktree.path, within), skipped };
     } catch (error) {
-        await discardWorktree(worktree, policy).catch(() => undefined);
+        if (reserved === undefined) {
+            await discardWorktree(worktree, policy).catch(() => undefined);
+        }
 
         throw new HttpError(500, `The worktree could not be set up: ${describe(error)}`);
     }

@@ -117,6 +117,8 @@ export interface SessionServices {
                   action: "start";
                   targetType: string;
                   relationship?: "same-work" | "new-work";
+                  /** Owner-only, explicit new-work selection. Defaults to inheriting the source checkout. */
+                  worktree?: boolean;
                   summary: string;
               },
         api: ToolExecutionApi,

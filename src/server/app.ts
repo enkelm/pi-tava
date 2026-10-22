@@ -44,6 +44,12 @@ import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Alerts } from "./alerts.ts";
+import { Diagnostics } from "./diagnostics.ts";
+import {
+    committedDiagnostics,
+    observeEnvironment,
+    observeRegistry,
+} from "./diagnostics/runtime.ts";
 import { Attribution, type Missing } from "./attribution.ts";
 import { Browsers } from "./browser.ts";
 import type { BrowserState } from "./browser/page.ts";
@@ -294,6 +300,8 @@ export class PocketApp {
     readonly reviews = new Reviews(this);
     readonly projects = new Projects(this);
     readonly workItems = new WorkItems(this);
+    /** Bounded private diagnostic capture/reads, independent of Bash, SSH and private persona work. */
+    readonly diagnostics = new Diagnostics(this);
 
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
@@ -535,7 +543,7 @@ export class PocketApp {
         this.models = await ModelRuntime.create(modelOptions);
         this.providers.modelRefresh.watch(this.models, modelOptions);
         this.#configureModels?.(this.models);
-        measureModelStreams(this.models);
+        measureModelStreams(this.models, this.diagnostics.recorder);
         this.providerExtensions = new ProviderExtensions(
             this.providerPackages,
             this.models,
@@ -663,10 +671,16 @@ export class PocketApp {
             storage,
             {
                 models: this.models,
-                registry,
+                registry: observeRegistry(registry, this.diagnostics.recorder),
                 settings: this.#harnessSettings(),
                 now: this.now,
-                env: ({ conversationId, cwd }) => this.#env(conversationId, cwd ?? this.defaultCwd),
+                env: ({ conversationId, cwd }) =>
+                    observeEnvironment(
+                        this.diagnostics.recorder,
+                        conversationId,
+                        () => this.#env(conversationId, cwd ?? this.defaultCwd),
+                        this.locationOf(conversationId) === undefined ? "local" : "ssh",
+                    ),
                 conversationCreated: async (tx, conversation) => {
                     // Every conversation gets the app's documents up front, so views can read them from the start.
                     await tx.doc(AuthorsDoc, conversation.id);
@@ -813,6 +827,13 @@ export class PocketApp {
 
     /** Every commit, as Pi Durable publishes it: what the app keeps in memory follows it, and so do the open views. */
     #committed(publication: CommitPublication): void {
+        // Metadata only; observer faults cannot fail a native commit or replay business work.
+        try {
+            committedDiagnostics(publication, this.diagnostics.recorder);
+        } catch {
+            this.diagnostics.recorder.dropped++;
+        }
+
         let sessionsChanged = false;
 
         // Usage in a commit is from the work that was going on before it: it is counted before a message the same
@@ -1653,6 +1674,27 @@ export class PocketApp {
                 ...[...this.#agents.keys()].filter((id) => this.rootOf(id) === root),
             ]),
         ];
+    }
+
+    /** Bounded cached membership for passive diagnostics; no task/storage traversal or workspace access. */
+    diagnosticConversations(roots: readonly ConversationId[], limit: number) {
+        const selected = new Set(roots.slice(0, limit));
+        const members = new Set(selected);
+        let scanned = 0;
+        let limited = roots.length > limit;
+
+        for (const id of this.#agents.keys()) {
+            if (++scanned > limit || members.size >= limit) {
+                limited = true;
+                break;
+            }
+
+            if (selected.has(this.rootOf(id))) {
+                members.add(id);
+            }
+        }
+
+        return { members: [...members], limited };
     }
 
     /** The conversation that spawned a subagent's; undefined for any other conversation. */
@@ -3463,6 +3505,7 @@ export class PocketApp {
             try {
                 // Close writes no outcome: running work resumes when the next process opens the storage.
                 try {
+                    await this.diagnostics.close();
                     await this.harness?.close(context);
                 } finally {
                     await this.providerExtensions?.close();

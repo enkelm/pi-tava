@@ -188,7 +188,10 @@ type Request = {
     reject: (failure: Error) => void;
 };
 
-function fixture(t: TestContext) {
+function fixture(
+    t: TestContext,
+    submit?: (id: number, body: { text: string; requestId: string; mode: string }) => Promise<void>,
+) {
     t.mock.timers.enable({ apis: ["setInterval"] });
     const document = Object.assign(new EventTarget(), { visibilityState: "visible" });
     const window = new EventTarget();
@@ -292,7 +295,7 @@ function fixture(t: TestContext) {
         },
         useEffect: (run: Effect["run"], deps: unknown[]) => effect(effects, run, deps),
         useLayoutEffect: (run: Effect["run"], deps: unknown[]) => effect(layouts, run, deps),
-        submit: () => assert.fail("recovery must not submit a handoff"),
+        submit: submit ?? (() => assert.fail("recovery must not submit a handoff")),
     };
     const state = createHandoffState(pocket);
     const Sheet = createHandoffSheet(pocket, state);
@@ -742,3 +745,128 @@ for (const verification of ["routine poll", "reopen"] as const) {
         );
     });
 }
+
+// The sheet owns explicit human selection, persisted retries and command construction. This
+// proof does not duplicate server/Git isolation: it checks the actual submitted human payload.
+test("own-worktree selection survives reopening and submits only for owner-selected new work", async (t) => {
+    const submitted: { text: string; requestId: string }[] = [];
+    const f = fixture(t, async (_id, body) => {
+        submitted.push(body);
+    });
+    const data = {
+        ...eligibility(),
+        options: [
+            {
+                targetType: "worker",
+                relationship: "new-work",
+                enabled: true,
+                reason: "Separate work",
+            },
+            {
+                targetType: "researcher",
+                relationship: "same-work",
+                enabled: true,
+                reason: "Current work",
+            },
+        ],
+    };
+
+    await f.settle();
+    await f.respond(0, data);
+    f.find("input")
+        .find((node) => node.props.value === "worker:new-work")!
+        .props.onChange();
+    await f.settle();
+    await f.find("form")[0]!.props.onSubmit({ preventDefault() {} });
+    await f.settle();
+    const checkbox = f.find("input").find((node) => node.props.type === "checkbox");
+
+    assert.ok(checkbox);
+    assert.equal(checkbox.props.checked, false, "inheritance is the default");
+    checkbox.props.onChange({ currentTarget: { checked: true } });
+    await f.settle();
+    const saved = f.storage.get("pocket.handoffDraft.alice.1");
+
+    assert.ok(saved);
+    assert.ok(f.text().includes("source thread still becomes read-only"));
+    f.reopen();
+    await f.settle();
+    await f.respond(1, data);
+    await f.find("form")[0]!.props.onSubmit({ preventDefault() {} });
+    await f.settle();
+    assert.equal(
+        f.find("input").find((node) => node.props.type === "checkbox")?.props.checked,
+        true,
+    );
+    await f.find("form")[0]!.props.onSubmit({ preventDefault() {} });
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0]!.text, "/handoff worker --new --worktree");
+    assert.equal(submitted[0]!.requestId, JSON.parse(saved).revision);
+});
+
+test("switching to same-work or losing owner status cannot submit a remembered isolation choice", async (t) => {
+    for (const mode of ["same-work", "collaborator"]) {
+        await t.test(mode, async (t) => {
+            const submitted: string[] = [];
+            const f = fixture(t, async (_id, body) => {
+                submitted.push(body.text);
+            });
+            const data = {
+                ...eligibility(),
+                options: [
+                    {
+                        targetType: "worker",
+                        relationship: "new-work",
+                        enabled: true,
+                        reason: "Separate work",
+                    },
+                    {
+                        targetType: "researcher",
+                        relationship: "same-work",
+                        enabled: true,
+                        reason: "Current work",
+                    },
+                ],
+            };
+
+            await f.settle();
+            await f.respond(0, data);
+            f.find("input")
+                .find((node) => node.props.value === "worker:new-work")!
+                .props.onChange();
+            await f.settle();
+            await f.find("form")[0]!.props.onSubmit({ preventDefault() {} });
+            await f.settle();
+            f.find("input")
+                .find((node) => node.props.type === "checkbox")!
+                .props.onChange({ currentTarget: { checked: true } });
+            await f.settle();
+
+            if (mode === "same-work") {
+                f.find("button", "Back")[0]!.props.onClick();
+                await f.settle();
+                f.find("input")
+                    .find((node) => node.props.value === "researcher:same-work")!
+                    .props.onChange();
+                await f.settle();
+                await f.find("form")[0]!.props.onSubmit({ preventDefault() {} });
+            } else {
+                f.changeRole("guest");
+                await f.settle();
+                await f.respond(1, data);
+            }
+
+            await f.settle();
+            assert.equal(
+                f.find("input").some((node) => node.props.type === "checkbox"),
+                mode === "collaborator",
+            );
+            assert.equal(
+                f.find("button", "Start thread")[0]!.props.disabled,
+                mode === "collaborator",
+            );
+            await f.find("form")[0]!.props.onSubmit({ preventDefault() {} });
+            assert.deepEqual(submitted, mode === "same-work" ? ["/handoff researcher --same"] : []);
+        });
+    }
+});

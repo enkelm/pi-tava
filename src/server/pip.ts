@@ -260,6 +260,11 @@ export class Pip {
         return createPrivateAgent(this, this.#app.pipCompaction);
     }
 
+    /** Metadata-only diagnostics remain global-private; the reader rejects shared/helper/controller callers. */
+    diagnosticTools() {
+        return this.#app.diagnostics.tools();
+    }
+
     /** Shared Reviewer publication remains separate from private PiP's owner tools and model. */
     get reviewTool(): PipReviewer["tool"] {
         return this.#reviewer.tool;

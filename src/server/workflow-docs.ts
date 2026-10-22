@@ -1,6 +1,7 @@
 /** Durable handoff grouping and per-thread workflow state; no executable context reset or task ownership. */
 import { defineDoc } from "@earendil-works/pi-durable";
 import { currentStateCheckpoints } from "./doc-checkpoint.ts";
+import type { Worktree } from "./worktrees.ts";
 
 /** Stable stored profile identity. Missing contributions never change it or imply Chat capabilities. */
 export type ThreadType = string;
@@ -147,7 +148,29 @@ export type Handoff = {
     titleNamed?: boolean;
     /** The extension's initial title at creation, retained across reload/removal for guarded naming. */
     initialTitle?: string;
+    /** Only explicit new-work transfers allocate a separate checkout. */
+    ownWorktree?: true;
+    skippedFiles?: string[];
 };
+/** Durable coordinates precede filesystem effects. Uncertain setup is never blindly replayed or deleted. */
+export type HandoffWorktree = {
+    sourceThreadId: number;
+    requestedBy: string;
+    tokenHash: string;
+    input: string;
+    source: string;
+    checkout: string;
+    worktree: Worktree;
+} & (
+    | { status: "creating" }
+    | {
+          status: "ready";
+          cwd: string;
+          fingerprint: CodeFingerprint;
+          sourceFingerprint: CodeFingerprint;
+          skipped: string[];
+      }
+);
 /** Immutable human intent; only its summary and settlement are produced by background work. */
 export type HandoffRequest = {
     sourceThreadId: number;
@@ -169,6 +192,7 @@ export type HandoffsData = {
     handoffs: Record<string, Handoff>;
     requests: Record<string, { input: string; id: number; handoffId: string; workItemId: string }>;
     pending?: Record<string, HandoffRequest>;
+    worktrees?: Record<string, HandoffWorktree>;
 };
 
 /** Application-wide retry receipts and grouping. Never exposed wholesale as a room document. */
