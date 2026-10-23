@@ -1024,6 +1024,8 @@ export const PipWorkDoc = defineDoc<{
     actions: Record<string, { epoch: number; finish?: string }>;
     humanInputs: Record<string, true>;
     humanPending?: string;
+    /** Native named-agent activation stays inactive until this exact input is accepted. */
+    contactPending?: { requestId: string; epoch: number };
     lastInput?: { requestId: string; epoch: number };
     reason?: string;
 }>({

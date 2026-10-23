@@ -1,4 +1,4 @@
-// Selected-chat projection over real native association/delegation; only the model is scripted.
+// Selected-chat projection over real native association/contact; only the model is scripted.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
@@ -35,9 +35,7 @@ function controlModel() {
                 return fauxAssistantMessage("Exact native contact accepted.");
             }
 
-            const command = /CONTROL_(delegate|follow|read)_(\d+)(?:_(ask|finish))?/.exec(
-                last.text,
-            );
+            const command = /CONTROL_(send|follow|read)_(\d+)(?:_(ask|finish))?/.exec(last.text);
 
             assert.ok(command, last.text);
             const action = command[1];
@@ -50,7 +48,7 @@ function controlModel() {
                         action,
                         session: Number(command[2]),
                         report: false,
-                        ...(action === "delegate"
+                        ...(action === "send"
                             ? {
                                   text:
                                       command[3] ??
@@ -92,13 +90,19 @@ function controlModel() {
     return { model, calls: () => calls };
 }
 
-test("current controllers follow the exact chat's live delegation, never its historical contacts or latest report context", async (t) => {
+test("current controllers follow the exact chat's live contact, never its historical contacts or latest report context", async (t) => {
     const scripted = controlModel();
     const app = await openApp(scripted.model);
 
     t.after(() => app.close());
     const firstWork = await newSession(app, app.defaultCwd, "worker");
     const secondWork = await newSession(app, app.defaultCwd, "worker");
+    const firstController = (
+        await app.pip.orchestration.control(firstWork, owner(app), { action: "open" })
+    ).orchestration!.conversationId as ConversationId;
+    const secondController = (
+        await app.pip.orchestration.control(secondWork, owner(app), { action: "open" })
+    ).orchestration!.conversationId as ConversationId;
     const first = (
         await app.pip.agents.create(owner(app), { name: "Coordinator", requestId: "coordinator" })
     ).id as ConversationId;
@@ -148,14 +152,14 @@ test("current controllers follow the exact chat's live delegation, never its his
     assert.equal((await rows(first))[0]!.current, false, "association alone is not control");
     assert.deepEqual(await rows(second), [], "association belongs to its actual source chat");
 
-    await say(app, first, `CONTROL_delegate_${firstWork}`);
-    const firstController = await settle(firstWork);
+    await say(app, first, `CONTROL_send_${firstController}`);
+    await settle(firstWork);
 
     await until(
         () => revision() > initialRevision,
-        "native delegation invalidates the visible owner's controller projection",
+        "native contact invalidates the visible owner's controller projection",
     );
-    await say(app, first, `CONTROL_delegate_${secondWork}`);
+    await say(app, first, `CONTROL_send_${secondController}`);
     await settle(secondWork);
     const firstItem = app.workItems.itemFor(firstWork)!.id;
     const secondItem = app.workItems.itemFor(secondWork)!.id;
@@ -196,13 +200,13 @@ test("current controllers follow the exact chat's live delegation, never its his
     );
     assert.deepEqual(currentIds(await rows(first)), [firstItem, secondItem].sort());
 
-    // A controller follow advances report context, but does not issue a new native delegation.
+    // A controller follow advances report context, but does not issue a new native send.
     await say(app, second, `CONTROL_follow_${firstController}`);
     assert.deepEqual(currentIds(await rows(first)), [firstItem, secondItem].sort());
     assert.deepEqual(itemIds(await rows(second)), [firstItem]);
     assert.deepEqual(currentIds(await rows(second)), []);
 
-    await say(app, second, `CONTROL_delegate_${firstController}`);
+    await say(app, second, `CONTROL_send_${firstController}`);
     await settle(firstWork);
     assert.deepEqual(
         itemIds(await rows(first)),
@@ -254,14 +258,19 @@ test("pending native questions and finished work retain truthful state without i
     t.after(() => app.close());
     const questionWork = await newSession(app, app.defaultCwd, "worker");
     const finishedWork = await newSession(app, app.defaultCwd, "worker");
+    const controller = (
+        await app.pip.orchestration.control(questionWork, owner(app), { action: "open" })
+    ).orchestration!.conversationId as ConversationId;
+    const finishedController = (
+        await app.pip.orchestration.control(finishedWork, owner(app), { action: "open" })
+    ).orchestration!.conversationId as ConversationId;
     const chat = (
         await app.pip.agents.create(owner(app), { name: "Questions", requestId: "questions" })
     ).id as ConversationId;
     const rows = () => app.pip.agents.supervision.controllers(chat, owner(app));
 
-    await say(app, chat, `CONTROL_delegate_${questionWork}_ask`);
+    await say(app, chat, `CONTROL_send_${controller}_ask`);
     const questionItem = app.workItems.itemFor(questionWork)!;
-    const controller = questionItem.supervisor!.conversationId as ConversationId;
 
     await until(
         async () => (await rows()).some((entry) => entry.state === "needs owner"),
@@ -279,7 +288,7 @@ test("pending native questions and finished work retain truthful state without i
     assert.equal(stopped.current, false);
     assert.equal(stopped.state, "needs owner", "Stop does not erase the pending question");
 
-    await say(app, chat, `CONTROL_delegate_${finishedWork}_finish`);
+    await say(app, chat, `CONTROL_send_${finishedController}_finish`);
     const finishedItem = app.workItems.itemFor(finishedWork)!;
 
     await until(
@@ -303,12 +312,13 @@ test("selected-chat history retains inaccessible work and rejects stale owner au
 
     t.after(() => app.close());
     const source = await newSession(app, app.defaultCwd, "worker");
+    const controller = (await app.pip.orchestration.control(source, owner(app), { action: "open" }))
+        .orchestration!.conversationId as ConversationId;
     const chat = (await app.pip.agents.create(owner(app), { name: "Access", requestId: "access" }))
         .id as ConversationId;
 
-    await say(app, chat, `CONTROL_delegate_${source}`);
+    await say(app, chat, `CONTROL_send_${controller}`);
     const item = app.workItems.itemFor(source)!;
-    const controller = item.supervisor!.conversationId as ConversationId;
 
     await until(async () => {
         const work = await app.harness.snapshot(PipWorkDoc, controller, context);
@@ -359,11 +369,12 @@ test("disabled execution and native model holds exclude an otherwise current del
 
     t.after(() => app.close());
     const source = await newSession(app, app.defaultCwd, "worker");
+    const controller = (await app.pip.orchestration.control(source, owner(app), { action: "open" }))
+        .orchestration!.conversationId as ConversationId;
     const chat = (await app.pip.agents.create(owner(app), { name: "Holds", requestId: "holds" }))
         .id as ConversationId;
 
-    await say(app, chat, `CONTROL_delegate_${source}`);
-    const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
+    await say(app, chat, `CONTROL_send_${controller}`);
     const row = async () => (await app.pip.agents.supervision.controllers(chat, owner(app)))[0]!;
 
     await until(async () => {

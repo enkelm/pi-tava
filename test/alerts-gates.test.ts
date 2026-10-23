@@ -184,6 +184,7 @@ test("named finals wait for delegated execution and exact recipients' helper tre
     for (const target of ["delegated-work", "chat-helper"] as const) {
         await t.test(target, async (t) => {
             let source!: ConversationId;
+            let controller!: ConversationId;
             let finishing = false;
             let release!: () => void;
             const held = new Promise<void>((resolve) => {
@@ -208,8 +209,8 @@ test("named finals wait for delegated execution and exact recipients' helper tre
                                             })
                                           : target === "delegated-work"
                                             ? fauxToolCall("agent_work", {
-                                                  action: "delegate",
-                                                  session: Number(source),
+                                                  action: "send",
+                                                  session: Number(controller),
                                                   text: "Observe the already-running execution.",
                                               })
                                             : fauxToolCall("session_send", {
@@ -274,6 +275,11 @@ test("named finals wait for delegated execution and exact recipients' helper tre
             );
 
             if (target === "delegated-work") {
+                const opened = await app.pip.orchestration.control(source, owner(app), {
+                    action: "open",
+                });
+
+                controller = opened.orchestration!.conversationId as ConversationId;
                 await app.commands.submit(source, owner(app), {
                     requestId: "held-execution",
                     text: "Hold this execution.",

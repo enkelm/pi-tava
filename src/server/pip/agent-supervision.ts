@@ -78,6 +78,10 @@ export type AgentContactIntent = {
     text: string;
     requestId: string;
     controllerEpoch?: number;
+    /** Fresh owner-authorized one-send contact. Absent on historical queue-only sends. */
+    controllerContact?: true;
+    /** Placement validated this contact; later inputs cannot rewrite placed history. */
+    contactPlaced?: true;
     /** Actual source invocation for new exact controller messages. Legacy delegations omit it. */
     sourceConversationId?: number;
     sourceTaskId?: number;
@@ -214,6 +218,7 @@ export class AgentSupervision {
     }
     readonly #app: PocketApp;
     readonly #lanes = new Map<string, Promise<void>>();
+    readonly #deliveries = new Map<string, Promise<void>>();
     #doc: SupervisionData = { agents: {}, requests: {}, controls: {} };
     #identities: Record<string, PrivateIdentity> = {};
     #ready = false;
@@ -1265,7 +1270,7 @@ export class AgentSupervision {
         defineTool({
             name: "agent_work",
             description:
-                "Discover accessible native work, inspect contact status or contact an exact native recipient. Input queues normally; steer only on explicit human instruction. Work Item contacts associate an existing controller automatically, without activating it. Use answer only for an exact pending question on your current attached controller, grounded in prior owner scope; it is attributed to this agent, never new owner input or publication approval. If unsure, visibly ask the owner and leave affected orchestration waiting. Replies remain tied to the originating chat. Native writer, model, spend and publication gates remain in force.",
+                "Discover accessible native work, inspect contact status or send to an exact native recipient. An owner-authorized send to a Work Item controller automatically takes control and activates it if inactive, or steers its current run if active; no separate delegation or manual linking is needed. Other recipients queue normally; steer them only on explicit human instruction. Discovery, association and reports do not activate work. Use answer only for an exact pending question on your current attached controller, grounded in prior owner scope; ordinary sends cannot answer or clear it. Answers are attributed to this agent, never new owner input or publication approval. If unsure, visibly ask the owner and leave affected orchestration waiting. Replies remain tied to the originating chat. Native writer, model, spend and publication gates remain in force.",
             replay: "safe",
             executionMode: "sequential",
             parameters: Type.Union([
@@ -1290,7 +1295,6 @@ export class AgentSupervision {
                 Type.Object(
                     {
                         action: Type.Union([
-                            Type.Literal("delegate"),
                             Type.Literal("send"),
                             Type.Literal("stop"),
                             Type.Literal("read"),
@@ -1677,7 +1681,44 @@ export class AgentSupervision {
         }
     }
 
-    /** Ordinary exact controller input retains its source and grant; it cannot renew either. */
+    /** Fresh control needs actual accepted owner input, not a report or a superseded generation. */
+    async #requireOwnerInput(tx: Tx, source: InputAuthority, ownerId: string): Promise<void> {
+        const doc = await tx.doc(AgentSupervisionDoc);
+        const admission = Object.values(doc.admissions ?? {}).find(
+            (entry) =>
+                entry.agentId === source.agentId &&
+                entry.chatId === source.chatId &&
+                entry.admissionSerial === source.admissionSerial,
+        );
+        const person = requestPerson(admission?.requestId);
+
+        if (
+            source.inputId === undefined ||
+            source.admissionSerial === undefined ||
+            person?.wrote !== true ||
+            person.userId !== ownerId ||
+            (await tx.submissionByRequest(idOf(source.chatId), admission!.requestId!))?.id !==
+                source.inputId
+        ) {
+            throw new HttpError(409, "Controller contact requires its accepted owner input.");
+        }
+
+        for (const newer of Object.values(doc.admissions ?? {})) {
+            const author = requestPerson(newer.requestId);
+
+            if (
+                newer.agentId === source.agentId &&
+                (newer.admissionSerial ?? 0) > source.admissionSerial &&
+                author?.wrote === true &&
+                author.userId === ownerId &&
+                (await tx.submissionByRequest(idOf(newer.chatId), newer.requestId!)) !== undefined
+            ) {
+                throw new HttpError(409, "A newer accepted owner input superseded this contact.");
+            }
+        }
+    }
+
+    /** Exact controller contact retains source fences; only a live new contact may activate. */
     async requireControllerMessage(
         tx: Tx,
         intent: AgentContactIntent,
@@ -1688,6 +1729,14 @@ export class AgentSupervision {
         const item = (await tx.doc(HandoffsDoc)).workItems[intent.workItemId];
         const user = this.#app.config.userById(intent.ownerId);
         const input = doc.inputs?.[String(intent.sourceInputId)];
+        const state = await tx.doc(PipWorkDoc, idOf(intent.controllerId));
+        const admittedActivation =
+            stored?.controllerContact &&
+            stored.status === "pending" &&
+            state.contactPending?.requestId === intent.requestId &&
+            state.contactPending.epoch === intent.controllerEpoch &&
+            (await tx.submissionByRequest(idOf(intent.controllerId), intent.requestId)) !==
+                undefined;
 
         if (
             stored === undefined ||
@@ -1696,7 +1745,9 @@ export class AgentSupervision {
             stored.target !== intent.controllerId ||
             Object.entries(stored).some(
                 ([field, value]) =>
-                    !["status", "submissionId", "result", "reason"].includes(field) &&
+                    !["status", "submissionId", "result", "reason", "contactPlaced"].includes(
+                        field,
+                    ) &&
                     intent[field as keyof AgentContactIntent] !== value,
             ) ||
             intent.sourceConversationId === undefined ||
@@ -1709,7 +1760,9 @@ export class AgentSupervision {
             user.tokenHash !== intent.tokenHash ||
             item?.supervisor?.conversationId !== intent.controllerId ||
             item.supervisor.epoch !== intent.controllerEpoch ||
-            item.supervisor.status !== "running" ||
+            (item.supervisor.status !== "running" &&
+                !(requireSource && stored.status === "pending" && stored.controllerContact) &&
+                !admittedActivation) ||
             item.activeThreadId !== intent.source ||
             item.archived ||
             !this.#app.config.pipEnabled ||
@@ -1742,7 +1795,7 @@ export class AgentSupervision {
         this.#app.spend.check(user, idOf(intent.chatId));
         this.#app.spend.check(user, idOf(intent.controllerId));
 
-        if ((await tx.doc(PipWorkDoc, idOf(intent.controllerId))).question !== undefined) {
+        if (state.question !== undefined) {
             throw new HttpError(
                 409,
                 "Ordinary messaging cannot answer the controller's pending exact question.",
@@ -1764,11 +1817,34 @@ export class AgentSupervision {
             );
         }
 
+        if (stored.controllerContact && !stored.contactPlaced) {
+            await this.#requireOwnerInput(
+                tx,
+                { ...input, inputId: intent.sourceInputId },
+                intent.ownerId,
+            );
+        }
+
         if (requireSource) {
-            await this.requireInvocation(tx, {
+            const api = {
                 conversationId: idOf(intent.sourceConversationId),
                 taskId: task.id,
-            });
+            };
+
+            await this.requireInvocation(tx, api);
+            const identity = await this.#identity(tx, intent.agentId, user);
+            const source = await this.#source(tx, api, identity);
+
+            if (
+                stored.controllerContact &&
+                (source.inputId !== intent.sourceInputId ||
+                    source.admissionSerial !== intent.sourceAdmissionSerial)
+            ) {
+                throw new HttpError(
+                    409,
+                    "This contact belongs to a different accepted owner input.",
+                );
+            }
         }
     }
 
@@ -1826,7 +1902,15 @@ export class AgentSupervision {
             }
 
             if (receipt === undefined) {
-                await this.associate(api, args.session, user, ctx);
+                await this.associate(
+                    api,
+                    args.session,
+                    user,
+                    ctx,
+                    false,
+                    args.action === "send" &&
+                        this.#app.pip.orchestration.isScoped(idOf(args.session)),
+                );
                 receipt = await api.commit(async (tx) => {
                     const identity = await this.#identity(tx, agentId, user);
 
@@ -1888,6 +1972,7 @@ export class AgentSupervision {
                             ? {
                                   controllerEpoch: (await tx.doc(HandoffsDoc)).workItems[item.id]!
                                       .supervisor!.epoch,
+                                  controllerContact: true,
                                   sourceConversationId: Number(api.conversationId),
                                   sourceTaskId: Number(api.taskId),
                                   sourceCallId: api.callId,
@@ -1903,7 +1988,7 @@ export class AgentSupervision {
             }
 
             if (receipt.status === "pending") {
-                await this.#deliver(key, receipt, api);
+                await this.#deliver(key, api);
                 receipt = (await this.#app.harness.snapshot(AgentSupervisionDoc, ctx))!.requests[
                     key
                 ]!;
@@ -1930,6 +2015,7 @@ export class AgentSupervision {
         user: User,
         ctx: Context,
         exactOnly = false,
+        controllerContact = false,
     ): Promise<void> {
         await api.commit(async (tx) => {
             await this.requireInvocation(tx, api);
@@ -1963,6 +2049,10 @@ export class AgentSupervision {
 
                 const sourceAuthority = await this.#source(tx, api, identity);
 
+                if (controllerContact) {
+                    await this.#requireOwnerInput(tx, sourceAuthority, user.id);
+                }
+
                 this.#app.requireSee(user, idOf(session));
                 const item = this.#app.workItems.itemFor(idOf(controllerId))!;
                 const grant = (await tx.doc(HandoffsDoc)).workItems[item.id]!.supervisor!;
@@ -1991,10 +2081,14 @@ export class AgentSupervision {
                     );
                 }
 
-                if (grant.status === "running" && grant.agentId === undefined) {
+                if (
+                    grant.status === "running" &&
+                    grant.agentId === undefined &&
+                    !controllerContact
+                ) {
                     throw new HttpError(
                         409,
-                        "This native orchestrator is already running independently. The owner must reclaim it before another agent can control it.",
+                        "This native orchestrator is already running independently. Send to its exact controller to contact it.",
                     );
                 }
 
@@ -2014,6 +2108,43 @@ export class AgentSupervision {
                     ];
 
                     return;
+                }
+
+                if (controllerContact) {
+                    const state = await tx.doc(PipWorkDoc, idOf(controllerId));
+                    const model = await tx.doc(AgentDoc, idOf(controllerId));
+
+                    if (state.question !== undefined || state.humanPending !== undefined) {
+                        throw new HttpError(
+                            409,
+                            "The controller is awaiting an exact human decision.",
+                        );
+                    }
+
+                    this.#app.requireSteer(user);
+                    this.#app.spend.check(user, idOf(controllerId));
+                    await this.#app.workItems.requireController(
+                        tx,
+                        idOf(controllerId),
+                        grant.epoch,
+                        undefined,
+                        false,
+                    );
+
+                    if (
+                        !this.#app.config.pipEnabled ||
+                        !this.#app.workItems.enabled ||
+                        item.archived ||
+                        (grant.maxActions !== undefined && grant.actions >= grant.maxActions) ||
+                        model.model === undefined ||
+                        this.#app.models.getModel(model.model.provider, model.model.modelId) ===
+                            undefined
+                    ) {
+                        throw new HttpError(
+                            409,
+                            "The controller is unavailable or its action budget is exhausted.",
+                        );
+                    }
                 }
 
                 const epoch = (previous?.epoch ?? 0) + 1;
@@ -2186,7 +2317,33 @@ export class AgentSupervision {
         return undefined;
     }
 
-    async #deliver(key: string, receipt: IntentReceipt, api?: ToolExecutionApi): Promise<void> {
+    async #deliver(key: string, api?: ToolExecutionApi): Promise<void> {
+        const previous = this.#deliveries.get(key) ?? Promise.resolve();
+        const pending = previous.then(async () => {
+            const receipt = (await this.#app.harness.snapshot(AgentSupervisionDoc, context))
+                ?.requests[key];
+
+            if (receipt?.status === "pending") {
+                await this.#deliverPending(key, receipt, api);
+            }
+        });
+
+        this.#deliveries.set(key, pending);
+
+        try {
+            await pending;
+        } finally {
+            if (this.#deliveries.get(key) === pending) {
+                this.#deliveries.delete(key);
+            }
+        }
+    }
+
+    async #deliverPending(
+        key: string,
+        receipt: IntentReceipt,
+        api?: ToolExecutionApi,
+    ): Promise<void> {
         try {
             const user = this.#app.config.userById(receipt.ownerId);
 
@@ -2199,6 +2356,14 @@ export class AgentSupervision {
             const action = receipt.action ?? "delegate";
 
             if (action === "send" && receipt.target === receipt.controllerId) {
+                if (receipt.controllerContact && api !== undefined) {
+                    await api.commit(
+                        (tx) => this.requireControllerMessage(tx, receipt, true),
+                        context,
+                    );
+                    await this.#app.pip.agents.execution.release(idOf(receipt.chatId));
+                }
+
                 const sender =
                     api === undefined
                         ? undefined
@@ -2313,8 +2478,10 @@ export class AgentSupervision {
             await this.#app.harness.commit(async (tx) => {
                 const latest = (await tx.doc(AgentSupervisionDoc)).requests[key]!;
 
-                latest.status = "blocked";
-                latest.reason = describe(error);
+                if (latest.status !== "accepted") {
+                    latest.status = "blocked";
+                    latest.reason = describe(error);
+                }
             }, context);
         }
     }
@@ -2421,7 +2588,7 @@ export class AgentSupervision {
             }
 
             if (receipt.status === "pending") {
-                await this.#deliver(key, receipt);
+                await this.#deliver(key);
             }
         }
 

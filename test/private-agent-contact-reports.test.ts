@@ -305,13 +305,14 @@ test("exact execution follows stay on their subscribed Worker across a stored Wo
 });
 
 test(
-    "mixed controller delegation and exact Worker send keep replies at their accepted origins",
+    "mixed exact controller and Worker sends keep replies at their accepted origins",
     { timeout: 30_000 },
     async (t) => {
         for (const scenario of ["done", "unanswered"] as const) {
             for (const report of [true, false]) {
                 await t.test(`exact send ${scenario} report=${report}`, async (t) => {
                     let worker!: ConversationId;
+                    let controller!: ConversationId;
                     let workerCalls = 0;
                     const app = await openApp(
                         scriptedModel((request) => {
@@ -327,8 +328,8 @@ test(
                                     return fauxAssistantMessage(
                                         [
                                             fauxToolCall("agent_work", {
-                                                action: exact ? "send" : "delegate",
-                                                session: Number(worker),
+                                                action: "send",
+                                                session: Number(exact ? worker : controller),
                                                 text: exact
                                                     ? "EXACT_TASK_B"
                                                     : "CONTROLLER_TASK_A: inspect only; do not start execution.",
@@ -360,6 +361,11 @@ test(
 
                     t.after(() => app.close());
                     worker = await newSession(app, app.defaultCwd, "worker");
+                    const opened = await app.pip.orchestration.control(worker, owner(app), {
+                        action: "open",
+                    });
+
+                    controller = opened.orchestration!.conversationId as ConversationId;
                     const a = (
                         await app.pip.agents.create(owner(app), {
                             name: "Mixed adapter origins",
@@ -375,9 +381,6 @@ test(
                         a,
                         "CONTROLLER_TASK_A: inspect through this Work Item's controller only.",
                     );
-                    const controller = app.workItems.itemFor(worker)!.supervisor!
-                        .conversationId as ConversationId;
-
                     await until(
                         () => !app.isBusy(controller),
                         "A's real native controller response settles",

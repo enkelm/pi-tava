@@ -118,6 +118,7 @@ test("a native controller wait and execution yield stay quiet; only explicit out
 
 test("nested native questions stay with their accepted named origin; only explicit owner escalation pushes that chat", async (t) => {
     let source!: ConversationId;
+    let controller!: ConversationId;
     let escalation = false;
     let finishing = false;
     let answer: { action: "answer"; session: number; questionId: string; text: string } | undefined;
@@ -152,8 +153,8 @@ test("nested native questions stay with their accepted named origin; only explic
                                             text: "The decision exceeds the prior scope; please clarify here.",
                                         }
                                       : {
-                                            action: "delegate",
-                                            session: Number(source),
+                                            action: "send",
+                                            session: Number(controller),
                                             text: "Inspect the existing scope and clarify before proceeding.",
                                         }),
                         ),
@@ -185,6 +186,9 @@ test("nested native questions stay with their accepted named origin; only explic
     const sent = capture(app);
 
     source = await newSession(app, app.defaultCwd, "worker");
+    const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     const chat = (
         await app.pip.agents.create(owner(app), {
             name: "Coordinator",
@@ -193,8 +197,6 @@ test("nested native questions stay with their accepted named origin; only explic
     ).id as ConversationId;
 
     await say(app, chat, "Coordinate this existing investigation.");
-    const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
-
     await until(
         async () =>
             (await app.harness.snapshot(PipWorkDoc, controller, context))?.question !== undefined &&

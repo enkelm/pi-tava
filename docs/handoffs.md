@@ -242,8 +242,11 @@ Further same-work handoffs join that item. There are no nested Work Items. A new
 A Work Item has exactly two control states: **PiP active** or **human control**, shown by its row's
 PiP status icon and accessible label. The row's PiP action replaces mark-read and opens the same
 owner-only PiP Thread without a goal form. Opening creates an inert controller or reuses the existing
-Thread without activating it. Only a newly accepted owner message in that exact controller activates
-PiP; duplicate or stale retries never activate it. Legacy persisted paused/reclaimed states both mean
+Thread without activating it. A newly accepted owner message in that exact controller, or a fresh
+owner-authorized named-agent send to it, activates PiP; duplicate or stale retries never activate it.
+Named-agent contact steers an already-active controller without stopping separate execution threads.
+It automatically associates the controller, but cannot bypass an exact pending question or individual
+publication approval. Discovery, navigation and passive reports never activate work. Legacy persisted paused/reclaimed states both mean
 human control. Activation preserves the pending question, scope, history, cumulative usage and caps. The grouped row, folded rails, launcher, Home
 and keyboard navigation open the same owner-only PiP conversation and keep that row selected;
 explicit execution-child links still open those exact threads. Questions, answers, checks and sends

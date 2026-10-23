@@ -54,8 +54,8 @@ async function questioning(
                                 "agent_work",
                                 reply === undefined
                                     ? {
-                                          action: "delegate",
-                                          session: Number(source),
+                                          action: "send",
+                                          session: Number(controller),
                                           text: "Clarify the existing investigation scope.",
                                       }
                                     : { action: "answer", ...reply },
@@ -69,7 +69,7 @@ async function questioning(
             }
 
             if (system.includes("the private supervisor for Work Item")) {
-                if (last.text.includes("App delegation")) {
+                if (last.text.includes("App message")) {
                     return fauxAssistantMessage(
                         [fauxToolCall("session_read", { session: Number(source) })],
                         { stopReason: "toolUse" },
@@ -106,6 +106,9 @@ async function questioning(
 
     t.after(() => app.close());
     source = await newSession(app, app.defaultCwd, "worker");
+    const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     const chat = (
         await app.pip.agents.create(owner(app), {
             name: "Tava",
@@ -114,7 +117,6 @@ async function questioning(
     ).id as ConversationId;
 
     await say(app, chat, "Coordinate the existing clarity investigation; do not implement.");
-    controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     await until(
         async () =>
             (await app.harness.snapshot(PipWorkDoc, controller, context))?.question !== undefined,
@@ -148,7 +150,7 @@ async function questioning(
     return { app, source, controller, chat, questionId, answer, received, executions };
 }
 
-// Existing coverage establishes that delegation is blocked, but cannot express a
+// Existing coverage establishes that ordinary controller contact is blocked, but cannot express a
 // correlated, attributed private-agent answer or its request retry lifecycle.
 test("a private agent answers the exact native question without impersonating its owner, and retries only its accepted payload", async (t) => {
     let target!: ConversationId;

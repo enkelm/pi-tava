@@ -63,6 +63,7 @@ const body = (entry: Awaited<ReturnType<typeof observations>>[number]) =>
 
 test("native empty controller snapshots do not report or recopy an old Worker final; equal-text source events survive reload distinctly", async (t) => {
     let worker!: ConversationId;
+    let controller!: ConversationId;
     let privateCalls = 0;
     let releaseFirst!: () => void;
     let releaseTool!: () => void;
@@ -90,8 +91,8 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
                 ? fauxAssistantMessage(
                       [
                           fauxToolCall("agent_work", {
-                              action: "delegate",
-                              session: Number(worker),
+                              action: "send",
+                              session: Number(controller),
                               text: "Observe only the exact native outcomes; do not start execution.",
                           }),
                       ],
@@ -143,12 +144,15 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
     });
     worker = await newSession(app, app.defaultCwd, "worker");
 
-    // Accept the real human work before attachment. New execution input after delegation would
+    // Accept the real human work before attachment. New execution input after contact would
     // correctly reclaim the writer, which is a different authority contract, not this report bug.
     for (const text of ["FIRST_OUTCOME", "EMPTY_TOOL_ROUND", "SECOND_OUTCOME", "THIRD_OUTCOME"]) {
         await app.commands.submit(worker, owner(app), { text, requestId: text });
     }
 
+    const opened = await app.pip.orchestration.control(worker, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     const identity = await app.pip.agents.create(owner(app), {
         name: "Observer",
         requestId: "observer",
@@ -156,8 +160,6 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
     const chat = identity.id as ConversationId;
 
     await say(app, chat, "Observe this Work Item within existing scope.");
-    const controller = app.workItems.itemFor(worker)!.supervisor!.conversationId as ConversationId;
-
     await until(() => !app.isBusy(controller), "empty controller input settles");
     await app.pip.agents.supervision.close();
     await app.pip.agents.supervision.open();
@@ -241,6 +243,7 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
 
 test("a correlated controller answer advances observation before multiple buffered native wakes", async (t) => {
     let worker!: ConversationId;
+    let controller!: ConversationId;
     let controllerCalls = 0;
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;
@@ -262,8 +265,8 @@ test("a correlated controller answer advances observation before multiple buffer
                     ? fauxAssistantMessage(
                           [
                               fauxToolCall("agent_work", {
-                                  action: "delegate",
-                                  session: Number(worker),
+                                  action: "send",
+                                  session: Number(controller),
                                   text: "Observe native progress only.",
                               }),
                           ],
@@ -297,17 +300,18 @@ test("a correlated controller answer advances observation before multiple buffer
         await app.commands.submit(worker, owner(app), { text, requestId: text });
     }
 
+    const opened = await app.pip.orchestration.control(worker, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     const chat = (
         await app.pip.agents.create(owner(app), { name: "Cursor observer", requestId: "observer" })
     ).id as ConversationId;
 
-    // Suspend passive observation before delegation so the first observed controller outcome is
+    // Suspend passive observation before contact so the first observed controller outcome is
     // already owned by the accepted input; no earlier empty scan can initialize its cursor.
     await app.pip.agents.supervision.close();
     await say(app, chat, "Observe this existing native work.");
-    const controller = app.workItems.itemFor(worker)!.supervisor!.conversationId as ConversationId;
-
-    await until(() => !app.isBusy(controller), "correlated delegation answer settles");
+    await until(() => !app.isBusy(controller), "correlated controller answer settles");
     await app.pip.agents.supervision.close();
     await app.pip.agents.supervision.open();
     const controllerReports = async () =>
@@ -317,7 +321,7 @@ test("a correlated controller answer advances observation before multiple buffer
     const before = (await controllerReports()).length;
     const calls = controllerCalls;
 
-    assert.equal(before, 1, "the accepted delegation has one correlated report");
+    assert.equal(before, 1, "the accepted controller send has one correlated report");
     await app.pip.agents.supervision.close();
     releaseFirst();
     await until(
@@ -341,6 +345,7 @@ test("a correlated controller answer advances observation before multiple buffer
 for (const buffered of [false, true]) {
     test(`pre-upgrade report identities survive startup${buffered ? " with multiple equal-text outcomes settled during downtime" : " without re-emitting delivered outcomes"}`, async (t) => {
         let worker!: ConversationId;
+        let controller!: ConversationId;
         let privateCalls = 0;
         let controllerCalls = 0;
         let releaseFirst!: () => void;
@@ -364,8 +369,8 @@ for (const buffered of [false, true]) {
                     ? fauxAssistantMessage(
                           [
                               fauxToolCall("agent_work", {
-                                  action: "delegate",
-                                  session: Number(worker),
+                                  action: "send",
+                                  session: Number(controller),
                                   text: "Observe existing work only.",
                               }),
                           ],
@@ -401,6 +406,9 @@ for (const buffered of [false, true]) {
             await app.commands.submit(worker, owner(app), { text, requestId: text });
         }
 
+        const opened = await app.pip.orchestration.control(worker, owner(app), { action: "open" });
+
+        controller = opened.orchestration!.conversationId as ConversationId;
         const identity = await app.pip.agents.create(owner(app), {
             name: "Legacy observer",
             requestId: "observer",
@@ -413,9 +421,11 @@ for (const buffered of [false, true]) {
         await app.pip.agents.supervision.close();
         await say(app, chat, "Observe this already accepted work.");
         const item = app.workItems.itemFor(worker)!;
-        const controller = item.supervisor!.conversationId as ConversationId;
 
-        await until(() => controllerCalls === 1 && !app.isBusy(controller), "delegation settles");
+        await until(
+            () => controllerCalls === 1 && !app.isBusy(controller),
+            "controller send settles",
+        );
         releaseFirst();
         await until(
             () => controllerCalls === 2 && !app.isBusy(controller),

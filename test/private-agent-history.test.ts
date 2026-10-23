@@ -172,7 +172,7 @@ test("owner-wide read admission does not expose deleted, hidden, other-owner or 
         plan.push({ name: "session_read", args: { session: Number(id) } });
     }
 
-    for (const action of ["send", "stop", "follow", "delegate"]) {
+    for (const action of ["send", "stop", "follow"]) {
         plan.push({
             name: "agent_work",
             args: { action, session: Number(peer), text: "Not authorized by a read." },
@@ -184,7 +184,7 @@ test("owner-wide read admission does not expose deleted, hidden, other-owner or 
         (entry) => entry.kind === "toolResult",
     );
 
-    assert.equal(results.length, 9);
+    assert.equal(results.length, 8);
     assert.equal(results[0]!.isError, false);
 
     for (const id of [deleted.id, other, hidden]) {
@@ -194,6 +194,10 @@ test("owner-wide read admission does not expose deleted, hidden, other-owner or 
     for (const result of results.slice(1)) {
         assert.equal(result.isError, true, result.text);
         assert.doesNotMatch(result.text, /DENIED_HISTORY_CANARY/);
+    }
+
+    for (const result of results.slice(5)) {
+        assert.match(result.text, /not another private identity/);
     }
 
     assert.equal(

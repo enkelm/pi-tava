@@ -73,7 +73,7 @@ test("attaching private supervision reuses the native controller without activat
 });
 
 test("task-directed native contact auto-associates the controller and reports to its originating chat across restart", async (t) => {
-    let source!: ConversationId;
+    let controller!: ConversationId;
     let agentCalls = 0;
     let controllerCalls = 0;
     let release!: () => void;
@@ -93,8 +93,8 @@ test("task-directed native contact auto-associates the controller and reports to
                 return fauxAssistantMessage(
                     [
                         fauxToolCall("agent_work", {
-                            action: "delegate",
-                            session: Number(source),
+                            action: "send",
+                            session: Number(controller),
                             text: "Observe the existing investigation; do not resend it.",
                         }),
                     ],
@@ -105,13 +105,13 @@ test("task-directed native contact auto-associates the controller and reports to
             assert.match(last.text, /"status":"accepted"/);
 
             return fauxAssistantMessage(
-                "Native delegation accepted; no execution task was resent.",
+                "Native controller contact accepted; no execution task was resent.",
             );
         }
 
         if (system.includes("the private supervisor for Work Item")) {
             controllerCalls++;
-            assert.match(last.text, /^\[App delegation from private supervisor/);
+            assert.match(last.text, /^\[App message from private supervisor/);
             assert.doesNotMatch(
                 last.text,
                 /\[from:/,
@@ -137,7 +137,7 @@ test("task-directed native contact auto-associates the controller and reports to
         release();
         await app.close();
     });
-    source = await newSession(app, app.defaultCwd, "worker");
+    const source = await newSession(app, app.defaultCwd, "worker");
     await app.commands.submit(source, owner(app), {
         text: "Investigate only; no implementation or publication.",
         requestId: "original-execution",
@@ -152,17 +152,27 @@ test("task-directed native contact auto-associates the controller and reports to
     const chat = second.id as ConversationId;
 
     assert.equal(app.workItems.itemFor(source)?.supervisor, undefined);
+    const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
+    assert.equal(app.workItems.itemFor(source)!.supervisor!.status, "reclaimed");
+    assert.equal(controllerCalls, 0, "opening the exact controller does not activate it");
+    assert.deepEqual(
+        (await app.pip.agents.supervision.status(chat, owner(app))).attachments,
+        [],
+        "controller discovery needs no manual association",
+    );
 
     await app.commands.submit(chat, owner(app), {
         text: "Observe this existing investigation within its human scope.",
         requestId: "coordinate",
     });
-    await until(() => controllerCalls === 1, "contact creates the missing native controller");
-    const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
+    await until(() => controllerCalls === 1, "contact activates the exact native controller");
+    assert.equal(app.workItems.itemFor(source)!.supervisor!.conversationId, Number(controller));
 
     await until(
         async () => !app.isBusy(chat) && controllerCalls === 1 && !app.isBusy(controller),
-        "native delegate and controller settle",
+        "native contact and controller settle",
     );
     await until(
         async () =>
@@ -219,11 +229,12 @@ test("task-directed native contact auto-associates the controller and reports to
     );
 });
 
-test("native questions hold parent delegation and exact execution input until the correlated human answer", async (t) => {
+test("native questions hold controller contact and exact execution input until the correlated human answer", async (t) => {
     let source!: ConversationId;
+    let controller!: ConversationId;
     let controllerCalls = 0;
     let expected = "accepted";
-    let contactAction: "delegate" | "send" = "delegate";
+    let target: "controller" | "execution" = "controller";
     let executionCalls = 0;
     const model = scriptedModel((request) => {
         const system = JSON.stringify(
@@ -236,8 +247,8 @@ test("native questions hold parent delegation and exact execution input until th
                 return fauxAssistantMessage(
                     [
                         fauxToolCall("agent_work", {
-                            action: contactAction,
-                            session: Number(source),
+                            action: "send",
+                            session: Number(target === "controller" ? controller : source),
                             text: "Clarify the investigation scope; ask the human before proceeding.",
                         }),
                     ],
@@ -245,13 +256,13 @@ test("native questions hold parent delegation and exact execution input until th
                 );
             }
 
-            if (contactAction === "send") {
+            if (target === "execution") {
                 assert.match(last.text, /Native question|human decision/);
             } else {
                 assert.match(last.text, new RegExp(`"status":"${expected}"`));
 
                 if (expected === "blocked") {
-                    assert.match(last.text, /awaiting a human decision/);
+                    assert.match(last.text, /pending exact question|human decision/);
                 }
             }
 
@@ -265,7 +276,7 @@ test("native questions hold parent delegation and exact execution input until th
                 return fauxAssistantMessage("Waiting for the exact human decision.");
             }
 
-            if (last.text.includes("App delegation")) {
+            if (last.text.includes("App message")) {
                 return fauxAssistantMessage(
                     [
                         fauxToolCall("work_supervise", {
@@ -303,6 +314,7 @@ test("native questions hold parent delegation and exact execution input until th
         session: Number(source),
         requestId: "attach",
     });
+    controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     await app.commands.submit(chat, owner(app), {
         text: "Ask about this investigation scope.",
         requestId: "ask",
@@ -314,7 +326,6 @@ test("native questions hold parent delegation and exact execution input until th
                 "needs owner",
         "native correlated question appears",
     );
-    const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     const inspected = await app.pip.orchestration.inspect(source, owner(app));
     const question = inspected.orchestration!.question!;
 
@@ -350,7 +361,7 @@ test("native questions hold parent delegation and exact execution input until th
         actions,
         "blocked admission does not consume or replenish actions",
     );
-    contactAction = "send";
+    target = "execution";
     const executions = executionCalls;
 
     await say(app, chat, "Attempt exact execution input without fabricating a question answer.");
@@ -381,8 +392,8 @@ test("native questions hold parent delegation and exact execution input until th
     );
 });
 
-test("an in-flight old-owner generation cannot delegate after token rotation or recover into a fresh dispatch", async (t) => {
-    let source!: ConversationId;
+test("an in-flight old-owner generation cannot contact a controller after token rotation or recover into a fresh dispatch", async (t) => {
+    let controller!: ConversationId;
     let agentCalls = 0;
     let controllerCalls = 0;
     let release!: () => void;
@@ -404,8 +415,8 @@ test("an in-flight old-owner generation cannot delegate after token rotation or 
             return fauxAssistantMessage(
                 [
                     fauxToolCall("agent_work", {
-                        action: "delegate",
-                        session: Number(source),
+                        action: "send",
+                        session: Number(controller),
                         text: "A stale decision must not be admitted.",
                     }),
                 ],
@@ -426,7 +437,7 @@ test("an in-flight old-owner generation cannot delegate after token rotation or 
         release();
         await app.close();
     });
-    source = await newSession(app, app.defaultCwd, "worker");
+    const source = await newSession(app, app.defaultCwd, "worker");
     const created = await app.pip.agents.create(owner(app), {
         name: "Revocation coordinator",
         requestId: "coordinator",
@@ -438,6 +449,7 @@ test("an in-flight old-owner generation cannot delegate after token rotation or 
         session: Number(source),
         requestId: "attach",
     });
+    controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     const admitted = await app.commands.submit(chat, owner(app), {
         text: "Observe this investigation.",
         requestId: "old-owner",
@@ -531,7 +543,7 @@ test("persisted unbound and retired named chats abort legacy native input before
 });
 
 test("delayed native replies retain their accepted source chat/request after a different chat contacts the same controller", async (t) => {
-    let source!: ConversationId;
+    let controller!: ConversationId;
     let controllerCalls = 0;
     const messages: string[] = [];
     const model = scriptedModel((request) => {
@@ -544,8 +556,8 @@ test("delayed native replies retain their accepted source chat/request after a d
             return fauxAssistantMessage(
                 [
                     fauxToolCall("agent_work", {
-                        action: "delegate",
-                        session: Number(source),
+                        action: "send",
+                        session: Number(controller),
                         text: last.text.includes("TASK_A") ? "TASK_A" : "TASK_B",
                     }),
                 ],
@@ -567,7 +579,10 @@ test("delayed native replies retain their accepted source chat/request after a d
     const app = await openApp(model, join(root, "private-supervision-two-origins"));
 
     t.after(() => app.close());
-    source = await newSession(app, app.defaultCwd, "worker");
+    const source = await newSession(app, app.defaultCwd, "worker");
+    const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     const created = await app.pip.agents.create(owner(app), {
         name: "Origin coordinator",
         requestId: "identity",
@@ -586,8 +601,6 @@ test("delayed native replies retain their accepted source chat/request after a d
         requestId: "task-a",
     });
     await until(() => controllerCalls === 1 && !app.isBusy(a), "first native contact settles");
-    const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
-
     await until(() => !app.isBusy(controller), "first controller input finishes");
     await app.commands.submit(b, owner(app), {
         text: "TASK_B: inspect only.",
@@ -626,8 +639,8 @@ test("delayed native replies retain their accepted source chat/request after a d
 
 test("archived report origins survive completed coding without rerouting or paid activation, then restore once", async (t) => {
     const note = join(root, "completed-report-context.md");
-    let delegated = false;
-    let source!: ConversationId;
+    let contacted = false;
+    let controller!: ConversationId;
     let release!: () => void;
     let controllerCalls = 0;
     let agentCalls = 0;
@@ -650,14 +663,14 @@ test("archived report origins survive completed coding without rerouting or paid
                 );
             }
 
-            if (!delegated) {
-                delegated = true;
+            if (!contacted) {
+                contacted = true;
 
                 return fauxAssistantMessage(
                     [
                         fauxToolCall("agent_work", {
-                            action: "delegate",
-                            session: Number(source),
+                            action: "send",
+                            session: Number(controller),
                             text: "Observe only; report this exact originating task.",
                         }),
                     ],
@@ -687,7 +700,10 @@ test("archived report origins survive completed coding without rerouting or paid
         release();
         await app.close();
     });
-    source = await newSession(app, app.defaultCwd, "worker");
+    const source = await newSession(app, app.defaultCwd, "worker");
+    const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     const first = (
         await app.pip.agents.create(owner(app), { name: "Held origin", requestId: "identity" })
     ).id as ConversationId;
@@ -722,7 +738,6 @@ test("archived report origins survive completed coding without rerouting or paid
 
     assert.equal((await reportText(first)).length, 0);
     assert.equal((await reportText(origin)).length, 0);
-    const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     const notices = async () =>
         (await app.transcripts.allEntries(controller, true)).flatMap((entry) =>
             entry.kind === "appEvent" && entry.event === "report" && entry.state === "held"

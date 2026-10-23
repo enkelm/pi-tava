@@ -29,14 +29,15 @@ after(cleanUp);
 
 // The owning contract is tool-level: Stop alone leaves execution running; direct intervention
 // joins it before editing, and delegation returns the native writer instead of leaving a second one.
-test("Stop and direct correction return one native writer for exact or delegated continuation", async (t) => {
-    for (const continuation of ["delegate", "send"] as const) {
+test("Stop and direct correction return one native writer for execution or controller continuation", async (t) => {
+    for (const continuation of ["controller", "execution"] as const) {
         await t.test(continuation, async (t) => {
             const directory = mkdtempSync(join(root, "execution-workspace-"));
             const file = join(directory, "answer.txt");
 
             writeFileSync(file, "original\n");
             let source!: ConversationId;
+            let controller!: ConversationId;
             let chat!: ConversationId;
             let workerEntered = false;
             let helperEntered = false;
@@ -69,10 +70,12 @@ test("Stop and direct correction return one native writer for exact or delegated
                                 }),
                             () =>
                                 tool("agent_work", {
-                                    action: continuation,
-                                    session: Number(source),
+                                    action: "send",
+                                    session: Number(
+                                        continuation === "controller" ? controller : source,
+                                    ),
                                     text:
-                                        continuation === "send"
+                                        continuation === "execution"
                                             ? "Continue after correction."
                                             : "Continue the corrected work; no publication.",
                                 }),
@@ -179,6 +182,11 @@ test("Stop and direct correction return one native writer for exact or delegated
 
             t.after(() => app.close());
             source = await newSession(app, directory, "worker");
+            const opened = await app.pip.orchestration.control(source, owner(app), {
+                action: "open",
+            });
+
+            controller = opened.orchestration!.conversationId as ConversationId;
             await app.commands.submit(source, owner(app), {
                 text: "Work until stopped.",
                 requestId: "old-work",
@@ -225,7 +233,7 @@ test("Stop and direct correction return one native writer for exact or delegated
                 "native writer continued",
             );
 
-            if (continuation === "send") {
+            if (continuation === "execution") {
                 assert.equal(
                     controllerStep,
                     0,
@@ -242,6 +250,7 @@ test("native Stop then immediate delegated correction needs no manual associatio
     const directory = mkdtempSync(join(root, "immediate-correction-"));
     const result = join(directory, "fixed.txt");
     let source!: ConversationId;
+    let controller!: ConversationId;
     let entered = false;
     let stopped = false;
     let step = 0;
@@ -270,8 +279,8 @@ test("native Stop then immediate delegated correction needs no manual associatio
                     assert.equal(app.isBusy(source), false);
 
                     return tool("agent_work", {
-                        action: "delegate",
-                        session: Number(source),
+                        action: "send",
+                        session: Number(controller),
                         text: "Correct the stopped work directly in its existing native execution thread.",
                     });
                 }
@@ -326,6 +335,9 @@ test("native Stop then immediate delegated correction needs no manual associatio
 
     t.after(() => app.close());
     source = await newSession(app, directory, "worker");
+    const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     await app.commands.submit(source, owner(app), {
         text: "Original work pending correction.",
         requestId: "original",
@@ -618,6 +630,7 @@ test("an overlapping independent writer must be explicitly stopped, never silent
 
 test("direct intervention retains the native Work Item action cap before cancelling its writer", async (t) => {
     let source!: ConversationId;
+    let controller!: ConversationId;
     let entered = false;
     let privateStep = 0;
     const app = await openApp(
@@ -631,9 +644,9 @@ test("direct intervention retains the native Work Item action cap before cancell
                     return fauxAssistantMessage(
                         [
                             fauxToolCall("agent_work", {
-                                action: "delegate",
-                                session: Number(source),
-                                text: "Observe the current native task; this bounded delegation consumes its one action.",
+                                action: "send",
+                                session: Number(controller),
+                                text: "Observe the current native task; this bounded contact consumes its one action.",
                                 report: false,
                             }),
                         ],
@@ -667,7 +680,9 @@ test("direct intervention retains the native Work Item action cap before cancell
 
     t.after(() => app.close());
     source = await newSession(app, mkdtempSync(join(root, "capped-writer-")), "worker");
-    await app.pip.orchestration.control(source, owner(app), { action: "open" });
+    const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+    controller = opened.orchestration!.conversationId as ConversationId;
     await setWorkPipLimits(app, source, owner(app), { maxActions: 1 });
     await app.commands.submit(source, owner(app), {
         text: "Original execution under native limits.",

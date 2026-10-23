@@ -9,6 +9,7 @@ import { lastText, newSession, openApp, owner, root, scriptedModel } from "../he
 const phase = process.argv[2];
 const data = process.argv[3]!;
 let source!: ConversationId;
+let controller!: ConversationId;
 let controllerCalls = 0;
 const model = scriptedModel((request) => {
     const system = JSON.stringify(request.messages.filter((message) => message.role === "system"));
@@ -20,8 +21,8 @@ const model = scriptedModel((request) => {
         return fauxAssistantMessage(
             [
                 fauxToolCall("agent_work", {
-                    action: "delegate",
-                    session: Number(source),
+                    action: "send",
+                    session: Number(controller),
                     text: "Observe the existing native work; do not resend it.",
                 }),
             ],
@@ -40,6 +41,9 @@ const model = scriptedModel((request) => {
 const app = await openApp(model, data);
 
 source = await newSession(app, app.defaultCwd, "worker");
+const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
+
+controller = opened.orchestration!.conversationId as ConversationId;
 const agent = await app.pip.agents.create(owner(app), {
     name: "Crash recovery",
     requestId: "crash-identity",
