@@ -75,7 +75,7 @@ Reviewer performs a bounded independent review, fixes concrete findings and repo
 
 Pull reads ticket/PR/repository data, settles direction with the human and handles specifically requested local rebases. It can start independently or occur at any stage, but not consecutively within the same Work Item. It does not authorize external publication. Preserve dirty work before rebasing or resolving conflicts; report the integration delta and remaining risks.
 
-Land handles only authorized local work: rebases, conflict resolutions, commits, commit-hook fixes and safe worktree cleanup. It checks the impact of its integration changes and reports the actual checkpoint, cleanliness, checks and risks. Entering Land does not attest that review or tests passed and does not authorize a commit, rebase or cleanup. A successful local landing is distinct from publication.
+Land handles only authorized local work: rebases, conflict resolutions, scoped commits, stash preservation/restoration, local main fast-forwards, commit-hook fixes and safe worktree cleanup. It uses ordinary offline bash/Git; there is no separate Land tool/API, second native Land action or required approval receipt. Settled Git exit/output, the resulting checkpoint and dirty-work preservation evidence are the local integration receipt. It checks the impact of its integration changes and reports cleanliness, checks and risks. Entering Land does not attest that review or tests passed and does not authorize a commit, rebase or cleanup. A successful local landing is distinct from publication.
 
 Publish follows Land for pushes, PR creation and ticket updates. Each external mutation requires its own human approval against the actual current clean Publish checkout and pinned action inputs, not an inherited readiness milestone. Starting Publish is never blanket permission. MCP is not required; supported repository CLI tools use the separate publication adapter.
 
@@ -322,7 +322,29 @@ These rules govern normal runtime execution. The app administrator and trusted s
 
 Local execution must not provide an unapproved route to external publication. Publish follows Land, but entry into that thread is not an inherited `ready` attestation or action approval. Each public action inspects the actual current clean Publish checkout and pins its exact command, content checkpoint, destination and relevant executable inputs for human approval. If those inputs change while approval is pending, fresh authorization is required.
 
-The first publication interface accepts an explicit Git push remote/refspec and supported `gh pr` or `gh issue` commands with an explicit repository. Git sources are pinned to concrete commits. Shell wrappers, interactive payloads, implicit pushes and arbitrary CLI extensions are not publication adapters. Managed shell refuses direct Git/GitHub publication commands, including pushes to local file remotes. Supported local Git commands such as `stash push` and `rebase` remain local operations, not publication merely because their arguments include `push`. Supported global options and command boundaries are parsed; nested shell/configuration text, unknown Git operations/options and unsupported shell syntax retain conservative lexical publication refusal. Trusted local programs still have the active writer’s local filesystem authority; this is not a hostile-code filesystem sandbox.
+The first publication interface accepts an explicit Git push remote/refspec and supported `gh pr` or `gh issue` commands with an explicit repository. Git sources are pinned to concrete commits. Shell wrappers, interactive payloads, implicit pushes and arbitrary CLI extensions are not publication adapters. Managed shell refuses direct Git/GitHub publication commands, including pushes to local file remotes. Supported local Git commands such as `stash push` and `rebase` remain local operations, not publication merely because their arguments include `push`. Supported global options and command boundaries are parsed; nested shell/configuration text, unknown Git operations/options and unsupported shell syntax retain conservative lexical publication refusal. The refusal distinguishes a detected operation from an unparsed command or embedded script with publication-like tokens. The latter can match local `git stash push` in a Node/Python script or heredoc: it is not proof of publication, a Git conflict or an executed command. Arbitrary embedded programs cannot be statically proven local by this parser. Trusted local programs still have the active writer’s local filesystem authority; this is not a hostile-code filesystem sandbox.
+
+### Supported local integration forms
+
+Prefer separate ordinary Git commands for already-authorized local work, with supported global
+options such as `-C`, `--git-dir`, `--work-tree` and `--no-pager`. For example, path-scoped
+`git stash push --include-untracked -m <label> -- <exact-paths>`, `git rebase main`,
+`git stash apply --index <saved-stash-sha>` and
+`git -C <local-target> merge --ff-only --no-edit <candidate-sha>` are local forms, not publication.
+These examples grant no mutation authority or permission to touch another writer's checkout.
+
+Preserve unrelated staged, unstaged and untracked work before staging the new scoped commit;
+stash records index state too. Record the exact preservation reference and compare index/worktree
+state and file bytes before/after, in both source and target. Do not drop recovery references or
+clean up a checkout without authorization. When main has advanced after an earlier local Land,
+inspect and integrate against its current head rather than assuming the old base is still current.
+
+On a conservative guard refusal, report that nothing was executed. Do not retry the rejected script
+unchanged, disguise it in another wrapper or translate hidden publication into a different mechanism.
+Supported standalone commands are the normal form for already-authorized local integration, not a
+way to obtain publication permission. Stop if the requested scope or prior effects are unclear.
+Git push/send-pack/receive-pack, even to file remotes, and GitHub mutations still require the Publish
+adapter and individual approval. No second Land API, review milestone or receipt gate is needed.
 
 External actions are not replay-safe merely because their surrounding task is durable. An interrupted or failed push or PR update can have succeeded remotely. Its receipt preserves that uncertainty and requires human reconciliation before another mutation or handoff is attempted. Starting a fresh successor cannot erase an unresolved publication receipt.
 

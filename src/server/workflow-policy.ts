@@ -107,20 +107,28 @@ function gitOperation(args: readonly string[]): number | undefined {
     return args.length;
 }
 
+type ShellPublication = "publication" | "unparsed";
+
 /** Recognize Git's operation, not a subcommand (stash push) or an option's value (-C push). */
-function gitPublication(args: readonly string[]): boolean {
+function gitPublication(args: readonly string[]): ShellPublication | undefined {
     const at = gitOperation(args);
     const operation = at === undefined ? undefined : args[at];
 
-    if (at === undefined) {
-        return lexicalPublication(["git", ...args]);
+    if (
+        operation !== undefined &&
+        ["push", "send-pack", "receive-pack"].includes(operation.toLowerCase())
+    ) {
+        return "publication";
     }
 
-    return (
-        operation !== undefined &&
-        (["push", "send-pack", "receive-pack"].includes(operation.toLowerCase()) ||
-            (!LOCAL_GIT_OPERATIONS.has(operation) && lexicalPublication(["git", ...args])))
-    );
+    if (
+        (at === undefined || (operation !== undefined && !LOCAL_GIT_OPERATIONS.has(operation))) &&
+        lexicalPublication(["git", ...args])
+    ) {
+        return "unparsed";
+    }
+
+    return undefined;
 }
 
 function inspectionWords(words: readonly string[]): boolean {
@@ -244,17 +252,20 @@ function publicationWords(
 }
 
 /** Bounded lexical inspection, not a shell interpreter or a filesystem jail for trusted programs. */
-function shellPublication(command: string | readonly string[], depth = 0): boolean {
+function shellPublication(
+    command: string | readonly string[],
+    depth = 0,
+): ShellPublication | undefined {
     if (depth > 8) {
-        return true;
+        return "unparsed";
     }
 
     const normalized = typeof command === "string" ? command.replace(/\\\r?\n/g, "") : command;
     const commands = typeof normalized === "string" ? commandWords(normalized) : [normalized];
 
     if (commands === undefined) {
-        // Redirects, substitutions and other unsupported syntax keep the conservative refusal.
-        return lexicalPublication(command);
+        // Keep the same conservative refusal, but do not present token matches as a known operation.
+        return lexicalPublication(command) ? "unparsed" : undefined;
     }
 
     // A search feeding an interpreter is not inert. Without a full pipeline interpreter, exempt
@@ -266,19 +277,24 @@ function shellPublication(command: string | readonly string[], depth = 0): boole
         (typeof normalized !== "string" ||
             commandWords(normalized, { pipelines: false }) !== undefined);
 
-    return commands.some((commandWords) => {
+    for (const commandWords of commands) {
         const words =
             depth === 0 ? publicationWords(commandWords, searchData, commitData) : commandWords;
 
-        return words.some((word, at) => {
+        for (const [at, word] of words.entries()) {
             const program = basename(word);
 
+            // Only the leading word is a known executable position. Other arguments are opaque.
             if (/^(?:gh|git-(?:send|receive)-pack)(?:\.exe)?$/i.test(program)) {
-                return true;
+                return at === 0 ? "publication" : "unparsed";
             }
 
-            if (/^git(?:\.exe)?$/i.test(program) && gitPublication(words.slice(at + 1))) {
-                return true;
+            if (/^git(?:\.exe)?$/i.test(program)) {
+                const refusal = gitPublication(words.slice(at + 1));
+
+                if (refusal !== undefined) {
+                    return at === 0 ? refusal : "unparsed";
+                }
             }
 
             // Inspect shell/wrapper arguments and config/environment values, including ! shell aliases.
@@ -286,11 +302,20 @@ function shellPublication(command: string | readonly string[], depth = 0): boole
                 ? word.slice(word.indexOf("=") + 1).replace(/^!/, "")
                 : undefined;
 
-            return [word, ...(value === undefined ? [] : [value])].some(
-                (nested) => /[\s'"\\;|&()<>{}]/.test(nested) && shellPublication(nested, depth + 1),
-            );
-        });
-    });
+            for (const nested of [word, ...(value === undefined ? [] : [value])]) {
+                if (/[\s'"\\;|&()<>{}]/.test(nested)) {
+                    const refusal = shellPublication(nested, depth + 1);
+
+                    if (refusal !== undefined) {
+                        // Shell-like text inside an argument is not a proven shell invocation.
+                        return "unparsed";
+                    }
+                }
+            }
+        }
+    }
+
+    return undefined;
 }
 
 /** Unsupported shell syntax must not hide explicit publication behind quotes, escapes or wrappers. */
@@ -855,11 +880,15 @@ export function protectWorkflowEnv<T extends ExecutionEnv>(
                             return err(new ExecutionError("spawn_error", "Empty command"));
                         }
 
-                        if (shellPublication(command)) {
+                        const publication = shellPublication(command);
+
+                        if (publication !== undefined) {
                             return err(
                                 new ExecutionError(
                                     "shell_unavailable",
-                                    "Direct Git push/send-pack/receive-pack and GitHub CLI commands are blocked in managed shell, including file remotes. Use pull for supported active-Pull reads, or publication for supported, individually human-approved mutations.",
+                                    publication === "unparsed"
+                                        ? "Managed shell cannot safely classify this command or embedded script: conservative publication-token checks matched opaque arguments, unsupported syntax or unknown Git options/operations. Nothing was executed; this is not a Git conflict. Do not retry unchanged or conceal it in another wrapper. For already-authorized local integration, use standalone ordinary Git commands: scoped commit, path-scoped stash push/apply, rebase, or local merge --ff-only --no-edit. Git push/send-pack/receive-pack (including file remotes) and gh mutations still require individually approved publication; use pull for supported active-Pull reads."
+                                        : "Direct Git push/send-pack/receive-pack and GitHub CLI commands are blocked in managed shell, including file remotes. Use pull for supported active-Pull reads, or publication for supported, individually human-approved mutations.",
                                 ),
                             );
                         }

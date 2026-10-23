@@ -1245,6 +1245,14 @@ test("the real work provider receives review-before-landing guidance without tre
     assert.match(delivered, /untouched work.*material rewrites.*stale/i);
     assert.match(delivered, /unavailable.*deferred.*alone.*not.*another Reviewer or Follow-up/i);
     assert.match(delivered, /manual-testing green light.*Land/i);
+    assert.match(delivered, /local integration through ordinary offline bash\/Git/);
+    assert.match(delivered, /no separate Land API\/action or required approval receipt/);
+    assert.match(delivered, /settled Git exit\/output.*checkpoint.*preservation evidence/);
+    assert.match(delivered, /supported standalone Git commands/);
+    assert.match(
+        delivered,
+        /individual approval.*Git push\/send-pack\/receive-pack to file remotes/,
+    );
     assert.match(delivered, /material new implementation.*initial independent Reviewer/i);
     assert.doesNotMatch(delivered, /then re-review the changed scope before landing/i);
     assert.equal(bootstrap, "Coordinate implementation and review before landing.");

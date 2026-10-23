@@ -974,7 +974,7 @@ test(
 );
 
 test(
-    "managed shell permits local stash restoration and rebase without confusing stash push with publication",
+    "managed shell preserves dirty work across sequential local main integrations without publication",
     { skip: process.platform !== "darwin" },
     async () => {
         const f = await fixture();
@@ -999,6 +999,8 @@ test(
                 `${JSON.stringify(command)}: ${!execution.ok ? execution.error.message : ""}`,
             );
             assert.equal(execution.value.exitCode, 0, `${JSON.stringify(command)}: ${output}`);
+
+            return output.trim();
         };
 
         const commands: (string | readonly string[])[] = [
@@ -1025,15 +1027,88 @@ test(
         // A later command's data is not an operation of the preceding Git command.
         await run("git status --short; printf '%s\\n' push send-pack receive-pack");
         writeFileSync(join(f.cwd, "code.txt"), "landed\n");
-        git(f.cwd, "checkout", "-qb", "local-rebase", "HEAD~1");
-        writeFileSync(join(f.cwd, "local.txt"), "local commit\n");
-        git(f.cwd, "add", "local.txt");
-        git(f.cwd, "commit", "-qm", "local commit");
-        await run(["git", "rebase", "topic"]);
-        assert.equal(git(f.cwd, "rev-parse", "HEAD^"), git(f.cwd, "rev-parse", "topic"));
-        assert.equal(readFileSync(join(f.cwd, "code.txt"), "utf8"), "landed\n");
-        assert.equal(readFileSync(join(f.cwd, "local.txt"), "utf8"), "local commit\n");
-        assert.equal(git(f.cwd, "status", "--porcelain"), "");
+        git(f.cwd, "branch", "-M", "main");
+
+        for (const name of ["source-notes.txt", "target-notes.txt"]) {
+            writeFileSync(join(f.cwd, name), "baseline\n");
+        }
+
+        git(f.cwd, "add", "--", "source-notes.txt", "target-notes.txt");
+        git(f.cwd, "commit", "-qm", "fixture notes");
+        const base = git(f.cwd, "rev-parse", "HEAD");
+        const sources = [1, 2, 3].map((number) => join(f.cwd, "..", `candidate-${number}`));
+
+        // All candidates start before the first integration; later rebases must retain earlier Lands.
+        for (const [at, source] of sources.entries()) {
+            git(f.cwd, "worktree", "add", "-qb", `candidate-${at + 1}`, source, base);
+        }
+
+        const dirty = (cwd: string, name: string) => {
+            writeFileSync(join(cwd, `${name}-notes.txt`), "staged unrelated work\n");
+            git(cwd, "add", "--", `${name}-notes.txt`);
+            writeFileSync(join(cwd, `${name}-notes.txt`), "staged and unstaged unrelated work\n");
+            writeFileSync(join(cwd, `${name}-scratch.bin`), Buffer.from([0, 255, 10, 13, 1]));
+        };
+
+        const preserved = (cwd: string, name: string) => ({
+            status: git(cwd, "status", "--porcelain=v1", "--untracked-files=all"),
+            index: git(cwd, "diff", "--cached", "--binary"),
+            worktree: git(cwd, "diff", "--binary"),
+            notes: readFileSync(join(cwd, `${name}-notes.txt`)),
+            untracked: readFileSync(join(cwd, `${name}-scratch.bin`)),
+        });
+
+        dirty(f.cwd, "target");
+        const targetBefore = preserved(f.cwd, "target");
+        let previousMain = base;
+
+        for (const [at, source] of sources.entries()) {
+            const file = `feature-${at + 1}.txt`;
+
+            dirty(source, "source");
+            const sourceBefore = preserved(source, "source");
+
+            await run([
+                "git",
+                "-C",
+                source,
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                "local preservation",
+                "--",
+                "source-notes.txt",
+                "source-scratch.bin",
+            ]);
+            const stash = await run(["git", "-C", source, "rev-parse", "refs/stash"]);
+
+            writeFileSync(join(source, file), `feature ${at + 1}\n`);
+            await run(["git", "-C", source, "add", "--", file]);
+            await run(["git", "-C", source, "commit", "-m", `Local feature ${at + 1}`]);
+            assert.equal(git(source, "show", "--pretty=", "--name-only", "HEAD"), file);
+            await run(["git", "-C", source, "rebase", "main"]);
+            const head = await run(["git", "-C", source, "rev-parse", "HEAD"]);
+
+            assert.equal(git(source, "rev-parse", "HEAD^"), previousMain);
+            await run(["git", "-C", source, "stash", "apply", "--index", stash]);
+            assert.deepEqual(preserved(source, "source"), sourceBefore);
+            const output = await run(["git", "-C", f.cwd, "merge", "--ff-only", "--no-edit", head]);
+
+            assert.match(output, /Fast-forward/);
+            assert.equal(git(f.cwd, "rev-parse", "main"), head);
+            assert.deepEqual(preserved(f.cwd, "target"), targetBefore);
+
+            for (let feature = 1; feature <= at + 1; feature++) {
+                assert.equal(
+                    readFileSync(join(f.cwd, `feature-${feature}.txt`), "utf8"),
+                    `feature ${feature}\n`,
+                );
+            }
+
+            previousMain = head;
+        }
+
         assert.equal(remoteRefs(f.remote), "");
         assert.equal(f.app.approvals.all().length, 0);
     },
@@ -1066,7 +1141,35 @@ test("managed shell delivers literal commit messages and search operands unchang
         ["git", "commit", "-mExplain git push and gh pr create"],
         `git commit --amend --no-edit -a -q -m "Explain git push | gh pr create" || git status`,
         ["git", "-C", "push", "status"],
+        ["git", "-Cpush", "status"],
         ["git", "stash", "push"],
+        [
+            "git",
+            "--no-pager",
+            "-C",
+            f.cwd,
+            "-c",
+            "core.fsmonitor=false",
+            "stash",
+            "push",
+            "--include-untracked",
+            "--",
+            "code.txt",
+        ],
+        [
+            "git",
+            "--git-dir",
+            join(f.cwd, ".git"),
+            "--work-tree",
+            f.cwd,
+            "--no-optional-locks",
+            "merge",
+            "--ff-only",
+            "--no-edit",
+            "topic",
+        ],
+        ["git", `--git-dir=${join(f.cwd, ".git")}`, `--work-tree=${f.cwd}`, "rebase", "topic"],
+        ["git", "--namespace", "push", "stash", "push"],
         ["git", "rebase", "topic"],
         `rg -n 'Direct Git|send-pack|receive-pack|publicationCommand|publication.*shell|isPublication|publication.*command' src/server/workflow-policy.ts`,
         ["rg", "-n", "git push|gh pr create", "src/server/workflow-policy.ts"],
@@ -1099,6 +1202,54 @@ test("managed shell delivers literal commit messages and search operands unchang
     assert.equal(delivered.length, before);
 });
 
+// The production environment owns both refusal and its explanation. Opaque scripts and arguments
+// stay refused, but their tokens do not prove an operation or tell an integrator that Git conflicted.
+test("managed shell explains conservative refusal of opaque scripts and command arguments", async () => {
+    const f = await fixture();
+    let launches = 0;
+    const env = protectWorkflowEnv(
+        f.app,
+        f.worker,
+        new NodeExecutionEnv({ cwd: f.cwd }),
+        async () => {
+            launches++;
+
+            return err(new ExecutionError("shell_unavailable", "fixture refuses native launch"));
+        },
+    );
+    const script = [
+        "const { execSync } = require('child_process');",
+        "execSync('git stash push --include-untracked -- code.txt');",
+        "execSync('git rebase main');",
+        "execSync('git stash apply stash@{0}');",
+    ].join("\n");
+    const commands: (string | readonly string[])[] = [
+        `node <<'JS'\n${script}\nJS`,
+        ["node", "-e", script],
+        // A parseable shell fragment inside a JavaScript string is still opaque argument text.
+        ["node", "-e", "'git push origin HEAD'"],
+        ["node", "-e", "'gh pr create'"],
+        ["printf", "%s", "git", "push"],
+        ["printf", "%s", "gh"],
+    ];
+
+    for (const command of commands) {
+        const execution = await env.exec(command, undefined, context);
+        const message = !execution.ok ? execution.error.message : "";
+
+        assert.equal(execution.ok, false);
+        assert.equal(launches, 0, "Opaque local scripts must not gain an execution exemption");
+        assert.match(message, /cannot safely classify/i, JSON.stringify(command));
+        assert.match(message, /standalone.*Git/);
+        assert.match(message, /already.authorized local/);
+        assert.match(message, /not a Git conflict/);
+        assert.match(message, /Do not retry unchanged/);
+        assert.equal(f.app.approvals.all().length, 0);
+        assert.equal(git(f.cwd, "stash", "list"), "");
+        assert.equal(remoteRefs(f.remote), "");
+    }
+});
+
 test("managed shell refuses publication before spawning, including wrappers and file remotes", async () => {
     const f = await fixture();
 
@@ -1126,8 +1277,9 @@ test("managed shell refuses publication before spawning, including wrappers and 
     );
     const program = workflowGitPath() ?? "git";
     const helpers = git(f.cwd, "--exec-path");
+    const directPush = push().command;
     const commands: (string | readonly string[])[] = [
-        push().command,
+        directPush,
         ["git", "push", `file://${f.remote}`, "HEAD:refs/heads/published"],
         ["git", "-C", "stash", "push", f.remote, "HEAD:refs/heads/published"],
         ["git", "--unknown-option", "stash", "push", f.remote],
@@ -1139,6 +1291,9 @@ test("managed shell refuses publication before spawning, including wrappers and 
         `rg '${push().command.join(" ")}' code.txt | /bin/sh`,
         `grep '${push().command.join(" ")}' code.txt | xargs /bin/sh -c`,
         ["node", "-e", `require('child_process').execSync('${push().command.join(" ")}')`],
+        `node <<'JS'\nrequire('child_process').execSync('git push file://${f.remote} HEAD:refs/heads/published')\nJS`,
+        `python3 -c 'import os; os.system("git send-pack ${f.remote} HEAD:refs/heads/published")'`,
+        `env 'MONITOR=git push ${f.remote} HEAD:refs/heads/published' git --config-env=core.fsmonitor=MONITOR stash push`,
         `/bin/sh -c "git commit -m 'gh pr create'"`,
         `find . -exec /bin/sh -c '${push().command.join(" ")}' \\;`,
         `git rebase --exec '${push().command.join(" ")}' HEAD~1`,
@@ -1200,6 +1355,11 @@ test("managed shell refuses publication before spawning, including wrappers and 
             /publication/,
             `Known publication CLI commands must be refused before spawning, not merely fail offline or because a binary is missing: ${JSON.stringify(command)}`,
         );
+
+        if (command === directPush || (typeof command !== "string" && command[0] === "gh")) {
+            assert.match(!execution.ok ? execution.error.message : "", /^Direct Git/);
+        }
+
         assert.equal(launches, 0, "No publication candidate may reach native execution");
         assert.equal(remoteRefs(f.remote), "", JSON.stringify(command));
         assert.equal(f.app.approvals.all().length, 0);

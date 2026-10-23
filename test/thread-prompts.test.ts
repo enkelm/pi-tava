@@ -243,6 +243,14 @@ test("each thread type receives its own system working playbook and retains shar
         const fresh = await probe(id);
 
         role(fresh, expected);
+
+        if (type === "land") {
+            assert.match(fresh.thread_role!, /ordinary offline.*Git/);
+            assert.match(fresh.thread_role!, /no separate Land (?:tool|API)/i);
+            assert.match(fresh.thread_role!, /settled Git.*checkpoint.*preservation evidence/);
+            assert.match(fresh.thread_role!, /standalone.*Git commands/);
+        }
+
         assert.equal(
             fresh.instructions,
             undefined,
@@ -394,7 +402,7 @@ test("changing app-wide instructions affects the next request without replacing 
     await app.commands.setInstructions(chat, owner(app), "SESSION_RULE_STAYS_SEPARATE");
     app.config.agentPrompts = {
         ...app.config.agentPrompts,
-        chat: "Custom Chat instructions: clarify the request. FIRST_GLOBAL_PROMPT. Handoffs are status-only. Record readiness to unlock Land.",
+        chat: "Custom Chat instructions: clarify the request. FIRST_GLOBAL_PROMPT. Handoffs are status-only. Record readiness to unlock Land. Local integration needs a dedicated Land API receipt.",
     };
     const first = await probe(chat);
 
@@ -412,6 +420,13 @@ test("changing app-wide instructions affects the next request without replacing 
     );
     assert.match(first.thread_role!, /Use handoff status.*then handoff start/i);
     assert.match(first.thread_role!, /These common rules override saved legacy prompts/i);
+    assert.match(first.thread_role!, /no separate Land (?:tool|API)/i);
+    assert.match(first.thread_role!, /settled Git.*checkpoint.*preservation evidence/);
+    assert.ok(
+        first.thread_role!.indexOf("no separate Land") >
+            first.thread_role!.indexOf("FIRST_GLOBAL_PROMPT"),
+        "shared local-integration guidance also survives incompatible saved role instructions",
+    );
     assert.match(
         first.thread_role!,
         /legacy app-issued summary-only request remains summary-only/i,
