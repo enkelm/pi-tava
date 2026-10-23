@@ -2226,6 +2226,7 @@ button.title:active:not(:disabled),
     flex: 1;
     min-width: 0;
     text-align: left;
+    overflow-wrap: anywhere;
 }
 
 .app-event[data-state="running"] .app-event-state,
@@ -2233,7 +2234,18 @@ button.title:active:not(:disabled),
     color: var(--accent);
 }
 
+.app-event[data-state="held"] .app-event-state,
+.app-event[data-state="held"] .app-event-mark,
+.app-event-question .agent-answer-head strong {
+    color: var(--warn);
+}
+
+.app-event .step-head:active {
+    background: var(--hover);
+}
+
 .app-event .step-open,
+.app-event-references a,
 .agent-answer-head a {
     display: inline-flex;
     align-items: center;
@@ -2244,6 +2256,7 @@ button.title:active:not(:disabled),
 }
 
 .app-event .step-open:focus-visible,
+.app-event-references a:focus-visible,
 .agent-answer-head a:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
@@ -2255,12 +2268,25 @@ button.title:active:not(:disabled),
     font-size: 12px;
 }
 
+.app-event-references {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    min-width: 0;
+    font-size: 12px;
+}
+
 .app-event-details {
     margin: 0;
+    max-width: 100%;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     user-select: text;
     -webkit-user-select: text;
+}
+
+.app-event-question {
+    padding-block: 8px;
 }
 
 .agent-answer {
@@ -2285,6 +2311,7 @@ button.title:active:not(:disabled),
 @media (pointer: coarse) {
     .app-event .step-head,
     .app-event .step-open,
+    .app-event-references a,
     .agent-answer-head a {
         min-height: 44px;
     }

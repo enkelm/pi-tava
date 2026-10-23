@@ -69,7 +69,13 @@ test("concurrent exact follow subscriptions fan out independent Chat outcomes to
             return fauxAssistantMessage("Following this exact Chat, without activating it.");
         }
 
-        return fauxAssistantMessage(last.text.includes("OLD") ? "OLD_OUTCOME" : "NEW_OUTCOME");
+        return fauxAssistantMessage(
+            last.text.includes("OLD")
+                ? "OLD_OUTCOME"
+                : last.text.includes("EMPTY")
+                  ? "   "
+                  : "NEW_OUTCOME",
+        );
     });
     const directory = join(root, "exact-contact-follow-fanout");
     let app = await openApp(model, directory);
@@ -103,6 +109,10 @@ test("concurrent exact follow subscriptions fan out independent Chat outcomes to
     assert.equal((await reports(app, b)).length, 0);
     const before = privateCalls;
 
+    await say(app, target, "EMPTY: no reportable outcome.");
+    await app.pip.agents.contacts.reports.reconcile();
+    assert.equal((await reports(app, a)).length, 0, "blank native finals do not create reports");
+    assert.equal((await reports(app, b)).length, 0);
     await say(app, target, "NEW: independent human-directed outcome.");
     await until(
         async () => (await reports(app, a)).length === 1 && (await reports(app, b)).length === 1,
@@ -121,10 +131,22 @@ test("concurrent exact follow subscriptions fan out independent Chat outcomes to
     assert.equal((await reports(app, untouched)).length, 0, "no latest-chat/inbox fallback");
     assert.equal(privateCalls, before, "passive observations buy no private-agent generation");
     assert.equal(app.workItems.itemFor(target), undefined, "Chat observation creates no Work Item");
+    await say(app, target, "NEW: another native event with identical output.");
+    await until(
+        async () => (await reports(app, a)).length === 2 && (await reports(app, b)).length === 2,
+        "equal-text source entries are distinct events for both exact origins",
+    );
+    const equalText = (await reports(app, a))[1]!;
+
+    assert.notEqual(
+        (first.data as { sourceEntryId: number }).sourceEntryId,
+        (equalText.data as { sourceEntryId: number }).sourceEntryId,
+    );
+    assert.equal((equalText.data as { source: number }).source, Number(target));
     await app.close();
     app = await openApp(model, directory);
-    assert.equal((await reports(app, a)).length, 1, "restart does not duplicate the first origin");
-    assert.equal((await reports(app, b)).length, 1, "restart does not duplicate the second origin");
+    assert.equal((await reports(app, a)).length, 2, "restart does not duplicate the first origin");
+    assert.equal((await reports(app, b)).length, 2, "restart does not duplicate the second origin");
     assert.equal(privateCalls, before);
 });
 
@@ -286,120 +308,136 @@ test(
     "mixed controller delegation and exact Worker send keep replies at their accepted origins",
     { timeout: 30_000 },
     async (t) => {
-        for (const report of [true, false]) {
-            await t.test(`exact send report=${report}`, async (t) => {
-                let worker!: ConversationId;
-                let workerCalls = 0;
-                const app = await openApp(
-                    scriptedModel((request) => {
-                        const last = lastText(request);
-                        const system = JSON.stringify(
-                            request.messages.filter((message) => message.role === "system"),
-                        );
+        for (const scenario of ["done", "unanswered"] as const) {
+            for (const report of [true, false]) {
+                await t.test(`exact send ${scenario} report=${report}`, async (t) => {
+                    let worker!: ConversationId;
+                    let workerCalls = 0;
+                    const app = await openApp(
+                        scriptedModel((request) => {
+                            const last = lastText(request);
+                            const system = JSON.stringify(
+                                request.messages.filter((message) => message.role === "system"),
+                            );
 
-                        if (system.includes("the owner's persistent private agent")) {
-                            if (last.role === "user") {
-                                const exact = last.text.includes("EXACT_TASK_B");
+                            if (system.includes("the owner's persistent private agent")) {
+                                if (last.role === "user") {
+                                    const exact = last.text.includes("EXACT_TASK_B");
 
-                                return fauxAssistantMessage(
-                                    [
-                                        fauxToolCall("agent_work", {
-                                            action: exact ? "send" : "delegate",
-                                            session: Number(worker),
-                                            text: exact
-                                                ? "EXACT_TASK_B"
-                                                : "CONTROLLER_TASK_A: inspect only; do not start execution.",
-                                            ...(exact ? { report } : {}),
-                                        }),
-                                    ],
-                                    { stopReason: "toolUse" },
-                                );
+                                    return fauxAssistantMessage(
+                                        [
+                                            fauxToolCall("agent_work", {
+                                                action: exact ? "send" : "delegate",
+                                                session: Number(worker),
+                                                text: exact
+                                                    ? "EXACT_TASK_B"
+                                                    : "CONTROLLER_TASK_A: inspect only; do not start execution.",
+                                                ...(exact ? { report } : {}),
+                                            }),
+                                        ],
+                                        { stopReason: "toolUse" },
+                                    );
+                                }
+
+                                return fauxAssistantMessage("Native contact accepted.");
                             }
 
-                            return fauxAssistantMessage("Native contact accepted.");
-                        }
+                            if (system.includes("the private supervisor for Work Item")) {
+                                return fauxAssistantMessage("CONTROLLER_ANSWER_A_ONLY");
+                            }
 
-                        if (system.includes("the private supervisor for Work Item")) {
-                            return fauxAssistantMessage("CONTROLLER_ANSWER_A_ONLY");
-                        }
+                            workerCalls++;
 
-                        workerCalls++;
+                            return scenario === "done"
+                                ? fauxAssistantMessage("EXACT_WORKER_ANSWER_B_ONLY")
+                                : fauxAssistantMessage("", {
+                                      stopReason: "error",
+                                      errorMessage: "EXACT_WORKER_PROVIDER_FAILURE_B_ONLY",
+                                  });
+                        }),
+                        join(root, `mixed-controller-exact-origins-${scenario}-${report}`),
+                    );
 
-                        return fauxAssistantMessage("EXACT_WORKER_ANSWER_B_ONLY");
-                    }),
-                    join(root, `mixed-controller-exact-origins-${report}`),
-                );
+                    t.after(() => app.close());
+                    worker = await newSession(app, app.defaultCwd, "worker");
+                    const a = (
+                        await app.pip.agents.create(owner(app), {
+                            name: "Mixed adapter origins",
+                            requestId: "mixed-origins",
+                        })
+                    ).id as ConversationId;
+                    const b = (
+                        await app.pip.agents.newChat(a, owner(app), { requestId: "exact-origin-b" })
+                    ).id as ConversationId;
 
-                t.after(() => app.close());
-                worker = await newSession(app, app.defaultCwd, "worker");
-                const a = (
-                    await app.pip.agents.create(owner(app), {
-                        name: "Mixed adapter origins",
-                        requestId: "mixed-origins",
-                    })
-                ).id as ConversationId;
-                const b = (
-                    await app.pip.agents.newChat(a, owner(app), { requestId: "exact-origin-b" })
-                ).id as ConversationId;
+                    await say(
+                        app,
+                        a,
+                        "CONTROLLER_TASK_A: inspect through this Work Item's controller only.",
+                    );
+                    const controller = app.workItems.itemFor(worker)!.supervisor!
+                        .conversationId as ConversationId;
 
-                await say(
-                    app,
-                    a,
-                    "CONTROLLER_TASK_A: inspect through this Work Item's controller only.",
-                );
-                const controller = app.workItems.itemFor(worker)!.supervisor!
-                    .conversationId as ConversationId;
+                    await until(
+                        () => !app.isBusy(controller),
+                        "A's real native controller response settles",
+                    );
+                    await until(
+                        async () =>
+                            (await observations(app, a, "agent-work-report")).some((entry) =>
+                                textOf(entry).includes("CONTROLLER_ANSWER_A_ONLY"),
+                            ),
+                        "A receives its controller's own answer",
+                    );
+                    assert.equal(workerCalls, 0, "A's request did not dispatch execution");
+                    // Hold only passive reconciliation, leaving real exact contact/native submission and
+                    // both tool and provider lifecycles intact. Reopening performs an awaited reconciliation.
+                    await app.pip.agents.supervision.close();
+                    await say(app, b, "EXACT_TASK_B: ask the exact Worker, not its controller.");
+                    await until(
+                        () => workerCalls === 1 && !app.isBusy(worker),
+                        "B's exact native Worker response settles",
+                    );
+                    const accepted = (await app.transcripts.allEntries(b, true)).find(
+                        (entry) => entry.kind === "toolResult" && entry.name === "agent_work",
+                    );
 
-                await until(
-                    () => !app.isBusy(controller),
-                    "A's real native controller response settles",
-                );
-                await until(
-                    async () =>
-                        (await observations(app, a, "agent-work-report")).some((entry) =>
-                            textOf(entry).includes("CONTROLLER_ANSWER_A_ONLY"),
+                    assert.ok(accepted?.kind === "toolResult");
+                    assert.equal(accepted.isError, false, accepted.text);
+                    assert.equal(JSON.parse(accepted.text).status, "accepted", accepted.text);
+                    await app.pip.agents.contacts.reports.reconcile();
+                    const bReports = await reports(app, b);
+
+                    assert.equal(
+                        bReports.length,
+                        report ? 1 : 0,
+                        "B's own report preference is respected by the exact adapter",
+                    );
+
+                    if (report) {
+                        assert.match(
+                            textOf(bReports[0]!),
+                            scenario === "done" ? /EXACT_WORKER_ANSWER_B_ONLY/ : /model_error/,
+                        );
+                    }
+
+                    await app.pip.agents.supervision.open();
+                    const aReports = await observations(app, a, "agent-work-report");
+
+                    assert.doesNotMatch(
+                        aReports.map(textOf).join("\n"),
+                        /EXACT_WORKER_ANSWER_B_ONLY|EXACT_WORKER_PROVIDER_FAILURE_B_ONLY/,
+                        "B's exact reply is not an independent controller event and must not reach A",
+                    );
+                    assert.ok(
+                        aReports.every(
+                            (entry) => (entry.data as { source: number }).source !== Number(worker),
                         ),
-                    "A receives its controller's own answer",
-                );
-                assert.equal(workerCalls, 0, "A's request did not dispatch execution");
-                // Hold only passive reconciliation, leaving real exact contact/native submission and
-                // both tool and provider lifecycles intact. Reopening performs an awaited reconciliation.
-                await app.pip.agents.supervision.close();
-                await say(app, b, "EXACT_TASK_B: ask the exact Worker, not its controller.");
-                await until(
-                    () => workerCalls === 1 && !app.isBusy(worker),
-                    "B's exact native Worker response settles",
-                );
-                const accepted = (await app.transcripts.allEntries(b, true)).find(
-                    (entry) => entry.kind === "toolResult" && entry.name === "agent_work",
-                );
-
-                assert.ok(accepted?.kind === "toolResult");
-                assert.equal(accepted.isError, false, accepted.text);
-                assert.equal(JSON.parse(accepted.text).status, "accepted", accepted.text);
-                await app.pip.agents.contacts.reports.reconcile();
-                const bReports = await reports(app, b);
-
-                assert.equal(
-                    bReports.length,
-                    report ? 1 : 0,
-                    "B's own report preference is respected by the exact adapter",
-                );
-
-                if (report) {
-                    assert.match(textOf(bReports[0]!), /EXACT_WORKER_ANSWER_B_ONLY/);
-                }
-
-                await app.pip.agents.supervision.open();
-                const aReports = await observations(app, a, "agent-work-report");
-
-                assert.doesNotMatch(
-                    aReports.map(textOf).join("\n"),
-                    /EXACT_WORKER_ANSWER_B_ONLY/,
-                    "B's exact reply is not an independent controller event and must not reach A",
-                );
-                assert.equal(workerCalls, 1, "reporting never repeats B's execution");
-            });
+                        "B's settled exact input never becomes an independent Worker report to A",
+                    );
+                    assert.equal(workerCalls, 1, "reporting never repeats B's execution");
+                });
+            }
         }
     },
 );

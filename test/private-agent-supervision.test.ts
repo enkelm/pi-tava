@@ -168,23 +168,15 @@ test("task-directed native contact auto-associates the controller and reports to
         async () =>
             (await app.transcripts.allEntries(chat, true)).some(
                 (entry) =>
-                    entry.kind === "assistant" &&
-                    entry.blocks.some(
-                        (block) =>
-                            block.type === "text" &&
-                            block.text.includes("Work Item report:") &&
-                            block.text.includes("NATIVE_CONTROLLER_OBSERVATION"),
-                    ),
+                    entry.kind === "appEvent" &&
+                    entry.event === "report" &&
+                    entry.text.includes("NATIVE_CONTROLLER_OBSERVATION"),
             ),
         "passive controller report reaches the originating task chat",
     );
     assert.equal(
         (await app.transcripts.allEntries(inbox, true)).some(
-            (entry) =>
-                entry.kind === "assistant" &&
-                entry.blocks.some(
-                    (block) => block.type === "text" && block.text.includes("Work Item report:"),
-                ),
+            (entry) => entry.kind === "appEvent" && entry.event === "report",
         ),
         false,
         "the first chat is not a special report destination",
@@ -325,6 +317,20 @@ test("native questions hold parent delegation and exact execution input until th
     const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     const inspected = await app.pip.orchestration.inspect(source, owner(app));
     const question = inspected.orchestration!.question!;
+
+    await until(
+        async () =>
+            (await app.transcripts.allEntries(chat, true)).some(
+                (entry) =>
+                    entry.kind === "appEvent" &&
+                    entry.event === "report" &&
+                    entry.state === "question" &&
+                    entry.questionId === question.id &&
+                    entry.source === Number(controller) &&
+                    entry.text.includes(question.text),
+            ),
+        "the native report retains its exact question and expanded-display state",
+    );
     const actions = app.workItems.itemFor(source)!.supervisor!.actions;
     const calls = controllerCalls;
 
@@ -598,15 +604,9 @@ test("delayed native replies retain their accepted source chat/request after a d
     );
     await app.pip.agents.supervision.open();
     const reports = async (chat: ConversationId) =>
-        (await app.transcripts.allEntries(chat, true))
-            .filter((entry) => entry.kind === "assistant")
-            .flatMap((entry) =>
-                entry.blocks.flatMap((block) =>
-                    block.type === "text" && block.text.includes("Work Item report:")
-                        ? [block.text]
-                        : [],
-                ),
-            );
+        (await app.transcripts.allEntries(chat, true)).flatMap((entry) =>
+            entry.kind === "appEvent" && entry.event === "report" ? [entry.text] : [],
+        );
 
     await until(
         async () => (await reports(a)).length === 1 && (await reports(b)).length === 1,
@@ -716,29 +716,19 @@ test("archived report origins survive completed coding without rerouting or paid
     );
     const before = agentCalls;
     const reportText = async (chat: ConversationId) =>
-        (await app.transcripts.allEntries(chat, true))
-            .filter((entry) => entry.kind === "assistant")
-            .flatMap((entry) =>
-                entry.blocks.flatMap((block) =>
-                    block.type === "text" && block.text.includes("Work Item report:")
-                        ? [block.text]
-                        : [],
-                ),
-            );
+        (await app.transcripts.allEntries(chat, true)).flatMap((entry) =>
+            entry.kind === "appEvent" && entry.event === "report" ? [entry.text] : [],
+        );
 
     assert.equal((await reportText(first)).length, 0);
     assert.equal((await reportText(origin)).length, 0);
     const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     const notices = async () =>
-        (await app.transcripts.allEntries(controller, true))
-            .filter((entry) => entry.kind === "assistant")
-            .flatMap((entry) =>
-                entry.blocks.flatMap((block) =>
-                    block.type === "text" && block.text.includes("Private report held:")
-                        ? [block.text]
-                        : [],
-                ),
-            );
+        (await app.transcripts.allEntries(controller, true)).flatMap((entry) =>
+            entry.kind === "appEvent" && entry.event === "report" && entry.state === "held"
+                ? [entry.text]
+                : [],
+        );
 
     await until(
         async () => (await notices()).length === 1,

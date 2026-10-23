@@ -203,6 +203,218 @@ test("native agent answers retain expanded service authorship and exact origin, 
     }
 });
 
+const reportEntry = (
+    data: Record<string, unknown>,
+    text = "Full passive report\nOriginal evidence",
+) =>
+    ({
+        ...entry("pi.assistant", {
+            role: "assistant",
+            api: "pi-coop",
+            provider: "pi-coop",
+            model: "app-authored",
+            stopReason: "stop",
+            content: [{ type: "text", text }],
+            timestamp: 1234,
+        }),
+        data: { appAuthored: true, reason: "agent-work-report", ...data },
+    }) as unknown as EntryRecord;
+
+test("native passive assistant reports become bounded neutral events with immutable captured sources and intact evidence", () => {
+    for (const [reason, report, state] of [
+        ["agent-work-report", "workItem", "reported"],
+        ["agent-report-held", "workItem", "held"],
+        ["agent-contact-report", "thread", "reported"],
+        ["agent-contact-report-held", "thread", "held"],
+    ] as const) {
+        const stored = reportEntry({
+            reason,
+            eventId: "report-key",
+            source: 27,
+            controllerId: 28,
+            originChatId: 29,
+            state,
+            summary: state === "held" ? "Report held" : "Report observed",
+            privateToken: "must-not-leak",
+        });
+
+        for (const full of [false, true]) {
+            const projected = projectEntry(stored, full);
+
+            assert.deepEqual(projected, {
+                id: 1,
+                kind: "appEvent",
+                event: "report",
+                report,
+                state,
+                source: 27,
+                controllerId: 28,
+                originChatId: 29,
+                summary: state === "held" ? "Report held" : "Report observed",
+                text: "Full passive report\nOriginal evidence",
+                at: 1234,
+            });
+        }
+    }
+
+    for (const reason of ["agent-helper-report", "agent-contact-report"]) {
+        const helper = projectEntry(
+            reportEntry({
+                reason,
+                privateHelperReport: 33,
+                eventId: "helper-key",
+                source: 31,
+                state: "reported",
+                summary: "Helper report observed",
+            }),
+        );
+
+        assert.ok(helper?.kind === "appEvent" && helper.event === "report");
+        assert.equal(helper.report, "helper");
+        assert.equal(helper.source, 31);
+    }
+
+    const taskAuthored = {
+        ...reportEntry({
+            reason: "agent-helper-report",
+            privateHelperReport: 33,
+            held: false,
+            eventId: "native-helper-key",
+            source: 31,
+            state: "reported",
+            summary: "Helper report observed",
+        }),
+        byTaskId: 33,
+    } as unknown as EntryRecord;
+
+    assert.equal(projectEntry(taskAuthored)?.kind, "appEvent");
+    assert.equal(
+        projectEntry({ ...taskAuthored, byTaskId: 34 } as unknown as EntryRecord)?.kind,
+        "assistant",
+    );
+});
+
+test("historical native report compatibility uses only captured metadata for links and generic neutral labels", () => {
+    const historical = [
+        [{}, "workItem", "reported", "Report observed", undefined],
+        [{ reason: "agent-report-held" }, "workItem", "held", "Report held", undefined],
+        [
+            { reason: "agent-contact-report", target: 37, sourceEntryId: 41 },
+            "thread",
+            "reported",
+            "Report observed",
+            37,
+        ],
+        [{ reason: "agent-contact-report-held" }, "thread", "held", "Report held", undefined],
+        [
+            { reason: undefined, privateHelperReport: 33, held: false },
+            "helper",
+            "reported",
+            "Report observed",
+            undefined,
+        ],
+        [
+            { reason: undefined, privateHelperReport: 33, held: true },
+            "helper",
+            "held",
+            "Report held",
+            undefined,
+        ],
+    ] as const;
+
+    for (const [data, report, state, summary, source] of historical) {
+        const projected = projectEntry(
+            reportEntry(data, "Source lookalike /s/999\nUntouched details"),
+        );
+
+        assert.ok(projected?.kind === "appEvent" && projected.event === "report");
+        assert.equal(projected.report, report);
+        assert.equal(projected.state, state);
+        assert.equal(projected.summary, summary);
+        assert.equal(projected.source, source);
+        assert.equal(projected.text, "Source lookalike /s/999\nUntouched details");
+        assert.equal(projected.sourceEntryId, source === undefined ? undefined : 41);
+    }
+});
+
+test("native report questions remain explicit, including conservative trusted historical questions", () => {
+    const question = projectEntry(
+        reportEntry({
+            eventId: "question-event",
+            source: 27,
+            state: "question",
+            summary: "Human decision needed",
+            questionId: "question-1",
+        }),
+    );
+
+    assert.ok(question?.kind === "appEvent" && question.event === "report");
+    assert.equal(question.state, "question");
+    assert.equal(question.questionId, "question-1");
+    const historical = projectEntry(
+        reportEntry({}, "Work Item report: old\nHuman decision needed: choose the scope.\nDetails"),
+    );
+
+    assert.ok(historical?.kind === "appEvent" && historical.event === "report");
+    assert.equal(historical.state, "question");
+});
+
+test("lookalikes and malformed report markers cannot fold user, model, imported or unrelated assistant content", () => {
+    const valid = {
+        eventId: "report-key",
+        source: 27,
+        state: "reported",
+        summary: "Report observed",
+    };
+    const native = reportEntry(valid);
+    const message = native.model![0] as Record<string, unknown>;
+    const candidates = [
+        { ...native, kind: "pi.user" },
+        { ...native, byTaskId: 9 },
+        reportEntry({ ...valid, imported: true }),
+        reportEntry({ ...valid, appAuthored: false }),
+        reportEntry({ ...valid, reason: "private-agent-onboarding" }),
+        reportEntry({ ...valid, reason: "app-command" }),
+        reportEntry({ ...valid, reason: "watch-pr" }),
+        ...["role", "api", "provider", "model"].map((field) => ({
+            ...native,
+            model: [{ ...message, [field]: "lookalike" }],
+        })),
+        ...[
+            { source: 0 },
+            { source: 1.5 },
+            { source: "27" },
+            { source: [27] },
+            { controllerId: -1 },
+            { originChatId: "29" },
+            { eventId: "" },
+            { eventId: "x".repeat(257) },
+            { state: "success" },
+            { state: ["reported"] },
+            { state: "held" },
+            { summary: "x".repeat(201) },
+            { summary: "Not\na label" },
+            { questionId: "question-on-hidden-report" },
+        ].map((bad) => reportEntry({ ...valid, ...bad })),
+        reportEntry({ source: 27 }),
+        reportEntry({ target: "37" }),
+        reportEntry({ sourceEntryId: 41 }),
+        reportEntry({ reason: ["agent-work-report"] }),
+        reportEntry({ reason: undefined, privateHelperReport: 0, held: false }),
+        reportEntry({ reason: undefined, privateHelperReport: 33, held: "false" }),
+        reportEntry({ reason: undefined, privateHelperReport: 33 }),
+        { ...native, model: [{ ...message, content: [{ type: "toolCall", id: "call" }] }] },
+        entry("pi.assistant", {
+            role: "assistant",
+            content: [{ type: "text", text: "Work Item report: /s/27\nHuman decision needed" }],
+        }),
+    ];
+
+    for (const candidate of candidates) {
+        assert.notEqual(projectEntry(candidate as unknown as EntryRecord)?.kind, "appEvent");
+    }
+});
+
 test("stats add the cost of models and tools", () => {
     const usage = {
         models: {

@@ -18,6 +18,8 @@ import {
     isWorkItemEvent,
     NOTE_ENTRY,
     PIP_QUESTION_ENTRY,
+    type PassiveReport,
+    readPassiveReport,
     SHELL_ENTRY,
     type ShellData,
     splitAttachments,
@@ -89,6 +91,7 @@ export type ClientEntry =
           text: string;
           at?: number;
       }
+    | ({ id: number; kind: "appEvent"; event: "report"; text: string; at?: number } & PassiveReport)
     | { id: number; kind: "agentAnswer"; actor: AgentAnswer; text: string; at?: number }
     | { id: number; kind: "fromPi"; title: string; file: string }
     | { id: number; kind: "other"; entryKind: string };
@@ -429,7 +432,42 @@ export function projectEntry(entry: EntryRecord, full = false): ClientEntry | un
         }
 
         case "pi.assistant": {
-            let blocks = projectBlocks(message?.content, full);
+            const content = message?.content;
+            const helperReporter = (entry.data as { privateHelperReport?: unknown } | undefined)
+                ?.privateHelperReport;
+            // Direct helper observations are appended by their real native reporter task.
+            // Other task-authored messages (including model answers) cannot borrow this exception.
+            const nativeAuthorship =
+                entry.byTaskId === undefined ||
+                (typeof helperReporter === "number" &&
+                    Number.isSafeInteger(helperReporter) &&
+                    helperReporter > 0 &&
+                    Number(entry.byTaskId) === helperReporter);
+            const nativeReport =
+                nativeAuthorship &&
+                (entry.data as { imported?: boolean } | undefined)?.imported !== true &&
+                message?.role === "assistant" &&
+                message.api === "pi-coop" &&
+                message.provider === "pi-coop" &&
+                message.model === "app-authored" &&
+                Array.isArray(content) &&
+                content.length > 0 &&
+                content.every((part) => part?.type === "text" && typeof part.text === "string")
+                    ? readPassiveReport(entry.data, textOfContent(content))
+                    : undefined;
+
+            if (nativeReport !== undefined) {
+                return {
+                    id,
+                    kind: "appEvent",
+                    event: "report",
+                    ...nativeReport,
+                    text: textOfContent(content),
+                    ...madeAt(message),
+                };
+            }
+
+            let blocks = projectBlocks(content, full);
             const stopReason =
                 typeof message?.stopReason === "string" ? message.stopReason : undefined;
 
@@ -862,7 +900,18 @@ export function snippet(text: string, max = 280): string {
 /** The visible text of a projected entry, as plain text: what a person or Pi wrote. */
 export function entryText(entry: ClientEntry): string {
     if (entry.kind === "appEvent") {
-        return `Work Item · Execution ${entry.state} · /s/${entry.source}`;
+        if (entry.event === "workItem") {
+            return `Work Item · Execution ${entry.state} · /s/${entry.source}`;
+        }
+
+        const label =
+            entry.report === "workItem"
+                ? "Work Item"
+                : entry.report === "helper"
+                  ? "Helper"
+                  : "Thread";
+
+        return `${label} · ${entry.summary}${entry.source === undefined ? "" : ` · /s/${entry.source}`}`;
     }
 
     if (entry.kind === "agentAnswer") {

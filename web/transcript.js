@@ -1872,6 +1872,57 @@ function PendingShells({ conversationId, rows }) {
 function AppEventEntry({ entry }) {
     const [open, setOpen] = useState(false);
     const detailsId = `app-event-detail-${entry.id}`;
+    const label =
+        entry.event !== "report" || entry.report === "workItem"
+            ? "Work Item"
+            : entry.report === "helper"
+              ? "Helper"
+              : "Thread";
+    const source =
+        entry.source === undefined
+            ? null
+            : html`<a
+                  class="step-open"
+                  href=${`/s/${entry.source}${entry.sourceEntryId === undefined ? "" : `#entry-${entry.sourceEntryId}`}`}
+              >
+                  /s/${entry.source}
+              </a>`;
+
+    const references = html`<div class="app-event-references">
+        ${
+            entry.controllerId === undefined || entry.controllerId === entry.source
+                ? null
+                : html`<a href=${`/s/${entry.controllerId}`}>Controller /s/${entry.controllerId}</a>`
+        }
+        ${
+            entry.originChatId === undefined
+                ? null
+                : html`<a href=${`/s/${entry.originChatId}`}>Origin /s/${entry.originChatId}</a>`
+        }
+    </div>`;
+    // Link literal captured references only after native event projection established provenance.
+    // This makes historical destinations inspectable without promoting prose into trusted source metadata.
+    const details = String(entry.text ?? "")
+        .split(/(?<=^|[\s([{])(\/s\/[1-9]\d*(?:#entry-[1-9]\d*)?)(?=$|[\s)\]},;:]|[.!?](?=\s|$))/g)
+        .map((part, index) => (index % 2 === 0 ? part : html`<a href=${part}>${part}</a>`));
+
+    // A report can carry a real human decision. It remains prominent and fully expanded, not a passive fold.
+    if (entry.state === "question") {
+        return html`<div
+            id=${`entry-${entry.id}`}
+            class="agent-answer app-event-question"
+            data-part="app-event-question"
+        >
+            <div class="agent-answer-head">
+                <${Icon} name="pulse" size=${16} />
+                <strong>Human decision needed</strong>
+                <span>${label} report</span>
+                ${source}
+            </div>
+            ${references}
+            <${Markdown} text=${entry.text} />
+        </div>`;
+    }
 
     return html`<div
         id=${`entry-${entry.id}`}
@@ -1891,19 +1942,20 @@ function AppEventEntry({ entry }) {
                 <span class="step-mark app-event-mark" aria-hidden="true">
                     <${Icon} name="pulse" size=${13} />
                 </span>
-                <span class="app-event-label">Work Item</span>
-                <span class="app-event-state">Execution ${entry.state}</span>
+                <span class="app-event-label">${label}</span>
+                <span class="app-event-state">
+                    ${entry.event === "report" ? entry.summary : `Execution ${entry.state}`}
+                </span>
                 <${Icon} name="chevron" size=${12} />
             </button>
-            <a class="step-open" href=${`/s/${entry.source}`}>
-                /s/${entry.source}
-            </a>
+            ${source}
         </div>
         ${
             open &&
             html`<div id=${detailsId} class="step-body" data-part="step-detail">
             <p class="app-event-context">Application observation · not proof of successful completion.</p>
-            <pre class="app-event-details">${entry.text}</pre>
+            ${references}
+            <pre class="app-event-details">${details}</pre>
         </div>`
         }
     </div>`;
@@ -2113,8 +2165,12 @@ function partialEntry(blocks) {
     return partials.get(blocks);
 }
 
-/** Projected native user inputs start turns even when rendered with explicit service provenance. */
-const startsTurn = (entry) => ["user", "appEvent", "agentAnswer"].includes(entry.kind);
+/** Passive reports separate activity, but unlike native wakes/answers do not start a paid response turn. */
+const startsTurn = (entry) =>
+    entry.kind === "user" ||
+    entry.kind === "agentAnswer" ||
+    (entry.kind === "appEvent" && entry.event !== "report");
+const activityBoundary = (entry) => startsTurn(entry) || entry.kind === "appEvent";
 
 /**
  * The transcript's items, each rendered again only when what it shows changed. A group is live while one of its calls
@@ -2124,7 +2180,7 @@ function Items({ items, results, slots, approvals, busy, past = false, conversat
     let lastMessage = -1;
 
     items.forEach((item, index) => {
-        if (item.type === "row" && startsTurn(item.entry)) {
+        if (item.type === "row" && activityBoundary(item.entry)) {
             lastMessage = index;
         }
     });
@@ -2328,7 +2384,7 @@ function newestThought(generation, entries) {
     for (let index = entries.length - 1; index >= 0; index--) {
         const entry = entries[index];
 
-        if (startsTurn(entry)) {
+        if (activityBoundary(entry)) {
             break;
         }
 

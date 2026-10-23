@@ -18,6 +18,18 @@ export type WorkItemEvent = {
     fingerprint: string;
 };
 
+/** Display-only report provenance, read from native assistant entry data rather than report prose. */
+export type PassiveReport = {
+    report: "workItem" | "thread" | "helper";
+    state: "reported" | "held" | "question";
+    summary: string;
+    source?: number;
+    sourceEntryId?: number;
+    controllerId?: number;
+    originChatId?: number;
+    questionId?: string;
+};
+
 /** A correlated service answer remains visible, separate from passive application observations. */
 export type AgentAnswer = {
     questionId: string;
@@ -30,6 +42,103 @@ const positiveId = (value: unknown): value is number =>
     typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const boundedText = (value: unknown, max: number): value is string =>
     typeof value === "string" && value.trim().length > 0 && value.length <= max;
+
+/**
+ * Called only after native assistant authorship/signature checks. Missing additive metadata is historical;
+ * present-but-malformed metadata must never fall back to a trusted historical fold.
+ */
+export function readPassiveReport(value: unknown, text: string): PassiveReport | undefined {
+    if (value === null || typeof value !== "object") {
+        return undefined;
+    }
+
+    const data = value as Record<string, unknown>;
+    const helper = data.privateHelperReport;
+    const legacyHelper = positiveId(helper) && typeof data.held === "boolean";
+    const known =
+        typeof data.reason === "string" &&
+        [
+            "agent-work-report",
+            "agent-report-held",
+            "agent-contact-report",
+            "agent-contact-report-held",
+            "agent-helper-report",
+        ].includes(data.reason);
+
+    if (
+        data.appAuthored !== true ||
+        (!known && !(data.reason === undefined && legacyHelper)) ||
+        (helper !== undefined && !positiveId(helper)) ||
+        (data.held !== undefined && typeof data.held !== "boolean") ||
+        (data.target !== undefined && !positiveId(data.target)) ||
+        (data.sourceEntryId !== undefined && !positiveId(data.sourceEntryId)) ||
+        (data.controllerId !== undefined && !positiveId(data.controllerId)) ||
+        (data.originChatId !== undefined && !positiveId(data.originChatId))
+    ) {
+        return undefined;
+    }
+
+    const report =
+        data.reason === "agent-helper-report" || positiveId(helper)
+            ? "helper"
+            : data.reason === "agent-work-report" || data.reason === "agent-report-held"
+              ? "workItem"
+              : "thread";
+    const held =
+        data.reason === "agent-report-held" ||
+        data.reason === "agent-contact-report-held" ||
+        (report === "helper" && data.held === true);
+    const modern = ["eventId", "source", "state", "summary", "questionId"].some(
+        (key) => data[key] !== undefined,
+    );
+
+    if (modern) {
+        if (
+            !boundedText(data.eventId, 256) ||
+            !positiveId(data.source) ||
+            (data.state !== "reported" && data.state !== "held" && data.state !== "question") ||
+            !boundedText(data.summary, 200) ||
+            /[\r\n\u0000-\u001f\u007f]/.test(data.summary) ||
+            (data.controllerId !== undefined && !positiveId(data.controllerId)) ||
+            (data.originChatId !== undefined && !positiveId(data.originChatId)) ||
+            (data.questionId !== undefined &&
+                (data.state !== "question" || !boundedText(data.questionId, 256))) ||
+            (held && data.state !== "held") ||
+            (!held && report !== "helper" && data.state === "held")
+        ) {
+            return undefined;
+        }
+
+        return {
+            report,
+            state: data.state as PassiveReport["state"],
+            summary: data.summary,
+            source: data.source,
+            ...(data.sourceEntryId === undefined ? {} : { sourceEntryId: data.sourceEntryId }),
+            ...(data.controllerId === undefined ? {} : { controllerId: data.controllerId }),
+            ...(data.originChatId === undefined ? {} : { originChatId: data.originChatId }),
+            ...(data.questionId === undefined ? {} : { questionId: data.questionId }),
+        } as PassiveReport;
+    }
+
+    if (data.sourceEntryId !== undefined && data.target === undefined) {
+        return undefined;
+    }
+
+    // Only widen visibility after trust is established. Legacy prose can prevent a fold, never create one
+    // or nominate a source. Old Work Item reports did not persist the question state separately.
+    const question = !held && /^Human decision needed:/m.test(text);
+
+    return {
+        report,
+        state: held ? "held" : question ? "question" : "reported",
+        summary: held ? "Report held" : question ? "Human decision needed" : "Report observed",
+        ...(data.target === undefined ? {} : { source: data.target }),
+        ...(data.sourceEntryId === undefined ? {} : { sourceEntryId: data.sourceEntryId }),
+        ...(data.controllerId === undefined ? {} : { controllerId: data.controllerId }),
+        ...(data.originChatId === undefined ? {} : { originChatId: data.originChatId }),
+    } as PassiveReport;
+}
 
 /** Conservative readers of additive native content metadata; imported entries must reject it separately. */
 export function isWorkItemEvent(value: unknown): value is WorkItemEvent {

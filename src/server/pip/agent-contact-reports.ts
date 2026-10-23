@@ -53,14 +53,15 @@ function outcome(entry: EntryRecord): string | undefined {
 
     const text = message.content
         .flatMap((part) => (part.type === "text" ? [part.text] : []))
-        .join("\n");
+        .join("\n")
+        .trim();
     const failure =
         message.stopReason === "error" || message.stopReason === "aborted"
             ? `Native response ${message.stopReason}: ${message.errorMessage ?? "no further detail"}.`
             : "";
     const result = [text, failure].filter(Boolean).join("\n").slice(0, TEXT_LIMIT);
 
-    return result || "Native assistant response completed without text; inspect the exact thread.";
+    return result || undefined;
 }
 
 export class AgentContactReports {
@@ -318,7 +319,9 @@ export class AgentContactReports {
             // so a send completing during the earlier read cannot leak to followers.
             if (
                 event[0] === "entry" &&
-                (await this.#app.pip.agents.contacts.ownsAnswer(tx, idOf(contact.target), entry))
+                (await this.#app.pip.agents.contacts.ownsOutcome(tx, idOf(contact.target), {
+                    answer: entry,
+                }))
             ) {
                 return;
             }
@@ -330,6 +333,9 @@ export class AgentContactReports {
                 contact: contactKey,
                 target: contact.target,
                 ...(entry === undefined ? {} : { entry }),
+                ...(event[0] === "question" && typeof event[1] === "string"
+                    ? { questionId: event[1] }
+                    : {}),
                 ...(Number.isSafeInteger(contact.chatId) ? { originChatId: contact.chatId } : {}),
                 originRequestId: contact.requestId,
                 agentId: contact.agentId,
@@ -526,6 +532,19 @@ export class AgentContactReports {
                             agentId: report.agentId,
                             contactRequestId: report.originRequestId ?? report.contact,
                             reportKey: key,
+                            source: report.target,
+                            eventId: key,
+                            state: "held",
+                            summary: "Report held",
+                            ...(report.originChatId === undefined
+                                ? {}
+                                : { originChatId: report.originChatId }),
+                            ...(contact?.controllerId === undefined
+                                ? {}
+                                : { controllerId: contact.controllerId }),
+                            ...(report.helperReporterId === undefined
+                                ? {}
+                                : { privateHelperReport: report.helperReporterId }),
                         },
                     );
                     report.notified = true;
@@ -551,6 +570,18 @@ export class AgentContactReports {
                 originRequestId: report.originRequestId!,
                 reportKey: key,
                 ...(report.entry === undefined ? {} : { sourceEntryId: report.entry }),
+                source: report.target,
+                originChatId: report.originChatId!,
+                eventId: key,
+                state: report.questionId === undefined ? "reported" : "question",
+                summary: report.questionId === undefined ? "Report observed" : "Decision needed",
+                ...(report.questionId === undefined ? {} : { questionId: report.questionId }),
+                ...(contact?.controllerId === undefined
+                    ? {}
+                    : { controllerId: contact.controllerId }),
+                ...(report.helperReporterId === undefined
+                    ? {}
+                    : { privateHelperReport: report.helperReporterId }),
             });
             report.status = "delivered";
             delete report.reason;

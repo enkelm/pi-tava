@@ -230,8 +230,17 @@ function reporterFor(Courier: CourierTask, host: Pick<PocketHost, "notice">) {
                     const answer = (await tx.entry(AssistantEntry, settled.answer))?.model?.[0] as
                         AssistantMessage | undefined;
 
+                    const text = textOf(answer).trim();
+                    const failure =
+                        answer?.stopReason === "error" || answer?.stopReason === "aborted"
+                            ? `Native response ${answer.stopReason}: ${answer.errorMessage ?? "no further detail"}.`
+                            : "";
+                    const outcome = [text, failure].filter(Boolean).join("\n");
+
                     return next(
-                        `${REPORT_PREFIX}${name} answered, no reply needed] ${textOf(answer)}`,
+                        outcome && answer?.stopReason !== "toolUse"
+                            ? `${REPORT_PREFIX}${name} answered, no reply needed] ${outcome}`
+                            : undefined,
                     );
                 }, context);
 
@@ -324,6 +333,14 @@ function reporterFor(Courier: CourierTask, host: Pick<PocketHost, "notice">) {
                                     appAuthored: true,
                                     privateHelperReport: Number(reporter.id),
                                     held: !current,
+                                    reason: "agent-helper-report",
+                                    eventId: `helper-return:${reporter.id}`,
+                                    source: Number(reporter.input.conversationId),
+                                    originChatId: Number(id),
+                                    state: current ? "reported" : "held",
+                                    summary: current
+                                        ? "Helper report observed"
+                                        : "Helper report held",
                                 },
                                 model: [
                                     {

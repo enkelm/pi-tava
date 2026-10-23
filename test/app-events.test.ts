@@ -14,8 +14,8 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai/providers/faux";
-import type { ConversationId } from "@earendil-works/pi-durable";
-import { entryText, peekLines } from "../src/server/projection.ts";
+import type { ConversationId, EntryRecord } from "@earendil-works/pi-durable";
+import { entryText, peekLines, projectEntry } from "../src/server/projection.ts";
 import { transcriptMarkdown } from "../src/server/export.ts";
 import type { WorkItemEvent } from "../src/server/entry-format.ts";
 
@@ -132,6 +132,88 @@ test("native service input persists compact event provenance while retaining com
         !(await app.transcripts.allEntries(source, true)).some(
             (entry) => entry.kind === "appEvent",
         ),
+    );
+});
+
+test("passive report peeks and exports retain neutral identity, exact historical links and complete evidence", () => {
+    const evidence = "Original details /s/999\n```untrusted fence\n" + "Evidence. ".repeat(1500);
+    const stored = (data: Record<string, unknown>) =>
+        ({
+            id: 17,
+            conversationId: 2,
+            kind: "pi.assistant",
+            data: { appAuthored: true, reason: "agent-contact-report", ...data },
+            model: [
+                {
+                    role: "assistant",
+                    api: "pi-coop",
+                    provider: "pi-coop",
+                    model: "app-authored",
+                    stopReason: "stop",
+                    content: [{ type: "text", text: evidence }],
+                },
+            ],
+        }) as unknown as EntryRecord;
+
+    for (const data of [
+        { target: 37, sourceEntryId: 41 },
+        { reason: "agent-work-report" },
+        { reason: "agent-report-held" },
+        { reason: undefined, privateHelperReport: 19, held: false },
+        { reason: undefined, privateHelperReport: 19, held: true },
+    ]) {
+        const event = projectEntry(stored(data))!;
+
+        assert.ok(event.kind === "appEvent" && event.event === "report");
+        const peek = peekLines([event], { busy: false });
+        const markdown = transcriptMarkdown({
+            title: "Report",
+            cwd: "/tmp",
+            exportedAt: new Date(0),
+            entries: [event],
+            authors: { 17: "Owner" },
+        });
+
+        assert.equal(peek[0]?.kind, "event");
+        assert.match(peek[0]!.text, /Report (?:observed|held)/);
+        assert.doesNotMatch(peek[0]!.text, /Evidence|999|success|complete/i);
+        assert.match(
+            markdown,
+            /\*\*Application event · (?:Work Item|Thread|Helper) · Report (?:observed|held)\*\*/,
+        );
+        assert.ok(markdown.includes("<details>"));
+        assert.ok(markdown.includes(evidence));
+        assert.doesNotMatch(markdown, /\*\*Owner\*\*|\*\*Pi\*\*|\/s\/undefined/);
+
+        if (data.target !== undefined) {
+            assert.ok(markdown.includes("[Source /s/37](/s/37#entry-41)"));
+        } else {
+            assert.ok(!markdown.includes("[Source /s/"), "never infer or retarget a legacy source");
+        }
+    }
+
+    const question = projectEntry(
+        stored({
+            eventId: "q-event",
+            source: 37,
+            state: "question",
+            summary: "Human decision needed",
+            questionId: "q1",
+        }),
+    )!;
+    const markdown = transcriptMarkdown({
+        title: "Question",
+        cwd: "/tmp",
+        exportedAt: new Date(0),
+        entries: [question],
+        authors: {},
+    });
+
+    assert.match(markdown, /Human decision needed/);
+    assert.ok(markdown.includes(evidence));
+    assert.ok(
+        !markdown.includes("<details>"),
+        "a real decision cannot be buried in a passive fold",
     );
 });
 

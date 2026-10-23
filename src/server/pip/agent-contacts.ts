@@ -536,9 +536,13 @@ export class AgentContacts {
         await this.#joinRevoked();
     }
 
-    /** A native send's answer is not an independent event, even if its report was disabled or revoked. */
-    async ownsAnswer(tx: Tx, target: ConversationId, entry: number | undefined): Promise<boolean> {
-        if (entry === undefined) {
+    /** A native send's settlement belongs to its exact origin, including failures and disabled reports. */
+    async ownsOutcome(
+        tx: Tx,
+        target: ConversationId,
+        outcome: { answer?: number; submission?: number },
+    ): Promise<boolean> {
+        if (outcome.answer === undefined && outcome.submission === undefined) {
             return false;
         }
 
@@ -553,8 +557,10 @@ export class AgentContacts {
 
             if (
                 record?.type === "input" &&
-                record.status === "done" &&
-                Number(record.answer) === entry
+                ((outcome.submission !== undefined && Number(record.id) === outcome.submission) ||
+                    (outcome.answer !== undefined &&
+                        record.status === "done" &&
+                        Number(record.answer) === outcome.answer))
             ) {
                 return true;
             }

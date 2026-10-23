@@ -164,8 +164,26 @@ export function transcriptMarkdown(input: ExportInput): string {
         }
 
         if (entry.kind === "appEvent") {
+            const label =
+                entry.event === "workItem" || entry.report === "workItem"
+                    ? "Work Item"
+                    : entry.report === "helper"
+                      ? "Helper"
+                      : "Thread";
+            const state = entry.event === "workItem" ? `Execution ${entry.state}` : entry.summary;
+            const heading = `**Application event · ${label} · ${state.replace(/([\\`*_[\]<>])/g, "\\$1")}**`;
+            const source =
+                entry.source === undefined
+                    ? ""
+                    : ` — [Source /s/${entry.source}](/s/${entry.source}${entry.event === "report" && entry.sourceEntryId !== undefined ? `#entry-${entry.sourceEntryId}` : ""})`;
+            const details = fence(entry.text);
+
             sections.push(
-                `**Application event · Work Item · Execution ${entry.state}** — [Source /s/${entry.source}](/s/${entry.source})\n\n<details><summary>Technical details (not proof of success)</summary>\n\n${fence(entry.text)}\n\n</details>`,
+                `${heading}${source}\n\n${
+                    entry.state === "question"
+                        ? details
+                        : `<details><summary>Technical details (not proof of success)</summary>\n\n${details}\n\n</details>`
+                }`,
             );
         } else if (entry.kind === "agentAnswer") {
             sections.push(

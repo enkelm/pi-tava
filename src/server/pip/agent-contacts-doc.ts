@@ -41,6 +41,8 @@ export type ContactReport = {
     contact: string;
     target: number;
     entry?: number;
+    /** Immutable native question identity, independent of its display prose. */
+    questionId?: string;
     /** Real native helper reporter; delivery validates its parent, child and copied creator authority. */
     helperReporterId?: number;
     originChatId?: number;

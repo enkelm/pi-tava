@@ -73,6 +73,7 @@ export class PipSupervision {
     readonly #inputs = new Map<number, Promise<void>>();
     /** Rebuilt from native submissions at startup; a new generation or busy run is not an outcome. */
     readonly #outcomes = new Map<ConversationId, ExecutionOutcome>();
+    #storage: Storage | undefined;
 
     constructor(app: PocketApp) {
         this.#app = app;
@@ -1909,6 +1910,52 @@ export class PipSupervision {
         return meta !== undefined && meta.pip === undefined && this.#app.rootOf(id) === id;
     }
 
+    /** Passive reporters read real terminal inputs, not the last assistant/tool snapshot. */
+    async settledOutcomes(
+        id: ConversationId,
+        after: number | undefined,
+    ): Promise<ExecutionOutcome[]> {
+        const outcomes: ExecutionOutcome[] = [];
+        let cursor: Cursor | undefined;
+
+        if (this.#storage === undefined) {
+            return outcomes;
+        }
+
+        do {
+            const page = await this.#storage.scanSubmissions(
+                { conversationId: id },
+                256,
+                cursor,
+                context,
+            );
+
+            for (const record of page.items) {
+                if (
+                    record.type === "input" &&
+                    record.entry !== undefined &&
+                    Number(record.entry) > (after ?? 0) &&
+                    (record.status === "done" || record.status === "unanswered")
+                ) {
+                    outcomes.push({
+                        submission: Number(record.id),
+                        entry: Number(record.entry),
+                        ...(record.status === "done"
+                            ? { status: "done", answer: Number(record.answer) }
+                            : { status: "unanswered", reason: record.reason }),
+                    });
+                }
+            }
+
+            cursor = page.next;
+        } while (cursor !== undefined);
+
+        outcomes.sort((a, b) => a.entry - b.entry);
+
+        // An initial association observes only the current outcome, not the entire old history.
+        return after === undefined ? outcomes.slice(-1) : outcomes;
+    }
+
     #settled(record: SubmissionRecord): boolean {
         if (
             !this.#execution(record.conversationId) ||
@@ -1939,6 +1986,8 @@ export class PipSupervision {
 
     /** Seed before subscribing to commits or resuming tasks; no second durable event log is needed. */
     async recover(storage: Storage): Promise<void> {
+        this.#storage = storage;
+
         for (const key of Object.keys(this.#app.sessionCatalogue())) {
             const id = conversationId(Number(key));
 

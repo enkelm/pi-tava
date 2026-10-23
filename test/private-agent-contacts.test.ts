@@ -359,6 +359,10 @@ test("an existing named helper accepts exact service input and fresh authenticat
                 return fauxAssistantMessage("The bounded tool step completed.");
             }
 
+            if (last.text.includes("EMPTY_PRIVATE_HELPER")) {
+                return fauxAssistantMessage("   ");
+            }
+
             if (last.text.includes("INIT_PRIVATE_HELPER")) {
                 return fauxAssistantMessage("Private helper initialized.");
             }
@@ -384,6 +388,11 @@ test("an existing named helper accepts exact service input and fresh authenticat
                             action: "spawn",
                             name: "bounded-private-child",
                             message: "INIT_PRIVATE_HELPER: complete this bounded initialization.",
+                        }),
+                        fauxToolCall("subagent", {
+                            action: "spawn",
+                            name: "empty-private-child",
+                            message: "EMPTY_PRIVATE_HELPER: no textual outcome.",
                         }),
                     ],
                     { stopReason: "toolUse" },
@@ -431,6 +440,7 @@ test("an existing named helper accepts exact service input and fresh authenticat
 
         return (
             record?.answeredAt !== undefined &&
+            state?.agents["empty-private-child"]?.answeredAt !== undefined &&
             !app.isBusy(chat) &&
             state?.sending === undefined &&
             (state?.outbox?.length ?? 0) === 0
@@ -439,6 +449,21 @@ test("an existing named helper accepts exact service input and fresh authenticat
     helper = (await app.harness.snapshot(SubagentsDoc, chat, context))!.agents[
         "bounded-private-child"
     ]!.conversationId;
+    const nativeHelperReports = (await app.transcripts.allEntries(chat, true)).filter(
+        (entry) =>
+            entry.kind === "appEvent" && entry.event === "report" && entry.report === "helper",
+    );
+
+    assert.equal(
+        nativeHelperReports.length,
+        1,
+        "the real task-authored helper return is a compact event",
+    );
+    const helperEvent = nativeHelperReports[0]!;
+
+    assert.ok(helperEvent.kind === "appEvent" && helperEvent.event === "report");
+    assert.equal(helperEvent.source, Number(helper));
+    assert.equal(helperEvent.state, "reported");
     const origin = (
         await app.pip.agents.newChat(chat, owner(app), { requestId: "helper-contact-origin" })
     ).id as ConversationId;
@@ -449,8 +474,9 @@ test("an existing named helper accepts exact service input and fresh authenticat
         async () =>
             (await app.transcripts.allEntries(origin, true)).some(
                 (entry) =>
-                    entry.kind === "assistant" &&
-                    JSON.stringify(entry).includes("Exact private helper acknowledged"),
+                    entry.kind === "appEvent" &&
+                    entry.event === "report" &&
+                    entry.text.includes("Exact private helper acknowledged"),
             ),
         "helper answer returns to its accepted second-chat origin",
     );

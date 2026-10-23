@@ -80,25 +80,14 @@ for (const phase of ["admission", "outbox"]) {
                 .allEntries(saved.chat, true)
                 .then((entries) =>
                     entries.filter(
-                        (entry) =>
-                            entry.kind === "assistant" &&
-                            entry.blocks.some(
-                                (block) =>
-                                    block.type === "text" &&
-                                    block.text.includes("Work Item report:"),
-                            ),
+                        (entry) => entry.kind === "appEvent" && entry.event === "report",
                     ),
                 );
 
         assert.equal(delegated.length, 1, "the exact accepted native intent is submitted once");
         assert.equal(
             (await app.transcripts.allEntries(saved.firstChat, true)).some(
-                (entry) =>
-                    entry.kind === "assistant" &&
-                    entry.blocks.some(
-                        (block) =>
-                            block.type === "text" && block.text.includes("Work Item report:"),
-                    ),
+                (entry) => entry.kind === "appEvent" && entry.event === "report",
             ),
             false,
             "recovery never redirects an originating-task report to the first/arbitrary chat",
