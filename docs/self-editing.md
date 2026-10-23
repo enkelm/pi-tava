@@ -42,14 +42,41 @@ Never try a change on the server that people use, and never with their data. The
 - **A test.** `test/helpers.ts` opens the app on a temporary data folder with a scripted model (`openApp`, `newSession`, `say`, `until`). Most features have a test in `test/` that you can copy. `test/mobile-ui.test.ts` drives the whole web app in Chromium at the size of a phone.
 - **A copy that you can open.** `test/serve.ts` runs the code of this folder on a temporary data folder. Its scripted model answers "echo: …", and costs nothing. It prints sign-in links for an owner and a guest. Web files and extension modules load again in it when you save them. Restart it after any other server change.
 
-The copy runs until you stop it. So start it in the background from a tool call, or the call waits forever:
+Prepare a fresh worktree before checking it. Ignored dependencies do not come with a worktree.
+If an explicitly chosen sibling checkout has the same manifest and npm lockfile, the offline command
+below makes an independent copy of its installed dependencies. It refuses an existing `node_modules`,
+never runs install scripts, and never changes or links back to the source checkout:
 
 ```sh
-nohup node test/serve.ts > /tmp/pocket-copy.log 2>&1 &
-sleep 5; cat /tmp/pocket-copy.log   # the sign-in links, and the kill that stops it
+node scripts/prepare-worktree.ts --from /path/to/matching/checkout
+node scripts/native-preflight.ts
 ```
 
-Open a link with the browser tool, also at the `mobile` viewport, because most people use a phone. Read its console for errors.
+Preflight checks installed dependency metadata, private temporary logs, and cancellation/join of its
+own child. It is not a passed test suite or browser check. Managed shell is deliberately offline,
+including loopback: a listener-backed test or disposable server can still fail with `listen EPERM`.
+Where a native profile supports listeners, `node scripts/native-preflight.ts --listen` adds a single
+bind-and-close check. Do not retry a known denial unchanged or run outside confinement to evade it.
+See [native validation commands and limits](../scripts/NATIVE-VALIDATION.md).
+
+The copy runs until stopped. Only in a profile that permits its listener, background it so the tool
+call can return. Use the target's authorized `$TMPDIR`, not a shared fixed `/tmp` filename:
+
+```sh
+umask 077
+copy_dir=$(mktemp -d "${TMPDIR:?Use target-authorized TMPDIR}/coop-copy.XXXXXX")
+nohup node test/serve.ts > "$copy_dir/server.log" 2>&1 &
+printf 'Copy log: %s/server.log\n' "$copy_dir"
+```
+
+Read that log after startup for sign-in links and the copy's own process id. These links are local
+test credentials; do not publish the log. A background command is not a managed ownership lease:
+stop and join this copy before transferring the writer, and remove only its own log directory.
+
+Where a local-app browser capability is available, open a link at the `mobile` viewport too, because
+most people use a phone, and read its console for errors. The managed browser's public-document
+reader cannot run JavaScript or open this local app; neither a successful listener probe nor a
+memory-only test establishes rendered or device acceptance.
 
 Stop the copy with the `kill <id>` that it printed. This also deletes its data; `kill -9` would leave the data in the temporary folder. Use that id, not `$!`: after `cd somewhere && node … &`, `$!` is the shell's id, not the copy's.
 
