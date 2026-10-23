@@ -4,6 +4,7 @@ import { api, closeSheet, navigate, openSheet, store, uid } from "./store.js";
 import { html, Icon, Loader, Sheet, Spinner, timeAgo } from "./ui.js";
 import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import { agentDrafts, openAgentDraft, selectAgentDraft } from "./agent-drafts.js";
+import { closedAgentTabs } from "./agent-tab-state.js";
 import { ModelPicker } from "./sheets/model.js";
 import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
 
@@ -95,8 +96,13 @@ function openIdentity(agent) {
 
     store.set({ sidebarTab: "sessions", drawer: false });
 
-    if (agent.id !== null && agent.id !== undefined) {
-        navigate(agent.id);
+    const closed = closedAgentTabs(store.state.me.id, agent.agentId);
+    const chats = agent.chats ?? (agent.chatIds ?? []).map((id) => ({ id }));
+    const open = chats.find((chat) => !closed.has(chat.id));
+    const preferred = agent.id != null && !closed.has(agent.id) ? agent.id : open?.id;
+
+    if (preferred != null) {
+        navigate(preferred);
     } else {
         const draft = agentDrafts(agent.agentId)[0];
 
@@ -145,7 +151,17 @@ function NamedAgentRow({ agent }) {
         data-part="session-button"
         data-agent-id=${agent.agentId}
         aria-current=${agentIsOpen(agent) ? "page" : undefined}
-        onClick=${() => openIdentity(agent)}
+        onClick=${() => {
+            if (store.state.me?.id !== userId) {
+                return;
+            }
+
+            const current = store.state.namedAgents?.find((item) => item.agentId === agent.agentId);
+
+            if (current) {
+                openIdentity(current);
+            }
+        }}
         title=${agent.name}
     >
         <${NamedAgentAvatar} agentId=${agent.agentId} />

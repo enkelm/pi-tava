@@ -1,10 +1,11 @@
 // Named identities keep saved chats and unsent local drafts in one compact navigation rail.
 import { Fragment } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { store, navigate } from "./store.js";
 import { html, Icon } from "./ui.js";
 import { namedAgentsAvailable } from "./named-agents.js";
 import { toSessions } from "./sessions.js";
+import { closedAgentTabs, setClosedAgentTabs } from "./agent-tab-state.js";
 import {
     agentDrafts,
     closeAgentDraft,
@@ -13,9 +14,7 @@ import {
     selectedAgentDraft,
 } from "./agent-drafts.js";
 
-const dismissed = new Map();
 const focusAfterClose = new Map();
-const closedKey = (userId, agentId) => `pocket.pipClosedTabs.${userId}.${agentId}`;
 const titleOf = (chat) => chat.title || (chat.draft ? "New chat" : `Chat ${chat.id}`);
 let pending = null;
 
@@ -62,30 +61,11 @@ function navigateAgentTab(agentId, source) {
     pendingTabAgent();
 }
 
-function closedTabs(key) {
-    if (!dismissed.has(key)) {
-        let ids = [];
-
-        try {
-            const saved = JSON.parse(sessionStorage.getItem(key) ?? "[]");
-
-            if (Array.isArray(saved)) {
-                ids = saved.filter((id) => Number.isSafeInteger(id) && id > 0);
-            }
-        } catch {
-            // Dismissal remains UI-only when browser storage is unavailable.
-        }
-
-        dismissed.set(key, new Set(ids));
-    }
-
-    return dismissed.get(key);
-}
-
 function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) {
-    const tabsKey = closedKey(userId, agent.agentId);
+    const tabsKey = `${userId}:${agent.agentId}`;
     const [, setClosed] = useState(null);
-    const closed = closedTabs(tabsKey);
+    const closedTabs = () => closedAgentTabs(userId, agent.agentId);
+    const closed = closedTabs();
     const links = useRef(new Map());
     const tabs = useRef(new Map());
     const switcher = useRef(null);
@@ -122,23 +102,17 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
     };
 
     const dismissTabs = (ids) => {
-        dismissed.set(tabsKey, ids);
+        setClosedAgentTabs(userId, agent.agentId, ids);
         setClosed(ids);
-        // The header rail and its phone picker share the same UI-only dismissal set.
+        // The header rail, phone picker and sidebar entry share the same UI-only dismissal set.
         store.set({});
-
-        try {
-            sessionStorage.setItem(tabsKey, JSON.stringify([...ids]));
-        } catch {
-            // Never alter retained chat data to dismiss a tab.
-        }
     };
 
-    useEffect(() => {
-        // An outgoing passive effect must not undo a close before the queued root navigation renders.
-        // Native navigation and History reopen only the saved chat still selected by the live route.
-        if (current() && typeof source === "number" && closedTabs(tabsKey).has(source)) {
-            const ids = new Set(closedTabs(tabsKey));
+    useLayoutEffect(() => {
+        // Reopen the exact selected route before interaction, never from an outgoing passive effect:
+        // closing the last tab can leave that route selected until native goHome's queue settles.
+        if (current() && typeof source === "number" && closedTabs().has(source)) {
+            const ids = new Set(closedTabs());
 
             ids.delete(source);
             dismissTabs(ids);
@@ -178,7 +152,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
         if (chat.draft) {
             closeAgentDraft(chat.id);
         } else {
-            const ids = new Set(closedTabs(tabsKey));
+            const ids = new Set(closedTabs());
 
             ids.add(chat.id);
             dismissTabs(ids);

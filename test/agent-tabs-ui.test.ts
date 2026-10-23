@@ -58,6 +58,7 @@ const bridge = {
         useState: (...args: any[]) => active.hooks.useState(...args),
         useRef: (...args: any[]) => active.hooks.useRef(...args),
         useEffect: (...args: any[]) => active.hooks.useEffect(...args),
+        useLayoutEffect: (...args: any[]) => active.hooks.useEffect(...args),
     },
 };
 const descriptor = Object.getOwnPropertyDescriptor(globalThis, "agentTabsUiFixture");
@@ -86,7 +87,8 @@ after(() => {
     }
 });
 const sources: Record<string, string> = {
-    "preact/hooks": "export const {useState,useRef,useEffect}=globalThis.agentTabsUiFixture.hooks;",
+    "preact/hooks":
+        "export const {useState,useRef,useEffect,useLayoutEffect}=globalThis.agentTabsUiFixture.hooks;",
     "./store.js":
         "export const {store,api,uid,navigate,openSheet,closeSheet,projectsAvailable}=globalThis.agentTabsUiFixture;",
     "./sessions.js": "export const {toSessions}=globalThis.agentTabsUiFixture;",

@@ -129,6 +129,7 @@ const bridge = {
 const globals: Record<string, unknown> = {
     agentTabLifecycle: bridge,
     document,
+    history: { state: { pocket: { layers: 0 } }, length: 1 },
     location,
     navigator: { platform: "", onLine: false },
     matchMedia: () => Object.assign(new EventTarget(), { matches: false }),
@@ -174,7 +175,9 @@ const sources: Record<string, string> = {
         ${inert("Loader", "Spinner")}`,
     "./back.js":
         "export const onRoute=()=>{},pushRoute=path=>globalThis.agentTabLifecycle.paths(path);",
-    "./sessions.js": `import {navigate} from ${JSON.stringify(new URL("../web/store.js", import.meta.url).href)}; export const toSessions=()=>navigate(null);`,
+    "./sessions.js": `import {navigate} from ${JSON.stringify(new URL("../web/store.js", import.meta.url).href)};
+        import {goHome} from ${JSON.stringify(new URL("../web/back.js", import.meta.url).href)};
+        export const toSessions=()=>goHome(()=>navigate(null));`,
     "./named-agent-avatar.js":
         "export const NamedAgentAvatar=props=>globalThis.agentTabLifecycle.primitive('Avatar',props);",
     "./sheets/model.js": inert("ModelPicker"),
@@ -194,6 +197,14 @@ const sources: Record<string, string> = {
 const owned = /\/web\/(agent-tabs|topbar|named-agents|agent-history|agent-drafts|store)\.js$/;
 const imports = registerHooks({
     resolve(specifier, context, next) {
+        // A browser reload refreshes both the tab component and its local dismissal module.
+        if (
+            specifier === "./agent-tab-state.js" &&
+            context.parentURL?.includes("agent-tabs.js?reload=")
+        ) {
+            return next(`${specifier}${new URL(context.parentURL).search}`, context);
+        }
+
         const source = owned.test(context.parentURL?.split("?")[0] ?? "")
             ? sources[specifier]
             : undefined;
@@ -210,6 +221,7 @@ const { Topbar, AgentHeaderSheet } = await import(
 const { openAgentDraft, selectedAgentDraft } = await import(
     new URL("../web/agent-drafts.js", import.meta.url).href
 );
+const { NamedAgents } = await import(new URL("../web/named-agents.js", import.meta.url).href);
 const initial = store.state;
 let owners = 0;
 
@@ -225,7 +237,7 @@ after(() => {
     }
 });
 
-async function fixture(t: TestContext, settle = true) {
+async function fixture(t: TestContext, { settle = true, lastSaved = false } = {}) {
     active = { paths: [], requests: [] };
     const observed = active;
     const agent = {
@@ -239,6 +251,12 @@ async function fixture(t: TestContext, settle = true) {
             { id: 27, title: "Last" },
         ],
     };
+
+    if (lastSaved) {
+        agent.id = 19;
+        agent.chatIds = [19];
+        agent.chats = [agent.chats[1]!];
+    }
 
     drafts.set(19, "Unsent composer text");
     const retained = { text: drafts.get(19), revision: drafts.revision(19) };
@@ -256,6 +274,7 @@ async function fixture(t: TestContext, settle = true) {
 
     function Host() {
         return [
+            h(NamedAgents, {}),
             h(Topbar, {}),
             store.state.sheet?.type === "agent-header"
                 ? h(AgentHeaderSheet, { sheet: store.state.sheet })
@@ -405,37 +424,57 @@ test("the phone chat picker can close a selected tab during its pending view", a
     onlyReads(f);
 });
 
-test("a close before the first passive opening effect cannot reopen the outgoing tab", async (t) => {
-    const frames: (() => void)[] = [];
-    const requestFrame = options.requestAnimationFrame;
+test("closing before opening effects preserves dismissal through neighbor or native home navigation", async (t) => {
+    for (const lastSaved of [false, true]) {
+        await t.test(lastSaved ? "last saved tab" : "saved neighbor", async (t) => {
+            const frames: (() => void)[] = [];
+            const requestFrame = options.requestAnimationFrame;
 
-    options.requestAnimationFrame = (callback) => {
-        frames.push(callback);
-    };
+            options.requestAnimationFrame = (callback) => {
+                frames.push(callback);
+            };
 
-    try {
-        const f = await fixture(t, false);
+            try {
+                const f = await fixture(t, { settle: false, lastSaved });
 
-        // Use Preact's default microtask scheduler, not act's render queue override:
-        // the local close render precedes app.js's queued root navigation render.
-        f.label("Close Selected tab, chat 19").props.onClick({
-            preventDefault() {},
-            stopPropagation() {},
+                // Use Preact's default microtask scheduler, not act's render queue override:
+                // a local close render can precede native goHome's queued route change.
+                f.label("Close Selected tab, chat 19").props.onClick({
+                    preventDefault() {},
+                    stopPropagation() {},
+                });
+                await new Promise<void>((resolve) => setImmediate(resolve));
+
+                for (const frame of frames.splice(0)) {
+                    frame();
+                }
+
+                assert.deepEqual(
+                    JSON.parse(
+                        storage.get(`pocket.pipClosedTabs.${store.state.me.id}.agent-a`) ?? "[]",
+                    ),
+                    [19],
+                    "the outgoing opening effect must not erase the saved dismissal",
+                );
+                assert.equal(store.state.conversationId, lastSaved ? null : 27);
+
+                if (!lastSaved) {
+                    await f.arrive(27);
+                }
+
+                assert.equal(Boolean(link(f, 19)), false);
+                const row = f.all().find((element) => element.props["data-agent-id"] === "agent-a");
+
+                assert.ok(row);
+                await f.click(row);
+                assert.equal(store.state.conversationId, lastSaved ? null : 7);
+                assert.equal(Boolean(selectedAgentDraft()), lastSaved);
+                composerRetained(f);
+                onlyReads(f);
+            } finally {
+                options.requestAnimationFrame = requestFrame;
+            }
         });
-        await new Promise<void>((resolve) => setImmediate(resolve));
-
-        for (const frame of frames.splice(0)) {
-            frame();
-        }
-
-        await f.arrive(27);
-        assert.equal(
-            Boolean(link(f, 19)),
-            false,
-            "the outgoing opening effect must not revive a closed tab",
-        );
-    } finally {
-        options.requestAnimationFrame = requestFrame;
     }
 });
 
@@ -498,6 +537,169 @@ test("closing the last saved tab returns home without removing its chat or retai
     assert.deepEqual(f.agent.chats, [{ id: 19, title: "Selected", busy: true }]);
     composerRetained(f);
     assert.equal(f.observed.paths.at(-1), "/");
+    onlyReads(f);
+});
+
+test("sidebar re-entry respects closed tabs and uses a draft when no saved tab remains", async (t) => {
+    for (const mode of [
+        "remaining saved tab",
+        "saved tab before draft",
+        "all closed",
+        "existing draft",
+    ]) {
+        await t.test(mode, async (t) => {
+            const f = await fixture(t);
+            const hasSaved = mode === "remaining saved tab" || mode === "saved tab before draft";
+            let existingDraft: Props | undefined;
+
+            await f.click(f.label("Close First tab, chat 7"));
+
+            if (!hasSaved) {
+                await f.click(f.label("Close Selected tab, chat 19"));
+                await f.click(f.label("Close Last tab, chat 27"));
+            }
+
+            if (mode === "existing draft" || mode === "saved tab before draft") {
+                await f.perform(() => {
+                    existingDraft = openAgentDraft("agent-a");
+                });
+            }
+
+            const reopen = async () => {
+                await f.perform(() => navigate(null));
+                const row = f.all().find((element) => element.props["data-agent-id"] === "agent-a");
+
+                assert.ok(row, "the actual sidebar identity is available outside its chats");
+                await f.click(row);
+            };
+
+            await reopen();
+
+            if (hasSaved) {
+                assert.equal(store.state.conversationId, 19, "skip the closed default chat");
+                await f.arrive(19);
+                assert.equal(Boolean(link(f, 7)), false);
+                assert.ok(link(f, 19));
+
+                if (existingDraft) {
+                    assert.equal(selectedAgentDraft(), null, "prefer an open saved Chat");
+                    assert.ok(f.label(`Close New chat draft, chat ${existingDraft.id}`));
+                }
+            } else {
+                assert.equal(store.state.conversationId, null);
+                const draft = selectedAgentDraft();
+
+                assert.ok(draft, "opening an identity with all saved tabs closed shows a draft");
+                assert.equal(draft.agentId, "agent-a");
+                assert.equal(draft.text, "");
+
+                if (existingDraft) {
+                    assert.equal(draft.id, existingDraft.id, "reuse the still-open local draft");
+                }
+
+                assert.ok(named(f));
+                assert.equal(Boolean(link(f, 7)), false);
+                assert.equal(Boolean(link(f, 19)), false);
+                assert.equal(Boolean(link(f, 27)), false);
+                await reopen();
+                assert.equal(
+                    selectedAgentDraft()?.id,
+                    draft.id,
+                    "re-entry does not pile up drafts",
+                );
+                await f.click(f.label(`Close New chat draft, chat ${draft.id}`));
+                assert.equal(selectedAgentDraft(), null);
+                await reopen();
+                assert.ok(selectedAgentDraft());
+                assert.notEqual(
+                    selectedAgentDraft()?.id,
+                    draft.id,
+                    "a disposed draft stays closed",
+                );
+            }
+
+            assert.equal(f.agent.chats.length, 3, "closed conversations remain in History");
+            assert.equal(f.agent.chats[1]?.busy, true, "closing does not stop retained work");
+            composerRetained(f);
+            onlyReads(f);
+        });
+    }
+});
+
+test("sidebar entry checks the live owner, capability and identity catalogue before navigating", async (t) => {
+    for (const [name, change] of Object.entries({
+        owner: () => ({ me: { ...store.state.me, id: "different-owner" } }),
+        role: () => ({ me: { ...store.state.me, role: "member" } }),
+        capability: () => ({ server: { privateAgents: 3 } }),
+        removed: () => ({ namedAgents: [] }),
+        replaced: () => ({
+            namedAgents: [{ agentId: "agent-b", id: 88, chatIds: [88], chats: [{ id: 88 }] }],
+        }),
+        refreshed: () => ({
+            namedAgents: [
+                { ...store.state.namedAgents[0], id: 27, chatIds: [27], chats: [{ id: 27 }] },
+            ],
+        }),
+    })) {
+        await t.test(name, async (t) => {
+            const f = await fixture(t);
+
+            await f.perform(() => navigate(null));
+            const row = f.all().find((element) => element.props["data-agent-id"] === "agent-a");
+
+            assert.ok(row);
+            const updated = change();
+
+            // The native click can run after a store change but before app.js's queued render.
+            await f.perform(() => {
+                store.set(updated);
+                row.props.onClick({ preventDefault() {}, stopPropagation() {} });
+            });
+            assert.equal(store.state.conversationId, name === "refreshed" ? 27 : null);
+            assert.equal(selectedAgentDraft(), null, "a stale row must not create a draft");
+            assert.deepEqual(
+                store.state.namedAgents,
+                "namedAgents" in updated ? updated.namedAgents : [f.agent],
+            );
+            onlyReads(f);
+        });
+    }
+});
+
+test("sidebar and phone picker share local dismissals when browser storage is unavailable", async (t) => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage")!;
+
+    Object.defineProperty(globalThis, "sessionStorage", {
+        configurable: true,
+        get() {
+            throw new Error("Browser storage is unavailable");
+        },
+    });
+    t.after(() => Object.defineProperty(globalThis, "sessionStorage", descriptor));
+    const f = await fixture(t);
+
+    await f.click(f.label("Selected: switch chats"));
+
+    for (const title of ["First", "Selected", "Last"]) {
+        const id = { First: 7, Selected: 19, Last: 27 }[title];
+        const close = f
+            .all()
+            .filter((element) => element.props["aria-label"] === `Close ${title} tab, chat ${id}`)
+            .at(-1);
+
+        assert.ok(close);
+        await f.click(close);
+    }
+
+    assert.equal(store.state.conversationId, null);
+    const row = f.all().find((element) => element.props["data-agent-id"] === "agent-a");
+
+    assert.ok(row);
+    await f.click(row);
+    assert.ok(selectedAgentDraft());
+    assert.equal(Boolean(link(f, 7) || link(f, 19) || link(f, 27)), false);
+    assert.equal(f.agent.chats.length, 3);
+    composerRetained(f);
     onlyReads(f);
 });
 
