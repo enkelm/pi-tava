@@ -198,6 +198,7 @@ async function setup(
         role = "guest",
         enabled = true,
         supported = true,
+        available = true,
         chat = [],
         threads = [],
         composing = false,
@@ -255,7 +256,12 @@ async function setup(
         chat,
         chatRead: 0,
         chatQuote: null,
-        view: { pins: [], live: {}, reviews: { threads } },
+        view: {
+            conversation: { id: conversation, pipMentionAvailable: available },
+            pins: [],
+            live: {},
+            reviews: { threads },
+        },
     };
     fixture.drafts.clear();
     fixture.notices = [];
@@ -465,7 +471,12 @@ test("PiP completion is a service choice for steering roles, with keyboard inser
 });
 
 test("completion follows public support and execution policy, while typed mentions still post normally", async (t) => {
-    for (const options of [{ role: "viewer" }, { enabled: false }, { supported: false }]) {
+    for (const options of [
+        { role: "viewer" },
+        { enabled: false },
+        { supported: false },
+        { available: false },
+    ]) {
         await t.test(JSON.stringify(options), async (t) => {
             const app = await setup(t, options);
 
@@ -474,11 +485,52 @@ test("completion follows public support and execution policy, while typed mentio
                 app.nodes().some((node) => node.props["aria-label"] === "Mention PiP"),
                 false,
             );
+            assert.doesNotMatch(app.text(), /Mention @PiP to ask/);
             await app.type("@PiP ordinary message even when unavailable");
             await app.post();
             assert.equal(app.sent[0]!.text, "@PiP ordinary message even when unavailable");
         });
     }
+
+    await t.test(
+        "room-bound server availability controls chat and review completion during navigation",
+        async (t) => {
+            for (const surface of ["chat", "review"]) {
+                const app = await setup(t, { surface, role: "owner", composing: true });
+
+                await app.type("@pi");
+                assert.ok(app.nodes().some((node) => node.props["aria-label"] === "Mention PiP"));
+                await app.update({
+                    view: {
+                        ...fixture.store.state.view,
+                        conversation: { id: conversation - 1, pipMentionAvailable: true },
+                    },
+                });
+                assert.equal(
+                    app.nodes().some((node) => node.props["aria-label"] === "Mention PiP"),
+                    false,
+                );
+                await app.update({
+                    view: { ...fixture.store.state.view, conversation: { id: conversation } },
+                });
+                assert.equal(
+                    app.nodes().some((node) => node.props["aria-label"] === "Mention PiP"),
+                    false,
+                );
+                await app.update({
+                    view: {
+                        ...fixture.store.state.view,
+                        conversation: {
+                            id: conversation,
+                            pipMentionAvailable: true,
+                            pipAgent: true,
+                        },
+                    },
+                });
+                assert.ok(app.nodes().some((node) => node.props["aria-label"] === "Mention PiP"));
+            }
+        },
+    );
 
     await t.test("pause and resume without refreshing the private panel", async (t) => {
         const app = await setup(t, { enabled: false });

@@ -5,7 +5,7 @@ import { Component } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { Avatar, personColor } from "./avatar.js";
 import { useMentionComposer } from "./mention-composer.js";
-import { DiscussionMentionText, PipMentionStatus } from "./pip-mentions.js";
+import { canMentionPip, DiscussionMentionText, PipMentionStatus } from "./pip-mentions.js";
 import { reviewPeople } from "./reviews.js";
 import {
     actions,
@@ -414,8 +414,8 @@ function ChatTab({ highlight, focus }) {
 
     return html`<div class="chat-label">
         <${Icon} name="eye" size=${12} />${
-            store.state.server?.pipMentions
-                ? "Side chat · Mention @PiP to ask about the current work."
+            canMentionPip()
+                ? "Side chat · Mention @PiP to ask about this discussion."
                 : "Side chat · Pi does not see this chat."
         }
     </div>

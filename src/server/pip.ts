@@ -156,6 +156,7 @@ export type PipSession = {
     threadType: string;
     readOnly: boolean;
     paused: boolean;
+    history?: string;
     workItem?: { id: string; title: string; activeThreadId?: number };
     controller?: { id: number; url: string; status: "active" | "human control" };
 };
@@ -285,6 +286,10 @@ export class Pip {
 
     isInternal(id: ConversationId): boolean {
         return this.#mentions.isInternal(id);
+    }
+
+    canMention(id: ConversationId, user: User): boolean {
+        return this.#mentions.available(id, user);
     }
 
     admitMention(tx: Tx, id: ConversationId, user: User, source: PipMentionSource): Promise<void> {
@@ -735,24 +740,34 @@ export class Pip {
         return user;
     }
 
-    /** A session PiP may act on: one its person can see, and not PiP itself. */
-    #session(pipId: ConversationId, user: User, sessionId: number): ConversationId {
+    /** Read-only named history is owner-delegated; all other callers retain exact control admission. */
+    #session(
+        pipId: ConversationId,
+        user: User,
+        sessionId: number,
+        passive = false,
+    ): ConversationId {
         const id = sessionId as unknown as ConversationId;
+        const history = passive && this.isNamedCaller(pipId);
+        const root = history ? this.#app.rootOf(id) : id;
 
-        if (id === pipId) {
+        if (id === pipId && !history) {
             throw new Error("That is your own conversation.");
         }
 
-        const target = this.#app.sessionMeta(id);
+        const target = this.#app.sessionMeta(root);
 
         if (
-            target?.pip !== undefined &&
-            !(this.isNamedCaller(pipId) && target.pipWorkItemId !== undefined)
+            (target?.pip !== undefined &&
+                !history &&
+                !(this.isNamedCaller(pipId) && target.pipWorkItemId !== undefined)) ||
+            (history && target?.pipAgent === true && this.agents.scope(root) === undefined) ||
+            (history && id !== root && !this.#app.conversationsOf(root).includes(id))
         ) {
             throw new Error(`There is no session ${String(sessionId)}.`);
         }
 
-        if (this.#app.sessionMeta(id) === undefined) {
+        if (target === undefined) {
             throw new Error(`There is no session ${sessionId}. List them with the sessions tool.`);
         }
 
@@ -1130,6 +1145,45 @@ export class Pip {
                           }),
                 };
             });
+
+        // The shared catalogue intentionally omits private roots. Only a named caller gets its
+        // current owner's readable history projection; this never opens/associates a controller.
+        if (this.isNamedCaller(pipId)) {
+            for (const [key, meta] of Object.entries(app.sessionCatalogue())) {
+                const id = Number(key) as ConversationId;
+
+                if (
+                    meta.pip === undefined ||
+                    !app.canSee(user, id) ||
+                    (meta.pipAgent === true && this.agents.scope(id) === undefined)
+                ) {
+                    continue;
+                }
+
+                const identity = this.agents.identity(id);
+
+                all.push({
+                    id: Number(id),
+                    title: meta.title ?? "New session",
+                    state: app.isBusy(id) ? "working" : "idle",
+                    folder: homePath(app.cwdOf(id)),
+                    archived: meta.archived === true,
+                    updatedAt: meta.updatedAt,
+                    threadType: meta.threadType ?? "chat",
+                    readOnly: true,
+                    paused: !app.config.pipEnabled,
+                    history:
+                        identity !== undefined
+                            ? `private agent ${identity.record.name}`
+                            : meta.pipWorkItemId !== undefined
+                              ? "private Work Item controller"
+                              : "global private PiP",
+                });
+            }
+
+            all.sort((a, b) => b.updatedAt - a.updatedAt);
+        }
+
         const folders = [
             ...new Set(all.filter((each) => !each.archived).map((each) => each.folder)),
         ];
@@ -1138,7 +1192,7 @@ export class Pip {
                 (filter.archived === true ? session.archived : !session.archived) &&
                 (filter.state === undefined || session.state === filter.state) &&
                 words.every((word) =>
-                    `${session.title} ${session.folder} ${session.branch ?? ""} ${session.workItem?.title ?? ""}`
+                    `${session.title} ${session.folder} ${session.branch ?? ""} ${session.workItem?.title ?? ""} ${session.history ?? ""}`
                         .toLowerCase()
                         .includes(word),
                 ),
@@ -1261,18 +1315,51 @@ export class Pip {
     }
 
     /** The newest part of a session, as text for PiP: its state, what waits there, and its last messages. */
-    async read(pipId: ConversationId, sessionId: number, entries = 40): Promise<string> {
+    async read(
+        pipId: ConversationId,
+        sessionId: number,
+        entries = 40,
+        revalidate?: () => Promise<void>,
+    ): Promise<string> {
         const app = this.#app;
-        const user = this.#person(pipId);
-        const id = this.#session(pipId, user, sessionId);
-        const meta = app.sessionMeta(id)!;
+        const user = structuredClone(this.#person(pipId));
+        const id = this.#session(pipId, user, sessionId, true);
+        const sourceIdentity = this.agents.identity(app.rootOf(pipId));
+
+        const assert = () => {
+            const current = this.#person(pipId);
+            const identity = this.agents.identity(app.rootOf(pipId));
+
+            if (
+                current.id !== user.id ||
+                current.tokenHash !== user.tokenHash ||
+                identity?.agentId !== sourceIdentity?.agentId ||
+                identity?.epoch !== sourceIdentity?.epoch
+            ) {
+                throw new HttpError(409, "The private history reader's authority changed.");
+            }
+
+            this.#session(pipId, user, sessionId, true);
+        };
+
+        const check = async () => {
+            assert();
+            await revalidate?.();
+            assert();
+        };
+
+        await check();
         const conversation = await app.conversation(id);
+
+        await check();
         const page = await conversation.entries(
             {},
             Math.max(MIN_INSPECTION_ENTRIES, Math.min(entries, 200)),
             undefined,
             context,
         );
+
+        await check();
         const projected = page.items
             .map((entry) => projectEntry(entry))
             .filter((entry): entry is ClientEntry => entry !== undefined)
@@ -1309,6 +1396,14 @@ export class Pip {
                 } else if (entry.error !== undefined) {
                     lines.push(`  (error: ${snippet(entry.error, 200)})`);
                 }
+            } else if (entry.kind === "pipQuestion") {
+                lines.push(
+                    `[question ${quoted(entry.questionId)}] ${clip(entry.text, LINE_CHARS)}`,
+                );
+            } else if (entry.kind === "agentAnswer") {
+                lines.push(`[agent answer] ${clip(entry.text, LINE_CHARS)}`);
+            } else if (entry.kind === "appEvent") {
+                lines.push(`[app ${entry.event}] ${clip(entry.text, LINE_CHARS)}`);
             } else if (entry.kind === "note") {
                 lines.push(`[note] ${entry.name} ${snippet(entry.text, 300)}`);
             } else if (entry.kind === "shell") {
@@ -1325,6 +1420,9 @@ export class Pip {
             .filter((request) => app.rootOf(request.conversationId) === id)
             .map((request) => `- ${request.id}: ${request.tool} ${snippet(request.subject, 200)}`);
         const schedules = await app.schedules.list(id);
+
+        await check();
+        const meta = app.sessionMeta(app.rootOf(id))!;
         const state = app.approvals
             .all()
             .some((request) => app.rootOf(request.conversationId) === id)

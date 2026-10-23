@@ -2348,6 +2348,7 @@ export class PocketApp {
                 ? {}
                 : { location: this.locationOf(room.id) }),
             archived: meta?.archived === true,
+            pipMentionAvailable: user !== undefined && this.pip.canMention(room.id, user),
             // PiP's own conversation, opened as a page: some session things (a PR to watch) are not for it.
             ...(meta?.pip === undefined ? {} : { pip: true }),
             ...(meta?.pipAgent === true ? { pipAgent: true, pipAgentId: meta.pipAgentId } : {}),

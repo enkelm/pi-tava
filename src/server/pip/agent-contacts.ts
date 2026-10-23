@@ -227,7 +227,77 @@ export class AgentContacts {
         }
     }
 
+    /** Capture the actual source, not whichever private chat is selected when an await completes. */
+    #reader(api: ToolExecutionApi, ctx: Context) {
+        const source = this.#app.rootOf(api.conversationId);
+        const identity = this.#app.pip.agents.identity(source);
+        const owner =
+            identity === undefined ? undefined : this.#app.config.userById(identity.ownerId);
+        const token = owner?.tokenHash;
+
+        const assert = () => {
+            const current = this.#app.pip.agents.identity(source);
+            const user =
+                identity === undefined ? undefined : this.#app.config.userById(identity.ownerId);
+
+            if (
+                identity === undefined ||
+                current?.agentId !== identity.agentId ||
+                current.epoch !== identity.epoch ||
+                user?.role !== "owner" ||
+                user.tokenHash !== token ||
+                !this.#app.config.pipEnabled
+            ) {
+                throw new HttpError(403, "This private history reader's source authority changed.");
+            }
+
+            this.#app.requireSee(user, api.conversationId);
+        };
+
+        return async () => {
+            assert();
+            await api.commit(
+                (tx) => this.#app.pip.agents.supervision.requireInvocation(tx, api),
+                ctx,
+            );
+            assert();
+        };
+    }
+
+    async discover(
+        api: ToolExecutionApi,
+        filter: Parameters<PocketApp["pip"]["sessions"]>[1],
+        ctx: Context,
+    ) {
+        await this.#reader(api, ctx)();
+
+        return this.#app.pip.sessions(api.conversationId, filter);
+    }
+
+    /** Passive history has invocation/visibility fences, never contact receipts or native control. */
+    async read(api: ToolExecutionApi, session: number, ctx: Context, entries?: number) {
+        if (!Number.isSafeInteger(session) || session <= 0) {
+            throw new HttpError(400, "Choose an exact readable conversation.");
+        }
+
+        const check = this.#reader(api, ctx);
+        const result = await this.#app.pip.read(api.conversationId, session, entries, check);
+
+        return {
+            status: "accepted" as const,
+            session,
+            result,
+            requestId: undefined,
+            submissionId: undefined,
+            reason: undefined,
+        };
+    }
+
     async contact(api: ToolExecutionApi, args: AgentContact, ctx: Context) {
+        if (args.action === "read") {
+            return this.read(api, args.session, ctx);
+        }
+
         if (args.action === "delegate") {
             throw new HttpError(400, "Delegate through the native Work Item orchestrator.");
         }

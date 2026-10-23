@@ -1773,6 +1773,10 @@ export class AgentSupervision {
     }
 
     async contact(api: ToolExecutionApi, args: AgentContact, ctx: Context) {
+        if (args.action === "read") {
+            return this.#app.pip.agents.contacts.read(api, args.session, ctx);
+        }
+
         const nativeStop =
             args.action === "stop" &&
             this.#app.rootOf(idOf(args.session)) === idOf(args.session) &&

@@ -1,4 +1,4 @@
-// Shared-discussion PiP presentation only: admission, roles and execution remain server-owned.
+// Source-discussion PiP presentation only: admission, scope and execution remain server-owned.
 import { marked } from "marked";
 import { pipMentionParts } from "./pip-mention-text.js";
 import { canSteer, store } from "./store.js";
@@ -8,7 +8,9 @@ export const canMentionPip = () =>
     !!store.state.me &&
     canSteer() &&
     !!store.state.server?.pipMentions &&
-    store.state.server?.pipEnabled === true;
+    store.state.server?.pipEnabled === true &&
+    store.state.view.conversation?.id === store.state.conversationId &&
+    store.state.view.conversation?.pipMentionAvailable === true;
 
 /** Highlight explicit prose mentions, not quoted/code examples or longer @names. */
 export function PipMentionText({ text, plain = (value) => value }) {

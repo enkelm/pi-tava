@@ -863,7 +863,7 @@ test("a native helper inherits its spawning authority and cannot execute an unre
     assert.equal(sourceCalls, 2, "helper observations do not pay to reactivate the stopped source");
 });
 
-test("registered discovery/work_context stay passive and exact session_read associates an unconfigured controller without buying a response", async (t) => {
+test("registered discovery, work_context and session_read need no controller or default model", async (t) => {
     let source!: ConversationId;
     let reading = false;
     let inspected = false;
@@ -947,21 +947,20 @@ test("registered discovery/work_context stay passive and exact session_read asso
         () => !app.isBusy(chat),
         "registered exact read completes without a native controller model",
     );
-    const controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
     const errors = (await app.transcripts.allEntries(chat, true)).filter(
         (entry) => entry.kind === "toolResult" && entry.isError,
     );
 
     assert.deepEqual(errors, [], JSON.stringify(errors));
     assert.equal(
-        (await app.agentState(controller))?.model,
+        app.workItems.itemFor(source),
         undefined,
-        "read does not select or substitute a model",
+        "reading creates no Work Item/controller",
     );
-    assert.equal(app.workItems.itemFor(source)!.supervisor!.status, "reclaimed");
-    assert.equal(
-        (await app.pip.agents.supervision.status(chat, owner(app))).attachments[0]!.controllerId,
-        Number(controller),
+    assert.deepEqual(
+        (await app.pip.agents.supervision.status(chat, owner(app))).attachments,
+        [],
+        "reading acquires no control grant",
     );
-    assert.equal(controllerCalls, 0, "native read and automatic association are passive");
+    assert.equal(controllerCalls, 0, "native history inspection never activates a controller");
 });

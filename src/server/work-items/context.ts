@@ -1,4 +1,4 @@
-/** Source-bound Work Item reads shared by private PiP and the read-only mention adapter. */
+/** Source-bound project/Work Item reads shared by private PiP and the read-only mention adapter. */
 import { Type, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import type { Context } from "@earendil-works/chord";
@@ -35,7 +35,7 @@ export const workContextParameters = Type.Object(
 export const sharedContextTool: Tool = {
     name: "work_context",
     description:
-        "Read the current shared work, without changing it. status shows the thread, project, workflow and visible Work Item threads. thread reads public coding-agent history (before paginates, query filters literal text). discussion reads recent chat and pages review threads (pass reviewPage.before until null; reviewPage counts all/omitted/unresolved threads, chatOmitted and omittedReplies disclose other truncation; query is not supported). files discovers paths (query filters names); file reads current UTF-8 code with line numbers (startLine/limit paginate, query finds text). changes/diff inspect current Changes (startLine/limit also page diff lines). threadId defaults to the source and may name only a visible thread in this same Work Item. All paths are relative to that thread's folder. No private PiP, arbitrary sessions, shell, writes or external access.",
+        "Read the source and its actually bound work, without changing it. status shows the source, actual project, workflow and visible project/Work Item threads. thread reads visible human/assistant text (before paginates, query filters literal text), never tool results, prompts or thinking. discussion reads recent chat and pages review threads (pass reviewPage.before until null; reviewPage counts all/omitted/unresolved threads, chatOmitted and omittedReplies disclose other truncation; query is not supported). files discovers paths (query filters names); file reads current UTF-8 code with line numbers (startLine/limit paginate, query finds text). changes/diff inspect current Changes (startLine/limit also page diff lines). threadId defaults to the actual source. Collaborator mentions may name visible non-private threads in that same project or Work Item; private PiP work reads stay in the source Work Item. A private named-agent source permits its own history/discussion only unless actually bound to project/work, never sibling chats, Memory or a project inferred from remit/name/folder. All paths are relative to the target thread's folder. No arbitrary sessions, shell, writes or external access.",
     parameters: workContextParameters,
 };
 
@@ -49,23 +49,31 @@ export type WorkReadInput = {
     limit?: number;
 };
 
-/** Only public display text is eligible: no system prompts, thinking blocks, tool details or raw entry metadata. */
+/** Visible conversation text only: tool results/commands and derived summaries may contain private Memory or secrets. */
 function publicEntry(entry: ClientEntry) {
+    if (
+        entry.kind !== "assistant" &&
+        entry.kind !== "user" &&
+        entry.kind !== "note" &&
+        entry.kind !== "agentAnswer" &&
+        entry.kind !== "pipQuestion"
+    ) {
+        return [];
+    }
+
     const text =
         entry.kind === "assistant"
             ? entry.blocks.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
-            : "text" in entry
-              ? (entry.text ?? "")
-              : entry.kind === "compaction"
-                ? entry.summary
-                : "";
+            : entry.text;
 
-    return {
-        id: entry.id,
-        kind: entry.kind,
-        text: text.slice(0, 4000),
-        ...(text.length > 4000 ? { truncated: true } : {}),
-    };
+    return [
+        {
+            id: entry.id,
+            kind: entry.kind,
+            text: text.slice(0, 4000),
+            ...(text.length > 4000 ? { truncated: true } : {}),
+        },
+    ];
 }
 
 export class WorkContext {
@@ -90,11 +98,63 @@ export class WorkContext {
         this.#audience = audience;
     }
 
+    #members(user: User): Set<number> {
+        const app = this.#app;
+        const root = app.rootOf(this.#source);
+        const meta = app.sessionMeta(root);
+        const members = new Set(
+            app.workItems.context(this.#source, user).workItem?.threadIds ?? [],
+        );
+
+        members.add(Number(root));
+
+        if (
+            this.#audience === "shared" &&
+            meta?.projectId !== undefined &&
+            app.projects.canAccessThread(user, meta)
+        ) {
+            for (const thread of app.sessions(user)) {
+                const target = app.sessionMeta(thread.id as ConversationId);
+
+                if (
+                    target?.projectId === meta.projectId &&
+                    app.projects.canAccessThread(user, target)
+                ) {
+                    members.add(thread.id);
+                }
+            }
+        }
+
+        return members;
+    }
+
+    #eligible(id: ConversationId, user: User): boolean {
+        const app = this.#app;
+        const root = app.rootOf(id);
+        const meta = app.sessionMeta(root);
+
+        if (!meta || !app.canSee(user, id) || app.pip.isInternal(id)) {
+            return false;
+        }
+
+        if (meta.pip !== undefined || meta.pipAgent === true || meta.pipWorkItemId !== undefined) {
+            return (
+                this.#audience === "shared" &&
+                id === this.#source &&
+                id === root &&
+                user.role === "owner" &&
+                app.pip.agents.scope(root)?.ownerId === user.id
+            );
+        }
+
+        return this.#audience !== "shared" || !meta.ownerOnly;
+    }
+
     async #target(requested?: number) {
         const user = await this.#authorize();
         const id = (requested ?? Number(this.#source)) as ConversationId;
         const app = this.#app;
-        const allowed = app.workItems.context(this.#source, user).workItem?.threadIds ?? [];
+        const allowed = this.#members(user);
         const root = app.rootOf(id);
         const meta = app.sessionMeta(root);
 
@@ -102,10 +162,11 @@ export class WorkContext {
 
         if (
             !meta ||
-            meta.pip !== undefined ||
-            (this.#audience === "shared" && meta.ownerOnly) ||
-            app.pip.isInternal(id) ||
-            (root !== app.rootOf(this.#source) && !allowed.includes(Number(root)))
+            !this.#eligible(id, user) ||
+            !allowed.has(Number(root)) ||
+            (app.sessionMeta(app.rootOf(this.#source))?.pip !== undefined &&
+                root === app.rootOf(this.#source) &&
+                id !== this.#source)
         ) {
             throw new HttpError(404, "That thread is outside this work");
         }
@@ -129,10 +190,16 @@ export class WorkContext {
         const root = app.rootOf(id);
         const meta = app.sessionMeta(root)!;
         const { workflow, workItem } = app.workItems.context(id, user);
-        const members = new Set(workItem?.threadIds ?? [Number(root)]);
-        const threads = app
+        const members = this.#members(user);
+        const visible = app
             .sessions(user)
-            .filter((thread) => members.has(thread.id))
+            .filter(
+                (thread) =>
+                    members.has(thread.id) && this.#eligible(thread.id as ConversationId, user),
+            );
+        const threads = visible.slice(0, 12);
+        const itemThreads = visible
+            .filter((thread) => workItem?.threadIds.includes(thread.id))
             .slice(0, 12);
         const project = app.projects
             .list(user)
@@ -142,18 +209,42 @@ export class WorkContext {
             this.#audience === "private" ? await app.workItems.list(active, user) : undefined;
         const currentType = app.sessionMeta(active)?.threadType ?? "worker";
         const role = app.workItems.profile(currentType);
-        const history = [...members].slice(-12).map((member) => ({
-            id: member,
-            type: app.sessionMeta(member as ConversationId)?.threadType ?? "worker",
-        }));
+        const history = (workItem?.threadIds ?? [Number(root)])
+            .filter((member) => this.#eligible(member as ConversationId, user))
+            .slice(-12)
+            .map((member) => ({
+                id: member,
+                type: app.sessionMeta(member as ConversationId)?.threadType ?? "worker",
+            }));
+
+        const title = (await app.conversationTitle(id)).slice(0, 200);
+
+        await this.#target();
 
         return {
             thread: {
                 id: Number(id),
-                title: (await app.conversationTitle(id)).slice(0, 200),
+                title,
                 type: meta.threadType ?? "worker",
             },
-            ...(project ? { project: { id: project.id, name: project.name.slice(0, 200) } } : {}),
+            ...(project
+                ? {
+                      project: {
+                          id: project.id,
+                          name: project.name.slice(0, 200),
+                          ...(this.#audience === "shared"
+                              ? {
+                                    threads: threads.map((thread) => ({
+                                        id: thread.id,
+                                        title: (thread.title ?? "Thread").slice(0, 120),
+                                        type: thread.threadType,
+                                    })),
+                                    truncated: visible.length > threads.length,
+                                }
+                              : {}),
+                      },
+                  }
+                : {}),
             workflow: {
                 status: workflow.status,
                 readOnly: workflow.readOnly,
@@ -168,7 +259,7 @@ export class WorkContext {
                               ? {}
                               : { role: { name: role.name, description: role.description } }),
                           history,
-                          historyOmitted: members.size - history.length,
+                          historyOmitted: (workItem?.threadIds.length ?? 1) - history.length,
                           options: routes.options,
                           ...(routes.diffReason === undefined
                               ? {}
@@ -181,12 +272,12 @@ export class WorkContext {
                       title: workItem.title.slice(0, 300),
                       activeThreadId: workItem.activeThreadId,
                       originThreadId: workItem.originThreadId,
-                      threads: threads.map((thread) => ({
+                      threads: itemThreads.map((thread) => ({
                           id: thread.id,
                           title: (thread.title ?? "Thread").slice(0, 120),
                           type: thread.threadType,
                       })),
-                      truncated: workItem.threadIds.length > threads.length,
+                      truncated: workItem.threadIds.length > itemThreads.length,
                   }
                 : null,
         };
@@ -198,13 +289,25 @@ export class WorkContext {
 
         await this.#target();
 
-        return { ...summary, transcript: page.entries.map(publicEntry), before: page.before };
+        return { ...summary, transcript: page.entries.flatMap(publicEntry), before: page.before };
     }
 
     async read(call: ToolCall): Promise<unknown> {
         const input = validateToolArguments(sharedContextTool, call) as WorkReadInput;
         const { id, user } = await this.#target(input.threadId);
         const app = this.#app;
+        const meta = app.sessionMeta(app.rootOf(id))!;
+
+        if (
+            meta.pip !== undefined &&
+            meta.projectId === undefined &&
+            meta.workItemId === undefined &&
+            meta.pipWorkItemId === undefined &&
+            ["files", "file", "changes", "diff"].includes(input.action)
+        ) {
+            throw new HttpError(404, "This private discussion has no bound workspace");
+        }
+
         let result: unknown;
 
         switch (input.action) {
@@ -219,7 +322,7 @@ export class WorkContext {
                     { before: input.before, limit: input.limit ?? 20 },
                     this.#context,
                 );
-                const entries = page.entries.map(publicEntry);
+                const entries = page.entries.flatMap(publicEntry);
 
                 result = {
                     ...page,

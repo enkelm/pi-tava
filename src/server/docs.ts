@@ -461,6 +461,8 @@ export type PipMentionJob = {
     source: PipMentionSource;
     requesterId: string;
     authority: string;
+    /** Actual source/project/workspace binding at admission. Older unbound jobs fail closed. */
+    binding?: string;
     fingerprint: string;
     context: string;
     createdAt: number;

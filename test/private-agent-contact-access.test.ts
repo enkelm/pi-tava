@@ -37,7 +37,7 @@ test("another private identity may follow a public execution thread without taki
                     ? fauxAssistantMessage(
                           [
                               fauxToolCall("agent_work", {
-                                  action: last.text.includes("ASSOCIATE_FIRST") ? "read" : "follow",
+                                  action: last.text.includes("READ_FIRST") ? "read" : "follow",
                                   session: Number(execution),
                               }),
                           ],
@@ -63,7 +63,13 @@ test("another private identity may follow a public execution thread without taki
         })
     ).id as ConversationId;
 
-    await say(app, first, "ASSOCIATE_FIRST: inspect this exact native work.");
+    // Establish control explicitly; a read is no longer an implicit association intent.
+    await app.pip.agents.supervision.control(first, owner(app), {
+        action: "attach",
+        session: Number(execution),
+        requestId: "first-parent-attachment",
+    });
+    await say(app, first, "READ_FIRST: inspect this exact native work.");
     const original = app.workItems.itemFor(execution)!.supervisor!;
     const controller = original.conversationId;
     const agentId = original.agentId;
@@ -98,8 +104,9 @@ test("another private identity may follow a public execution thread without taki
         async () =>
             (await app.transcripts.allEntries(observer, true)).some(
                 (entry) =>
-                    entry.kind === "assistant" &&
-                    JSON.stringify(entry).includes("NATIVE_VISIBLE_OUTCOME"),
+                    entry.kind === "appEvent" &&
+                    entry.event === "report" &&
+                    entry.text?.includes("NATIVE_VISIBLE_OUTCOME"),
             ),
         "independent public execution event reaches its accepted observing origin",
     );
