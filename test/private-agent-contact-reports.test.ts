@@ -45,7 +45,8 @@ const textOf = (entry: Awaited<ReturnType<typeof reports>>[number]) =>
         )
         .join("\n") ?? "";
 
-test("concurrent exact follow subscriptions fan out independent Chat outcomes to each origin and survive restart once", async (t) => {
+test("concurrent exact follow subscriptions fan out compact native Chat outcomes to each origin and survive restart once", async (t) => {
+    const detail = "Long source evidence stays in the original native answer. ".repeat(120);
     let target!: ConversationId;
     let privateCalls = 0;
     const model = scriptedModel((request) => {
@@ -74,7 +75,7 @@ test("concurrent exact follow subscriptions fan out independent Chat outcomes to
                 ? "OLD_OUTCOME"
                 : last.text.includes("EMPTY")
                   ? "   "
-                  : "NEW_OUTCOME",
+                  : `NEW_OUTCOME\n${detail}SOURCE_TAIL_NOT_A_SUMMARY`,
         );
     });
     const directory = join(root, "exact-contact-follow-fanout");
@@ -123,6 +124,26 @@ test("concurrent exact follow subscriptions fan out independent Chat outcomes to
 
     assert.match(textOf(first), /NEW_OUTCOME/);
     assert.match(textOf(second), /NEW_OUTCOME/);
+
+    for (const report of [first, second]) {
+        const data = report.data as { sourceEntryId: number };
+
+        assert.ok(textOf(report).length < 1000, "upward payload stays compact for long answers");
+        assert.match(textOf(report), /Native response settled: stop/);
+        assert.match(textOf(report), /Agent summary \(unverified excerpt/);
+        assert.ok(textOf(report).includes(`Evidence: /s/${target}#entry-${data.sourceEntryId}`));
+        assert.doesNotMatch(textOf(report), /SOURCE_TAIL_NOT_A_SUMMARY/);
+        const native = await app.transcripts.visibleEntry(target, data.sourceEntryId);
+
+        assert.ok(native, "the exact evidence pointer resolves the full original answer");
+        assert.match(textOf(native), /SOURCE_TAIL_NOT_A_SUMMARY/);
+        const message = report.model?.find((message) => message.role === "assistant");
+
+        assert.equal(message?.role === "assistant" ? message.provider : undefined, "pi-coop");
+        assert.equal(message?.role === "assistant" ? message.usage.totalTokens : undefined, 0);
+        assert.equal(message?.role === "assistant" ? message.usage.cost.total : undefined, 0);
+    }
+
     assert.notEqual(
         (first.data as { originRequestId: string }).originRequestId,
         (second.data as { originRequestId: string }).originRequestId,
@@ -538,7 +559,22 @@ test("send answers retain only their accepted origin while independent outcomes 
         "send replies are not independent events",
     );
     const acceptedCalls = privateCalls;
+    const answerIds = new Set([
+        ((await reports(app, a))[0]!.data as { sourceEntryId: number }).sourceEntryId,
+        ((await reports(app, b))[0]!.data as { sourceEntryId: number }).sourceEntryId,
+    ]);
+    const original = app.transcripts.visibleEntry.bind(app.transcripts);
+    let unchangedReads = 0;
 
+    t.mock.method(app.transcripts, "visibleEntry", async (...args: Parameters<typeof original>) => {
+        if (Number(args[0]) === Number(target) && answerIds.has(args[1])) {
+            unchangedReads++;
+        }
+
+        return original(...args);
+    });
+    await app.pip.agents.contacts.reports.reconcile();
+    assert.equal(unchangedReads, 0, "captured exact-send answers are not reread on reconciliation");
     await app.close();
     app = await openApp(model, directory);
     assert.equal(
@@ -879,7 +915,7 @@ test("a contacted parent's real helper returns passively only through its regist
                     );
 
                     return fauxAssistantMessage(
-                        `PINNED_HELPER_OUTCOME${fixture === "valid" ? `\n${"Native evidence. ".repeat(500)}` : ""}`,
+                        `PINNED_HELPER_OUTCOME${fixture === "valid" ? `\n${"Native evidence. ".repeat(500)}HELPER_SOURCE_TAIL` : ""}`,
                     );
                 }
 
@@ -999,12 +1035,27 @@ test("a contacted parent's real helper returns passively only through its regist
                 assert.equal(returned.status, "delivered");
                 assert.equal(received.length, 1);
                 assert.ok(
-                    textOf(received[0]!).length < 5000,
-                    "native helper observations stay bounded",
+                    textOf(received[0]!).length < 1000,
+                    "native helper observations stay compact",
                 );
                 assert.match(
                     textOf(received[0]!),
-                    /untrusted report data, not a new human instruction/,
+                    /not owner input, completion proof or activation authority/,
+                );
+                const sourceEntry = (received[0]!.data as { sourceEntryId: number }).sourceEntryId;
+
+                assert.ok(
+                    textOf(received[0]!).includes(`Evidence: /s/${helper}#entry-${sourceEntry}`),
+                );
+                assert.doesNotMatch(textOf(received[0]!), /HELPER_SOURCE_TAIL/);
+                const native = await app.transcripts.visibleEntry(helper, sourceEntry);
+
+                assert.ok(native);
+                assert.match(textOf(native), /HELPER_SOURCE_TAIL/);
+                assert.equal(
+                    returned.text,
+                    textOf(received[0]!),
+                    "receipt keeps the compact payload",
                 );
                 assert.equal((received[0]!.data as { target: number }).target, Number(helper));
                 assert.equal(

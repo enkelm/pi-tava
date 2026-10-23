@@ -1006,13 +1006,26 @@ export type PipWorkQuestion = {
     supersededAnswers?: NonNullable<PipWorkQuestion["answer"]>[];
 };
 
+/** Reconstructible semantic cursors, not an event store or an authority grant. */
+export type PipWorkObservation = {
+    source: number;
+    outcome: string | null;
+    discussion: string;
+    blocker: string;
+};
+
 /** Private supervisor memory and wake receipts; only the pending ask is projected in its owner's private room. */
 export const PipWorkDoc = defineDoc<{
     goal: string;
     observed: string;
+    observation?: PipWorkObservation;
+    /** Bounded native wake category; never transcript text or model reasoning. */
+    lastWake?: { reason: "outcome" | "discussion" | "blocker"; source: number; sequence: number };
     sequence: number;
     pending?: {
         fingerprint: string;
+        observation?: PipWorkObservation;
+        reason?: "outcome" | "discussion" | "blocker";
         requestId: string;
         epoch: number;
         source: number;

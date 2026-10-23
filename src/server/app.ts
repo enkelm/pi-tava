@@ -3478,7 +3478,8 @@ export class PocketApp {
             const alertsClosed = this.alerts.close();
 
             this.themes.close();
-            this.pip.close();
+            const pipClosed = this.pip.close();
+
             this.spend.close();
             this.#unsubscribeCommits?.();
             this.#unsubscribeApprovals?.();
@@ -3505,6 +3506,7 @@ export class PocketApp {
             this.languages.close();
             await headsClosed;
             await agentsClosed;
+            await pipClosed;
 
             await sshClosed;
             await this.privateTerminals.close();

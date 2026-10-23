@@ -61,13 +61,15 @@ const body = (entry: Awaited<ReturnType<typeof observations>>[number]) =>
         )
         .join("\n") ?? "";
 
-test("native empty controller snapshots do not report or recopy an old Worker final; equal-text source events survive reload distinctly", async (t) => {
+test("shared native answers report once; empty yields stay passive and distinct equal-text answers survive reload", async (t) => {
+    const workerSummary = `HOLD: awaiting owner direction.\n${"Full native evidence stays here. ".repeat(200)}SOURCE_TAIL_NOT_A_SUMMARY`;
     let worker!: ConversationId;
     let controller!: ConversationId;
     let privateCalls = 0;
     let releaseFirst!: () => void;
     let releaseTool!: () => void;
     let releaseSecond!: () => void;
+    let firstStarted = false;
     let secondStarted = false;
     const firstGate = new Promise<void>((resolve) => {
         releaseFirst = resolve;
@@ -105,6 +107,10 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
             return fauxAssistantMessage("");
         }
 
+        if (last.text.includes("FIRST_STEER")) {
+            return fauxAssistantMessage(workerSummary);
+        }
+
         const gate = last.text.includes("FIRST_OUTCOME")
             ? firstGate
             : last.text.includes("EMPTY_TOOL_ROUND")
@@ -113,6 +119,8 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
 
         if (gate === secondGate && last.role === "user") {
             secondStarted = true;
+        } else if (gate === firstGate && last.role === "user") {
+            firstStarted = true;
         }
 
         if (last.role === "user") {
@@ -122,16 +130,17 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
             );
         }
 
-        if (last.role === "user" && last.text.includes("EMPTY_TOOL_ROUND")) {
+        if (
+            last.role === "user" &&
+            (last.text.includes("EMPTY_TOOL_ROUND") || last.text.includes("FIRST_OUTCOME"))
+        ) {
             return fauxAssistantMessage(
                 [fauxToolCall("read", { path: join(root, "not-an-outcome.txt") })],
                 { stopReason: "toolUse" },
             );
         }
 
-        return fauxAssistantMessage(
-            last.role === "toolResult" ? "   " : "HOLD: awaiting owner direction.",
-        );
+        return fauxAssistantMessage(last.role === "toolResult" ? "   " : workerSummary);
     });
     const directory = join(root, "native-passive-report-outcomes");
     let app = await openApp(model, directory);
@@ -150,6 +159,21 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
         await app.commands.submit(worker, owner(app), { text, requestId: text });
     }
 
+    await until(
+        () => firstStarted,
+        "the original native provider is held before its tool boundary",
+    );
+    const steer = await (
+        await app.conversation(worker)
+    ).submit(
+        {
+            type: "input",
+            content: "FIRST_STEER",
+            requestId: "shared-native-answer",
+            whenBusy: "steer",
+        },
+        context,
+    );
     const opened = await app.pip.orchestration.control(worker, owner(app), { action: "open" });
 
     controller = opened.orchestration!.conversationId as ConversationId;
@@ -186,6 +210,25 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
         "native delivery projects as a compact event, not an assistant answer",
     );
     assert.match(body(first), /HOLD: awaiting owner direction/);
+    assert.ok(body(first).length < 1000, "long Worker evidence is not copied upward");
+    assert.match(body(first), /Native response settled: stop/);
+    assert.match(body(first), /Agent summary \(unverified excerpt/);
+    const sourceEntryId = (first.data as { sourceEntryId: number }).sourceEntryId;
+    const steered = await steer.wait(context);
+
+    assert.ok(steered.type === "input" && steered.status === "done");
+    assert.equal(Number(steered.answer), sourceEntryId, "one native answer settles both inputs");
+    assert.ok(body(first).includes(`Evidence: /s/${worker}#entry-${sourceEntryId}`));
+    assert.doesNotMatch(body(first), /SOURCE_TAIL_NOT_A_SUMMARY/);
+    const native = await app.transcripts.visibleEntry(worker, sourceEntryId);
+
+    assert.ok(native, "the exact source entry retains all original evidence");
+    assert.match(body(native), /SOURCE_TAIL_NOT_A_SUMMARY/);
+    const message = first.model?.find((message) => message.role === "assistant");
+
+    assert.equal(message?.role === "assistant" ? message.provider : undefined, "pi-coop");
+    assert.equal(message?.role === "assistant" ? message.usage.totalTokens : undefined, 0);
+    assert.equal(message?.role === "assistant" ? message.usage.cost.total : undefined, 0);
     releaseTool();
     await until(() => secondStarted, "tool-only round settles before the next held outcome");
     await app.pip.agents.supervision.close();
@@ -239,6 +282,144 @@ test("native empty controller snapshots do not report or recopy an old Worker fi
         calls,
         "passive capture, delivery and reload never wake the private agent",
     );
+});
+
+test("native controller finish and hold reports keep full details only in their exact native evidence", async (t) => {
+    for (const scenario of ["finish", "hold"] as const) {
+        await t.test(scenario, async (t) => {
+            const detail = `CONTROLLER_${scenario.toUpperCase()}_DETAIL: unavailable until owner direction. ${"Full controller evidence. ".repeat(240)}CONTROLLER_SOURCE_TAIL`;
+            let worker!: ConversationId;
+            let controller!: ConversationId;
+            let privateCalls = 0;
+            let controllerCalls = 0;
+            let executionCalls = 0;
+            const model = scriptedModel((request) => {
+                const last = lastText(request);
+                const system = JSON.stringify(
+                    request.messages.filter((message) => message.role === "system"),
+                );
+
+                if (system.includes("the owner's persistent private agent")) {
+                    privateCalls++;
+
+                    return last.role === "user"
+                        ? fauxAssistantMessage(
+                              [
+                                  fauxToolCall("agent_work", {
+                                      action: "send",
+                                      session: Number(controller),
+                                      text: "Report this bounded observation, then yield without execution.",
+                                  }),
+                              ],
+                              { stopReason: "toolUse" },
+                          )
+                        : fauxAssistantMessage("Delegation observed; waiting for owner direction.");
+                }
+
+                if (system.includes("the private supervisor for Work Item")) {
+                    controllerCalls++;
+
+                    return fauxAssistantMessage(
+                        [
+                            fauxToolCall("work_supervise", {
+                                action: scenario === "finish" ? "finish" : "wait",
+                                text: detail,
+                            }),
+                        ],
+                        { stopReason: "toolUse" },
+                    );
+                }
+
+                executionCalls++;
+
+                return fauxAssistantMessage("UNREQUESTED_EXECUTION");
+            });
+            const directory = join(root, `compact-controller-${scenario}`);
+            let app = await openApp(model, directory);
+
+            t.after(() => app.close());
+            worker = await newSession(app, app.defaultCwd, "worker");
+            const opened = await app.pip.orchestration.control(worker, owner(app), {
+                action: "open",
+            });
+
+            controller = opened.orchestration!.conversationId as ConversationId;
+            const chat = (
+                await app.pip.agents.create(owner(app), {
+                    name: "Controller observer",
+                    requestId: "identity",
+                })
+            ).id as ConversationId;
+
+            await say(app, chat, "Observe this exact controller, without running execution.");
+            const label =
+                scenario === "finish" ? "Controller finish reported" : "Controller hold observed";
+            const selected = async () =>
+                (await observations(app, chat)).filter((entry) => body(entry).includes(label));
+
+            await until(
+                async () => (await selected()).length === 1,
+                "native controller fact is reported once",
+            );
+            await settledController(app, controller);
+            assert.equal(
+                (await observations(app, chat)).length,
+                1,
+                "a finish reason is not recopied as a separate controller hold",
+            );
+            const report = (await selected())[0]!;
+            const state = (await app.harness.snapshot(PipWorkDoc, controller, context))!;
+
+            assert.ok(body(report).length < 1000);
+            assert.ok(body(report).includes(`Evidence: /s/${controller}`));
+            assert.doesNotMatch(body(report), /CONTROLLER_SOURCE_TAIL|UNREQUESTED_EXECUTION/);
+            assert.match(body(report), /not owner input, completion proof or activation authority/);
+            const message = report.model?.find((message) => message.role === "assistant");
+
+            assert.equal(message?.role === "assistant" ? message.usage.totalTokens : undefined, 0);
+            assert.equal(message?.role === "assistant" ? message.usage.cost.total : undefined, 0);
+            assert.equal(
+                privateCalls,
+                2,
+                "the named parent only handles its original accepted turn",
+            );
+            assert.equal(controllerCalls, 1, "a final native tool needs no paid acknowledgement");
+
+            if (scenario === "finish") {
+                const [actionId, action] = Object.entries(state.actions).find(
+                    ([, action]) => action.finish !== undefined,
+                )!;
+
+                assert.equal(action.finish, detail, "native finish keeps the full original report");
+                assert.ok(body(report).includes(`actions[${JSON.stringify(actionId)}].finish`));
+                assert.match(body(report), /Agent summary \(unverified excerpt/);
+                assert.match(body(report), /not verified completion/);
+            } else {
+                assert.equal(state.reason, detail, "native hold keeps the full original detail");
+                assert.match(body(report), /pocket.pip-work reason; controller epoch/);
+            }
+
+            const paid = privateCalls;
+            const nativeCalls = controllerCalls;
+
+            await app.close();
+            app = await openApp(model, directory);
+            await app.pip.agents.supervision.close();
+            await app.pip.agents.supervision.open();
+            assert.equal(
+                (await observations(app, chat)).length,
+                1,
+                "recovery preserves one native event without a duplicate finish/hold narrative",
+            );
+            assert.equal(privateCalls, paid, "reports cannot continue the named parent");
+            assert.equal(
+                controllerCalls,
+                nativeCalls,
+                "passive delivery does not buy controller reasoning",
+            );
+            assert.equal(executionCalls, 0, "an observation grants no execution authority");
+        });
+    }
 });
 
 test("a correlated controller answer advances observation before multiple buffered native wakes", async (t) => {
@@ -322,6 +503,21 @@ test("a correlated controller answer advances observation before multiple buffer
     const calls = controllerCalls;
 
     assert.equal(before, 1, "the accepted controller send has one correlated report");
+    const answerId = ((await controllerReports())[0]!.data as { sourceEntryId: number })
+        .sourceEntryId;
+    const original = app.transcripts.visibleEntry.bind(app.transcripts);
+    let unchangedReads = 0;
+
+    t.mock.method(app.transcripts, "visibleEntry", async (...args: Parameters<typeof original>) => {
+        if (Number(args[0]) === Number(controller) && args[1] === answerId) {
+            unchangedReads++;
+        }
+
+        return original(...args);
+    });
+    await app.pip.agents.supervision.close();
+    await app.pip.agents.supervision.open();
+    assert.equal(unchangedReads, 0, "a captured accepted reply needs no transcript reconstruction");
     await app.pip.agents.supervision.close();
     releaseFirst();
     await until(

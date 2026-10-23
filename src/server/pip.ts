@@ -296,9 +296,10 @@ export class Pip {
         return this.#mentions.admit(tx, id, user, source);
     }
 
-    close(): void {
+    close(): Promise<void> {
         this.#mentions.close();
-        this.orchestration.close();
+
+        return this.orchestration.close();
     }
 
     // ─── Native settings ────────────────────────────────────────────────────
