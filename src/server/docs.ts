@@ -21,6 +21,7 @@ import type { Changes } from "./changes.ts";
 import type { ThreadType } from "./workflow-docs.ts";
 import type { WorkspaceLocation } from "./workspace-location.ts";
 import type { DiagnosticJournal } from "./diagnostics/recorder.ts";
+import type { AssignedTaskOutcome } from "./pip/outcomes.ts";
 
 /** Private, bounded diagnostic observations; never a room document or inherited fork history. */
 export const DiagnosticsDoc = defineDoc<DiagnosticJournal>({
@@ -1037,6 +1038,13 @@ export const PipWorkDoc = defineDoc<{
     actions: Record<string, { epoch: number; finish?: string }>;
     humanInputs: Record<string, true>;
     humanPending?: string;
+    /** Current accepted named-parent assignment; routine yields and handoffs do not settle it. */
+    assignment?: {
+        requestId: string;
+        submissionId: number;
+        epoch: number;
+        outcome?: AssignedTaskOutcome;
+    };
     /** Native named-agent activation stays inactive until this exact input is accepted. */
     contactPending?: { requestId: string; epoch: number };
     lastInput?: { requestId: string; epoch: number };

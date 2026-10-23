@@ -190,7 +190,6 @@ export class WorkContext {
 
         if (meta.pip !== undefined || meta.pipAgent === true || meta.pipWorkItemId !== undefined) {
             return (
-                this.#audience === "shared" &&
                 id === this.#source &&
                 id === root &&
                 user.role === "owner" &&
@@ -429,7 +428,25 @@ export class WorkContext {
                       },
                   }),
         }));
+        const parentProjection = async () =>
+            this.#audience === "private" && app.pip.agents.isNamed(root)
+                ? (await app.pip.agents.supervision.parentContext(root, user)).map((task) => ({
+                      ...task,
+                      remaining: compactText(task.remaining, 600),
+                      dependency: {
+                          ...task.dependency,
+                          requestId: exactRef(task.dependency.requestId),
+                      },
+                      ...(task.reason === undefined
+                          ? {}
+                          : { reason: compactText(task.reason, 200) }),
+                  }))
+                : undefined;
+        const parentTasks = await parentProjection();
+
+        await this.#target();
         const scope = {
+            ...(parentTasks === undefined ? {} : { parentTasks }),
             source: {
                 threadId: Number(root),
                 title: compactText(await app.conversationTitle(root), 200),
@@ -767,6 +784,19 @@ export class WorkContext {
                 ]) !== privateRevision
             ) {
                 throw new HttpError(409, "The work changed during this snapshot; read it again");
+            }
+        }
+
+        if (parentTasks !== undefined) {
+            const currentParents = await parentProjection();
+
+            await this.#target();
+
+            if (revisionOf(currentParents) !== revisionOf(parentTasks)) {
+                throw new HttpError(
+                    409,
+                    "The parent task changed during this snapshot; read it again",
+                );
             }
         }
 

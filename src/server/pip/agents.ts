@@ -1103,6 +1103,7 @@ export class PipAgents {
             Object.assign(identity, change);
 
             for (const chat of identity.chatIds) {
+                await this.supervision.fenceParents(tx, cid(chat));
                 Object.assign(await tx.doc(AgentDoc, cid(chat)), change);
             }
 

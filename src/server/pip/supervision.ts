@@ -69,6 +69,7 @@ export const WORK_TOOLS = [
 ];
 
 type InterruptedWork = { run?: TaskId; wake?: TaskId; inputs: SubmissionId[] };
+type WorkGeneration = { epoch: number; inputs?: number[] };
 type ExecutionOutcome = {
     submission: number;
     entry: number;
@@ -137,6 +138,14 @@ export class PipSupervision {
                             grant.epoch++;
                             state.reason =
                                 "Wake interrupted before admission. Human control; inspect the work and send a new message in the PiP Thread to activate PiP.";
+
+                            if (state.assignment?.epoch === pending.epoch) {
+                                state.assignment.outcome = {
+                                    id: pending.requestId,
+                                    kind: "cancelled",
+                                    text: state.reason,
+                                };
+                            }
                         }
                     }
 
@@ -237,6 +246,15 @@ export class PipSupervision {
                                 ) {
                                     current.status = "reclaimed";
                                     current.epoch++;
+
+                                    if (latest.assignment?.epoch === pending.epoch) {
+                                        latest.assignment.outcome = {
+                                            id: pending.requestId,
+                                            kind: "failure",
+                                            text: latest.reason,
+                                        };
+                                    }
+
                                     blocked = true;
                                 }
                             }
@@ -954,10 +972,20 @@ export class PipSupervision {
                 );
 
                 if (intent.controllerContact) {
-                    await this.#app.harness.commit(
-                        (tx) => this.#activateContactAccepted(tx, id, intent.requestId),
-                        context,
-                    );
+                    await this.#app.harness.commit(async (tx) => {
+                        await this.#activateContactAccepted(tx, id, intent.requestId);
+                        const state = await tx.doc(PipWorkDoc, id);
+
+                        // An already-running controller has no contactPending activation. Its
+                        // exact accepted assignment still replaces the prior one, once only.
+                        if (state.assignment?.requestId !== intent.requestId) {
+                            state.assignment = {
+                                requestId: intent.requestId,
+                                submissionId: Number(submission.id),
+                                epoch: intent.controllerEpoch!,
+                            };
+                        }
+                    }, context);
                 }
 
                 return { submissionId: submission.id };
@@ -1583,6 +1611,11 @@ export class PipSupervision {
         await this.#app.pip.agents.supervision.requireControllerMessage(tx, receipt);
         await this.#app.workItems.requireController(tx, id, grant.epoch, undefined, false);
         grant.status = "running";
+        state.assignment = {
+            requestId,
+            submissionId: Number(native.id),
+            epoch: grant.epoch,
+        };
         delete state.contactPending;
         state.reason = "The owner-authorized named-agent contact was accepted. PiP active.";
     }
@@ -1690,6 +1723,11 @@ export class PipSupervision {
             }
 
             state.questions.push(question);
+
+            if (state.assignment?.outcome?.questionId === question.id) {
+                delete state.assignment.outcome;
+            }
+
             delete state.question;
             state.reason =
                 question.answer.agent === undefined
@@ -1780,6 +1818,18 @@ export class PipSupervision {
 
                     if (receipt.controllerContact) {
                         receipt.contactPlaced = true;
+                        const state = await tx.doc(PipWorkDoc, id);
+
+                        if (
+                            state.lastInput?.requestId === requestId &&
+                            state.assignment?.requestId !== requestId
+                        ) {
+                            state.assignment = {
+                                requestId,
+                                submissionId: Number(input),
+                                epoch: receipt.controllerEpoch!,
+                            };
+                        }
                     }
                 } else {
                     await this.#app.pip.agents.supervision.requireAttachment(
@@ -1921,7 +1971,11 @@ export class PipSupervision {
                         ctx,
                     );
                     this.#app.spend.check(user, api.conversationId);
-                    const pin = await api.memo(EPOCH, { epoch: grant.epoch }, ctx);
+                    const pin = await api.memo(
+                        EPOCH,
+                        { epoch: grant.epoch, inputs: [...requests.keys()] },
+                        ctx,
+                    );
 
                     this.#app.workItems.controllerCurrent(api.conversationId, undefined, false);
 
@@ -1958,36 +2012,60 @@ export class PipSupervision {
             return undefined;
         }
 
-        return api.commit(async (tx) => {
-            let task = await tx.task(api.taskId);
-            const seen = new Set<number>();
+        return api.commit(async (tx) => (await this.#generation(tx, api)).epoch, ctx);
+    }
 
-            while (task !== undefined && !seen.has(Number(task.id)) && seen.size < 32) {
-                seen.add(Number(task.id));
+    async #generation(tx: Tx, api: ToolExecutionApi): Promise<WorkGeneration> {
+        let task = await tx.task(api.taskId);
+        const seen = new Set<number>();
 
-                if (
-                    task.abortRequested ||
-                    task.state.status === "terminal" ||
-                    task.state.status === "completing"
-                ) {
-                    break;
-                }
+        while (task !== undefined && !seen.has(Number(task.id)) && seen.size < 32) {
+            seen.add(Number(task.id));
 
-                if (task.kind === GenerationTask.definition.name) {
-                    const epoch = task.memos?.[EPOCH] as { epoch?: unknown } | undefined;
-
-                    if (typeof epoch?.epoch === "number") {
-                        return epoch.epoch;
-                    }
-
-                    break;
-                }
-
-                task = task.owner === undefined ? undefined : await tx.task(task.owner);
+            if (
+                task.abortRequested ||
+                task.state.status === "terminal" ||
+                task.state.status === "completing"
+            ) {
+                break;
             }
 
-            throw new HttpError(409, "The action has no current work generation authority.");
-        }, ctx);
+            if (task.kind === GenerationTask.definition.name) {
+                const pin = task.memos?.[EPOCH] as WorkGeneration | undefined;
+
+                if (typeof pin?.epoch === "number") {
+                    return pin;
+                }
+
+                break;
+            }
+
+            task = task.owner === undefined ? undefined : await tx.task(task.owner);
+        }
+
+        throw new HttpError(409, "The action has no current work generation authority.");
+    }
+
+    /** Acceptance can replace the assignment while an older response is still in flight. */
+    async #producingAssignment(tx: Tx, api: ToolExecutionApi, epoch: number) {
+        const assignment = (await tx.doc(PipWorkDoc, api.conversationId)).assignment;
+        const pin = await this.#generation(tx, api);
+
+        if (
+            assignment?.epoch !== epoch ||
+            pin.epoch !== epoch ||
+            !pin.inputs?.includes(assignment.submissionId)
+        ) {
+            return undefined;
+        }
+
+        const native = await tx.submissionByRequest(api.conversationId, assignment.requestId);
+
+        return native?.type === "input" &&
+            Number(native.id) === assignment.submissionId &&
+            native.entry !== undefined
+            ? assignment
+            : undefined;
     }
 
     async perform<T>(
@@ -2037,6 +2115,16 @@ export class PipSupervision {
                         state.reason =
                             "Work action budget exhausted; explicitly renew the delegation with a new action budget.";
 
+                        const assignment = await this.#producingAssignment(tx, api, epoch);
+
+                        if (assignment !== undefined) {
+                            assignment.outcome = {
+                                id: `budget-${epoch}`,
+                                kind: "budget",
+                                text: state.reason,
+                            };
+                        }
+
                         return false;
                     }
 
@@ -2068,7 +2156,11 @@ export class PipSupervision {
     async supervise(
         api: ToolExecutionApi,
         ctx: Context,
-        input: { action: "ask" | "wait" | "finish"; text: string },
+        input: {
+            action: "ask" | "wait" | "finish";
+            text: string;
+            continuation?: { requestId: string; remaining: string };
+        },
         epoch: number | undefined,
     ) {
         if (epoch === undefined) {
@@ -2077,6 +2169,13 @@ export class PipSupervision {
             }
 
             throw new HttpError(403, "Only an authorized work-scoped PiP can supervise work.");
+        }
+
+        if (input.continuation !== undefined) {
+            throw new HttpError(
+                403,
+                "Only a named parent's main Chat can register a continuation.",
+            );
         }
 
         const id = api.conversationId;
@@ -2124,6 +2223,8 @@ export class PipSupervision {
                 throw new HttpError(409, "Wait for the pending human question.");
             }
 
+            const assignment = await this.#producingAssignment(tx, api, epoch);
+
             if (input.action === "ask") {
                 if (state.questions.length >= 1000) {
                     throw new HttpError(413, "The work question limit was reached.");
@@ -2140,6 +2241,16 @@ export class PipSupervision {
                     at: Date.now(),
                     entryId: Number(entry.id),
                 };
+
+                if (assignment !== undefined) {
+                    assignment.outcome = {
+                        id: questionId,
+                        kind: "question",
+                        questionId,
+                        text: input.text,
+                    };
+                }
+
                 notify = true;
             } else if (input.action === "finish") {
                 // A response generated before a fresh contact cannot finish that unseen input.
@@ -2171,6 +2282,14 @@ export class PipSupervision {
 
                 if (!continuing) {
                     grant.status = "reclaimed";
+
+                    if (assignment !== undefined) {
+                        assignment.outcome = {
+                            id: keyOf(api),
+                            kind: "finish",
+                            text: input.text,
+                        };
+                    }
                 }
 
                 state.actions[keyOf(api)]!.finish = input.text;
@@ -2506,7 +2625,22 @@ export class PipSupervision {
                 if (grant?.status === "running" && grant.epoch === epoch) {
                     grant.status = "reclaimed";
                     grant.epoch++;
-                    (await tx.doc(PipWorkDoc, id)).reason = reason;
+                    const state = await tx.doc(PipWorkDoc, id);
+
+                    state.reason = reason;
+
+                    if (state.assignment?.epoch === epoch) {
+                        state.assignment.outcome = {
+                            id: eventId,
+                            kind: eventId.startsWith("budget-")
+                                ? "budget"
+                                : eventId.startsWith("aborted-")
+                                  ? "cancelled"
+                                  : "failure",
+                            text: reason,
+                        };
+                    }
+
                     changed = true;
                 }
             }, context),

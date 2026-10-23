@@ -353,6 +353,31 @@ External actions are not replay-safe merely because their surrounding task is du
 
 Repository rules govern local integration and delivery details. They cannot disable the public-action approval requirement. Worktree cleanup must preserve dirty work and the resulting commits; successors must not depend on a deleted checkout.
 
+## Registered named-parent continuation
+
+A named agent’s main Chat can explicitly keep an unfinished owner-authorized task suspended after an accepted `agent_work send` to a Work Item controller:
+
+```json
+{
+    "action": "wait",
+    "text": "Wait for A’s assigned outcome, then inspect its evidence.",
+    "continuation": {
+        "requestId": "<exact accepted agent_work send requestId>",
+        "remaining": "Inspect A; decide whether B and C remain within the original owner scope."
+    }
+}
+```
+
+These are parameters to the registered `work_supervise` tool, called alone as the turn’s final tool. `continuation` is optional; ordinary `wait` remains a quiet yield without a parent wake subscription. Registration accepts only this Chat/task’s actual accepted owner instruction and child controller assignment, not a report, quoted text, read/follow subscription, ordinary Chat or literal helper. Exact-thread follows retain their existing recipients. There is no delegate mode, manual link, resume UI or workflow language.
+
+The runtime retains the original owner-input ID/serial, current identity/token/Chat/model/scope binding, remaining work and accepted child request/submission. A native controller finish waits for its execution/helper/report tree to settle. An intermediate worker yield, handoff, tool round, busy/idle transition or unsolicited/passive report cannot advance the parent. A correlated native question, failure, cancellation or budget hold may admit one parent inspection/escalation; it does not authorize the next batch step or automatically answer the question. The parent must inspect the actual evidence and original instruction. Exact native question replies remain attributed to the agent and use the existing exact-question adapter; uncertain decisions are surfaced to the owner in this originating Chat.
+
+Delivery uses a conversation-owned durable task and one stable service request per semantic event. Reconciliation looks up actual accepted native input before dispatch; a lost acknowledgement is not evidence of rejection. Pending/running events coalesce. Resumed generations retain the original owner authority separately from their new service-input identity. Each continuation provider request records uncertainty before dispatch: if that native request phase replays after interruption, it is held for owner inspection rather than invoked again. A crash between that marker and the provider call can conservatively hold an unstarted request. This is idempotent admission/reconciliation, not exactly-once provider execution or external effects.
+
+`ask` blocks and `finish` closes the parent task. Stop, native takeover/revocation, a newer accepted owner instruction (including another Chat of the same identity), source archive/deletion, project/model changes and changed token/access/identity authority fence continuation; they do not cancel independent child execution. No continuation borrows a different Chat or task’s authority. A newer authenticated owner steer placed in the same run takes authority at the next native tool boundary without inheriting stale continuation effects. Each owner task has at most 16 continuation admissions; current spend, controller action, driver, writer, model/sign-in and individual approval gates still apply. Admission counts and positive-cost returned-provider wake counts are separate; a passive report is neither. Failed admission/provider execution is held and reported, never silently regenerated or routed to another model. An owner must supply fresh direction for a fenced/closed task; registration itself never invents authorization for landing, staging/commits or publication, or a readiness gate.
+
+Private `work_context snapshot/delta` includes at most four exact-Chat parent-task projections with original input, dependency, state, remaining work and wake counts. Shared/Collaborator snapshots never load this private ledger. Stored document kinds, scopes, history and fork contracts are unchanged; all fields are additive.
+
 ## Scope
 
 This release supports agent-executed human-requested handoffs with state-based transitions, typed successors, Work Items, guarded destination naming and mandatory individual publication approval. Core task registrations recover already-accepted summary/delivery data only; new requests use the current human-input/tool path. Historical milestone/review/risk-acceptance records remain evidence, not thread-creation gates. A newly accepted owner message in the exact Work Item PiP Thread activates a bounded private supervisor: it observes running work, uses this same file/courier engine for settled controller handoffs, manages discussions and asks durable human questions. The controller bypasses historical role/diff eligibility but retains access, spend, driver, writer/helper-idle and publication safeguards. Direct human execution input and normal Stop return it to human control without stopping execution Threads; publication is never preapproved by activation. This is not a general project scheduler, generic context-relay/file service, automatic merge monitor or MCP host.

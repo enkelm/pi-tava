@@ -8,11 +8,12 @@ import {
     type ConversationId,
     type Cursor,
     type TaskId,
+    type ToolExecutionApi,
     type Tx,
 } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
-import { WorkContext } from "./work-items/context.ts";
+import { WorkContext, type WorkReadInput } from "./work-items/context.ts";
 import type { PocketApp } from "./app.ts";
 import { APP_ROOT, type User } from "./config.ts";
 import { PipWorkDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
@@ -93,6 +94,57 @@ export class WorkItems {
         audience: "shared" | "private",
     ): WorkContext {
         return new WorkContext(this.#app, source, authorize, ctx, audience);
+    }
+
+    /** Exact main-Chat snapshots use native private invocation authority, never a selected peer. */
+    async parentContext(api: ToolExecutionApi, input: WorkReadInput, ctx: Context) {
+        const app = this.#app;
+        const source = api.conversationId;
+        const identity = app.pip.agents.identity(source);
+        const owner = identity === undefined ? undefined : app.config.userById(identity.ownerId);
+        const token = owner?.tokenHash;
+
+        if (
+            source !== app.rootOf(source) ||
+            !["snapshot", "delta"].includes(input.action) ||
+            (input.threadId !== undefined && input.threadId !== Number(source))
+        ) {
+            throw new HttpError(404, "Only this private main Chat's snapshot/delta is available.");
+        }
+
+        const check = () => {
+            const current = app.pip.agents.identity(source);
+            const user = identity === undefined ? undefined : app.config.userById(identity.ownerId);
+
+            if (
+                identity === undefined ||
+                current?.agentId !== identity.agentId ||
+                current.epoch !== identity.epoch ||
+                user?.role !== "owner" ||
+                user.tokenHash !== token ||
+                !app.pip.available(user)
+            ) {
+                throw new HttpError(403, "This private context reader's source authority changed.");
+            }
+
+            app.requireSee(user, source);
+
+            return user;
+        };
+        const authorize = async () => {
+            check();
+            await api.commit((tx) => app.pip.agents.supervision.requireInvocation(tx, api), ctx);
+
+            return check();
+        };
+        const reader = this.reader(source, authorize, ctx, "private");
+
+        return reader.read({
+            type: "toolCall",
+            id: api.callId,
+            name: "work_context",
+            arguments: input,
+        });
     }
 
     // Durable names and task implementations stay with the transfer engine.
@@ -899,6 +951,13 @@ export class WorkItems {
 
         this.#requireMembers(item, user);
 
+        if (archived && item.supervisor !== undefined) {
+            await this.#app.pip.agents.supervision.fenceParents(
+                tx,
+                item.supervisor.conversationId as ConversationId,
+            );
+        }
+
         for (const threadId of item.threadIds) {
             const member = sessions.items[String(threadId)];
 
@@ -961,6 +1020,15 @@ export class WorkItems {
             return;
         }
 
+        await this.#app.pip.agents.supervision.fenceParents(tx, id);
+
+        if (item?.supervisor !== undefined) {
+            await this.#app.pip.agents.supervision.fenceParents(
+                tx,
+                item.supervisor.conversationId as ConversationId,
+            );
+        }
+
         for (const memberId of members) {
             const member = sessions.items[String(memberId)]!;
 
@@ -999,6 +1067,10 @@ export class WorkItems {
         }
 
         if (patch.archived !== undefined) {
+            if (patch.archived) {
+                await this.#app.pip.agents.supervision.fenceParents(tx, id);
+            }
+
             if (meta.workItemId === undefined) {
                 meta.archived = patch.archived;
             } else {

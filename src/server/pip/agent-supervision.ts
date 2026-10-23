@@ -10,10 +10,12 @@ import {
     LiveDoc,
     ToolTask,
     defineDoc,
+    defineTask,
     defineTool,
     hook,
     type CommitPublication,
     type ConversationId,
+    type ConversationHandle,
     type SubmissionId,
     type ToolExecutionApi,
     type Tx,
@@ -23,7 +25,7 @@ import type { User } from "../config.ts";
 import { AgentIdentitiesDoc, type PrivateIdentity } from "../agent-identity-docs.ts";
 import { currentStateCheckpoints } from "../doc-checkpoint.ts";
 import { PipWorkDoc, SessionsDoc, SubagentsDoc } from "../docs.ts";
-import { requestFor, requestPerson } from "../requests.ts";
+import { clientKey, requestFor, requestPerson } from "../requests.ts";
 import { HttpError, describe } from "../errors.ts";
 import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
 import { AgentContactsDoc } from "./agent-contacts-doc.ts";
@@ -32,6 +34,7 @@ import { nativePassiveOutcome, passiveReport, type PassiveOutcome } from "./outc
 
 const context = BACKGROUND_CONTEXT;
 const AGENT_EPOCH = "private-supervisor-epoch";
+const PARENT_REQUEST = "private-parent-request-started";
 const idOf = (id: number) => id as ConversationId;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -163,9 +166,37 @@ type InputAuthority = {
     chatId: number;
     inputId?: number;
     admissionSerial?: number;
+    /** Registered continuation inputs retain the original accepted owner instruction. */
+    parentTask?: string;
+    wakeId?: string;
 };
+type ParentTask = {
+    authority: InputAuthority;
+    ownerId: string;
+    binding: string;
+    status: "running" | "waiting" | "completed" | "blocked" | "revoked";
+    remaining: string;
+    waitTool?: number;
+    dependency: { requestId: string; controller: number; submission: number };
+    consumed: string[];
+    /** Admission and actual returned provider invocation are deliberately separate counts. */
+    admittedWakes: number;
+    paidWakes: number;
+    wake?: {
+        id: string;
+        requestId: string;
+        text: string;
+        taskId: number;
+        submissionId?: number;
+        paid?: true;
+    };
+    reason?: string;
+};
+export type ParentContinuation = { requestId: string; remaining: string };
 type SupervisionData = {
     inputSequence?: number;
+    /** Explicit unfinished owner tasks only, not a report/event log. */
+    parentTasks?: Record<string, ParentTask>;
     admissions?: Record<string, InputAuthority>;
     inputs?: Record<string, InputAuthority>;
     toolAuthorities?: Record<string, InputAuthority>;
@@ -228,6 +259,51 @@ export class AgentSupervision {
     constructor(app: PocketApp) {
         this.#app = app;
     }
+
+    readonly task = defineTask<{ key: string; wake: string }, { phase: "deliver" }, null>({
+        name: "pocket.agent-parent-continuation",
+        version: 1,
+        initial: () => ({ phase: "deliver" }),
+        abort: async (task, runtime, ctx) => {
+            await runtime.commit(async (tx) => {
+                await this.#recordParentDelivery(
+                    tx,
+                    task.input.key,
+                    task.input.wake,
+                    "Delivery interrupted; no regeneration.",
+                );
+
+                return { status: "terminal", outcome: { status: "aborted" } };
+            }, ctx);
+        },
+        phases: {
+            deliver: async (task, runtime, ctx) => {
+                try {
+                    const sender = await runtime.conversation(runtime.conversationId, ctx);
+
+                    if (sender === undefined) {
+                        throw new HttpError(
+                            409,
+                            "The exact originating parent Chat is unavailable.",
+                        );
+                    }
+
+                    await this.#deliverParent(task.input.key, task.input.wake, sender, ctx);
+                } catch (error) {
+                    await this.#settleParentDelivery(
+                        task.input.key,
+                        task.input.wake,
+                        describe(error),
+                    );
+                }
+
+                await runtime.commit(
+                    () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+                    ctx,
+                );
+            },
+        },
+    });
 
     #owner(supplied: User): User {
         const user = this.#app.config.userById(supplied.id);
@@ -776,6 +852,7 @@ export class AgentSupervision {
             item!.id
         ];
 
+        await this.fenceParents(tx, controller);
         await this.#app.pip.agents.contacts.fenceTarget(tx, idOf(item!.activeThreadId));
 
         if (attachment !== undefined) {
@@ -860,12 +937,12 @@ export class AgentSupervision {
     }
 
     /** Finality follows native execution/helper/report trees even after a controller returns control. */
-    async #hasPendingChildren(tx: Tx, chat: ConversationId): Promise<boolean> {
-        if (this.hasRunningChildren(chat)) {
+    async #hasPendingChildren(tx: Tx, chat: ConversationId, controller?: number): Promise<boolean> {
+        if (controller === undefined && this.hasRunningChildren(chat)) {
             return true;
         }
 
-        const roots = new Set<ConversationId>([chat]);
+        const roots = new Set<ConversationId>(controller === undefined ? [chat] : []);
         const items = new Set<string>();
 
         for (const key of Object.keys(this.#app.sessionCatalogue())) {
@@ -874,7 +951,11 @@ export class AgentSupervision {
             if (
                 item !== undefined &&
                 !items.has(item.id) &&
-                this.notificationParent(item) === chat
+                // A registered assignment pins its controller independently of passive report
+                // origins, which a later read/follow can change without settling child work.
+                (controller === undefined
+                    ? this.notificationParent(item) === chat
+                    : item.supervisor?.conversationId === controller)
             ) {
                 items.add(item.id);
                 roots.add(idOf(item.supervisor!.conversationId));
@@ -889,6 +970,7 @@ export class AgentSupervision {
 
         for (const contact of Object.values(contacts.contacts)) {
             if (
+                controller === undefined &&
                 contact.chatId === Number(chat) &&
                 contact.action === "send" &&
                 contacts.epochs[String(contact.target)] === contact.epoch
@@ -947,7 +1029,11 @@ export class AgentSupervision {
     async supervise(
         api: ToolExecutionApi,
         ctx: Context,
-        input: { action: "ask" | "wait" | "finish"; text: string },
+        input: {
+            action: "ask" | "wait" | "finish";
+            text: string;
+            continuation?: ParentContinuation;
+        },
     ) {
         const id = api.conversationId;
         const key = hash([Number(id), Number(api.taskId), api.callId]);
@@ -986,6 +1072,29 @@ export class AgentSupervision {
                 throw new HttpError(413, "The private attention receipt limit was reached.");
             }
 
+            if (input.continuation !== undefined) {
+                if (input.action !== "wait") {
+                    throw new HttpError(400, "Register a child continuation only with wait.");
+                }
+
+                await this.#registerParent(
+                    tx,
+                    pin,
+                    identity.ownerId,
+                    input.continuation,
+                    Number(api.taskId),
+                );
+            } else if (input.action !== "wait") {
+                for (const task of Object.values(doc.parentTasks ?? {})) {
+                    if (
+                        task.authority.chatId === Number(id) &&
+                        ["waiting", "running"].includes(task.status)
+                    ) {
+                        task.status = input.action === "finish" ? "completed" : "blocked";
+                    }
+                }
+            }
+
             doc.attentionCalls ??= {};
             doc.attentionCalls[key] = { fingerprint };
             doc.attention ??= {};
@@ -995,7 +1104,8 @@ export class AgentSupervision {
                     : doc.attention[String(id)]?.finishedThrough;
 
             doc.attention[String(id)] = {
-                ...input,
+                action: input.action,
+                text: input.text,
                 eventId: key,
                 ...(pin.admissionSerial === undefined
                     ? {}
@@ -1056,6 +1166,524 @@ export class AgentSupervision {
         }
     }
 
+    /** Private exact-Chat projection; shared snapshot callers never load this ledger. */
+    async parentContext(chat: ConversationId, supplied: User) {
+        const user = this.#owner(supplied);
+
+        this.#scope(chat, user);
+        const doc = await this.#app.harness.snapshot(AgentSupervisionDoc, context);
+
+        return Object.values(doc?.parentTasks ?? {})
+            .filter((task) => task.authority.chatId === Number(chat) && task.ownerId === user.id)
+            .slice(-4)
+            .map((task) => ({
+                ownerInputId: task.authority.inputId,
+                status: task.status,
+                remaining: task.remaining,
+                dependency: task.dependency,
+                admittedWakes: task.admittedWakes,
+                paidWakes: task.paidWakes,
+                ...(task.reason === undefined ? {} : { reason: task.reason }),
+            }));
+    }
+
+    async #reconcileParents(): Promise<void> {
+        const keys = Object.keys(
+            (await this.#app.harness.snapshot(AgentSupervisionDoc, context))?.parentTasks ?? {},
+        );
+
+        for (const key of keys) {
+            let blocker: { chat: number; text: string } | undefined;
+
+            await this.#app.harness.commit(async (tx) => {
+                const task = (await tx.doc(AgentSupervisionDoc)).parentTasks?.[key];
+
+                if (task === undefined || !["waiting", "running"].includes(task.status)) {
+                    return;
+                }
+
+                try {
+                    await this.#requireParent(tx, task, false);
+                    const child = (await tx.doc(AgentSupervisionDoc)).requests[
+                        task.dependency.requestId.replace(/^agent-delegation-/, "")
+                    ];
+
+                    if (
+                        child?.status !== "accepted" ||
+                        child.chatId !== task.authority.chatId ||
+                        child.sourceInputId !== task.authority.inputId ||
+                        child.controllerId !== task.dependency.controller ||
+                        child.submissionId !== task.dependency.submission
+                    ) {
+                        throw new HttpError(
+                            409,
+                            "The registered accepted child contact is unavailable or changed.",
+                        );
+                    }
+
+                    await this.requireAttachment(
+                        tx,
+                        idOf(child.controllerId),
+                        child.agentId,
+                        child.agentEpoch,
+                        child.attachmentEpoch,
+                    );
+
+                    if (task.status === "running" && task.wake !== undefined) {
+                        const delivered = await tx.submissionByRequest(
+                            idOf(task.authority.chatId),
+                            task.wake.requestId,
+                        );
+
+                        if (delivered?.type === "input" && delivered.status === "unanswered") {
+                            task.status = "blocked";
+                            task.reason = `Parent continuation input was unanswered (${delivered.reason}). Inspect its native receipt; no automatic regeneration.`;
+                            blocker = { chat: task.authority.chatId, text: task.reason };
+                        }
+                    }
+
+                    if (task.status !== "waiting" || task.wake !== undefined) {
+                        return;
+                    }
+
+                    const state = await tx.doc(PipWorkDoc, idOf(task.dependency.controller));
+                    const assignment = state.assignment;
+
+                    if (
+                        assignment?.requestId !== task.dependency.requestId ||
+                        assignment.submissionId !== task.dependency.submission ||
+                        assignment.epoch !== child.controllerEpoch
+                    ) {
+                        throw new HttpError(409, "The exact accepted child assignment changed.");
+                    }
+
+                    const native = await tx.submissionByRequest(
+                        idOf(child.controllerId),
+                        child.requestId,
+                    );
+
+                    if (native?.type !== "input" || Number(native.id) !== assignment.submissionId) {
+                        throw new HttpError(
+                            409,
+                            "The assigned child has no matching native input receipt.",
+                        );
+                    }
+
+                    if (assignment.outcome === undefined && native.status === "unanswered") {
+                        assignment.outcome = {
+                            id: `input-${native.id}-${native.reason}`,
+                            kind:
+                                native.reason === "aborted" || native.reason === "reset"
+                                    ? "cancelled"
+                                    : "failure",
+                            text: `The exact assigned native input was unanswered: ${native.reason}.`,
+                        };
+                    }
+
+                    const outcome = assignment.outcome;
+
+                    if (outcome === undefined) {
+                        return;
+                    }
+
+                    // A controller finish can precede the actual execution/helper/report tree's
+                    // settlement. An intermediate handoff or idle worker is never completion.
+                    if (
+                        outcome.kind === "finish" &&
+                        (await this.#hasPendingChildren(tx, idOf(child.chatId), child.controllerId))
+                    ) {
+                        return;
+                    }
+
+                    const event = hash([
+                        child.requestId,
+                        assignment.submissionId,
+                        outcome.kind,
+                        outcome.id,
+                    ]);
+
+                    if (task.consumed.includes(event)) {
+                        return;
+                    }
+
+                    if (task.consumed.length >= 16) {
+                        task.status = "blocked";
+                        task.reason =
+                            "The parent task's 16 continuation wake limit was reached. Ask the owner; no automatic renewal.";
+                        blocker = { chat: task.authority.chatId, text: task.reason };
+
+                        return;
+                    }
+
+                    const requestId = requestFor(
+                        task.ownerId,
+                        clientKey(`parent-${hash([key, event])}`),
+                    );
+                    const delivery = await tx.createTask(
+                        this.task,
+                        { key, wake: event },
+                        {
+                            ownership: { kind: "conversation" },
+                            background: true,
+                            conversationId: idOf(task.authority.chatId),
+                        },
+                    );
+
+                    task.consumed.push(event);
+                    task.wake = {
+                        id: event,
+                        requestId,
+                        taskId: Number(delivery),
+                        text: [
+                            `Registered parent task continuation for accepted owner input ${task.authority.inputId} in /s/${task.authority.chatId}.`,
+                            `Exact child assignment ${child.requestId}, native input ${assignment.submissionId}, controller /s/${child.controllerId}.`,
+                            `Native semantic outcome: ${outcome.kind}; evidence pocket.pip-work assignment outcome ${outcome.id}.`,
+                            ...(outcome.questionId === undefined
+                                ? []
+                                : [
+                                      `Exact pending question: ${outcome.questionId}; use only the native exact-question adapter after inspection.`,
+                                  ]),
+                            `Remaining work (parent-authored, not new authority): ${task.remaining}`,
+                            "Inspect work_context and the actual child evidence/outcome before deciding the next step under the original owner instruction. Failure, question, cancellation and budget outcomes do not authorize advancing the batch or regeneration. If blocked/unsure, ask the owner here; leave the affected work waiting. This runtime notice is not owner input, a success certificate, Land/commit/publication approval or a model fallback.",
+                        ].join("\n"),
+                    };
+                } catch (error) {
+                    task.status = "revoked";
+                    task.reason = describe(error);
+                }
+            }, context);
+
+            if (blocker !== undefined) {
+                await this.#app.alerts.orchestrationEvent(
+                    idOf(blocker.chat),
+                    `parent-limit-${key}`,
+                    "blocker",
+                    blocker.text,
+                );
+            }
+        }
+    }
+
+    async #recordParentDelivery(tx: Tx, key: string, wake: string, reason?: string) {
+        const task = (await tx.doc(AgentSupervisionDoc)).parentTasks?.[key];
+
+        if (task?.wake?.id !== wake) {
+            return undefined;
+        }
+
+        const native = await tx.submissionByRequest(
+            idOf(task.authority.chatId),
+            task.wake.requestId,
+        );
+
+        if (native !== undefined) {
+            if (task.wake.submissionId === undefined) {
+                task.admittedWakes++;
+                task.wake.submissionId = Number(native.id);
+            }
+
+            // Admission is historical fact even if a later Stop revoked activation.
+            return undefined;
+        }
+
+        if (task.status === "revoked" || task.status === "completed") {
+            return undefined;
+        }
+
+        task.status = "blocked";
+        task.reason = reason ?? "Parent continuation was not admitted; no automatic retry.";
+
+        return { chat: task.authority.chatId, text: task.reason };
+    }
+
+    async #settleParentDelivery(key: string, wake: string, reason?: string): Promise<void> {
+        const notice = await this.#app.harness.commit(
+            (tx) => this.#recordParentDelivery(tx, key, wake, reason),
+            context,
+        );
+
+        if (notice !== undefined) {
+            await this.#app.alerts.orchestrationEvent(
+                idOf(notice.chat),
+                `parent-${wake}`,
+                "blocker",
+                notice.text,
+            );
+        }
+    }
+
+    async #deliverParent(
+        key: string,
+        wake: string,
+        sender: ConversationHandle,
+        ctx: Context,
+    ): Promise<void> {
+        const task = (await this.#app.harness.snapshot(AgentSupervisionDoc, ctx))?.parentTasks?.[
+            key
+        ];
+
+        if (task?.wake?.id !== wake || sender.id !== idOf(task.authority.chatId)) {
+            return;
+        }
+
+        const accepted = await this.#app.harness.commit(
+            (tx) => tx.submissionByRequest(sender.id, task.wake!.requestId),
+            ctx,
+        );
+
+        if (accepted === undefined) {
+            const user = await this.#app.harness.commit((tx) => this.#requireParent(tx, task), ctx);
+
+            await this.#app.pip.agents.input(
+                sender.id,
+                user,
+                task.wake.requestId,
+                async () => {
+                    await this.#app.harness.commit(async (tx) => {
+                        const current = (await tx.doc(AgentSupervisionDoc)).parentTasks?.[key];
+
+                        if (current?.wake?.id !== wake) {
+                            throw new HttpError(409, "This continuation was superseded.");
+                        }
+
+                        await this.#requireParent(tx, current);
+                    }, ctx);
+                    await this.#app.requireDriver(sender.id, user);
+                    const model = (await this.#app.agentState(sender.id))?.model;
+
+                    if (
+                        model === undefined ||
+                        this.#app.models.getModel(model.provider, model.modelId) === undefined
+                    ) {
+                        throw new HttpError(
+                            409,
+                            "Parent model unavailable; no fallback or regeneration.",
+                        );
+                    }
+
+                    await sender.submit(
+                        {
+                            type: "input",
+                            requestId: task.wake!.requestId,
+                            content: `[App registered continuation; not new owner input]\n${task.wake!.text}`,
+                            whenBusy: "followUp",
+                        },
+                        ctx,
+                    );
+                },
+                true,
+            );
+        }
+
+        await this.#settleParentDelivery(key, wake);
+    }
+
+    async #parentBinding(tx: Tx, chat: number): Promise<string> {
+        const meta = (await tx.doc(SessionsDoc)).items[String(chat)];
+        const agent = await tx.doc(AgentDoc, idOf(chat));
+        const identity = this.#app.pip.agents.identity(idOf(chat));
+
+        return hash([
+            meta?.cwd,
+            meta?.location,
+            meta?.projectId,
+            meta?.pipAgentId,
+            meta?.ownerOnly,
+            identity?.record.revision,
+            agent.model,
+            agent.thinkingLevel,
+        ]);
+    }
+
+    async #requireParent(tx: Tx, task: ParentTask, checkSpend = true): Promise<User> {
+        const pin = task.authority;
+        const user = this.#app.config.userById(task.ownerId);
+        const identity = (await tx.doc(AgentIdentitiesDoc)).items[pin.agentId];
+        const meta = (await tx.doc(SessionsDoc)).items[String(pin.chatId)];
+
+        if (
+            !["running", "waiting"].includes(task.status) ||
+            user?.role !== "owner" ||
+            user.tokenHash !== pin.tokenHash ||
+            identity?.deletedAt !== undefined ||
+            identity?.epoch !== pin.epoch ||
+            identity.ownerId !== task.ownerId ||
+            !identity.chatIds.includes(pin.chatId) ||
+            meta === undefined ||
+            meta.archived ||
+            !this.#app.config.pipEnabled ||
+            (await this.#parentBinding(tx, pin.chatId)) !== task.binding
+        ) {
+            throw new HttpError(409, "The registered parent task's authority changed.");
+        }
+
+        this.#scope(idOf(pin.chatId), user);
+        this.#app.requireSteer(user);
+
+        if (checkSpend) {
+            this.#app.spend.check(user, idOf(pin.chatId));
+        }
+
+        await this.#requireOwnerInput(tx, pin, task.ownerId);
+
+        return user;
+    }
+
+    async #requireParentInput(tx: Tx, pin: InputAuthority, invocation?: number): Promise<void> {
+        if (pin.parentTask === undefined) {
+            return;
+        }
+
+        const task = (await tx.doc(AgentSupervisionDoc)).parentTasks?.[pin.parentTask];
+
+        if (
+            task?.status === "waiting" &&
+            task.waitTool === invocation &&
+            pin.wakeId !== undefined &&
+            task.consumed.includes(pin.wakeId)
+        ) {
+            // Only the exact saved terminating wait may replay after its acknowledgement was
+            // lost. Other effects and provider continuations remain fenced while waiting.
+            await this.#requireParent(tx, task);
+
+            return;
+        }
+
+        if (
+            task?.status !== "running" ||
+            task.wake?.id !== pin.wakeId ||
+            task.authority.chatId !== pin.chatId ||
+            task.authority.inputId !== pin.inputId
+        ) {
+            throw new HttpError(409, "This parent continuation is no longer current.");
+        }
+
+        const native = await tx.submissionByRequest(idOf(pin.chatId), task.wake!.requestId);
+
+        if (native === undefined) {
+            throw new HttpError(409, "This parent continuation has no native accepted input.");
+        }
+
+        if (task.wake!.submissionId === undefined) {
+            task.wake!.submissionId = Number(native.id);
+            task.admittedWakes++;
+        }
+
+        await this.#requireParent(tx, task);
+    }
+
+    async #registerParent(
+        tx: Tx,
+        pin: InputAuthority,
+        ownerId: string,
+        input: ParentContinuation,
+        invocation: number,
+    ): Promise<void> {
+        await this.#requireOwnerInput(tx, pin, ownerId);
+        const doc = await tx.doc(AgentSupervisionDoc);
+        const attention = doc.attention?.[String(pin.chatId)];
+
+        if (
+            (attention?.finishedThrough ?? -1) >= pin.admissionSerial! ||
+            (attention?.action === "ask" && attention.admissionSerial === pin.admissionSerial)
+        ) {
+            throw new HttpError(
+                409,
+                "This owner task already finished or asked its owner; no implicit continuation.",
+            );
+        }
+
+        const child = Object.values(doc.requests).find(
+            (entry) => entry.requestId === input.requestId,
+        );
+        const native =
+            child === undefined
+                ? undefined
+                : await tx.submissionByRequest(idOf(child.controllerId), child.requestId);
+
+        if (
+            !input.remaining.trim() ||
+            input.remaining.length > 2000 ||
+            child?.status !== "accepted" ||
+            !child.controllerContact ||
+            child.action !== "send" ||
+            child.chatId !== pin.chatId ||
+            child.agentId !== pin.agentId ||
+            child.sourceInputId !== pin.inputId ||
+            child.sourceAdmissionSerial !== pin.admissionSerial ||
+            child.agentEpoch !== pin.epoch ||
+            child.tokenHash !== pin.tokenHash ||
+            child.submissionId === undefined ||
+            Number(native?.id) !== child.submissionId
+        ) {
+            throw new HttpError(
+                409,
+                "Wait on this task's exact accepted controller send, not a report or follow.",
+            );
+        }
+
+        const key = hash([pin.chatId, pin.inputId]);
+        const previous = doc.parentTasks?.[key];
+
+        if (previous !== undefined && previous.status !== "running") {
+            throw new HttpError(409, "This parent task is not running; no implicit renewal.");
+        }
+
+        if (previous === undefined && Object.keys(doc.parentTasks ?? {}).length >= 1000) {
+            throw new HttpError(413, "The registered parent task limit was reached.");
+        }
+
+        const task: ParentTask = previous ?? {
+            authority: { ...pin },
+            ownerId,
+            binding: await this.#parentBinding(tx, pin.chatId),
+            status: "running",
+            remaining: "",
+            consumed: [],
+            admittedWakes: 0,
+            paidWakes: 0,
+            dependency: {
+                requestId: child.requestId,
+                controller: child.controllerId,
+                submission: child.submissionId,
+            },
+        };
+
+        await this.#requireParent(tx, task);
+        await this.requireAttachment(
+            tx,
+            idOf(child.controllerId),
+            child.agentId,
+            child.agentEpoch,
+            child.attachmentEpoch,
+        );
+        task.remaining = input.remaining;
+        task.dependency = {
+            requestId: child.requestId,
+            controller: child.controllerId,
+            submission: child.submissionId,
+        };
+        task.status = "waiting";
+        task.waitTool = invocation;
+        delete task.wake;
+        doc.parentTasks ??= {};
+        doc.parentTasks[key] = task;
+    }
+
+    /** Native lifecycle fences discard parent authority, never cancel independent child execution. */
+    async fenceParents(tx: Tx, chat: ConversationId): Promise<void> {
+        for (const task of Object.values((await tx.doc(AgentSupervisionDoc)).parentTasks ?? {})) {
+            if (
+                ["waiting", "running"].includes(task.status) &&
+                (task.authority.chatId === Number(chat) ||
+                    task.dependency.controller === Number(chat))
+            ) {
+                task.status = "revoked";
+                task.reason = "Native Stop, takeover or source lifecycle change.";
+            }
+        }
+    }
+
     /** Capture authority before native acceptance can schedule its first provider hook. */
     async acceptInput(
         tx: Tx,
@@ -1068,6 +1696,27 @@ export class AgentSupervision {
         const identity = await this.#identity(tx, scope.agentId, user);
         const doc = await tx.doc(AgentSupervisionDoc);
         const key = hash([Number(chat), requestId]);
+        const continuation = Object.entries(doc.parentTasks ?? {}).find(
+            ([, task]) =>
+                task.authority.chatId === Number(chat) && task.wake?.requestId === requestId,
+        );
+
+        if (continuation !== undefined) {
+            const [taskId, task] = continuation;
+
+            await this.#requireParent(tx, task);
+            task.status = "running";
+            doc.admissions ??= {};
+            doc.admissions[key] ??= {
+                ...task.authority,
+                requestId,
+                parentTask: taskId,
+                wakeId: task.wake!.id,
+            };
+
+            return;
+        }
+
         const pin: InputAuthority = {
             requestId,
             agentId: identity.agentId,
@@ -1101,6 +1750,46 @@ export class AgentSupervision {
 
     readonly hooks = [
         hook(GenerationTask, {
+            afterResponse: async (message, api, ctx) => {
+                const pin = await api.memo<InputAuthority>(AGENT_EPOCH, ctx);
+
+                if (pin?.parentTask === undefined) {
+                    return;
+                }
+
+                let failure: string | undefined;
+
+                await this.#app.harness.commit(async (tx) => {
+                    const task = (await tx.doc(AgentSupervisionDoc)).parentTasks?.[pin.parentTask!];
+
+                    if (task?.wake?.id !== pin.wakeId) {
+                        return;
+                    }
+
+                    if (!task.wake.paid && message.usage.cost.total > 0) {
+                        task.wake.paid = true;
+                        task.paidWakes++;
+                    }
+
+                    if (
+                        task.status === "running" &&
+                        (message.stopReason === "error" || message.stopReason === "aborted")
+                    ) {
+                        task.status = "blocked";
+                        failure = `Parent continuation response ${message.stopReason}; inspect its native response. No fallback or automatic regeneration.`;
+                        task.reason = failure;
+                    }
+                }, ctx);
+
+                if (failure !== undefined) {
+                    await this.#app.alerts.orchestrationEvent(
+                        api.conversationId,
+                        `parent-${pin.wakeId}`,
+                        "blocker",
+                        failure,
+                    );
+                }
+            },
             beforeRequest: async (_request, api, ctx) => {
                 if (!this.#app.pip.agents.isNamed(this.#chat(api.conversationId))) {
                     return undefined;
@@ -1159,6 +1848,42 @@ export class AgentSupervision {
                                 : {}),
                         };
 
+                        // A postTools owner steer can share this run with its now-stale
+                        // continuation. Only a placed, authenticated newer owner input may
+                        // replace that authority; reports/helpers and old effects never do.
+                        let ownerAuthority: InputAuthority | undefined;
+
+                        if (api.conversationId === this.#chat(api.conversationId)) {
+                            for (const input of live.run.inputs) {
+                                const requestId = requests.get(String(input));
+                                const author = requestPerson(requestId);
+                                const admission =
+                                    requestId === undefined
+                                        ? undefined
+                                        : doc.admissions?.[
+                                              hash([Number(api.conversationId), requestId])
+                                          ];
+
+                                if (
+                                    author?.wrote === true &&
+                                    author.userId === owner.id &&
+                                    admission?.parentTask === undefined &&
+                                    admission?.agentId === pin.agentId &&
+                                    admission.epoch === pin.epoch &&
+                                    admission.tokenHash === pin.tokenHash &&
+                                    admission.chatId === pin.chatId &&
+                                    (admission.admissionSerial ?? 0) >
+                                        (ownerAuthority?.admissionSerial ?? 0)
+                                ) {
+                                    ownerAuthority = { ...admission, inputId: Number(input) };
+                                }
+                            }
+                        }
+
+                        if (ownerAuthority !== undefined) {
+                            await this.#requireOwnerInput(tx, ownerAuthority, owner.id);
+                        }
+
                         for (const input of live.run.inputs) {
                             const requestId = requests.get(String(input));
                             const previous =
@@ -1194,15 +1919,38 @@ export class AgentSupervision {
                                 );
                             }
 
+                            const supersededContinuation =
+                                previous.parentTask !== undefined &&
+                                ownerAuthority !== undefined &&
+                                (ownerAuthority.admissionSerial ?? 0) >
+                                    (previous.admissionSerial ?? 0);
+
+                            if (!supersededContinuation) {
+                                await this.#requireParentInput(tx, previous);
+                            }
+
+                            if (
+                                ownerAuthority === undefined &&
+                                input === live.run.inputs.at(-1) &&
+                                previous.parentTask !== undefined
+                            ) {
+                                pin.inputId = previous.inputId;
+                                pin.parentTask = previous.parentTask;
+                                pin.wakeId = previous.wakeId;
+                            }
+
                             pin.inputId ??= previous.inputId ?? Number(input);
                             pin.admissionSerial = Math.max(
                                 pin.admissionSerial ?? 0,
                                 previous.admissionSerial ?? 0,
                             );
-                            doc.inputs[String(input)] ??= pin;
+                            doc.inputs[String(input)] ??= {
+                                ...previous,
+                                inputId: previous.inputId ?? Number(input),
+                            };
                         }
 
-                        return pin;
+                        return ownerAuthority ?? pin;
                     }, ctx);
                     const previous = await api.memo<InputAuthority>(AGENT_EPOCH, ctx);
                     const pin = previous ?? (await api.memo(AGENT_EPOCH, authority, ctx));
@@ -1220,6 +1968,37 @@ export class AgentSupervision {
                             409,
                             "Private supervisor identity changed before provider dispatch.",
                         );
+                    }
+
+                    if (pin.parentTask !== undefined) {
+                        if (await api.memo<boolean>(PARENT_REQUEST, ctx)) {
+                            const reason =
+                                "Parent provider request was interrupted or uncertain; inspect its native input. No automatic regeneration.";
+
+                            await this.#app.harness.commit(async (tx) => {
+                                const task = (await tx.doc(AgentSupervisionDoc)).parentTasks?.[
+                                    pin.parentTask!
+                                ];
+
+                                if (task?.status === "running" && task.wake?.id === pin.wakeId) {
+                                    task.status = "blocked";
+                                    task.reason = reason;
+                                }
+                            }, ctx);
+                            await this.#app.alerts.orchestrationEvent(
+                                api.conversationId,
+                                `parent-request-${api.taskId}`,
+                                "blocker",
+                                reason,
+                            );
+
+                            throw new HttpError(409, reason);
+                        }
+
+                        // Native request phases can replay after a crash. Commit uncertainty
+                        // before calling the provider; a successor tool round has a new task.
+                        // This may conservatively hold an unstarted request, not promise exactly once.
+                        await api.memo(PARENT_REQUEST, true, ctx);
                     }
 
                     return undefined;
@@ -2234,6 +3013,8 @@ export class AgentSupervision {
                     owner?.role === "owner" &&
                     pin.tokenHash === owner.tokenHash
                 ) {
+                    await this.#requireParentInput(tx, pin as InputAuthority, Number(api.taskId));
+
                     return {
                         agentId: identity.agentId,
                         epoch: identity.epoch,
@@ -2241,6 +3022,12 @@ export class AgentSupervision {
                         chatId: Number(this.#chat(api.conversationId)),
                         inputId: (pin as InputAuthority).inputId,
                         admissionSerial: (pin as InputAuthority).admissionSerial,
+                        ...((pin as InputAuthority).parentTask === undefined
+                            ? {}
+                            : {
+                                  parentTask: (pin as InputAuthority).parentTask,
+                                  wakeId: (pin as InputAuthority).wakeId,
+                              }),
                     };
                 }
 
@@ -2534,6 +3321,9 @@ export class AgentSupervision {
                         PipWorkDoc.definition.kind,
                         SessionsDoc.definition.kind,
                         AgentIdentitiesDoc.definition.kind,
+                        AgentSupervisionDoc.definition.kind,
+                        LiveDoc.definition.kind,
+                        SubagentsDoc.definition.kind,
                     ].includes(change.record.kind));
         }
 
@@ -2579,6 +3369,7 @@ export class AgentSupervision {
     }
 
     async #reconcile(): Promise<void> {
+        await this.#reconcileParents();
         const doc = await this.#app.harness.snapshot(AgentSupervisionDoc, context);
 
         for (const [key, receipt] of Object.entries(doc?.requests ?? {})) {

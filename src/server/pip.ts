@@ -258,7 +258,7 @@ export class Pip {
 
     /** Install once before Harness.open, including while paused, so stored selections and follows recover. */
     registration(): ReturnType<typeof createPrivateAgent> {
-        return createPrivateAgent(this, this.#app.pipCompaction);
+        return createPrivateAgent(this, this.#app.pipCompaction, this.#app.workItems);
     }
 
     /** Metadata-only diagnostics remain global-private; the reader rejects shared/helper/controller callers. */

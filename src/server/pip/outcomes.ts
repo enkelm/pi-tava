@@ -1,6 +1,14 @@
 /** Compact passive observations; full agent evidence remains at its native source identity. */
 import type { EntryRecord } from "@earendil-works/pi-durable";
 
+/** Written only at a correlated native assignment lifecycle transition, never inferred from prose. */
+export type AssignedTaskOutcome = {
+    id: string;
+    kind: "finish" | "question" | "failure" | "budget" | "cancelled";
+    questionId?: string;
+    text: string;
+};
+
 export type PassiveOutcome = { fact: string; summary?: string };
 
 function excerpt(text: string, limit: number): string {
