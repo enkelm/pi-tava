@@ -15,7 +15,7 @@ import {
     GallerySourceSheet,
     GalleryUpdateSheet,
 } from "./sheets/gallery.js";
-import { ImportSheet } from "./sheets/pi-sessions.js";
+import { ImportSheet, ShareImportSheet } from "./sheets/pi-sessions.js";
 import { CwdSheet } from "./sheets/folder.js";
 import { MemorySheet } from "./sheets/memory.js";
 import { MenuSheet, PlacesSheet } from "./sheets/menu.js";
@@ -350,6 +350,10 @@ function sheetBody(sheet) {
             break;
         case "chat":
             body = view.conversation ? html`<${ChatSheet} />` : null;
+            break;
+
+        case "share-import":
+            body = html`<${ShareImportSheet} key=${sheet.id} id=${sheet.id} />`;
             break;
 
         case "rename": {

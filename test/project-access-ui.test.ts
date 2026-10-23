@@ -1,6 +1,8 @@
 // Authoring gate: real components own grant choices, invite races and fixed-destination creation.
 // A broadened invite, lost manual choice, stale QR, or guest destination override must fail here.
 // App permission tests own enforcement; they do not render controls or deliver late invite responses.
+// Import confirmation owns visibility/placement consent and fences stale accounts, targets and openings.
+// API tests cannot deliver retained component callbacks or a response after that component is disposed.
 // Only hooks/scheduling and external UI dependencies are replaced; no production test seams or listeners.
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
@@ -95,6 +97,7 @@ const fixture = {
     navigated: [] as number[],
     remembered: [] as unknown[],
     opened: [] as Props[],
+    closed: [] as Props[],
 };
 
 const mediaDescriptor = Object.getOwnPropertyDescriptor(globalThis, "matchMedia");
@@ -118,7 +121,8 @@ const sources: Record<string, string> = {
         export const {store,actions}=f;
         export const api=(...args)=>f.api(...args);
         export const attempt=fn=>Promise.resolve().then(fn).catch(error=>f.errors.push(error.message));
-        export const collab=()=>true,closeSheet=()=>{},notify=()=>{},uid=()=>"request";
+        export const collab=()=>true,notify=()=>{},uid=()=>"request";
+        export const closeSheet=()=>f.closed.push(store.state.sheet);
         export const projectsAvailable=()=>true,insertIntoComposer=()=>{},handoffsAvailable=()=>true;
         export const canSteer=()=>store.state.me?.role!=='viewer';
         export const scoped=()=>store.state.me?.sessions!==undefined;
@@ -173,7 +177,7 @@ const sources: Record<string, string> = {
     "ssh-login.js": "export const SshLogin=()=>null;",
 };
 const owned =
-    /\/web\/(project-access|workspace-field|session-moves|launcher|sheets\/(people|project|session-projects|pi-sessions|sidebar-options|message|menu|worktree|branch))\.js$/;
+    /\/web\/(project-access|workspace-field|session-moves|launcher|sheets\/(people|project|session-projects|session|pi-sessions|sidebar-options|message|menu|worktree|branch))\.js$/;
 
 registerHooks({
     resolve(specifier, context, next) {
@@ -200,7 +204,10 @@ const { ProjectSessionPanel } = await import(
 );
 const { ProjectForm } = await import(new URL("../web/sheets/project.js", import.meta.url).href);
 const { WorkspaceField } = await import(new URL("../web/workspace-field.js", import.meta.url).href);
-const { ImportPanel } = await import(new URL("../web/sheets/pi-sessions.js", import.meta.url).href);
+const { ImportPanel, ShareImportSheet } = await import(
+    new URL("../web/sheets/pi-sessions.js", import.meta.url).href
+);
+const { NewSessionSheet } = await import(new URL("../web/sheets/session.js", import.meta.url).href);
 const { SidebarOptions } = await import(
     new URL("../web/sheets/sidebar-options.js", import.meta.url).href
 );
@@ -217,6 +224,14 @@ function mount(run: () => unknown): Mount {
     render(instance);
 
     return instance;
+}
+
+function dispose(instance: Mount) {
+    instance.disposed = true;
+
+    for (const slot of instance.slots) {
+        slot?.cleanup?.();
+    }
 }
 
 function nodes(value: any): Node[] {
@@ -261,6 +276,24 @@ const checkbox = (instance: Mount, label: string) =>
 const child = (instance: Mount, component: unknown) =>
     find(instance, (node) => node.type === component);
 
+const field = (instance: Mount, id: string): Node => {
+    const node = find(instance, (candidate) => candidate.props.id === id);
+
+    if (typeof node.type === "function") {
+        const component = node.type;
+
+        return field(
+            mount(() => component(node.props)),
+            id,
+        );
+    }
+
+    return node;
+};
+
+const submit = (instance: Mount) =>
+    find(instance, (node) => node.type === "form").props.onSubmit({ preventDefault() {} });
+
 const flush = async () => {
     for (let index = 0; index < 20; index++) {
         await Promise.resolve();
@@ -293,7 +326,679 @@ function reset() {
     fixture.navigated = [];
     fixture.remembered = [];
     fixture.opened = [];
+    fixture.closed = [];
 }
+
+function importPreview(patch: Props = {}) {
+    return {
+        title: "Saved conversation",
+        cwd: "/local",
+        path: "/history/session.jsonl",
+        sha256: "a".repeat(64),
+        leafId: "saved-leaf",
+        sourceModel: { provider: "provider", modelId: "one" },
+        sourceThinkingLevel: "low",
+        models: [
+            { provider: "provider", id: "one", images: true, levels: ["off", "low", "high"] },
+            { provider: "provider", id: "two", images: true, levels: ["off", "low", "high"] },
+        ],
+        hasImages: false,
+        entries: 2,
+        messages: 1,
+        history: [{ role: "user", text: "A saved request" }],
+        warnings: [],
+        ...patch,
+    };
+}
+
+async function changeField(instance: Mount, id: string, value: string | boolean) {
+    field(instance, id).props.onChange({
+        currentTarget: typeof value === "boolean" ? { checked: value } : { value },
+    });
+    await flush();
+}
+
+test("owner import visibility and project choices invalidate consent together with model and thinking", async () => {
+    reset();
+    const requests: unknown[] = [];
+
+    fixture.store.state.sheet = { type: "import" };
+
+    fixture.api = async (path, body) => {
+        requests.push([path, body]);
+
+        return { id: 45 };
+    };
+
+    const preview = importPreview();
+    const panel = mount(() => ImportPanel({ initialPreview: preview }));
+
+    await flush();
+    const visibility = field(panel, "import-visibility");
+    const options = nodes(visibility).filter((node) => node.type === "option");
+
+    assert.equal(visibility.props.value, "owner");
+    assert.deepEqual(
+        options.map((option) => option.props.value),
+        ["owner", "shared"],
+    );
+    assert.match(textOf(options[0]), /Private/);
+    assert.match(textOf(options[1]), /Shared/);
+    assert.equal(field(panel, "import-project").type, "select");
+
+    for (const [id, value] of [
+        ["import-model", "provider/two"],
+        ["import-thinking", "high"],
+        ["import-project", "local"],
+        ["import-visibility", "shared"],
+    ] as const) {
+        await changeField(panel, "import-consent", true);
+        const staleSubmit = find(panel, (node) => node.type === "form").props.onSubmit;
+
+        await changeField(panel, id, value);
+        assert.equal(field(panel, "import-consent").props.checked, false, id);
+        await staleSubmit({ preventDefault() {} });
+        await submit(panel);
+        await flush();
+        assert.deepEqual(
+            requests,
+            [],
+            `${id} needs fresh acknowledgement, even through an old form`,
+        );
+    }
+
+    dispose(panel);
+});
+
+test("reopening a private receipt identifies the entire existing Chat and explicitly clears project placement", async () => {
+    reset();
+    fixture.store.state.sheet = { type: "import" };
+    const requests = holdApi();
+    const preview = importPreview({
+        existing: 45,
+        existingTitle: "Continued confidential Chat",
+        visibility: "owner",
+        projectId: "local",
+    });
+    const panel = mount(() => ImportPanel({ initialPreview: preview }));
+
+    await flush();
+    await changeField(panel, "import-visibility", "shared");
+    await changeField(panel, "import-project", "");
+    assert.match(textOf(panel.tree), /Continued confidential Chat/);
+    assert.match(textOf(panel.tree), /#45/);
+    assert.match(
+        textOf(panel.tree),
+        /entire current history, including messages added since import/i,
+    );
+    await changeField(panel, "import-consent", true);
+    const saving = submit(panel);
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.body.projectId, null);
+    assert.equal(requests[0]!.body.existingId, 45);
+    requests[0]!.resolve({ id: 45, existing: true });
+    await saving;
+    dispose(panel);
+});
+
+test("New Session preserves import choices across its own tabs but rejects a replacement opening", async () => {
+    reset();
+    fixture.store.state.sheet = { type: "new-session", tab: "import" };
+    const requests = holdApi();
+    const preview = importPreview();
+    const sheet = mount(() =>
+        NewSessionSheet({ tab: fixture.store.state.sheet.tab, initialPreview: preview }),
+    );
+    const panel = mount(() => ImportPanel(child(sheet, ImportPanel).props));
+
+    await flush();
+    await changeField(panel, "import-visibility", "shared");
+    await changeField(panel, "import-project", "local");
+    await changeField(panel, "import-consent", true);
+
+    for (const tab of ["Start new", "Import"]) {
+        button(sheet, tab).props.onClick();
+        fixture.store.state.sheet = fixture.opened.at(-1)!;
+        render(sheet);
+        await flush();
+        render(panel);
+        await flush();
+    }
+
+    assert.equal(field(panel, "import-visibility").props.value, "shared");
+    assert.equal(field(panel, "import-project").props.value, "local");
+    assert.equal(field(panel, "import-consent").props.checked, true);
+    const retainedSubmit = find(panel, (node) => node.type === "form").props.onSubmit;
+    const saving = submit(panel);
+
+    assert.equal(requests.length, 1);
+    requests[0]!.resolve({ id: 45 });
+    await saving;
+    await flush();
+    fixture.store.state.sheet = { ...fixture.store.state.sheet };
+    render(sheet);
+    render(panel);
+    await retainedSubmit({ preventDefault() {} });
+    assert.equal(requests.length, 1, "a genuine replacement opening cannot reuse old consent");
+    dispose(panel);
+    dispose(sheet);
+});
+
+function holdApi() {
+    const requests: { path: string; body: Props; resolve: (value: Props) => void }[] = [];
+
+    fixture.api = (path, body) => new Promise((resolve) => requests.push({ path, body, resolve }));
+
+    return requests;
+}
+
+test("saved and live import confirmations send the reviewed source and destination only once", async (t) => {
+    for (const active of [false, true]) {
+        await t.test(active ? "shared live snapshot" : "private saved snapshot", async () => {
+            reset();
+            const opening = { type: "import" };
+            const requests = holdApi();
+            const created: number[] = [];
+            const preview = importPreview(active ? { activeId: "live-source" } : {});
+
+            fixture.store.state.sheet = opening;
+            const panel = mount(() =>
+                ImportPanel({
+                    initialPreview: preview,
+                    onCreated: (id: number) => created.push(id),
+                }),
+            );
+
+            await flush();
+            await changeField(panel, "import-model", "provider/two");
+            await changeField(panel, "import-thinking", "high");
+            await changeField(panel, "import-visibility", active ? "shared" : "owner");
+            await changeField(panel, "import-project", "local");
+            await changeField(panel, "import-consent", true);
+            const first = submit(panel);
+            const second = submit(panel);
+
+            await flush();
+            assert.equal(requests.length, 1, "a second click cannot start another copy");
+            assert.deepEqual(
+                [requests[0]!.path, requests[0]!.body],
+                [
+                    active ? "pi-sessions/active" : "pi-sessions/continue",
+                    {
+                        ...(active ? { id: "live-source" } : { path: "/history/session.jsonl" }),
+                        sha256: "a".repeat(64),
+                        leafId: "saved-leaf",
+                        model: "provider/two",
+                        thinkingLevel: "high",
+                        visibility: active ? "shared" : "owner",
+                        projectId: "local",
+                        acknowledged: true,
+                    },
+                ],
+            );
+            assert.equal(field(panel, "import-consent").props.disabled, true);
+            requests[0]!.resolve({ id: 45 });
+            await Promise.all([first, second]);
+            await flush();
+            assert.deepEqual(fixture.navigated, [45]);
+            assert.deepEqual(fixture.closed, [opening]);
+            assert.deepEqual(created, [45]);
+            dispose(panel);
+        });
+    }
+});
+
+test("guest imports, private-pane moves and already-shared previews cannot request Private", async (t) => {
+    for (const kind of ["guest", "private-pane", "already-shared"]) {
+        await t.test(kind, async () => {
+            reset();
+            const requests = holdApi();
+            const preview = importPreview(
+                kind === "already-shared" ? { existing: 45, visibility: "shared" } : {},
+            );
+
+            fixture.store.state.sheet = { type: "import" };
+
+            if (kind === "guest") {
+                fixture.store.state.me = { id: "guest", role: "guest", continuePiSessions: true };
+            }
+
+            const panel = mount(() =>
+                ImportPanel({
+                    initialPreview: preview,
+                    fromPrivate: kind === "private-pane",
+                }),
+            );
+
+            await flush();
+            assert.equal(field(panel, "import-visibility").props.value, "shared");
+            assert.equal(field(panel, "import-visibility").props.disabled, true);
+
+            if (kind === "guest") {
+                assert.equal(
+                    nodes(panel.tree).some((node) => node.props.id === "import-project"),
+                    false,
+                );
+            }
+
+            await changeField(panel, "import-visibility", "owner");
+            assert.equal(field(panel, "import-visibility").props.value, "shared");
+            await changeField(panel, "import-consent", true);
+            const saving = submit(panel);
+
+            assert.equal(requests.length, 1);
+            assert.equal(requests[0]!.body.visibility, "shared");
+            assert.equal(requests[0]!.body.projectId, kind === "guest" ? undefined : null);
+            requests[0]!.resolve({ id: 45 });
+            await saving;
+            await flush();
+            dispose(panel);
+        });
+    }
+});
+
+test("import confirmations reject a replacement preview until its new source is acknowledged", async () => {
+    reset();
+    fixture.store.state.sheet = { type: "import" };
+    const requests = holdApi();
+    let preview = importPreview();
+    const panel = mount(() => ImportPanel({ initialPreview: preview }));
+
+    await flush();
+    await changeField(panel, "import-consent", true);
+    const oldSubmit = find(panel, (node) => node.type === "form").props.onSubmit;
+
+    preview = importPreview({
+        path: "/history/other.jsonl",
+        sha256: "b".repeat(64),
+        leafId: "new-leaf",
+    });
+    render(panel);
+    await flush();
+    assert.equal(field(panel, "import-consent").props.checked, false);
+    const staleDispatch = oldSubmit({ preventDefault() {} });
+    const unacknowledgedDispatch = submit(panel);
+
+    await flush();
+    assert.equal(requests.length, 0);
+    await Promise.all([staleDispatch, unacknowledgedDispatch]);
+    await changeField(panel, "import-consent", true);
+    const saving = submit(panel);
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.body.path, "/history/other.jsonl");
+    assert.equal(requests[0]!.body.sha256, "b".repeat(64));
+    assert.equal(requests[0]!.body.leafId, "new-leaf");
+    requests[0]!.resolve({ id: 46 });
+    await saving;
+    await flush();
+    dispose(panel);
+});
+
+const lifecycleChanges: [string, (instance: Mount) => void][] = [
+    [
+        "another owner account",
+        () => {
+            fixture.store.state.me = { id: "other-owner", role: "owner" };
+        },
+    ],
+    [
+        "guest with import access",
+        () => {
+            fixture.store.state.me = { id: "owner", role: "guest", continuePiSessions: true };
+        },
+    ],
+    [
+        "a newer opening of the same sheet",
+        () => {
+            fixture.store.state.sheet = { ...fixture.store.state.sheet };
+        },
+    ],
+    ["component disposal", dispose],
+];
+
+test("import callbacks cannot dispatch or finish into a changed account, opening or disposed panel", async (t) => {
+    for (const phase of ["before dispatch", "while copying"]) {
+        for (const [name, change] of lifecycleChanges) {
+            await t.test(`${name}, ${phase}`, async () => {
+                reset();
+                fixture.store.state.sheet = { type: "import" };
+                const requests = holdApi();
+                const created: number[] = [];
+                const preview = importPreview();
+                const panel = mount(() =>
+                    ImportPanel({
+                        initialPreview: preview,
+                        onCreated: (id: number) => created.push(id),
+                    }),
+                );
+
+                await flush();
+                await changeField(panel, "import-consent", true);
+                const oldSubmit = find(panel, (node) => node.type === "form").props.onSubmit;
+                const saving = phase === "while copying" ? submit(panel) : null;
+
+                change(panel);
+
+                if (!panel.disposed) {
+                    render(panel);
+                }
+
+                const staleDispatch = oldSubmit({ preventDefault() {} });
+
+                await flush();
+
+                if (phase === "while copying") {
+                    assert.equal(requests.length, 1);
+                    requests[0]!.resolve({ id: 47 });
+                    await saving;
+                } else {
+                    assert.equal(requests.length, 0);
+                }
+
+                await staleDispatch;
+                await flush();
+                assert.deepEqual(fixture.closed, [], "the newer sheet stays open");
+                assert.deepEqual(fixture.navigated, []);
+                assert.deepEqual(created, []);
+                dispose(panel);
+            });
+        }
+    }
+});
+
+function privateImportRow(patch: Props = {}) {
+    return {
+        id: 71,
+        title: "Continued imported Chat",
+        imported: true,
+        ownerOnly: true,
+        threadType: "chat",
+        ...patch,
+    };
+}
+
+test("Share imported Chat confirms its selected target and optional project only once", async (t) => {
+    for (const projectId of ["local", ""]) {
+        await t.test(projectId || "no project", async () => {
+            reset();
+            const opening = { type: "share-import", id: 71 };
+            const requests = holdApi();
+
+            fixture.store.state.sheet = opening;
+            fixture.store.state.conversationId = 99;
+            fixture.store.state.sessions = [privateImportRow(), privateImportRow({ id: 99 })];
+            const sheet = mount(() => ShareImportSheet({ id: 71 }));
+
+            await flush();
+            assert.equal(field(sheet, "share-import-project").type, "select");
+            const unacknowledgedDispatch = submit(sheet);
+
+            await flush();
+            assert.equal(requests.length, 0, "sharing requires explicit consent");
+            await unacknowledgedDispatch;
+            await changeField(sheet, "share-import-consent", true);
+            const oldSubmit = find(sheet, (node) => node.type === "form").props.onSubmit;
+
+            await changeField(sheet, "share-import-project", projectId || "a");
+            assert.equal(field(sheet, "share-import-consent").props.checked, false);
+            const staleDispatch = oldSubmit({ preventDefault() {} });
+
+            await flush();
+            assert.equal(
+                requests.length,
+                0,
+                "a retained confirmation cannot use the old project consent",
+            );
+            await staleDispatch;
+
+            if (!projectId) {
+                await changeField(sheet, "share-import-project", "");
+            }
+
+            await changeField(sheet, "share-import-consent", true);
+            const first = submit(sheet);
+            const second = submit(sheet);
+
+            assert.equal(requests.length, 1);
+            assert.equal(requests[0]!.path, "pi-sessions/71/share");
+            assert.equal(requests[0]!.body.acknowledged, true);
+            assert.equal(requests[0]!.body.projectId ?? null, projectId || null);
+            assert.ok(
+                Object.keys(requests[0]!.body).every((key) =>
+                    ["acknowledged", "projectId"].includes(key),
+                ),
+            );
+            // The room event may arrive before the POST response; it must not suppress this success.
+            fixture.store.state.sessions[0].ownerOnly = false;
+            render(sheet);
+            requests[0]!.resolve({ id: 71 });
+            await Promise.all([first, second]);
+            await flush();
+            assert.deepEqual(fixture.closed, [opening]);
+            assert.deepEqual(fixture.navigated, [], "sharing does not switch the viewed Chat");
+            dispose(sheet);
+        });
+    }
+});
+
+test("share callbacks are bound to the owner, target and sheet opening across late responses", async (t) => {
+    const changes: [string, (instance: Mount) => void][] = [
+        ...lifecycleChanges,
+        [
+            "a different target sheet",
+            () => {
+                fixture.store.state.sheet = { type: "share-import", id: 99 };
+            },
+        ],
+    ];
+
+    for (const phase of ["before dispatch", "while sharing"]) {
+        for (const [name, change] of changes) {
+            await t.test(`${name}, ${phase}`, async () => {
+                reset();
+                fixture.store.state.sheet = { type: "share-import", id: 71 };
+                fixture.store.state.sessions = [privateImportRow(), privateImportRow({ id: 99 })];
+                const requests = holdApi();
+                const sheet = mount(() => ShareImportSheet({ id: 71 }));
+
+                await flush();
+                await changeField(sheet, "share-import-consent", true);
+                const oldSubmit = find(sheet, (node) => node.type === "form").props.onSubmit;
+                const saving = phase === "while sharing" ? submit(sheet) : null;
+
+                change(sheet);
+
+                if (!sheet.disposed) {
+                    render(sheet);
+                }
+
+                const staleDispatch = oldSubmit({ preventDefault() {} });
+
+                await flush();
+
+                if (phase === "while sharing") {
+                    assert.equal(requests.length, 1);
+                    requests[0]!.resolve({ id: 71 });
+                    await saving;
+                } else {
+                    assert.equal(requests.length, 0);
+                }
+
+                await staleDispatch;
+                await flush();
+                assert.deepEqual(fixture.closed, []);
+                assert.deepEqual(fixture.navigated, []);
+                dispose(sheet);
+            });
+        }
+    }
+});
+
+test("sidebar and Chat menu sharing are owner-only and offered only for an independent private imported Chat", async () => {
+    for (const [role, patch, offered] of [
+        ["owner", {}, true],
+        ["guest", {}, false],
+        ["owner", { ownerOnly: false }, false],
+        ["owner", { imported: false }, false],
+        ["owner", { workItemId: "work" }, false],
+        ["owner", { forkedFrom: 12 }, false],
+    ] as const) {
+        reset();
+        fixture.store.state.me.role = role;
+        fixture.store.state.conversationId = 99;
+        fixture.store.state.sheet = { type: "sidebar-options", kind: "thread", id: 71 };
+        fixture.store.state.sessions = [privateImportRow(patch)];
+        const menu = mount(() => SidebarOptions({ kind: "thread", id: 71 }));
+        const share = nodes(menu.tree).find(
+            (node) => node.type === "button" && textOf(node).trim() === "Share imported Chat…",
+        );
+
+        assert.equal(Boolean(share), offered, `${role}: ${JSON.stringify(patch)}`);
+
+        if (share) {
+            await share.props.onClick();
+            await flush();
+            assert.deepEqual(fixture.opened, [{ type: "share-import", id: 71 }]);
+            assert.deepEqual(fixture.navigated, []);
+        }
+
+        dispose(menu);
+        const { workItemId, ...conversation } = fixture.store.state.sessions[0];
+
+        fixture.store.state.view.conversation = {
+            ...conversation,
+            kind: "session",
+            ...(workItemId ? { workflow: { workItemId } } : {}),
+        };
+        fixture.store.state.view.subagents = [];
+        const chatMenu = mount(() => MenuSheet({ places: false }));
+
+        assert.equal(
+            nodes(chatMenu.tree).some(
+                (node) => node.type === "button" && textOf(node).startsWith("Share imported Chat…"),
+            ),
+            offered,
+            `Chat menu ${role}: ${JSON.stringify(patch)}`,
+        );
+        dispose(chatMenu);
+    }
+});
+
+test("unchecking consent invalidates retained acknowledged import and share submissions", async (t) => {
+    for (const sharing of [false, true]) {
+        await t.test(sharing ? "share" : "import", async () => {
+            reset();
+            fixture.store.state.sheet = { type: sharing ? "share-import" : "import", id: 71 };
+            fixture.store.state.sessions = [privateImportRow()];
+            const requests = holdApi();
+            const preview = importPreview();
+            const panel = mount(() =>
+                sharing ? ShareImportSheet({ id: 71 }) : ImportPanel({ initialPreview: preview }),
+            );
+            const consentId = sharing ? "share-import-consent" : "import-consent";
+
+            await flush();
+            await changeField(panel, consentId, true);
+            const oldSubmit = find(panel, (node) => node.type === "form").props.onSubmit;
+
+            await changeField(panel, consentId, false);
+            const dispatch = oldSubmit({ preventDefault() {} });
+
+            await flush();
+            assert.equal(
+                requests.length,
+                0,
+                "withdrawn consent cannot be restored by an old callback",
+            );
+            await dispatch;
+            dispose(panel);
+        });
+    }
+});
+
+test("retained share confirmations recheck that the selected row is still an independent private import", async (t) => {
+    for (const patch of [
+        { ownerOnly: false },
+        { imported: false },
+        { workItemId: "new-work" },
+        { forkedFrom: 12 },
+    ]) {
+        await t.test(JSON.stringify(patch), async () => {
+            reset();
+            fixture.store.state.sheet = { type: "share-import", id: 71 };
+            fixture.store.state.sessions = [privateImportRow()];
+            const requests = holdApi();
+            const sheet = mount(() => ShareImportSheet({ id: 71 }));
+
+            await flush();
+            await changeField(sheet, "share-import-consent", true);
+            const oldSubmit = find(sheet, (node) => node.type === "form").props.onSubmit;
+
+            fixture.store.state.sessions = [privateImportRow(patch)];
+            render(sheet);
+            const dispatch = oldSubmit({ preventDefault() {} });
+
+            await flush();
+            assert.equal(requests.length, 0);
+            await dispatch;
+            assert.deepEqual(fixture.closed, []);
+            dispose(sheet);
+        });
+    }
+});
+
+test("a retained sidebar Share action cannot open for a new account, opening or ineligible target", async (t) => {
+    for (const [name, change] of [
+        [
+            "another owner",
+            () => {
+                fixture.store.state.me = { id: "another-owner", role: "owner" };
+            },
+        ],
+        [
+            "guest",
+            () => {
+                fixture.store.state.me.role = "guest";
+            },
+        ],
+        [
+            "newer sheet",
+            () => {
+                fixture.store.state.sheet = { type: "sidebar-options", kind: "thread", id: 71 };
+            },
+        ],
+        [
+            "already shared",
+            () => {
+                fixture.store.state.sessions[0].ownerOnly = false;
+            },
+        ],
+        [
+            "grouped",
+            () => {
+                fixture.store.state.sessions[0].workItemId = "work";
+            },
+        ],
+    ] as const) {
+        await t.test(name, async () => {
+            reset();
+            fixture.store.state.sheet = { type: "sidebar-options", kind: "thread", id: 71 };
+            fixture.store.state.sessions = [privateImportRow()];
+            const menu = mount(() => SidebarOptions({ kind: "thread", id: 71 }));
+            const oldShare = button(menu, "Share imported Chat…").props.onClick;
+
+            change();
+            render(menu);
+            await oldShare();
+            await flush();
+            assert.deepEqual(fixture.opened, []);
+            assert.deepEqual(fixture.closed, [], "stale options must not close a newer sheet");
+            dispose(menu);
+        });
+    }
+});
 
 test("Work Item options offer only optional Limits for the selected PiP Thread", async () => {
     for (const state of [undefined, "running", "paused", "reclaimed"]) {
@@ -661,7 +1366,7 @@ test("project grants cannot browse Pi history or expose continuation grants, whi
         const panel = mount(() => ImportPanel({}));
 
         await flush();
-        assert.match(textOf(panel.tree), /not available with project-only access/);
+        assert.match(textOf(panel.tree), /history.*(?:not available|unavailable)/);
         assert.equal(
             nodes(panel.tree).some((node) => node.type === "button"),
             false,
@@ -708,7 +1413,7 @@ test("project grants cannot browse Pi history or expose continuation grants, whi
     await staleRefresh();
     await flush();
     assert.equal(reads, 1, "an old refresh control cannot continue reading after a project grant");
-    assert.match(textOf(legacy.tree), /not available with project-only access/);
+    assert.match(textOf(legacy.tree), /history.*(?:not available|unavailable)/);
     fixture.store.state.me = { id: "owner", role: "owner" };
     mount(() => ImportPanel({}));
     await flush();

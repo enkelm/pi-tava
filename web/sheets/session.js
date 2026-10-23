@@ -1,5 +1,5 @@
 // Session creation/import and the separate held-row actions share this module, not a sheet contract.
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { selectFromList, setArchived } from "../sessions.js";
 import {
     canSteer,
@@ -80,6 +80,9 @@ export function NewSessionSheet({
     const active = importAllowed && tab === "import" ? "import" : "new";
     const [visited, setVisited] = useState(() => new Set([active]));
     const [busy, setBusy] = useState(false);
+    // Only this opening's own tab switches may replace the sheet without invalidating import consent.
+    const opening = useRef(store.state.sheet);
+    const isCurrentOpening = () => store.state.sheet === opening.current;
 
     // Mount each flow on first use, then keep its folder options or import draft across tab switches.
     useEffect(() => {
@@ -89,8 +92,11 @@ export function NewSessionSheet({
     }, [active]);
 
     const select = (id) => {
-        if (!busy) {
-            openSheet({ ...store.state.sheet, type: "new-session", tab: id });
+        if (!busy && isCurrentOpening()) {
+            const next = { ...store.state.sheet, type: "new-session", tab: id };
+
+            opening.current = next;
+            openSheet(next);
         }
     };
 
@@ -177,6 +183,7 @@ export function NewSessionSheet({
                     (active === "import" || visited.has("import")) &&
                     html`<${ImportPanel}
                         initialPreview=${initialPreview}
+                        isCurrentOpening=${isCurrentOpening}
                         visible=${active === "import"}
                         onBusyChange=${setBusy}
                         onCreated=${() => {

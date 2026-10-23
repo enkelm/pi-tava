@@ -17,6 +17,7 @@ import {
 } from "../store.js";
 import { isPinned, togglePin } from "../theme.js";
 import { copyText, html, Icon, Sheet, SheetInfo } from "../ui.js";
+import { canShareImportedChat, importSharingAction } from "./pi-sessions.js";
 
 const NARROW = matchMedia("(max-width: 699px)");
 
@@ -267,6 +268,10 @@ export function SidebarOptions({ kind, id, at }) {
             add(workItem ? "Move Work Item to project…" : "Move to project…", "folder", () =>
                 openSheet({ type: "move-sessions", ids: [id] }),
             );
+        }
+
+        if (!grouped && canShareImportedChat(thread)) {
+            add("Share imported Chat…", "people", importSharingAction(id));
         }
 
         add("Copy link", "link", async () => {

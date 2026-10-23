@@ -39,7 +39,7 @@ Starter choices come from the application-owned WorkItems catalog and current na
 
 Confirming Start creates one thread directly in the selected project. Cancelling creates none. Creation retry receipts prevent duplicate conversations. Project selection performs no model request or naming work.
 
-Project defaults affect new threads only. Moving an existing thread changes organization, never its directory. Ungrouped forks and resends retain source placement and thread type, actual directory/worktree and owner-only restrictions. Grouped handoff threads cannot fork or resend around Work Item ownership. Imports retain their source directory and initially remain unassigned Chats; import destination selection is not extended by this feature.
+Project defaults affect new threads only. Moving an existing thread changes organization, never its directory. Ungrouped forks and resends retain source placement and thread type, actual directory/worktree and owner-only restrictions. Grouped handoff threads cannot fork or resend around Work Item ownership. Imports retain their source directory and default to unassigned Chats. The owner can select a project in import confirmation or when explicitly sharing an existing private imported Chat. Placement never changes the source directory or pinned machine; a private import remains owner-only inside a project. An unassigned shared import is still excluded from project-only grants, including All projects, and needs an exact-session invitation for those participants.
 
 ## SSH workspaces
 

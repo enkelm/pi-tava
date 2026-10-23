@@ -33,7 +33,7 @@ import { currentTrust, trustAvailable } from "../trust.js";
 import { branchAvailable } from "./branch.js";
 import { memoryAvailable, memoryHint, useMemory } from "./memory.js";
 import { defaultLabel, defaultsKept } from "./model.js";
-import { piSessionsAvailable } from "./pi-sessions.js";
+import { canShareImportedChat, importSharingAction, piSessionsAvailable } from "./pi-sessions.js";
 import { copyText, html, Icon, item, Sheet, shortPath } from "../ui.js";
 import { conversationLocation } from "../workspace-location.js";
 import { SshLogin } from "../ssh-login.js";
@@ -365,9 +365,8 @@ export function MenuSheet({ places = true, sheet = store.state.sheet }) {
     const namedAgent = Boolean(agent) || conversation?.pipAgent === true;
     const session = conversation?.kind === "session" && !namedAgent;
     const location = conversationLocation();
-    const workItem =
-        handoffsAvailable() &&
-        store.state.sessions.find((each) => each.id === conversation?.id)?.workItemId;
+    const thread = store.state.sessions.find((each) => each.id === conversation?.id);
+    const workItem = handoffsAvailable() && thread?.workItemId;
     const turns = view.turns;
     // While take turns is on, settings belong to the driver.
     const driving = !turns?.on || turns.driver === me?.id;
@@ -513,6 +512,15 @@ export function MenuSheet({ places = true, sheet = store.state.sheet }) {
                 )
             }
         </div>
+        ${
+            session &&
+            canShareImportedChat(thread) &&
+            item(
+                "Share imported Chat…",
+                importSharingAction(conversation.id),
+                "project and invitation access",
+            )
+        }
         ${
             session &&
             conversation.imported &&

@@ -6,6 +6,7 @@ import { configure, type ConversationId, type Tx } from "@earendil-works/pi-dura
 import type { PocketApp } from "./app.ts";
 import { canContinuePiSessions, type User } from "./config.ts";
 import { ImportedSessionDoc, ImportsDoc, SessionsDoc } from "./docs.ts";
+import type { ProjectSelection } from "./projects.ts";
 import { FROM_PI_ENTRY } from "./entry-format.ts";
 import { HttpError } from "./errors.ts";
 import { modelList } from "./models.ts";
@@ -24,6 +25,9 @@ export type ImportRequest = {
     model?: unknown;
     thinkingLevel?: unknown;
     visibility?: unknown;
+    projectId?: unknown;
+    /** The previewed Chat whose entire history the owner agreed to share on receipt reuse. */
+    existingId?: unknown;
     /** Old clients must never turn a copy into an abort or stop. */
     abortRunning?: unknown;
     stopped?: unknown;
@@ -54,21 +58,6 @@ export function importVisibility(request: ImportRequest): ImportVisibility {
     throw new HttpError(400, "Choose owner or shared import visibility");
 }
 
-async function reuseImport(tx: Tx, id: ConversationId, visibility: ImportVisibility) {
-    if (visibility === "shared") {
-        const sessions = await tx.doc(SessionsDoc);
-        const session = sessions.items[String(id)];
-
-        if (session?.imported !== true) {
-            throw new HttpError(409, "The imported conversation is no longer available");
-        }
-
-        session.ownerOnly = false;
-    }
-
-    return { id, existing: true };
-}
-
 export class PiSessions {
     readonly #app: PocketApp;
     readonly active: ActivePiSessions;
@@ -83,11 +72,145 @@ export class PiSessions {
     requireAccess(user: User): User {
         const current = this.#app.config.userById(user.id);
 
-        if (!current || !canContinuePiSessions(current)) {
+        if (
+            !current ||
+            current.tokenHash !== user.tokenHash ||
+            current.role !== user.role ||
+            !canContinuePiSessions(current)
+        ) {
             throw new HttpError(403, "Permission to continue local Pi sessions is required");
         }
 
+        return { ...current };
+    }
+
+    #owner(user: User): User {
+        const current = this.requireAccess(user);
+
+        if (current.role !== "owner") {
+            throw new HttpError(403, "Only the owner can share an imported Chat");
+        }
+
         return current;
+    }
+
+    #destination(user: User, request: { projectId?: unknown }): ProjectSelection | undefined {
+        if (request.projectId === undefined) {
+            return undefined;
+        }
+
+        this.#owner(user);
+
+        return this.#app.projects.prepare(user, {
+            projectId: request.projectId,
+            threadType: "chat",
+        });
+    }
+
+    /** Only a directly imported, independent Chat can lose its owner-only restriction. */
+    async #promote(
+        tx: Tx,
+        user: User,
+        id: ConversationId,
+        request: { projectId?: unknown },
+    ): Promise<void> {
+        this.#owner(user);
+        const imported = await tx.doc(ImportedSessionDoc, id);
+        const sessions = await tx.doc(SessionsDoc);
+        const meta = sessions.items[String(id)];
+
+        this.#owner(user);
+
+        if (
+            !meta ||
+            (meta.imported !== true && meta.fromPi === undefined) ||
+            imported.source === undefined ||
+            this.#app.rootOf(id) !== id ||
+            this.#app.pip.isInternal(id) ||
+            meta.pip !== undefined ||
+            meta.pipAgent !== undefined ||
+            meta.pipAgentId !== undefined ||
+            meta.pipWorkItemId !== undefined ||
+            meta.workItemId !== undefined ||
+            meta.accessFrom !== undefined ||
+            meta.forkedFrom !== undefined ||
+            meta.linkedFrom !== undefined ||
+            (meta.threadType !== undefined &&
+                meta.threadType !== "chat" &&
+                !(meta.threadType === "worker" && meta.fromPi !== undefined))
+        ) {
+            throw new HttpError(409, "Only an independent imported Chat can be shared here");
+        }
+
+        // A repeated/stale confirmation never relocates an already-shared Chat.
+        if (meta.ownerOnly !== false) {
+            // Projects also checks current steering/turn authority when placement is unchanged.
+            await this.#app.projects.assignTx(tx, user, id, request);
+            this.#owner(user);
+            meta.ownerOnly = false;
+        }
+    }
+
+    async #reuse(
+        tx: Tx,
+        user: User,
+        id: ConversationId,
+        visibility: ImportVisibility,
+        request: ImportRequest,
+    ) {
+        const sessions = await tx.doc(SessionsDoc);
+        const meta = sessions.items[String(id)];
+
+        this.requireAccess(user);
+
+        if (!meta || (meta.imported !== true && meta.fromPi === undefined)) {
+            throw new HttpError(409, "The imported conversation is no longer available");
+        }
+
+        if (visibility === "shared" && meta.ownerOnly !== false) {
+            if (request.existingId !== Number(id)) {
+                throw new HttpError(
+                    409,
+                    "This source already has a private imported Chat. Preview again to confirm sharing its entire history.",
+                );
+            }
+
+            await this.#promote(tx, user, id, request);
+        }
+
+        this.requireAccess(user);
+
+        return { id, existing: true };
+    }
+
+    /** Share the current Chat, including its continuation, without consulting the Pi source. */
+    async share(
+        user: User,
+        id: ConversationId,
+        request: { acknowledged?: unknown; projectId?: unknown },
+    ) {
+        user = { ...user };
+        request = { ...request };
+        this.#owner(user);
+
+        if (request.acknowledged !== true) {
+            throw new HttpError(400, "Confirm sharing this Chat's entire history");
+        }
+
+        this.#app.requireSee(user, id);
+
+        if (this.#app.sessionMeta(id) === undefined) {
+            throw new HttpError(404, "No such imported Chat");
+        }
+
+        await this.#app.requireDriver(id, user);
+
+        return this.#app.harness.commit(async (tx) => {
+            await this.#promote(tx, user, id, request);
+            this.#owner(user);
+
+            return { id };
+        }, context);
     }
 
     async #listHistory() {
@@ -240,7 +363,15 @@ export class PiSessions {
                 existing !== undefined && this.#app.sessionMeta(existing)?.ownerOnly === false
                     ? "shared"
                     : visibility,
-            ...(existing === undefined ? {} : { existing: Number(existing) }),
+            ...(existing === undefined
+                ? {}
+                : {
+                      existing: Number(existing),
+                      existingTitle: this.#app.sessionMeta(existing)?.title,
+                  }),
+            ...(current.role === "owner" && existing !== undefined
+                ? { projectId: this.#app.sessionMeta(existing)?.projectId }
+                : {}),
             ...(active === undefined
                 ? {}
                 : {
@@ -274,6 +405,8 @@ export class PiSessions {
     }
 
     async prepare(user: User, request: ImportRequest, options: { mode?: PiSessionMode } = {}) {
+        user = { ...user };
+        request = { ...request };
         const current = this.requireAccess(user);
         const visibility = this.#confirmation(current, request);
         const { source } = await this.#source(current, request, options.mode ?? "snapshot");
@@ -319,8 +452,15 @@ export class PiSessions {
     }
 
     async create(user: User, request: ImportRequest) {
+        user = { ...user };
+        request = { ...request };
         const caller = this.requireAccess(user);
         const intent = this.#confirmation(caller, request);
+
+        if (caller.role !== "owner" && request.projectId !== undefined) {
+            throw new HttpError(403, "Only the owner can place imported Chats in projects");
+        }
+
         const receiptKey = this.#key(caller, request.sha256 as string, request.leafId as string);
         const receipts = await this.#app.harness.snapshot(ImportsDoc, context);
 
@@ -340,7 +480,7 @@ export class PiSessions {
                     );
                 }
 
-                const result = await reuseImport(tx, existing, intent);
+                const result = await this.#reuse(tx, caller, existing, intent, request);
 
                 this.requireAccess(caller);
 
@@ -352,6 +492,7 @@ export class PiSessions {
         const { source, cwd, model, thinkingLevel, visibility } = prepared;
         const current = this.requireAccess(user);
         const key = this.#key(current, source.sha256, source.leafId);
+        const destination = this.#destination(current, request);
 
         return this.#app.harness.commit(async (tx) => {
             this.requireAccess(current);
@@ -359,13 +500,16 @@ export class PiSessions {
             const existing = imports.items[key];
 
             if (existing !== undefined) {
-                const result = await reuseImport(tx, existing, visibility);
+                const result = await this.#reuse(tx, current, existing, visibility, request);
 
                 this.requireAccess(current);
 
                 return result;
             }
 
+            const placement = destination
+                ? await this.#app.projects.place(tx, destination)
+                : undefined;
             const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
             const id = conversation.id;
 
@@ -397,6 +541,7 @@ export class PiSessions {
             sessions.items[String(id)] = {
                 cwd,
                 threadType: "chat",
+                ...(placement?.projectId === undefined ? {} : { projectId: placement.projectId }),
                 title: source.title,
                 createdAt: Date.now(),
                 updatedAt: Date.now(),

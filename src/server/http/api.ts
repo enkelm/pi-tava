@@ -809,6 +809,21 @@ export function createApi(options: HttpOptions, auth: Auth) {
         if (
             first === "pi-sessions" &&
             second !== undefined &&
+            third === "share" &&
+            method === "POST"
+        ) {
+            response.setHeader("cache-control", "no-store");
+
+            return json(
+                response,
+                200,
+                await app.piSessions.share(user, conversationId(second), await readJson(request)),
+            );
+        }
+
+        if (
+            first === "pi-sessions" &&
+            second !== undefined &&
             third === "archive" &&
             method === "GET"
         ) {

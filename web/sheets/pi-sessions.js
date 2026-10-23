@@ -1,6 +1,6 @@
 // One Pi-session picker and confirmation for saved history and live snapshots.
 import { useEffect, useRef, useState } from "preact/hooks";
-import { api, closeSheet, navigate, notify, store } from "../store.js";
+import { api, closeSheet, navigate, notify, openSheet, store } from "../store.js";
 import { html, Icon, Loader, Sheet, shortPath, timeAgo } from "../ui.js";
 
 export const piSessionsAvailable = () => {
@@ -15,10 +15,198 @@ export const piSessionsAvailable = () => {
     );
 };
 
+const accountKey = () => JSON.stringify([store.state.me?.id, store.state.me?.role]);
+
+export const canShareImportedChat = (session) =>
+    store.state.me?.role === "owner" &&
+    session?.imported &&
+    session.ownerOnly === true &&
+    !session.workItemId &&
+    !session.forkedFrom;
+
+/** The menu's selected target and opening survive only while their actual owner and access do. */
+export function importSharingAction(id) {
+    const account = accountKey();
+    const opening = store.state.sheet;
+
+    return () => {
+        const target = store.state.sessions.find((session) => session.id === id);
+
+        if (
+            accountKey() !== account ||
+            store.state.sheet !== opening ||
+            !canShareImportedChat(target)
+        ) {
+            throw new Error("This Chat or account changed. Reopen its options before sharing.");
+        }
+
+        openSheet({ type: "share-import", id });
+    };
+}
+
 export function ImportSheet({ initialPreview = null, fromPrivate = false }) {
-    return html`<${Sheet} title="Import & share" onClose=${closeSheet}>
+    return html`<${Sheet}
+        title=${fromPrivate ? "Import & share" : "Import Pi session"}
+        onClose=${closeSheet}
+    >
         <${ImportPanel} initialPreview=${initialPreview} fromPrivate=${fromPrivate} />
     <//>`;
+}
+
+/** Share the existing Chat, not a new snapshot of its original Pi journal. */
+export function ShareImportSheet({ id }) {
+    const target = store.state.sessions.find((session) => session.id === id);
+    const opening = useRef({ account: accountKey(), sheet: store.state.sheet, id });
+    const alive = useRef(true);
+    const pending = useRef(false);
+    const latest = useRef(null);
+    const confirmed = useRef(null);
+    const [projectId, setProjectId] = useState(target?.projectId ?? "");
+    const [consent, setConsent] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState("");
+    const project = (store.state.projects ?? []).find((item) => item.id === projectId);
+    const current = () =>
+        alive.current &&
+        opening.current.account === accountKey() &&
+        opening.current.sheet === store.state.sheet &&
+        opening.current.id === id &&
+        store.state.me?.role === "owner";
+    const eligible = current() && canShareImportedChat(target);
+    const key = JSON.stringify([
+        accountKey(),
+        id,
+        target?.title,
+        target?.projectId,
+        projectId,
+        project?.name,
+    ]);
+
+    latest.current = key;
+    const acknowledged = consent === key;
+
+    useEffect(
+        () => () => {
+            alive.current = false;
+        },
+        [],
+    );
+
+    const submit = async (event) => {
+        event.preventDefault();
+        const now = store.state.sessions.find((session) => session.id === id);
+        const nowProject = (store.state.projects ?? []).find((item) => item.id === projectId);
+        const nowKey = JSON.stringify([
+            accountKey(),
+            id,
+            now?.title,
+            now?.projectId,
+            projectId,
+            nowProject?.name,
+        ]);
+
+        if (
+            !current() ||
+            !eligible ||
+            !canShareImportedChat(now) ||
+            pending.current ||
+            !acknowledged ||
+            latest.current !== key ||
+            confirmed.current !== key ||
+            nowKey !== key ||
+            (projectId && !project)
+        ) {
+            return;
+        }
+
+        pending.current = true;
+        setBusy(true);
+        setError("");
+
+        try {
+            await api(`pi-sessions/${id}/share`, {
+                acknowledged: true,
+                projectId: projectId || null,
+            });
+
+            if (current()) {
+                notify(
+                    "info",
+                    "Chat shared under project and session-invitation access. The source archive stays owner-only.",
+                );
+                closeSheet();
+            }
+        } catch (failure) {
+            if (current()) {
+                confirmed.current = null;
+                setConsent(null);
+                setError(failure.message);
+            }
+        } finally {
+            pending.current = false;
+
+            if (alive.current) {
+                setBusy(false);
+            }
+        }
+    };
+
+    return html`<${Sheet} title="Share imported Chat" onClose=${closeSheet}>
+        ${
+            eligible
+                ? html`<form class="import-form" onSubmit=${submit}>
+            <h3>${target.title ?? "Imported Pi session"}</h3>
+            <p class="small">Shares this Chat’s entire current history, including messages added since import, and future messages. It does not re-import the Pi source.</p>
+            <${ImportProjectField}
+                id="share-import-project"
+                value=${projectId}
+                busy=${busy}
+                onChange=${(event) => {
+                    latest.current = null;
+                    confirmed.current = null;
+                    setConsent(null);
+                    setProjectId(event.currentTarget.value);
+                }}
+            />
+            <p class="small muted">Uses normal signed-in access: existing unrestricted access, project grants and session invitations. Never an anonymous link. To invite someone without project access, open this Chat and choose People → Invite → Only this session.</p>
+            <label class="check">
+                <input
+                    id="share-import-consent"
+                    type="checkbox"
+                    checked=${acknowledged}
+                    disabled=${busy}
+                    onChange=${(event) => {
+                        confirmed.current = event.currentTarget.checked ? key : null;
+                        setConsent(confirmed.current);
+                    }}
+                />
+                <span>Share this entire Chat${project ? ` in ${project.name}` : " without a project"}. The original source archive, other Pi branches and existing private forks stay owner-only.</span>
+            </label>
+            ${error && html`<p class="error-box" role="alert">${error}</p>`}
+            <button
+                class="button primary wide"
+                type="submit"
+                disabled=${busy || !acknowledged || (projectId && !project)}
+            >
+                ${busy ? "Sharing…" : "Share Chat"}
+            </button>
+        </form>`
+                : html`<p class="small muted">This private imported Chat is no longer available to share. Reopen its options to check its current access.</p>`
+        }
+    <//>`;
+}
+
+function ImportProjectField({ id, value, busy, onChange }) {
+    return html`<div class="field">
+        <label class="label" for=${id}>Project</label>
+        <select id=${id} value=${value} disabled=${busy} onChange=${onChange}>
+            <option value="">No project</option>
+            ${(store.state.projects ?? []).map(
+                (project) => html`<option value=${project.id}>${project.name}</option>`,
+            )}
+        </select>
+        <p class="small muted">Project access applies only when Shared. No project uses this Chat’s existing access and session invitations. Its working directory stays unchanged.</p>
+    </div>`;
 }
 
 /** Preserve newest-first discovery order within each exact working directory and between directories. */
@@ -239,6 +427,7 @@ export function ImportPanel({
     visible = true,
     onBusyChange,
     onCreated,
+    isCurrentOpening,
 }) {
     const allowed = piSessionsAvailable();
     const [mode, setMode] = useState("running");
@@ -250,15 +439,51 @@ export function ImportPanel({
     const [preview, setPreview] = useState(initialPreview);
     const [model, setModel] = useState("");
     const [thinking, setThinking] = useState("off");
-    const [acknowledged, setAcknowledged] = useState(false);
+    const [visibility, setVisibility] = useState("owner");
+    const [projectId, setProjectId] = useState("");
+    const [consent, setConsent] = useState(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const alive = useRef(true);
     const pending = useRef(false);
     const generation = useRef(0);
+    const scope = useRef({ account: accountKey(), sheet: store.state.sheet });
+    const inScope = () =>
+        alive.current &&
+        scope.current.account === accountKey() &&
+        (isCurrentOpening ? isCurrentOpening() : scope.current.sheet === store.state.sheet);
     const selected = preview?.models.find((item) => `${item.provider}/${item.id}` === model);
     const active = Boolean(preview?.activeId);
-    const sharing = fromPrivate || preview?.visibility === "shared";
+    const owner = store.state.me?.role === "owner";
+    const alreadyShared = preview?.existing !== undefined && preview.visibility === "shared";
+    const sharing = fromPrivate || !owner || alreadyShared || visibility === "shared";
+    const chosenProject = (store.state.projects ?? []).find((item) => item.id === projectId);
+    const intent = useRef(null);
+    const confirmed = useRef(null);
+    const intentKey = JSON.stringify([
+        accountKey(),
+        preview?.path,
+        preview?.activeId,
+        preview?.sha256,
+        preview?.leafId,
+        preview?.existing,
+        preview?.existingTitle,
+        model,
+        thinking,
+        sharing,
+        projectId,
+        chosenProject?.name,
+    ]);
+
+    intent.current = intentKey;
+    const acknowledged = consent === intentKey;
+
+    const resetConsent = () => {
+        intent.current = null;
+        confirmed.current = null;
+        setConsent(null);
+    };
+
     const sourceTab = mode === "running" ? "live" : "history";
 
     useEffect(
@@ -273,13 +498,19 @@ export function ImportPanel({
 
     const clearPreview = () => {
         setPreview(null);
-        setAcknowledged(false);
+        resetConsent();
         setError("");
     };
 
     const showPreview = (result) => {
+        if (!inScope()) {
+            return;
+        }
+
         setPreview(result);
-        setAcknowledged(false);
+        resetConsent();
+        setVisibility(result.visibility === "shared" ? "shared" : "owner");
+        setProjectId(result.projectId ?? "");
         const preferred = result.sourceModel
             ? `${result.sourceModel.provider}/${result.sourceModel.modelId}`
             : "";
@@ -370,7 +601,7 @@ export function ImportPanel({
     };
 
     const choose = async (session) => {
-        if (!piSessionsAvailable() || pending.current) {
+        if (!inScope() || !piSessionsAvailable() || pending.current) {
             return;
         }
 
@@ -401,12 +632,27 @@ export function ImportPanel({
         event.preventDefault();
 
         if (
+            !inScope() ||
             !piSessionsAvailable() ||
             pending.current ||
-            (preview && (!selected || !acknowledged))
+            (preview &&
+                (!selected ||
+                    !acknowledged ||
+                    intent.current !== intentKey ||
+                    confirmed.current !== intentKey ||
+                    (projectId && !chosenProject)))
         ) {
             return;
         }
+
+        const account = accountKey();
+        const opening = store.state.sheet;
+        const current = () =>
+            alive.current &&
+            accountKey() === account &&
+            store.state.sheet === opening &&
+            intent.current === intentKey &&
+            piSessionsAvailable();
 
         pending.current = true;
         setBusy(true);
@@ -419,7 +665,7 @@ export function ImportPanel({
                     ...(leafId.trim() ? { leafId: leafId.trim() } : {}),
                 });
 
-                if (alive.current) {
+                if (current()) {
                     showPreview(result);
                 }
             } else {
@@ -430,8 +676,14 @@ export function ImportPanel({
                     model,
                     thinkingLevel: thinking,
                     acknowledged,
-                    ...(sharing ? { visibility: "shared" } : {}),
+                    visibility: sharing ? "shared" : "owner",
+                    ...(owner ? { projectId: projectId || null } : {}),
+                    ...(preview.existing === undefined ? {} : { existingId: preview.existing }),
                 });
+
+                if (!current()) {
+                    return;
+                }
 
                 notify(
                     "info",
@@ -447,11 +699,11 @@ export function ImportPanel({
                 }
             }
         } catch (failure) {
-            if (alive.current) {
+            if (current()) {
                 setError(failure.message);
 
                 if (failure.status === 409) {
-                    setAcknowledged(false);
+                    resetConsent();
 
                     if (!fromPrivate) {
                         setPreview(null);
@@ -467,8 +719,8 @@ export function ImportPanel({
         }
     };
 
-    if (!allowed) {
-        return html`<p class="muted small">Local Pi history is not available with project-only access.</p>`;
+    if (!allowed || !inScope()) {
+        return html`<p class="muted small">Local Pi history is unavailable with this access. Reopen Import after changing accounts.</p>`;
     }
 
     return html`
@@ -609,6 +861,10 @@ export function ImportPanel({
                         <h3>${preview.title}</h3>
                         <p class="small import-cwd">${preview.cwd}</p>
                         <p class="small muted">${active ? "Move copies saved history; Pi keeps running." : "Copies saved history without changing the original."} Unfinished work is not resumed here.</p>
+                        ${
+                            preview.existing !== undefined &&
+                            html`<p class="small">Opens existing Chat #${preview.existing}: ${preview.existingTitle ?? "Imported Pi session"}. Sharing publishes its entire current history, including messages added since import, and future messages, not just the source excerpts below.</p>`
+                        }
                         <div class="field">
                             <label class="label" for="import-model">Destination model</label>
                             <select
@@ -617,6 +873,7 @@ export function ImportPanel({
                                 required
                                 disabled=${busy}
                                 onChange=${(event) => {
+                                    resetConsent();
                                     setModel(event.currentTarget.value);
                                     setThinking("off");
                                 }}
@@ -639,11 +896,42 @@ export function ImportPanel({
                                 id="import-thinking"
                                 value=${thinking}
                                 disabled=${busy || !selected}
-                                onChange=${(event) => setThinking(event.currentTarget.value)}
+                                onChange=${(event) => {
+                                    resetConsent();
+                                    setThinking(event.currentTarget.value);
+                                }}
                             >
                                 ${(selected?.levels ?? ["off"]).map((level) => html`<option value=${level}>${level}</option>`)}
                             </select>
                         </div>
+                        <div class="field">
+                            <label class="label" for="import-visibility">Visibility</label>
+                            <select
+                                id="import-visibility"
+                                value=${sharing ? "shared" : "owner"}
+                                disabled=${busy || fromPrivate || !owner || alreadyShared}
+                                onChange=${(event) => {
+                                    resetConsent();
+                                    setVisibility(event.currentTarget.value);
+                                }}
+                            >
+                                <option value="owner">Private — owner only</option>
+                                <option value="shared">Shared — project / invitation access</option>
+                            </select>
+                            <p class="small muted">${alreadyShared ? "This copy is already shared. Reopening it cannot make it private." : "Shared is never anonymous. Choose a project for project-scoped collaborators, or invite people to this Chat."}</p>
+                        </div>
+                        ${
+                            owner &&
+                            html`<${ImportProjectField}
+                            id="import-project"
+                            value=${projectId}
+                            busy=${busy || alreadyShared}
+                            onChange=${(event) => {
+                                resetConsent();
+                                setProjectId(event.currentTarget.value);
+                            }}
+                        />`
+                        }
                         <details class="import-history-preview">
                             <summary>Saved history and import limits</summary>
                             <div class="import-history-messages">
@@ -668,16 +956,21 @@ export function ImportPanel({
                                 type="checkbox"
                                 checked=${acknowledged}
                                 disabled=${busy}
-                                onChange=${(event) => setAcknowledged(event.currentTarget.checked)}
+                                onChange=${(event) => {
+                                    confirmed.current = event.currentTarget.checked
+                                        ? intentKey
+                                        : null;
+                                    setConsent(confirmed.current);
+                                }}
                             />
-                            <span>${sharing ? "Share this copied conversation with app participants. The source archive stays owner-only." : "Continue this saved snapshot with Coop’s instructions and tools. It stays owner-only."}</span>
+                            <span>${sharing ? `${preview.existing === undefined ? "Copy this saved branch and share the Chat" : `Share existing Chat #${preview.existing}’s entire current history, including messages added since import, and future messages`}${chosenProject ? ` in ${chosenProject.name}` : " under its existing access and session invitations"}. Future messages here are shared too. The source archive and other branches stay owner-only.` : "Copy this saved branch into a private Chat using Coop’s instructions and tools. Only the owner can access it, even in a project."}</span>
                         </label>
                     </section>`
                     }
                     <button
                         class="button primary wide"
                         type="submit"
-                        disabled=${busy || (!preview && !path.trim()) || (preview && (!selected || !acknowledged))}
+                        disabled=${busy || (!preview && !path.trim()) || (preview && (!selected || !acknowledged || (projectId && !chosenProject)))}
                     >
                         ${busy ? (preview ? "Copying history…" : "Reading session…") : !preview ? "Preview import" : "Move"}
                     </button>

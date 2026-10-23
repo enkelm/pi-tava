@@ -240,6 +240,7 @@ test("defaults stay private; preview cannot promote; confirmed retry promotes on
         );
         const promoted = await app.piSessions.create(owner(app), {
             ...request,
+            existingId: Number(original.id),
             visibility: "shared",
         });
 
@@ -297,7 +298,11 @@ test("saved-file and active previews disclose existing shared imports without pu
             "shared",
         );
         assert.deepEqual(await app.harness.snapshot(SessionsDoc, context), privateSessions);
-        await app.piSessions.create(owner(app), { ...request, visibility: "shared" });
+        await app.piSessions.create(owner(app), {
+            ...request,
+            existingId: Number(result.id),
+            visibility: "shared",
+        });
         const sharedSessions = await app.harness.snapshot(SessionsDoc, context);
         const provenance = await app.harness.snapshot(ImportedSessionDoc, result.id, context);
         const index = await app.harness.snapshot(ImportsDoc, context);
@@ -407,7 +412,11 @@ test("shared creation and private promotion roll back atomically with the import
 
         fault = failCommit();
         await assert.rejects(
-            app.piSessions.create(owner(app), { ...request, visibility: "shared" }),
+            app.piSessions.create(owner(app), {
+                ...request,
+                existingId: Number(original.id),
+                visibility: "shared",
+            }),
             /injected/,
         );
         fault.mock.restore();
@@ -417,7 +426,11 @@ test("shared creation and private promotion roll back atomically with the import
                 .ownerOnly,
             true,
         );
-        await app.piSessions.create(owner(app), { ...request, visibility: "shared" });
+        await app.piSessions.create(owner(app), {
+            ...request,
+            existingId: Number(original.id),
+            visibility: "shared",
+        });
         assert.equal(app.sessionMeta(original.id)!.ownerOnly, false);
     } finally {
         fault?.mock.restore();
