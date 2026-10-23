@@ -429,6 +429,8 @@ type RendererState = {
     iframe: { current: HostFrame | null };
     source: string;
     active: boolean;
+    visible: boolean;
+    editorReady: boolean;
     inputReady: boolean;
     loading: boolean;
     error: boolean;
@@ -730,6 +732,90 @@ test("an over-budget DPR stays in error until the budget changes or an explicit 
     assert.equal(f.options.ch, 20);
 });
 
+test("same-split focus and metadata updates retain the warm painter, not stale input readiness", async (t) => {
+    const f = await hookFixture(t);
+    const firstPane = f.options.surface.panes[0]!;
+    const secondPane = {
+        ...firstPane,
+        pane_id: "pane-2",
+        focused: false,
+        rect: { ...firstPane.rect, x: 1 },
+        inner_rect: { ...firstPane.inner_rect, x: 1 },
+    };
+
+    f.options.surface = {
+        ...f.options.surface,
+        frame: { width: 2, height: 1, cells: [{ symbol: "a" }, { symbol: "b" }] },
+        panes: [firstPane, secondPane],
+    };
+    await f.update();
+    await f.load();
+    const node = f.frame;
+
+    await f.ready(node);
+    await f.painted(node);
+    const before = last(node.messages);
+
+    f.options.surface = {
+        ...f.options.surface,
+        projection_revision: "9007199254741000",
+        panes: f.options.surface.panes
+            .map((pane) => ({ ...pane, focused: pane.pane_id === "pane-2" }))
+            .reverse(),
+    };
+    await f.update();
+    assert.equal(f.frame, node, "focus navigation reuses the same child session");
+    assert.equal(last(node.messages).type, "gpui-present", "no clear or blank scene");
+    assert.equal(f.state.visible, true, "retain acknowledged same-split pixels");
+    assert.equal(f.state.loading, false, "warm focus is not renderer startup");
+    assert.equal(f.state.active, false);
+    assert.equal(f.state.editorReady, false, "composition cannot migrate to the new pane");
+    assert.equal(f.state.inputReady, false);
+    await f.painted(node, before);
+    assert.equal(
+        f.state.inputReady,
+        false,
+        "the old target's receipt cannot authorize the new one",
+    );
+    await f.painted(node);
+    assert.equal(f.state.active, true);
+    assert.equal(f.state.inputReady, true);
+
+    f.options.surface = { ...f.options.surface, projection_revision: "9007199254741001" };
+    await f.update();
+    assert.equal(f.state.visible, true);
+    assert.equal(f.state.loading, false);
+    assert.equal(f.state.editorReady, true, "the unchanged editor keeps focus/IME intent");
+    assert.equal(
+        f.state.inputReady,
+        false,
+        "editor continuity is not permission to send blind input",
+    );
+    await f.painted(node);
+    assert.equal(f.state.inputReady, true);
+
+    f.options.surface = {
+        ...f.options.surface,
+        projection_revision: "9007199254741002",
+        panes: f.options.surface.panes.map((pane) => ({
+            ...pane,
+            pane_id: `other-${pane.pane_id}`,
+        })),
+    };
+    await f.update();
+    assert.equal(f.frame, node, "even a real view change reuses the renderer connection");
+    assert.equal(last(node.messages).type, "gpui-clear");
+    assert.equal(
+        f.state.visible,
+        false,
+        "a different native view cannot expose old terminal content",
+    );
+    assert.equal(f.state.loading, true);
+    assert.equal(f.state.editorReady, false);
+    assert.equal(f.state.inputReady, false);
+    assert.equal(f.requests.length, 1, "navigation never starts another renderer download/session");
+});
+
 test("geometry-only repaints preserve acknowledged input intent, but new input contexts need their own paint", async (t) => {
     const f = await hookFixture(t);
 
@@ -795,7 +881,6 @@ test("geometry-only repaints preserve acknowledged input intent, but new input c
     const contexts: [string, () => void][] = [
         ["input epoch", () => f.options.inputEpoch++],
         ["boot", () => (f.options.surface.boot_id = "boot-2")],
-        ["exact projection", () => (f.options.surface.projection_revision = "9007199254741000")],
         [
             "popup opens",
             () => {

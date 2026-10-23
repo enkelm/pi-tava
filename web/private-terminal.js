@@ -1327,7 +1327,7 @@ export function PrivateTerminal({
     const controller = useRef(null);
     const retained = useRef(null);
     const opened = useRef(false);
-    const lastSurface = useRef(null);
+    const lastPresentation = useRef(null);
     const gridFocus = useRef(null);
     const wantsFocus = useRef(matchMedia("(min-width: 960px)").matches);
     const host = useRef(null);
@@ -1439,14 +1439,28 @@ export function PrivateTerminal({
         !state.targetPending;
 
     if (!connected || state.paused || !state.surfaceActive) {
-        lastSurface.current = null;
+        lastPresentation.current = null;
     } else if (state.surface) {
-        lastSurface.current = state.surface;
+        lastPresentation.current = { surface: state.surface, images: state.images };
     }
 
-    // A metadata revision may arrive just before its matching surface. Keep the textarea node,
-    // but never route input using the preceding frame. Resume focus only for terminal intent.
-    const displaySurface = state.surface || lastSurface.current;
+    // A metadata revision may precede its surface. Retain the complete prior view only
+    // when it already contains the requested pane (for example, focusing a split).
+    // Keep its images paired; a new image set can arrive before the replacement surface.
+    // Never cover it with the opaque route's text preview or use it to authorize input.
+    const candidate = state.surface || lastPresentation.current?.surface;
+    const displayImages = state.surface ? state.images : lastPresentation.current?.images || [];
+    const desiredPane = state.targetPending ? nativeId : state.snapshot?.focused_pane_id;
+    const displaySurface = candidate?.panes?.some((pane) => pane.pane_id === desiredPane)
+        ? candidate
+        : null;
+    const inputPending =
+        connected &&
+        state.surfaceActive &&
+        !state.paused &&
+        !state.targetPending &&
+        !state.surface &&
+        displaySurface?.panes?.some((pane) => pane.focused && pane.pane_id === desiredPane);
 
     const restoreInputFocus = () => {
         if (
@@ -1857,8 +1871,9 @@ export function PrivateTerminal({
                 Grid &&
                 html`<${Grid}
                 surface=${state.surfaceActive && !state.paused ? displaySurface : null}
-                images=${interactive ? state.images : []}
+                images=${displayImages}
                 enabled=${interactive}
+                inputPending=${Boolean(inputPending)}
                 inputEpoch=${state.inputEpoch}
                 focusRef=${gridFocus}
                 onInputReady=${restoreInputFocus}
@@ -1894,7 +1909,7 @@ export function PrivateTerminal({
                 }}
             />`
             }
-            ${(!interactive || !state.surface) && html`<pre class="private-terminal-preview" aria-label="Read-only terminal snapshot">${state.paused ? "Painting paused while hidden or offline." : fallback || "Waiting for terminal output…"}</pre>`}
+            ${!displaySurface && html`<pre class="private-terminal-preview" aria-label="Read-only terminal snapshot">${state.paused ? "Painting paused while hidden or offline." : fallback || "Waiting for terminal output…"}</pre>`}
         </div>
         ${!Grid && footer(null)}
     </div>`;

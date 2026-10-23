@@ -1314,7 +1314,12 @@ test(
             );
 
             // Real keyboard/click navigation with asynchronous native projections keeps input ownership.
-            const project = async (paneId: string, tabId: string, revision: number) => {
+            const project = async (
+                paneId: string,
+                tabId: string,
+                revision: number,
+                expectWarm = false,
+            ) => {
                 const next = {
                     ...snapshot,
                     revision,
@@ -1345,6 +1350,18 @@ test(
                     true,
                     "metadata gaps preserve the renderer textarea node",
                 );
+
+                if (expectWarm) {
+                    assert.equal(
+                        await value(
+                            page,
+                            "document.querySelector('.private-terminal-preview') === null",
+                        ),
+                        true,
+                        "same-view metadata gaps must not cover retained pixels with a text preview",
+                    );
+                }
+
                 await page.evaluate(
                     `window.fixtureSurface = ${JSON.stringify(frame)}; window.fixtureSockets[0].receive({type:'surface',surface:window.fixtureSurface})`,
                 );
@@ -1364,8 +1381,61 @@ test(
             await page.evaluate(
                 `window.fixtureInput = document.querySelector('.terminal-grid-input'); window.fixtureInput.focus()`,
             );
+            await page.evaluate(`window.fixturePainter = document.querySelector('.terminal-grid-gpui');
+                window.fixtureGpuiAutoPaint = false;
+                window.fixtureInput.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true}));`);
+            await project("native-agent", "native-tab", 20, true);
+            await until(
+                () =>
+                    value(
+                        page,
+                        `window.fixturePainter.contentWindow.fixtureGpui.messages.at(-1)?.presentation?.surface.projection_revision === 20`,
+                    ),
+                "same-pane metadata reaches the warm painter",
+            );
+            assert.equal(
+                await focused(),
+                true,
+                "same-target metadata/paint gaps preserve native editor focus",
+            );
+            await page.evaluate(`window.fixtureGpuiAutoPaint = true;
+                window.fixturePainter.contentWindow.fixtureGpui.paint();`);
+            await ready(page);
+            await page.evaluate(
+                `window.fixtureInput.dispatchEvent(new CompositionEvent('compositionend', {bubbles:true,data:'same-pane-composition'}))`,
+            );
+            assert.equal(
+                await value(
+                    page,
+                    `window.fixtureSockets[0].sent.some(frame => frame.type === 'input' && frame.events.some(event => event.TextCommit === 'same-pane-composition'))`,
+                ),
+                true,
+                "live composition survives same-target metadata and its paint receipt",
+            );
+            await page.evaluate("window.fixtureGpuiAutoPaint = false");
             await page.press("Meta+Alt+ArrowRight");
-            await project("native-shell", "native-tab", 2);
+            await project("native-shell", "native-tab", 2, true);
+            await until(
+                () =>
+                    value(
+                        page,
+                        `window.fixturePainter.contentWindow.fixtureGpui.messages.at(-1)?.presentation?.surface.projection_revision === 2`,
+                    ),
+                "split focus reaches the retained painter without a clear",
+            );
+            assert.deepEqual(
+                await value(
+                    page,
+                    `({same:document.querySelector('.terminal-grid-gpui') === window.fixturePainter,
+                    visible:getComputedStyle(window.fixturePainter).visibility,
+                    loading:!!document.querySelector('.terminal-grid-renderer-status'),
+                    inputDisabled:window.fixtureInput.disabled})`,
+                ),
+                { same: true, visible: "visible", loading: false, inputDisabled: true },
+                "split focus keeps valid pixels visible while its new input target awaits paint",
+            );
+            await page.evaluate(`window.fixtureGpuiAutoPaint = true;
+                window.fixturePainter.contentWindow.fixtureGpui.paint();`);
             await until(focused, "keyboard navigation restores terminal focus after a new surface");
             await page.press("q");
             assert.equal(

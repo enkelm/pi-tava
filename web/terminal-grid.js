@@ -439,6 +439,7 @@ export async function clipboardPNG(file) {
  * only explicit image paste gestures. Parent wraps this in native clipboard-image + bootId.
  * onResize({cols,rows,cell_width_px,cell_height_px}) fires only while enabled.
  * onInputReady() lets the embedding view restore guarded focus after renderer startup.
+ * inputPending preserves an unchanged editor during a metadata/surface gap, not input admission.
  * onAction: focus-pane, unsupported; no Herdr mutation is inferred from a render.
  * focus-pane is called before the first mouse event; false / Promise<false> rejects it.
  * inputEpoch identifies the UI connection/stream generation, even for the same boot/pane.
@@ -454,6 +455,7 @@ export function TerminalGrid({
     surface,
     images = [],
     enabled = false,
+    inputPending = false,
     disabled = false,
     onInput,
     onInputReady,
@@ -547,6 +549,7 @@ export function TerminalGrid({
     });
     // Require a painted input context, but preserve IME across geometry-only repaints.
     const interactive = enabled && !disabled && gpui.inputReady;
+    const editorEnabled = !disabled && (enabled || inputPending) && gpui.editorReady;
 
     const activeTarget = () => {
         const pending = pendingPane.current;
@@ -636,7 +639,11 @@ export function TerminalGrid({
     ]);
 
     if (pasteState.current.context !== pasteContext) {
-        if (composing.current && pasteState.current.context) {
+        if (
+            composing.current &&
+            pasteState.current.context &&
+            (!editorEnabled || compositionTarget.current?.id !== target.id)
+        ) {
             cancelledComposition.current = true;
         }
 
@@ -722,7 +729,14 @@ export function TerminalGrid({
         if (input.current) {
             input.current.value = "";
         }
-    }, [surface?.boot_id, surface?.popup?.terminal_id, interactive, inputEpoch]);
+    }, [surface?.boot_id, surface?.popup?.terminal_id, editorEnabled, inputEpoch, target.id]);
+
+    useEffect(() => {
+        if (!interactive) {
+            held.current.clear();
+            drag.current = null;
+        }
+    }, [interactive]);
 
     useEffect(() => {
         setSelection(null);
@@ -1492,6 +1506,12 @@ export function TerminalGrid({
 
     const keydown = (event) => {
         if (!interactive) {
+            event.stopPropagation();
+
+            if (!composing.current && !event.isComposing) {
+                event.preventDefault();
+            }
+
             return;
         }
 
@@ -1624,6 +1644,8 @@ export function TerminalGrid({
 
     const paste = (event) => {
         if (!interactive) {
+            event.preventDefault();
+
             return;
         }
 
@@ -1882,7 +1904,7 @@ export function TerminalGrid({
                                 style=${pixels({ left: touchSelection.x * cw, top: touchSelection.y * ch })} />`
                         }
                         <textarea ref=${input} class="terminal-grid-input" aria-label="Terminal input"
-                            disabled=${!interactive} readOnly=${!interactive || touchInput}
+                            disabled=${!editorEnabled} readOnly=${!editorEnabled || touchInput}
                             inputMode=${touchInput ? "none" : "text"} spellcheck="false"
                             autocapitalize="off" autocomplete="off" autocorrect="off" enterkeyhint="enter"
                             style=${pixels({
@@ -1907,7 +1929,7 @@ export function TerminalGrid({
                                 }
                             }} onKeyDown=${keydown} onKeyUp=${keyup} onPaste=${paste}
                             onCompositionStart=${() => {
-                                cancelledComposition.current = false;
+                                cancelledComposition.current = !interactive;
                                 composing.current = true;
                                 compositionTarget.current = {
                                     ...activeTarget(),
@@ -1948,7 +1970,15 @@ export function TerminalGrid({
                                 e.currentTarget.value = "";
                             }}
                             onBeforeInput=${(e) => {
-                                if (!interactive || composing.current || e.isComposing) {
+                                if (!interactive) {
+                                    if (!composing.current && !e.isComposing) {
+                                        e.preventDefault();
+                                    }
+
+                                    return;
+                                }
+
+                                if (composing.current || e.isComposing) {
                                     return;
                                 }
 
@@ -1971,7 +2001,13 @@ export function TerminalGrid({
                                     return;
                                 }
 
-                                if (!interactive || composing.current || e.isComposing) {
+                                if (composing.current || e.isComposing) {
+                                    return;
+                                }
+
+                                if (!interactive) {
+                                    e.currentTarget.value = "";
+
                                     return;
                                 }
 
@@ -2000,7 +2036,7 @@ export function TerminalGrid({
                     aria-hidden="true"
                     tabIndex="-1"
                     src=${gpui.source}
-                    style=${{ ...pixels({ width, height }), visibility: gpui.active ? "visible" : "hidden" }}
+                    style=${{ ...pixels({ width, height }), visibility: gpui.visible ? "visible" : "hidden" }}
                     sandbox="allow-scripts allow-same-origin"
                     allow="webgpu"
                     referrerpolicy="no-referrer"
@@ -2009,7 +2045,7 @@ export function TerminalGrid({
             </div>
             ${
                 drawable &&
-                !gpui.active &&
+                (gpui.loading || gpui.error) &&
                 html`<div class="terminal-grid-renderer-status" role="status">
                     <span>${gpui.error ? "Terminal renderer unavailable." : "Loading terminal renderer…"}</span>
                     ${

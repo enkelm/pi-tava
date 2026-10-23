@@ -29,12 +29,17 @@ const bundle = await build({
                     namespace: "test-renderer",
                 }));
                 build.onLoad({ filter: /.*/, namespace: "test-renderer" }, () => ({
-                    contents: `export const useTerminalRenderer = () => ({
-                        ...globalThis[Symbol.for("terminal-grid-render-test-painter")],
-                        inputReady: globalThis[Symbol.for("terminal-grid-render-test-painter")].inputReady
-                            ?? globalThis[Symbol.for("terminal-grid-render-test-painter")].active,
-                        iframe: {current: null}, source: "", retry() {},
-                    });`,
+                    contents: `export const useTerminalRenderer = () => {
+                        const state = globalThis[Symbol.for("terminal-grid-render-test-painter")];
+                        return {
+                            ...state,
+                            inputReady: state.inputReady ?? state.active,
+                            editorReady: state.editorReady ?? state.inputReady ?? state.active,
+                            visible: state.visible ?? state.active,
+                            loading: state.loading ?? (!state.active && !state.error),
+                            iframe: {current: null}, source: "", retry() {},
+                        };
+                    };`,
                 }));
                 build.onResolve({ filter: /^preact\/hooks$/ }, () => ({
                     path: "initial-render-hooks",
@@ -317,6 +322,70 @@ test("loading and failed rendering disable the existing input surface instead of
             clientY: 50,
             preventDefault() {},
         });
+        assert.deepEqual(delivered, []);
+    }
+});
+
+test("warm editor continuity never buffers or sends input before current paint admission", (t) => {
+    t.after(ready);
+    Reflect.set(globalThis, painterKey, {
+        active: false,
+        visible: true,
+        editorReady: true,
+        inputReady: false,
+        loading: false,
+        error: false,
+    });
+
+    for (const admission of [
+        { enabled: true, inputPending: false },
+        { enabled: false, inputPending: true },
+    ]) {
+        const delivered: unknown[] = [];
+        const rect = { x: 0, y: 0, width: 8, height: 6 };
+        const nodes = descendants(
+            TerminalGrid({
+                ...admission,
+                surface: {
+                    boot_id: "synthetic-warm-editor",
+                    frame: frame(8, 6, { x: 0, y: 0, shape: 0 }),
+                    panes: [{ pane_id: "pane", focused: true, rect, inner_rect: rect }],
+                },
+                showKeybar: false,
+                cellWidth: 10,
+                cellHeight: 20,
+                onInput: (...args: unknown[]) => delivered.push(args),
+            }),
+        );
+        const input = nodes.find((node) => node.type === "textarea");
+        const status = nodes.find(
+            (node) => "class" in node.props && node.props.class === "terminal-grid-renderer-status",
+        );
+
+        assert.ok(input);
+        assert.ok("disabled" in input.props && !input.props.disabled, "retain the native editor");
+        assert.equal(status, undefined, "an acknowledged warm scene is not a cold load");
+        assert.ok("onKeyDown" in input.props && typeof input.props.onKeyDown === "function");
+        let prevented = 0;
+
+        input.props.onKeyDown({
+            key: "q",
+            preventDefault: () => prevented++,
+            stopPropagation() {},
+        });
+        assert.equal(prevented, 1);
+        assert.ok("onInput" in input.props && typeof input.props.onInput === "function");
+        const textarea = { value: "must-not-buffer-unacknowledged-text" };
+
+        input.props.onInput({ currentTarget: textarea });
+        assert.equal(
+            textarea.value,
+            "",
+            "DOM text must not leak into a later admitted input event",
+        );
+        assert.ok("onPaste" in input.props && typeof input.props.onPaste === "function");
+        input.props.onPaste({ preventDefault: () => prevented++ });
+        assert.equal(prevented, 2, "native paste cannot buffer text either");
         assert.deepEqual(delivered, []);
     }
 });

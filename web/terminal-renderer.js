@@ -12,6 +12,8 @@ export function useTerminalRenderer(options) {
     const assets = useRef(null);
     const latest = useRef(options);
     const generation = useRef({ key: "", value: 0 });
+    const pixels = useRef({ key: "", painted: false });
+    const editorContext = useRef({ key: "", painted: false });
     const inputContext = useRef({ key: "", painted: false });
     const [attempt, setAttempt] = useState(0);
     const [source, setSource] = useState("");
@@ -23,13 +25,12 @@ export function useTerminalRenderer(options) {
         options;
     // Geometry-only repaint barriers hide pixels without retiring acknowledged editor
     // intent. A new session, target or input epoch must earn its own CPU-paint receipt.
-    const inputKey = JSON.stringify([
+    const editorKey = JSON.stringify([
         source,
         attempt,
         options.drawable,
         inputEpoch,
         surface?.boot_id,
-        surface?.projection_revision,
         surface?.popup?.terminal_id,
         surface?.panes
             ?.filter((pane) => pane.focused)
@@ -37,8 +38,41 @@ export function useTerminalRenderer(options) {
             .sort(),
     ]);
 
+    if (editorKey !== editorContext.current.key) {
+        editorContext.current = { key: editorKey, painted: false };
+    }
+
+    const inputKey = JSON.stringify([editorKey, surface?.projection_revision]);
+
     if (inputKey !== inputContext.current.key) {
         inputContext.current = { key: inputKey, painted: false };
+    }
+
+    // Focus/projection changes within the same split do not invalidate its raster
+    // space. Keep acknowledged pixels, but never inherit the new input fence's
+    // readiness. A different pane set, popup, geometry or connection still clears.
+    const pixelKey = JSON.stringify([
+        source,
+        attempt,
+        inputEpoch,
+        options.drawable,
+        surface?.boot_id,
+        surface?.frame?.width,
+        surface?.frame?.height,
+        surface?.popup?.terminal_id,
+        surface?.popup?.frame?.width,
+        surface?.popup?.frame?.height,
+        cw,
+        ch,
+        fontSize,
+        dpr,
+        surface?.panes
+            ?.map((pane) => [pane.pane_id, pane.rect, pane.inner_rect])
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    ]);
+
+    if (pixelKey !== pixels.current.key) {
+        pixels.current = { key: pixelKey, painted: false };
     }
 
     const key = JSON.stringify([
@@ -73,6 +107,8 @@ export function useTerminalRenderer(options) {
     latest.current = { ...options, fence };
 
     const fail = () => {
+        pixels.current.painted = false;
+        editorContext.current.painted = false;
         inputContext.current.painted = false;
         startup.current?.abort();
         bridge.current?.dispose();
@@ -84,6 +120,8 @@ export function useTerminalRenderer(options) {
     const retry = () => {
         // Retire the old child and startup work immediately. The new attempt is also
         // part of the fence, so no receipt can enable input before its own CPU paint.
+        pixels.current.painted = false;
+        editorContext.current.painted = false;
         inputContext.current.painted = false;
         startup.current?.abort();
         bridge.current?.dispose();
@@ -175,6 +213,8 @@ export function useTerminalRenderer(options) {
                     latest.current.drawable &&
                     next.fence === latest.current.fence
                 ) {
+                    pixels.current.painted = true;
+                    editorContext.current.painted = true;
                     inputContext.current.painted = true;
                     latest.current.onReady?.(FAILURE);
                 }
@@ -220,6 +260,7 @@ export function useTerminalRenderer(options) {
                 theme,
             },
             fence,
+            { preservePixels: pixels.current.painted },
         );
     }, [
         source,
@@ -244,12 +285,18 @@ export function useTerminalRenderer(options) {
         status.phase === "ready" &&
         status.fence === fence;
 
+    const visible = !error && !!source && !!options.drawable && pixels.current.painted;
+
     return {
         iframe,
         source: error ? "" : source,
         active,
+        visible,
+        // Editor continuity is not input admission: an unchanged target can retain
+        // focus/composition while a newer projection waits for its own receipt.
+        editorReady: !error && !!source && !!options.drawable && editorContext.current.painted,
         inputReady: !error && !!source && !!options.drawable && inputContext.current.painted,
-        loading: !error && !!options.drawable && !active,
+        loading: !error && !!options.drawable && !visible,
         error,
         retry,
     };

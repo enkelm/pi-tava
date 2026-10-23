@@ -11,6 +11,8 @@ const ERROR_MESSAGE = "Terminal renderer unavailable.";
  * lifecycle. Pass location.origin verbatim; post must use that exact target origin.
  * Presentations are immutable until sent/replaced. Only the latest waiting object is
  * retained and serialization happens when a transport slot actually opens.
+ * present(..., {preservePixels:true}) is only for an already-painted, compatible
+ * native view. It preserves the wire slot/deadline, not the new fence's readiness.
  *
  * gpui-painted acknowledges BOTH gpui-present and gpui-clear. For a presentation it
  * must mean that the child's CPU scene paint completed, not merely that it was parsed.
@@ -244,7 +246,7 @@ export function createTerminalRendererBridge({
         return true;
     }
 
-    function present(presentation, nextFence) {
+    function present(presentation, nextFence, { preservePixels = false } = {}) {
         if (disposed || failed || !validFence(nextFence)) {
             return false;
         }
@@ -258,9 +260,12 @@ export function createTerminalRendererBridge({
         if (nextFence !== fence) {
             fence = nextFence;
 
-            if (mayHavePixels) {
+            if (mayHavePixels && !preservePixels) {
                 invalidate();
             } else {
+                // A compatible, already-painted view can keep its pixels while the
+                // newest fence waits for a real receipt. Do not cancel the old wire
+                // slot or its deadline; its receipt only releases the pending scene.
                 notify("loading");
             }
         }
