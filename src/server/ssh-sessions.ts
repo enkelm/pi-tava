@@ -142,11 +142,13 @@ export class SshSessions {
                 }
 
                 return (...args: unknown[]) => {
-                    const context = args.at(-1) as Context;
+                    // execConfined has an optional writeRoots argument after its context.
+                    const contextIndex = property === "execConfined" ? 3 : args.length - 1;
+                    const context = args[contextIndex] as Context;
 
                     return this.#lifetime.run(context, async (context) => {
                         checkAccess();
-                        args[args.length - 1] = context;
+                        args[contextIndex] = context;
 
                         if (property === "exec" || property === "execConfined") {
                             const index = property === "exec" ? 1 : 2;

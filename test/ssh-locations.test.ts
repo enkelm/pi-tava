@@ -17,7 +17,16 @@ import { join, posix } from "node:path";
 import { writeFileSync } from "node:fs";
 import { after, before, mock, test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { err, FileError, ok } from "@earendil-works/pi-durable/env";
+import type { Context } from "@earendil-works/chord";
+import { withCancel } from "@earendil-works/chord/context";
+import {
+    err,
+    ExecutionError,
+    FileError,
+    getOrThrow,
+    ok,
+    type ShellExecOptions,
+} from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { SubagentsDoc } from "../src/server/docs.ts";
 import { WorkflowDoc } from "../src/server/workflow-docs.ts";
@@ -191,7 +200,7 @@ test("SSH project defaults are creation-time only; explicit local overrides, ret
     assert.equal(app.envFor(first.id).id === app.envFor(later.id).id, false);
 });
 
-test("SSH Worker creation writes remotely and honors later read-only workflow state", async () => {
+test("SSH Worker executes confined commands with cancellation, writes remotely and honors later read-only state", async (t) => {
     const person = owner(app);
     const { id } = await app.commands.createSession(person, {
         cwd: remoteCwd,
@@ -207,6 +216,75 @@ test("SSH Worker creation writes remotely and honors later read-only workflow st
 
     assert.equal((await env.writeFile(path, "remote managed bytes", context)).ok, true);
     assert.deepEqual(staged.at(-1), { path, bytes: Buffer.from("remote managed bytes") });
+    let confinedCalls = 0;
+
+    t.mock.method(
+        SshExecutionEnv.prototype,
+        "execConfined",
+        async (
+            readOnly: boolean,
+            command: string | readonly string[],
+            options: ShellExecOptions | undefined,
+            executionContext: Context,
+            writeRoots?: readonly string[],
+        ) => {
+            transportCalls++;
+            confinedCalls++;
+            assert.equal(readOnly, false);
+            assert.equal(writeRoots, undefined, "an absent write-root override stays absent");
+            assert.ok(executionContext.abortSignal);
+
+            if (confinedCalls === 1) {
+                assert.deepEqual(command, ["printf", "remote managed output"]);
+                options?.onOutput?.("remote managed output", executionContext, {
+                    stream: "stdout",
+                });
+
+                return ok({ exitCode: 0 });
+            }
+
+            assert.deepEqual(command, ["sleep", "30"]);
+            await new Promise<void>((resolve) => {
+                executionContext.abortSignal!.addEventListener("abort", () => resolve(), {
+                    once: true,
+                });
+            });
+
+            return err(new ExecutionError("aborted", "Fixture command cancelled"));
+        },
+    );
+    let output = "";
+    const result = getOrThrow(
+        await env.exec(
+            ["printf", "remote managed output"],
+            {
+                onOutput: (text) => {
+                    output += text;
+                },
+            },
+            context,
+        ),
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(output, "remote managed output");
+    const cancelled = withCancel(context);
+    const running = env.exec(["sleep", "30"], undefined, cancelled.context);
+
+    try {
+        await until(() => confinedCalls === 2, "managed SSH command reaches the transport", 1_000);
+        cancelled.cancel();
+        const aborted = await running;
+
+        assert.equal(aborted.ok, false);
+
+        if (!aborted.ok) {
+            assert.equal(aborted.error.code, "aborted");
+        }
+    } finally {
+        cancelled.cancel();
+        await running;
+    }
 
     // The coordinator must revoke the already-issued environment, not merely new tool invocations.
     // Full human transfer/transaction behavior is owned by handoff-execution tests.
