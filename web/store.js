@@ -1158,7 +1158,8 @@ export function connect() {
 
     store.set({ connection: "connecting" });
     const id = store.state.conversationId;
-    const query = `tab=${encodeURIComponent(TAB)}&p=${PROTOCOL}${id === null ? "" : `&c=${id}`}`;
+    const privateId = store.state.privateId;
+    const query = `tab=${encodeURIComponent(TAB)}&p=${PROTOCOL}${id === null ? "" : `&c=${id}`}${privateId === null ? "" : `&private=${encodeURIComponent(privateId)}`}`;
 
     source = pollHere() && !local ? pollEvents(query) : streamEvents(query);
 }

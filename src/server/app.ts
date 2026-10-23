@@ -736,6 +736,9 @@ export class PocketApp {
 
         await this.pip.orchestration.open();
         await this.pip.agents.supervision.open();
+        this.privateSessions.startAlerts((ownerId, paneId, kind, signal) =>
+            this.alerts.herdr(ownerId, paneId, kind, signal),
+        );
         await this.pip.agents.contacts.open();
 
         if (this.guardOn()) {
@@ -893,6 +896,7 @@ export class PocketApp {
             }
         }
 
+        this.alerts.committed(publication);
         this.pip.orchestration.committed(publication);
         this.pip.agents.supervision.committed(publication);
         this.pip.agents.execution.changed();
@@ -1593,6 +1597,17 @@ export class PocketApp {
         }
 
         return false;
+    }
+
+    /** Private pane presence is owner-only and expires with the normal visible event connection. */
+    watchingHerdr(userId: string, paneId: string): boolean {
+        return [...this.#clients].some(
+            (client) =>
+                client.user.id === userId &&
+                client.user.role === "owner" &&
+                client.privateId === paneId &&
+                client.visible !== false,
+        );
     }
 
     /** Change someone's name: shown at once on their messages, in the people lists, and on their avatar. */
@@ -3458,7 +3473,9 @@ export class PocketApp {
             const agentsClosed = this.pip.agents.close();
 
             clearTimeout(this.#sessionsTimer);
-            this.alerts.close();
+            const privateClosed = this.privateSessions.close();
+            const alertsClosed = this.alerts.close();
+
             this.themes.close();
             this.pip.close();
             this.spend.close();
@@ -3490,6 +3507,8 @@ export class PocketApp {
 
             await sshClosed;
             await this.privateTerminals.close();
+            await privateClosed;
+            await alertsClosed;
 
             // A timer that holds the process: with nothing else to do, Node would end it here, before the rest closed.
             let limit: NodeJS.Timeout | undefined;

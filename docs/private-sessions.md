@@ -18,6 +18,26 @@ Attach files with the paperclip, drag/drop or clipboard paste. Uploads are owner
 
 Chat sends guarded prompts and agent commands to a verified idle/done Pi and previews import. Working/blocked Pi stays read-only in Chat. The user subsequently chose a separate structured **Terminal** mode for full Herdr control, with GPUI-style desktop navigation and mobile-first agent Chat. See [terminal-mode.md](terminal-mode.md). The text snapshot described here is a fallback, not the Terminal renderer.
 
+## Background notifications
+
+The server observes Herdr agent metadata even with every browser/PWA closed, but only while the
+owner has a push subscription and completion or approval notifications enabled. It never attaches
+a terminal client or reads journals, transcripts, terminal text or history for notifications. The
+existing **Pi finished** preference covers Herdr turn completion; **Pi needs approval** covers
+blocked-agent attention, without notification Allow/Deny actions. A push contains fixed generic
+text and an exact opaque `/private/:id` pane link, never titles, paths or private content. A visible
+owner event connection on that exact pane suppresses its pushes; hidden/disconnected views do not.
+
+Only an observed working-to-done/idle transition of the same verified foreground agent emits
+completion. A new blocked transition emits attention. Initial discovery, reconnect, unknown or
+missing state, disappearance, changed process/session/terminal identity and owner credential
+changes rebaseline silently. Eligibility is rechecked between native reads, and a second snapshot
+must agree with the first on pane identity, status and sequence after process-info reads. These
+checks are not an atomic native identity lease. This is an observed agent-turn ending, not
+verification of task success. Polling can miss turns shorter than its four-second interval. Shutdown
+cancels and joins discovery, process/socket reads and admitted push delivery. Synthetic coverage is in
+`test/herdr-alerts.test.ts` and `test/alerts.test.ts`; it is not live Herdr or device-push validation.
+
 ## Routes and authorization
 
 | Route                                  | Operation                                            |

@@ -6,6 +6,7 @@ import type { Context } from "@earendil-works/chord";
 import {
     AgentDoc,
     GenerationTask,
+    InboxDoc,
     LiveDoc,
     ToolTask,
     defineDoc,
@@ -27,6 +28,7 @@ import { HttpError, describe } from "../errors.ts";
 import type { ClientEntry } from "../projection.ts";
 import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
 import { AgentContactsDoc } from "./agent-contacts-doc.ts";
+import { hasPendingSubagentReports } from "../subagent-reports.ts";
 
 const context = BACKGROUND_CONTEXT;
 const AGENT_EPOCH = "private-supervisor-epoch";
@@ -169,6 +171,18 @@ type SupervisionData = {
     requests: Record<string, IntentReceipt>;
     questionAnswers?: Record<string, QuestionAnswerReceipt>;
     controls: Record<string, { fingerprint: string; result: SupervisionStatus }>;
+    /** Explicit named-agent yields, not inferred from assistant prose or an idle model run. */
+    attention?: Record<
+        string,
+        {
+            action: "ask" | "wait" | "finish";
+            text: string;
+            eventId: string;
+            admissionSerial?: number;
+            finishedThrough?: number;
+        }
+    >;
+    attentionCalls?: Record<string, { fingerprint: string }>;
 };
 type ReportStatus = {
     sequence: number;
@@ -790,6 +804,214 @@ export class AgentSupervision {
             attachment.epoch === grant.attachmentEpoch &&
             attachment.agentEpoch === grant.agentEpoch
         );
+    }
+
+    /** Exact accepted delegation origin. Association/history alone never suppresses a human question. */
+    notificationParent(item: Readonly<WorkItem>): ConversationId | undefined {
+        const grant = item.supervisor;
+
+        if (grant?.agentId === undefined || !this.current(item) || !this.#app.config.pipEnabled) {
+            return undefined;
+        }
+
+        const attachment = this.#doc.agents[grant.agentId]?.attachments[item.id];
+        const receipt = Object.values(this.#doc.requests).find(
+            (entry) =>
+                entry.requestId === attachment?.contextRequestId &&
+                entry.status === "accepted" &&
+                entry.agentId === grant.agentId &&
+                entry.agentEpoch === grant.agentEpoch &&
+                entry.attachmentEpoch === grant.attachmentEpoch &&
+                entry.controllerId === grant.conversationId &&
+                entry.controllerEpoch === grant.epoch,
+        );
+        const user = this.#app.config.userById(grant.ownerId);
+        const origin = receipt === undefined ? undefined : idOf(receipt.chatId);
+
+        return user?.role === "owner" &&
+            user.tokenHash === grant.tokenHash &&
+            receipt?.tokenHash === user.tokenHash &&
+            origin !== undefined &&
+            this.#app.sessionMeta(origin)?.archived !== true &&
+            this.#app.canSee(user, origin)
+            ? origin
+            : undefined;
+    }
+
+    /** Active child grants remain work even when both models are idle at an internal wait. */
+    hasRunningChildren(chat: ConversationId): boolean {
+        return (
+            Object.keys(this.#app.sessionCatalogue()).some((key) => {
+                const item = this.#app.workItems.itemFor(idOf(Number(key)));
+
+                return (
+                    item?.supervisor?.status === "running" && this.notificationParent(item) === chat
+                );
+            }) ||
+            this.#app
+                .conversationsOf(chat)
+                .some((child) => child !== chat && this.#app.isBusy(child))
+        );
+    }
+
+    /** Finality follows native execution/helper/report trees even after a controller returns control. */
+    async #hasPendingChildren(tx: Tx, chat: ConversationId): Promise<boolean> {
+        if (this.hasRunningChildren(chat)) {
+            return true;
+        }
+
+        const roots = new Set<ConversationId>([chat]);
+        const items = new Set<string>();
+
+        for (const key of Object.keys(this.#app.sessionCatalogue())) {
+            const item = this.#app.workItems.itemFor(idOf(Number(key)));
+
+            if (
+                item !== undefined &&
+                !items.has(item.id) &&
+                this.notificationParent(item) === chat
+            ) {
+                items.add(item.id);
+                roots.add(idOf(item.supervisor!.conversationId));
+
+                for (const thread of item.threadIds) {
+                    roots.add(idOf(thread));
+                }
+            }
+        }
+
+        const contacts = await tx.doc(AgentContactsDoc);
+
+        for (const contact of Object.values(contacts.contacts)) {
+            if (
+                contact.chatId === Number(chat) &&
+                contact.action === "send" &&
+                contacts.epochs[String(contact.target)] === contact.epoch
+            ) {
+                if (contact.status === "prepared") {
+                    return true;
+                }
+
+                if (contact.status === "accepted") {
+                    roots.add(idOf(contact.target));
+                }
+            }
+        }
+
+        const pending = [...roots];
+        const seen = new Set<ConversationId>();
+
+        while (pending.length) {
+            const id = pending.pop()!;
+
+            if (seen.has(id)) {
+                continue;
+            }
+
+            seen.add(id);
+            const live = await tx.doc(LiveDoc, id);
+            const inbox = await tx.doc(InboxDoc, id);
+            const helpers = await tx.doc(SubagentsDoc, id);
+
+            if (
+                (id !== chat && live.run !== undefined) ||
+                inbox.items.length > 0 ||
+                this.#app.workItems.isPreparing(id) ||
+                (await hasPendingSubagentReports(tx, id))
+            ) {
+                return true;
+            }
+
+            for (const taskId of [helpers.courier, ...Object.values(helpers.reporters)]) {
+                const task = taskId === undefined ? undefined : await tx.task(taskId);
+
+                if (task !== undefined && task.state.status !== "terminal") {
+                    return true;
+                }
+            }
+
+            for (const child of Object.values(helpers.agents)) {
+                pending.push(child.conversationId);
+            }
+        }
+
+        return false;
+    }
+
+    /** Native named-agent attention/finality signal; adds no execution or approval authority. */
+    async supervise(
+        api: ToolExecutionApi,
+        ctx: Context,
+        input: { action: "ask" | "wait" | "finish"; text: string },
+    ) {
+        const id = api.conversationId;
+        const key = hash([Number(id), Number(api.taskId), api.callId]);
+        const fingerprint = hash(input);
+
+        if (id !== this.#chat(id)) {
+            throw new HttpError(403, "Only the named agent's main chat can address its owner.");
+        }
+
+        await api.commit(async (tx) => {
+            await this.requireInvocation(tx, api);
+            const identity = this.#app.pip.agents.identity(id)!;
+            const pin = await this.#source(tx, api, identity);
+            const doc = await tx.doc(AgentSupervisionDoc);
+            const previous = doc.attentionCalls?.[key];
+
+            if (input.action === "finish" && (await this.#hasPendingChildren(tx, id))) {
+                throw new HttpError(
+                    409,
+                    "Child work or a report is still active. Wait or ask; an internal wait is not a final.",
+                );
+            }
+
+            if (previous !== undefined) {
+                if (previous.fingerprint !== fingerprint) {
+                    throw new HttpError(
+                        409,
+                        "This attention signal already has different content.",
+                    );
+                }
+
+                return;
+            }
+
+            if (Object.keys(doc.attentionCalls ?? {}).length >= 10000) {
+                throw new HttpError(413, "The private attention receipt limit was reached.");
+            }
+
+            doc.attentionCalls ??= {};
+            doc.attentionCalls[key] = { fingerprint };
+            doc.attention ??= {};
+            const finishedThrough =
+                input.action === "finish"
+                    ? pin.admissionSerial
+                    : doc.attention[String(id)]?.finishedThrough;
+
+            doc.attention[String(id)] = {
+                ...input,
+                eventId: key,
+                ...(pin.admissionSerial === undefined
+                    ? {}
+                    : { admissionSerial: pin.admissionSerial }),
+                ...(finishedThrough === undefined ? {} : { finishedThrough }),
+            };
+        }, ctx);
+
+        if (input.action !== "wait") {
+            await this.#app.alerts.orchestrationEvent(
+                id,
+                key,
+                input.action === "ask" ? "question" : "final",
+                input.text,
+            );
+        }
+
+        return {
+            action: input.action,
+            note: "Saved. This signal is not execution or publication approval.",
+        };
     }
 
     async requireAttachment(
@@ -1656,6 +1878,8 @@ export class AgentSupervision {
                                 args.action === "send" ||
                                 args.action === "follow"),
                         requestId: `agent-delegation-${key}`,
+                        sourceInputId: sourceAuthority.inputId,
+                        sourceAdmissionSerial: sourceAuthority.admissionSerial,
                         ...(args.action === "send" && isController
                             ? {
                                   controllerEpoch: (await tx.doc(HandoffsDoc)).workItems[item.id]!
@@ -1663,8 +1887,6 @@ export class AgentSupervision {
                                   sourceConversationId: Number(api.conversationId),
                                   sourceTaskId: Number(api.taskId),
                                   sourceCallId: api.callId,
-                                  sourceInputId: sourceAuthority.inputId,
-                                  sourceAdmissionSerial: sourceAuthority.admissionSerial,
                               }
                             : {}),
                         status: "pending",

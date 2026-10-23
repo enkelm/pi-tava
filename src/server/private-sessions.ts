@@ -11,6 +11,7 @@ import { HttpError } from "./errors.ts";
 import { foregroundPi, type ProcessIdentity, type ProcessInfo } from "./pi-sessions/herdr.ts";
 import { readJournal } from "./private-sessions/journal.ts";
 import { PrivateControl, UNCERTAIN_INPUT_REASON } from "./private-sessions/control.ts";
+import { HerdrAlerts, privatePaneId, type HerdrAlertSink } from "./private-sessions/alerts.ts";
 import { MAX_ATTACHMENTS, PrivateUploads, uploadId } from "./private-sessions/uploads.ts";
 import type { ClientEntry } from "./projection.ts";
 
@@ -273,7 +274,7 @@ function hierarchy(socket: string, snapshot: Snapshot) {
             throw new Error("Invalid pane");
         }
 
-        const id = hash([socket, "pane", wire.pane_id]);
+        const id = privatePaneId(socket, wire.pane_id);
 
         if (targets.has(id)) {
             throw new Error("Duplicate pane");
@@ -316,6 +317,8 @@ export class PrivateSessions {
     readonly #requests = new Map<string, { digest: string; promise: Promise<{ sent: true }> }>();
     readonly control: PrivateControl;
     readonly #uploads: PrivateUploads;
+    #alerts: HerdrAlerts | undefined;
+    #closed = false;
 
     constructor(app: PocketApp) {
         this.#app = app;
@@ -327,6 +330,39 @@ export class PrivateSessions {
     get local() {
         // One transport, process checker and pane-operation lock for private input and adoption.
         return this.#app.piSessions.active.local;
+    }
+
+    /** Start once after push/owner configuration is ready. Alerts supplies its owner-only delivery sink. */
+    startAlerts(notify: HerdrAlertSink): void {
+        if (this.#closed) {
+            return;
+        }
+
+        this.#alerts ??= new HerdrAlerts(
+            this.local,
+            () => {
+                const owner = this.#app.config.users.find((user) => user.role === "owner");
+                const store = this.#app.pushStore;
+
+                if (!owner || !store) {
+                    return undefined;
+                }
+
+                const prefs = store.prefs(owner.id);
+
+                return (prefs.done || prefs.approval) && store.subscriptions(owner.id).length
+                    ? owner
+                    : undefined;
+            },
+            notify,
+        );
+        this.#alerts.start();
+    }
+
+    /** Stop polling, cancel native reads and join their actual transport/child cleanup. */
+    async close(): Promise<void> {
+        this.#closed = true;
+        await this.#alerts?.close();
     }
 
     #owner(user: User): void {

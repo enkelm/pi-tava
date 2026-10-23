@@ -54,12 +54,16 @@ interface Poller {
 
 function newClient(url: URL, user: User, send: Client["send"]): Client {
     const raw = url.searchParams.get("c");
+    const privateId = url.searchParams.get("private");
 
     return {
         id: (url.searchParams.get("tab") ?? randomUUID()).slice(0, 64),
         connection: randomUUID(),
         user,
         conversationId: raw === null || raw === "" ? undefined : conversationId(raw),
+        ...(user.role === "owner" && privateId !== null && /^[a-f0-9]{64}$/.test(privateId)
+            ? { privateId }
+            : {}),
         // What the tab's code understands of updates: none named is older code.
         protocol: Number(url.searchParams.get("p")) || 1,
         sentEntries: new Set(),

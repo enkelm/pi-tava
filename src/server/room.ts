@@ -129,6 +129,8 @@ export interface Client {
     close?(): void;
     /** False while the tab is hidden: the person is away, and push notifications may reach them. */
     visible?: boolean;
+    /** Exact owner-only Herdr route being viewed; never a shared conversation id. */
+    privateId?: string;
     /** Entries this client has, so updates carry only new ones. */
     readonly sentEntries: Set<number>;
     orderKey: string;

@@ -124,6 +124,40 @@ GPUI/WASM is the sole terminal painter. `terminal-renderer.js` feeds complete re
 
 The grid embeds `terminal-keyboard.js` on narrow or coarse-pointer screens. The touch keyboard emits semantic strokes through the grid’s current target and the same Herdr shortcut handler as hardware input, without DOM key-event dispatch or browser-reserved shortcut interception. Moving focus between controls inside the terminal preserves an armed Herdr prefix; leaving the terminal cancels it. Its one-shot/locked modifiers and repeat timers are memory-only and cancelled when the target, popup, input epoch, visibility or interactivity changes. Local `setTarget()` and cancellation reset keyboard intent synchronously, before any render. Pointer taps commit on release and scrolling cancels them; keyboard/assistive activation preserves button focus. Short terminal hosts scroll the key rows under a sticky toolbar instead of clipping essential keys. The hidden textarea is read-only with `inputMode="none"` in touch mode; native input is an explicit fallback. The keyboard’s Paste control opens a separate editable, memory-only text field for native paste menus without reading the clipboard API. Explicit submission uses the grid’s existing semantic Paste event and UTF-8 size bound; target/connection/access changes and local navigation resets discard the draft. Keyboard height participates in the terminal’s flex layout and resize reporting. `terminal-viewport.js` owns physical size reporting: its last geometry/connection key survives observer recreation and metadata/surface input fences, rather than being reset whenever interactivity changes. Actual dimension/cell-metric changes still report once and new input epochs start fresh; disposed observers cannot restore old geometry. The grid owns expanded/type state and supplies the keyboard-type group plus chevron and a Touch-only Paste icon through an optional chrome render slot. Private Terminal puts the Paste icon last in its retained mobile tab/split/zoom bar, and the type controls beside connection/help controls in the footer. The keyboard exposes a local reset/open-paste controller so the relocated action opens the same draft editor and returns Cancel focus to that icon; there is no second paste-delivery path. Its grid host reserves separate action/footer rows so read-only preview overlays cannot cover those controls. The persistent modifier hint is removed; Herdr shortcuts and Help remain. Temporary diagnostics project whitelisted transport/state/DOM geometry metadata through `terminal-diagnostics.js` without subscribing to a new native stream or changing delivery/scroll policy. Recording does not trigger renders. Browser-queued controls and received surfaces have relative timestamps; payloads, key values, titles and paths are not retained, and exports use identifier aliases. Per-connection bounded memory is cleared on disposal/owner-access loss; only an explicit owner Help action exports a stable JSON snapshot, with a readonly selectable fallback when clipboard copying is blocked. `terminal-touch.js` separates touch intent from mouse input: it waits for a tap, swipe or deliberate hold before sending anything, with timer and continuation fences on pane/popup/boot/input epoch, interactivity and geometry changes. Swipes use the same bounded semantic scroll accumulator as wheel input; fractional deltas are connection/target-scoped and reset at touch start. Holds select locally even in mouse-reporting TUIs, with a reduced-motion-aware activation cue instead of a viewport bounce. Multi-finger contact cancels terminal intent and leaves pinch zoom to the browser; release does not synthesize momentum.
 
+## Notification lifecycle
+
+`Alerts` observes newly committed terminal input receipts, not merely the last assistant text at an
+idle gap. Standalone answers retain their short debounce, preferences and visible-session
+suppression. Helpers, retiring/transferring execution threads, active Work Item execution and
+controllers' ordinary yields are internal. A controller's native `work_supervise ask/finish` and
+native failure/budget holds are explicit events; wait is never final. An existing Work Item finish
+may return control while execution is still active: that transition stays unchanged but is not
+announced as completion. Accepted, current named-parent
+delegation suppresses child questions/finals, allowing the parent to answer the exact native question.
+An unavailable parent does not redirect a human question to an arbitrary chat.
+
+Named main chats also use `work_supervise ask/wait/finish`: ask explicitly addresses the owner in
+that originating chat, wait is internal, and finish reports the outer orchestration ended. It cannot
+finish while a native child grant, delegated execution tree, exact contacted recipient's helper
+tree or helper report is still active, even after the child controller or recipient model yields.
+Accepted native contacts keep routine named-agent yields internal across owner clarifications until
+an explicit final. This adds notification signals, not execution authority, human question answers
+or publication approval. Untouched standalone named replies still notify normally. No prose
+heuristic or model classification is used. `AgentSupervisionDoc` retains source-bound signals and
+retry receipts; private conversation-scoped `pocket.alerts` claims question/final/blocker attempts and
+standalone answer watermarks before transport, so uncertain pushes are not replayed. Both ledgers
+are private, never room data. The bounded explicit-event ledger stops sending after 10,000 events
+per conversation rather than evicting retry identities. No startup/history completion backfill runs.
+
+`PrivateSessions` owns a separate cancellable/joined `private-sessions/alerts.ts` metadata monitor.
+It shares `pi-sessions/herdr.ts` discovery/foreground identity and opaque private pane IDs, not
+Durable transcripts. Only current owners with eligible push subscriptions admit reads. Identity or
+transport gaps reset the baseline; missing/replaced/unknown agents are not finished agents. Exact
+owner-private pane presence travels on the existing event connection. `Alerts.herdr` retains the
+existing done/approval preferences and sends fixed text with no private transcript or action payload.
+Push transport carries bounded cancellation through fetch. App shutdown stops and joins the monitor
+and its delivery before closing Harness. See [private notification limits](private-sessions.md#background-notifications).
+
 ## Importing ordinary Pi history
 
 `app.piSessions` is the only local Pi discovery/continuation service. `PiSessions` in `src/server/pi-sessions.ts` owns access checks, previews, destination configuration, atomic copies and archive retrieval. Its `pi-sessions/` modules own source parsing, saved-history discovery, Herdr identity/transport and active-instance selection. The old `Imports` service and `imports/` directory are removed. HTTP routes use `/api/pi-sessions`; no takeover reservation or recovery API remains. `TakeoversDoc` retains its original stored identity and settings for inert legacy records, without resuming old stop operations.

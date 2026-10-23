@@ -205,7 +205,13 @@ export async function sendPush(
     subscription: PushSubscriptionJson,
     message: PushMessage,
     vapid: VapidKeys,
-    options: { subject?: string; ttl?: number; urgency?: Urgency; fetch?: typeof fetch } = {},
+    options: {
+        subject?: string;
+        ttl?: number;
+        urgency?: Urgency;
+        fetch?: typeof fetch;
+        signal?: AbortSignal;
+    } = {},
 ): Promise<number> {
     const payload: PushMessage = {
         title: clip(message.title, MAX_TITLE),
@@ -243,6 +249,7 @@ export async function sendPush(
         method: "POST",
         headers,
         body: new Uint8Array(body),
+        signal: options.signal,
     });
 
     await response.arrayBuffer().catch(() => undefined);
@@ -437,7 +444,12 @@ export class PushStore {
     async notify(
         userId: string,
         message: PushMessage,
-        options: { urgency?: Urgency; fetch?: typeof fetch; subject?: string } = {},
+        options: {
+            urgency?: Urgency;
+            fetch?: typeof fetch;
+            subject?: string;
+            signal?: AbortSignal;
+        } = {},
     ): Promise<number> {
         const targets = this.subscriptions(userId);
 
@@ -452,6 +464,7 @@ export class PushStore {
                     urgency: options.urgency,
                     fetch: options.fetch,
                     subject: options.subject,
+                    signal: options.signal,
                 }),
             ),
         );

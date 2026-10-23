@@ -179,6 +179,8 @@ export class PipSupervision {
                         }
                     }
 
+                    let blocked = false;
+
                     await runtime.commit(async (tx) => {
                         const latest = await tx.doc(PipWorkDoc, id);
 
@@ -203,12 +205,22 @@ export class PipSupervision {
                                 ) {
                                     current.status = "reclaimed";
                                     current.epoch++;
+                                    blocked = true;
                                 }
                             }
                         }
 
                         return undefined;
                     }, ctx);
+
+                    if (blocked) {
+                        await this.#app.alerts.orchestrationEvent(
+                            id,
+                            `wake-${pending.epoch}`,
+                            "blocker",
+                            "Wake not admitted. Fix access, model or budget, then send a new message in this PiP Thread.",
+                        );
+                    }
                 });
                 await runtime.commit(() => finished, ctx);
             },
@@ -1779,6 +1791,13 @@ export class PipSupervision {
             }, ctx);
 
             if (!permitted) {
+                await this.#app.alerts.orchestrationEvent(
+                    id,
+                    `budget-${epoch}`,
+                    "blocker",
+                    "The work action budget is exhausted; extend it before continuing.",
+                );
+
                 throw new HttpError(
                     409,
                     "The work action budget is exhausted; ask the human to extend it.",
@@ -1796,13 +1815,18 @@ export class PipSupervision {
         epoch: number | undefined,
     ) {
         if (epoch === undefined) {
+            if (this.#app.pip.agents.isNamed(api.conversationId)) {
+                return this.#app.pip.agents.supervision.supervise(api, ctx, input);
+            }
+
             throw new HttpError(403, "Only an authorized work-scoped PiP can supervise work.");
         }
 
         const id = api.conversationId;
         const questionId = `q-${keyOf(api)}`;
         let notify = false;
-        const user = await api.commit(async (tx) => {
+
+        await api.commit(async (tx) => {
             const user = await this.#app.workItems.requireController(
                 tx,
                 id,
@@ -1870,12 +1894,9 @@ export class PipSupervision {
         }, ctx);
 
         if (notify) {
-            await this.#app.alerts.push(user.id, id, "chat", {
-                title: "PiP needs your decision",
-                body: input.text.slice(0, 300),
-                url: `/s/${id}`,
-                tag: questionId,
-            });
+            await this.#app.alerts.orchestrationEvent(id, questionId, "question", input.text);
+        } else if (input.action === "finish") {
+            await this.#app.alerts.orchestrationEvent(id, keyOf(api), "final", input.text);
         }
 
         return {
@@ -2123,7 +2144,14 @@ export class PipSupervision {
         this.#ready = false;
     }
 
-    async #hold(id: ConversationId, epoch: number, reason: string): Promise<void> {
+    async #hold(
+        id: ConversationId,
+        epoch: number,
+        reason: string,
+        eventId = `hold-${epoch}`,
+    ): Promise<void> {
+        let changed = false;
+
         await this.#app.workItems.withControl(id, () =>
             this.#app.harness.commit(async (tx) => {
                 const item = (await tx.doc(HandoffsDoc)).workItems[
@@ -2135,9 +2163,14 @@ export class PipSupervision {
                     grant.status = "reclaimed";
                     grant.epoch++;
                     (await tx.doc(PipWorkDoc, id)).reason = reason;
+                    changed = true;
                 }
             }, context),
         );
+
+        if (changed) {
+            await this.#app.alerts.orchestrationEvent(id, eventId, "blocker", reason);
+        }
     }
 
     async #reconcile(): Promise<void> {
@@ -2212,6 +2245,7 @@ export class PipSupervision {
                         id,
                         grant.epoch,
                         "Work action budget exhausted; explicitly renew the delegation with a new action budget.",
+                        `budget-${grant.epoch}`,
                     );
                     continue;
                 }

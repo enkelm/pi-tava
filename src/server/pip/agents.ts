@@ -342,7 +342,7 @@ export class PipAgents {
                     PIP_EXTENSION,
                 ]),
             ],
-            tools: { remove: ["work_handoff", "work_supervise"] },
+            tools: { remove: ["work_handoff"] },
         };
     }
     list(supplied: User): PrivateAgentSummary[] {

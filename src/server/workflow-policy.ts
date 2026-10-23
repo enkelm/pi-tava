@@ -655,6 +655,7 @@ export function createWorkflowHooks(app: PocketApp) {
                             "agent_execution",
                             "agent_work",
                             "agent_charter",
+                            "work_supervise",
                             "memory",
                             "sessions",
                             "session_read",

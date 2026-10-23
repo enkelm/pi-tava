@@ -63,12 +63,16 @@ export function herdrRequest<T>(
     method: string,
     params = {},
     timeoutMs = 2000,
+    signal?: AbortSignal,
 ): Promise<T> {
     return new Promise((resolve, reject) => {
+        signal?.throwIfAborted();
         const socket = createConnection(socketPath);
         const id = randomUUID();
         let text = "";
         let finished = false;
+        let failure: Error | undefined;
+        let value: T | undefined;
 
         const finish = (error?: Error, result?: T) => {
             if (finished) {
@@ -76,23 +80,40 @@ export function herdrRequest<T>(
             }
 
             finished = true;
+            failure = error;
+            value = result;
             clearTimeout(timer);
             socket.destroy();
-
-            if (error) {
-                reject(error);
-            } else {
-                resolve(result!);
-            }
         };
 
+        const abort = () => finish(new Error("Herdr request cancelled"));
         const timer = setTimeout(() => finish(new Error("Herdr did not respond")), timeoutMs);
 
+        // Destroy requests cancellation; close joins the actual transport before settling its caller.
+        socket.once("close", () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", abort);
+
+            if (!finished || failure) {
+                reject(failure ?? new Error("Herdr closed before replying"));
+            } else {
+                resolve(value!);
+            }
+        });
+        signal?.addEventListener("abort", abort, { once: true });
         socket.setEncoding("utf8");
         socket.on("error", (error) => finish(error));
         socket.on("end", () => finish(new Error("Herdr closed before replying")));
-        socket.on("connect", () => socket.write(`${JSON.stringify({ id, method, params })}\n`));
+        socket.on("connect", () => {
+            if (!finished) {
+                socket.write(`${JSON.stringify({ id, method, params })}\n`);
+            }
+        });
         socket.on("data", (chunk: string) => {
+            if (finished) {
+                return;
+            }
+
             text += chunk;
 
             if (Buffer.byteLength(text) > MAX_REPLY) {
@@ -174,17 +195,28 @@ export function parseProcesses(text: string): LocalProcess[] {
     });
 }
 
-export async function localProcesses(): Promise<LocalProcess[]> {
+export async function localProcesses(signal?: AbortSignal): Promise<LocalProcess[]> {
+    signal?.throwIfAborted();
+
     try {
-        const { stdout } = await execute(
-            "/bin/ps",
-            ["-axo", "pid=,ppid=,uid=,stat=,lstart=,command="],
-            {
-                env: { ...process.env, LC_ALL: "C" },
-                timeout: 3000,
-                maxBuffer: 4 * 1024 * 1024,
-            },
+        const execution = execute("/bin/ps", ["-axo", "pid=,ppid=,uid=,stat=,lstart=,command="], {
+            env: { ...process.env, LC_ALL: "C" },
+            timeout: 3000,
+            maxBuffer: 4 * 1024 * 1024,
+            ...(signal ? { signal } : {}),
+        });
+        const closed = new Promise<void>((resolve) =>
+            execution.child.once("close", () => resolve()),
         );
+        let stdout: string;
+
+        try {
+            ({ stdout } = await execution);
+        } finally {
+            await closed;
+        }
+
+        signal?.throwIfAborted();
 
         return parseProcesses(stdout);
     } catch {
@@ -219,7 +251,8 @@ function idFor(candidate: Omit<ActivePi, "id">): string {
 }
 
 /** Only owner-owned local sockets are discovered. The browser never supplies endpoints or PIDs. */
-async function sockets(): Promise<string[]> {
+async function sockets(signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted();
     const inherited = process.env.HERDR_SOCKET_PATH;
     const roots = new Set([
         join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "herdr"),
@@ -236,6 +269,7 @@ async function sockets(): Promise<string[]> {
     const paths = new Set<string>(inherited && isAbsolute(inherited) ? [inherited] : []);
 
     for (const root of roots) {
+        signal?.throwIfAborted();
         paths.add(join(root, "herdr.sock"));
         const entries = await readdir(join(root, "sessions"), { withFileTypes: true }).catch(
             () => [],
@@ -249,7 +283,10 @@ async function sockets(): Promise<string[]> {
     const result: string[] = [];
 
     for (const path of paths) {
+        signal?.throwIfAborted();
         const metadata = await lstat(path).catch(() => undefined);
+
+        signal?.throwIfAborted();
 
         if (metadata?.isSocket() && metadata.uid === process.getuid?.()) {
             result.push(path);
@@ -278,6 +315,33 @@ export function foregroundPi(table: LocalProcess[], info: ProcessInfo): LocalPro
         !Number.isSafeInteger(info.foreground_process_group_id) ||
         info.foreground_process_group_id === info.shell_pid ||
         actual.command !== (foreground?.argv?.length ? foreground.argv.join(" ") : "pi")
+    ) {
+        return undefined;
+    }
+
+    return actual;
+}
+
+/** Conservative identity for non-Pi agents: a verified foreground group leader, never its shell.
+ * A changing foreground job is an observation gap, not evidence of completion.
+ */
+export function foregroundAgent(
+    table: LocalProcess[],
+    info: ProcessInfo,
+): LocalProcess | undefined {
+    const foreground = info.foreground_processes.find(
+        (item) => item.pid === info.foreground_process_group_id,
+    );
+    const actual = table.find((item) => item.pid === foreground?.pid);
+
+    if (
+        !actual ||
+        actual.uid !== process.getuid?.() ||
+        actual.pid === info.shell_pid ||
+        !beneath(table, actual.pid, info.shell_pid) ||
+        !Number.isSafeInteger(info.foreground_process_group_id) ||
+        !foreground?.argv?.length ||
+        actual.command !== foreground.argv.join(" ")
     ) {
         return undefined;
     }
