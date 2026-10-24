@@ -141,18 +141,22 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
         if (chat.draft) {
             closeAgentDraft(chat.id);
         } else {
+            const beforeChat = store.state.namedAgents
+                .find((item) => item.agentId === agent.agentId)
+                ?.chats?.find((item) => item.id === chat.id);
+            // Read the target Chat's latest activity, not a sibling or a stale render's flags.
+            const activity = beforeChat ?? chat;
+
             if (
-                !confirm(
-                    `Close “${titleOf(chat)}” everywhere? This stops this Chat and its orchestration. Independent child Work Items keep running. Unsent drafts are discarded. Saved history remains recoverable through History → Restore.`,
-                ) ||
+                ((activity.busy || activity.managing) &&
+                    !confirm(
+                        `Close “${titleOf(chat)}” everywhere? This stops this Chat and its orchestration. Independent child Work Items keep running. Unsent drafts are discarded. Saved history remains recoverable through History → Restore.`,
+                    )) ||
                 !current()
             ) {
                 return;
             }
 
-            const beforeChat = store.state.namedAgents
-                .find((item) => item.agentId === agent.agentId)
-                ?.chats?.find((item) => item.id === chat.id);
             const beforeView = store.state.view.conversation;
             const draftRevision = drafts.revision(chat.id);
 

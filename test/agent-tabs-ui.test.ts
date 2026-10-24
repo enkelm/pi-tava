@@ -629,13 +629,11 @@ test("saved Close waits for native archive acknowledgement before removing tabs 
             );
             assert.deepEqual(f.draftWrites, []);
             assert.deepEqual(f.navigated, []);
-            const confirmation = f.confirm.messages[0];
-
-            assert.ok(confirmation);
-            assert.match(confirmation, /stops this Chat and its orchestration/);
-            assert.match(confirmation, /Independent child Work Items keep running/);
-            assert.match(confirmation, /Unsent drafts.*discarded/);
-            assert.match(confirmation, /History/);
+            assert.equal(
+                f.confirm.messages.length,
+                0,
+                "an idle Chat closes without a warning even when its sibling is working",
+            );
             f.click(inactive);
             assert.equal(
                 f.mutations.length,
@@ -653,6 +651,13 @@ test("saved Close waits for native archive acknowledgement before removing tabs 
             assert.deepEqual(f.draftWrites, [[inactiveId, ""]]);
             f.focus(f.label(closeActive));
             f.click(f.label(closeActive));
+            const confirmation = f.confirm.messages[0];
+
+            assert.ok(confirmation);
+            assert.match(confirmation, /stops this Chat and its orchestration/);
+            assert.match(confirmation, /Independent child Work Items keep running/);
+            assert.match(confirmation, /Unsent drafts.*discarded/);
+            assert.match(confirmation, /History/);
             assert.equal(
                 f.state.conversationId,
                 19,
@@ -681,36 +686,48 @@ test("saved Close waits for native archive acknowledgement before removing tabs 
     }
 });
 
-test("every saved Close asks permission, and cancellation or rejection preserves tab and drafts", async (t) => {
-    for (const activity of ["idle", "busy", "managing"]) {
-        await t.test(activity, async (t) => {
+test("saved Close warns only for the target Chat's current activity and preserves rejected drafts", async (t) => {
+    for (const { before, activity, warn } of [
+        { before: "busy", activity: "idle", warn: false },
+        { before: "idle", activity: "busy", warn: true },
+        { before: "idle", activity: "managing", warn: true },
+    ]) {
+        await t.test(`${before} → ${activity}`, async (t) => {
             const f = fixture(t);
+            const setActivity = (value: string) =>
+                f.patch({
+                    namedAgents: f.state.namedAgents.map((agent: Props) => ({
+                        ...agent,
+                        chats: agent.chats.map((chat: Props) =>
+                            chat.id !== 7
+                                ? chat
+                                : {
+                                      ...chat,
+                                      busy: value === "busy",
+                                      managing: value === "managing",
+                                  },
+                        ),
+                    })),
+                });
 
-            f.patch({
-                namedAgents: [
-                    {
-                        ...f.state.namedAgents[0],
-                        chats: [
-                            {
-                                id: 7,
-                                title: "Initial setup",
-                                busy: activity === "busy",
-                                managing: activity === "managing",
-                            },
-                            f.state.namedAgents[0].chats[1],
-                        ],
-                    },
-                ],
-            });
+            setActivity(before);
+            const captured = f.label(closeInitial);
+
+            setActivity(activity);
             f.confirm.allow = false;
-            f.click(f.label(closeInitial));
-            assert.equal(f.confirm.messages.length, 1);
-            assert.equal(f.mutations.length, 0);
-            assert.ok(chatLink(f, 7));
-            assert.deepEqual(f.draftWrites, []);
-            f.confirm.allow = true;
-            f.click(f.label(closeInitial));
-            assert.equal(f.confirm.messages.length, 2);
+            f.click(captured);
+            assert.equal(f.confirm.messages.length, warn ? 1 : 0);
+
+            if (warn) {
+                assert.equal(f.mutations.length, 0);
+                assert.ok(chatLink(f, 7));
+                assert.deepEqual(f.draftWrites, []);
+                f.confirm.allow = true;
+                f.click(f.label(closeInitial));
+                assert.equal(f.confirm.messages.length, 2);
+            }
+
+            assert.equal(f.mutations.length, 1);
             f.mutations[0].reject(new Error("Archive denied"));
             await f.settle();
             assert.ok(chatLink(f, 7));
@@ -1271,6 +1288,7 @@ test("phone chooser closes a saved Chat only after native archive acknowledgemen
 
     f.focus(inactive);
     f.click(inactive);
+    assert.equal(f.confirm.messages.length, 0, "the phone picker also closes idle Chats quietly");
     assert.ok(nodes(f.label("Reviewer open chats")).some((node) => node.props.href === "/s/7"));
     assert.deepEqual(f.mutations[0].patch, { archived: true });
     f.mutations[0].resolve({});
