@@ -98,34 +98,13 @@
     display: block;
 }
 
-.agent-tab .sr-only,
-.named-agent-input-avatar .sr-only {
+.agent-tab .sr-only {
     position: absolute;
     width: 1px;
     height: 1px;
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
-}
-
-/* Keep identity beside the input itself, not among send/attachment toolbar actions. */
-.message-box-input {
-    display: flex;
-    align-items: flex-start;
-    min-width: 0;
-}
-
-.named-agent-input-avatar {
-    display: inline-flex;
-    flex: none;
-    margin: calc(12px * var(--space-y)) 0 0 calc(12px * var(--space-x));
-}
-
-.message-box-input textarea {
-    flex: 1;
-    min-width: 0;
-    width: 0;
-    padding-left: 8px;
 }
 
 .named-agent-name {

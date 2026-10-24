@@ -6,7 +6,6 @@ export function MessageBox({
     inputRef,
     input,
     before,
-    leading,
     children,
     class: className = "",
     ...events
@@ -36,17 +35,7 @@ export function MessageBox({
         ...${events}
     >
         ${before}
-        ${
-            leading
-                ? html`<div
-                      class="message-box-input"
-                      onClick=${() => inputRef.current?.focus()}
-                  >
-                      ${leading}
-                      <textarea ref=${inputRef} rows="1" ...${input}></textarea>
-                  </div>`
-                : html`<textarea ref=${inputRef} rows="1" ...${input}></textarea>`
-        }
+        <textarea ref=${inputRef} rows="1" ...${input}></textarea>
         <div class="composer-row">${children}</div>
     </div>`;
 }

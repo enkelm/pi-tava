@@ -14,7 +14,6 @@ import { loadFiles, mentionAt, mentionText, suggestFiles } from "./files.js";
 import { remember, searchHistory, sentHistory } from "./history.js";
 import { ExtensionSessionControls, extensionInputSuggestions } from "./extension-ui.js";
 import { MessageBox, SendButton } from "./message-box.js";
-import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import {
     actions,
     attempt,
@@ -622,9 +621,7 @@ export function Composer({ draft = null, onCheckDraft } = {}) {
             view.conversation?.id === conversationId
           ? store.state.namedAgents?.find((item) => item.agentId === view.conversation.pipAgentId)
           : null;
-    const namedChat = !draft && namedIdentity?.chats?.find((chat) => chat.id === conversationId);
     const closed = !draft && !!namedIdentity && view.conversation?.archived === true;
-    const thinking = busy || namedChat?.managing === true;
     const draftModel = draftAgent?.modelInfo;
     const agent = draft ? (draftModel?.model === undefined ? null : draftModel) : view.agent;
     const modelName =
@@ -1785,20 +1782,6 @@ export function Composer({ draft = null, onCheckDraft } = {}) {
                 }
                 <${MessageBox}
                     inputRef=${box}
-                    leading=${
-                        namedIdentity &&
-                        html`<span class="named-agent-input-avatar">
-                            <${NamedAgentAvatar}
-                                agentId=${namedIdentity.agentId}
-                                size=${28}
-                                animated=${true}
-                                thinking=${thinking}
-                            />
-                            <span class="sr-only" role="status">
-                                ${thinking ? (busy ? "Working" : "Managing orchestration") : "Ready"}
-                            </span>
-                        </span>`
-                    }
                     class=${`${busy ? "busy" : ""} ${filled ? "filled" : ""} ${editing ? "editing" : ""}`}
                     data-part="message-box"
                     input=${{

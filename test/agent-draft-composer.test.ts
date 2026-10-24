@@ -266,12 +266,6 @@ function fixture() {
         flush,
         render,
         renderCaptured,
-        renderSaved: () => {
-            slots = composerSlots;
-            cursor = 0;
-
-            return context.Composer();
-        },
         openDraft: context.openAgentDraft,
     };
 }
@@ -544,60 +538,4 @@ test("draft commands use native dispatch: shell/session effects are refused, Mod
     assert.equal(f.sheets.at(-1)?.type, "model");
     assert.equal(f.sheets.at(-1)?.agentId, "ada");
     assert.equal(f.requests.length, 0);
-});
-
-test("the input identity is animated and exact-Chat management keeps its thinking cue between provider runs", () => {
-    const f = fixture();
-    const leading = (tree: Template) =>
-        templates(tree).flatMap((each) => bound(each, "leading"))[0];
-    const avatar = (tree: Template) =>
-        templates(leading(tree)).find((each) => bound(each, "agentId").length > 0);
-    const unsent = avatar(f.render());
-
-    assert.ok(unsent);
-    assert.equal(bound(unsent, "agentId")[0], "ada");
-    assert.equal(bound(unsent, "animated")[0], true);
-    assert.equal(bound(unsent, "thinking")[0], false);
-    f.store.state.agentDraft = null;
-    f.store.state.conversationId = 19;
-    f.store.state.view.conversation = { id: 19, pipAgentId: "ada" };
-    f.store.state.namedAgents = [
-        {
-            agentId: "ada",
-            chats: [
-                { id: 7, managing: true },
-                { id: 19, managing: false },
-            ],
-        },
-    ];
-    let saved = avatar(f.renderSaved());
-
-    assert.ok(saved);
-    assert.equal(
-        bound(saved, "thinking")[0],
-        false,
-        "a sibling's management is not this input's activity",
-    );
-    f.store.state.namedAgents[0].chats[1].managing = true;
-    saved = avatar(f.renderSaved());
-    assert.ok(saved);
-    assert.equal(bound(saved, "thinking")[0], true);
-    assert.equal(
-        f.store.state.view.live.busy,
-        false,
-        "management does not fabricate provider activity",
-    );
-    f.store.state.view.conversation = { id: 7, pipAgentId: "ada" };
-    assert.equal(
-        leading(f.renderSaved()),
-        null,
-        "a stale saved view cannot lend its identity to this input",
-    );
-    f.store.state.view.conversation = { id: 19, pipAgentId: "ada" };
-    f.store.state.me.role = "viewer";
-    assert.equal(
-        leading(f.renderSaved()),
-        null,
-        "owner-private identity is not shown after access loss",
-    );
 });
