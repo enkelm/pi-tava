@@ -75,6 +75,7 @@ import { queuedInputText } from "./queued-input.ts";
 import { clientKey, ownRequest, requestFor } from "./requests.ts";
 import { type Resend, resendContent, resendRequest, ResendTask, userContent } from "./resend.ts";
 import { whyUnanswered } from "./subagent-runs.ts";
+import { createSessionRoot } from "./session-roots.ts";
 import { wantsTitle, writeTitle } from "./titles.ts";
 import { describeMoment, describeRepeat, knownZone } from "./when.ts";
 import {
@@ -483,9 +484,7 @@ export class Commands {
         const check = () => this.#requireCreationSource(source);
 
         if (receipt !== undefined) {
-            const saved = (await app.harness.snapshot(SessionCreatesDoc, ctx))?.items[
-                receipt.key
-            ];
+            const saved = (await app.harness.snapshot(SessionCreatesDoc, ctx))?.items[receipt.key];
 
             await check();
 
@@ -564,9 +563,15 @@ export class Commands {
                             undefined,
                             projectDefaults && location === undefined ? cwd : undefined,
                         );
-                    const conversation = await app.harness.createConversation(
-                        {
-                            ownership: { kind: "ownerless" },
+
+                    return app.harness.commit(async (tx) => {
+                        // ConversationInit runs after the first table write. Native source
+                        // authority reads tasks/submissions, so check it here before creation.
+                        ctx.abortSignal?.throwIfAborted();
+                        await source?.requireCurrent(tx);
+                        this.#requireCreate(user);
+                        const placement = await app.projects.place(tx, selection);
+                        const id = await createSessionRoot(tx, {
                             agent: {
                                 cwd,
                                 ...(initial.model === undefined ? {} : { model: initial.model }),
@@ -574,38 +579,29 @@ export class Commands {
                                     ? {}
                                     : { thinkingLevel: initial.thinkingLevel }),
                             },
-                            init: async (tx, id) => {
-                                ctx.abortSignal?.throwIfAborted();
-                                await source?.requireCurrent(tx);
-                                this.#requireCreate(user);
-                                const placement = await app.projects.place(tx, selection);
-                                const sessions = await tx.doc(SessionsDoc);
-
-                                sessions.items[String(id)] = {
-                                    cwd,
-                                    ...(location === undefined ? {} : { location }),
-                                    ...placement,
-                                    createdAt: now,
-                                    updatedAt: now,
-                                    createdBy: user.id,
-                                    ...(title === undefined ? {} : { title }),
-                                    ...(worktree === undefined ? {} : { worktree }),
-                                };
-
-                                if (receipt !== undefined) {
-                                    const creates = await tx.doc(SessionCreatesDoc);
-
-                                    creates.items[receipt.key] = {
-                                        id: Number(id),
-                                        input: receipt.input,
-                                    };
-                                }
+                            meta: {
+                                cwd,
+                                ...(location === undefined ? {} : { location }),
+                                ...placement,
+                                createdAt: now,
+                                updatedAt: now,
+                                createdBy: user.id,
+                                ...(title === undefined ? {} : { title }),
+                                ...(worktree === undefined ? {} : { worktree }),
                             },
-                        },
-                        ctx,
-                    );
+                        });
 
-                    return { id: conversation.id };
+                        if (receipt !== undefined) {
+                            const creates = await tx.doc(SessionCreatesDoc);
+
+                            creates.items[receipt.key] = {
+                                id: Number(id),
+                                input: receipt.input,
+                            };
+                        }
+
+                        return { id };
+                    }, ctx);
                 },
                 { offline: selection.threadType !== "chat", backend, context: ctx, check },
             );
