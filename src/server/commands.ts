@@ -327,6 +327,8 @@ export class Commands {
      * says who dealt with the failure. A message left in the queue by a run that failed ends it, settling nothing.
      */
     readonly followTask: Task<Followed, { phase: "wait" }, null, object>;
+    /** Close/Restore ordering must not hold the supervision lane that cancelled tools need. */
+    readonly #namedChatUpdates = new Map<ConversationId, Promise<void>>();
     readonly #creating = new Map<
         string,
         { input: string; promise: Promise<{ id: ConversationId }> }
@@ -812,11 +814,22 @@ export class Commands {
 
         const before = app.sessionMeta(id);
 
-        if (before?.pipAgent === true) {
-            throw new HttpError(409, "Edit this private PiP from its PiP settings.");
-        }
-
+        const namedChat = before?.pipAgent === true;
         const placing = Object.hasOwn(patch, "projectId");
+
+        if (
+            (namedChat || before?.pip !== undefined || before?.pipWorkItemId !== undefined) &&
+            (!namedChat ||
+                app.pip.agents.scope(id)?.ownerId !== user.id ||
+                patch.archived === undefined ||
+                patch.title !== undefined ||
+                placing)
+        ) {
+            throw new HttpError(
+                409,
+                "Use PiP settings for other changes. Only a bound saved named Chat can be archived or restored here.",
+            );
+        }
 
         if (placing) {
             if (patch.title !== undefined || patch.archived !== undefined) {
@@ -828,12 +841,45 @@ export class Commands {
             return;
         }
 
-        await app.harness.commit(async (tx) => {
-            await app.workItems.updateSession(tx, id, user, {
-                ...(patch.title === undefined ? {} : { title: oneLine(patch.title) }),
-                ...(patch.archived === undefined ? {} : { archived: patch.archived }),
-            });
-        }, context);
+        const update = () =>
+            app.harness.commit(async (tx) => {
+                await app.workItems.updateSession(tx, id, user, {
+                    ...(patch.title === undefined ? {} : { title: oneLine(patch.title) }),
+                    ...(patch.archived === undefined ? {} : { archived: patch.archived }),
+                });
+            }, context);
+
+        if (namedChat) {
+            const previous = this.#namedChatUpdates.get(id) ?? Promise.resolve();
+            const pending = previous
+                .catch(() => {})
+                .then(async () => {
+                    // Fence source authority in order with tool admission, then release that lane
+                    // before joining tools which may themselves already be queued on it.
+                    await app.pip.agents.supervision.perform(id, update);
+
+                    if (patch.archived === true) {
+                        // Independent Work Item roots and sibling Chats are not cancellation scopes.
+                        await (await app.conversation(id)).abort(context, { background: true });
+                        await app.pip.agents.execution.release(id, { exactChat: true });
+                        await app.pip.agents.contacts.settleRevoked();
+                    }
+                });
+
+            this.#namedChatUpdates.set(id, pending);
+
+            try {
+                // Only lifecycle requests share this wait; Restore cannot overtake native join.
+                await pending;
+            } finally {
+                if (this.#namedChatUpdates.get(id) === pending) {
+                    this.#namedChatUpdates.delete(id);
+                }
+            }
+        } else {
+            await update();
+        }
+
         const title = patch.title === undefined ? undefined : oneLine(patch.title);
 
         if (title !== undefined && title !== "" && title !== before?.title) {
@@ -848,6 +894,15 @@ export class Commands {
                     ? "archived the session"
                     : "brought the session back from the archive",
             );
+        }
+    }
+
+    #requireOpenNamedChat(id: ConversationId): void {
+        const root = this.#app.rootOf(id);
+        const meta = this.#app.sessionMeta(root);
+
+        if (meta?.pipAgent === true && meta.archived === true) {
+            throw new HttpError(409, "This Chat is closed. Restore it before sending fresh input.");
         }
     }
 
@@ -922,6 +977,7 @@ export class Commands {
         const initialUser = this.#requireCurrentUser(user);
 
         app.requireSee(initialUser, id);
+        this.#requireOpenNamedChat(id);
         await app.requireDriver(id, initialUser);
 
         // PiP turned off takes nothing, from its person either: it would run without its rules, and be compacted without
@@ -1048,6 +1104,7 @@ export class Commands {
 
             await app.requireDriver(id, liveUser);
             app.requireSee(this.#requireCurrentUser(user), id);
+            this.#requireOpenNamedChat(id);
             app.spend.check(liveUser, id);
 
             if (app.pip.orchestration.isScoped(id)) {

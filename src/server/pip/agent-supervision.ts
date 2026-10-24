@@ -166,6 +166,8 @@ type InputAuthority = {
     chatId: number;
     inputId?: number;
     admissionSerial?: number;
+    /** Native source lifecycle revoked this input; restoring history cannot renew its authority. */
+    revoked?: true;
     /** Registered continuation inputs retain the original accepted owner instruction. */
     parentTask?: string;
     wakeId?: string;
@@ -493,7 +495,8 @@ export class AgentSupervision {
                         receipt.attachmentEpoch === attachment?.epoch &&
                         receipt.tokenHash === user.tokenHash &&
                         receipt.controllerEpoch !== undefined &&
-                        receipt.controllerEpoch === grant?.epoch,
+                        receipt.controllerEpoch === grant?.epoch &&
+                        this.#receiptSourceCurrent(receipt, doc),
                 );
                 const work = accessible ? await tx.doc(PipWorkDoc, controller) : undefined;
                 let current =
@@ -632,11 +635,29 @@ export class AgentSupervision {
                     current = false;
                 }
 
+                const endedAt = accessible ? this.#app.endedAt(controller) : undefined;
+
                 result.push({
                     workItemId,
                     conversationId,
                     title: accessible ? item!.title : "Unavailable Work Item",
-                    ...(accessible ? { activeThreadId: item!.activeThreadId } : {}),
+                    ...(accessible
+                        ? {
+                              activeThreadId: item!.activeThreadId,
+                              cwd: this.#app.cwdOf(controller),
+                              ...(this.#app.locationOf(controller) === undefined
+                                  ? {}
+                                  : { location: this.#app.locationOf(controller) }),
+                              busy: this.#app.isBusy(controller),
+                              waiting: this.#app.approvals
+                                  .all()
+                                  .some(
+                                      (approval) =>
+                                          this.#app.rootOf(approval.conversationId) === controller,
+                                  ),
+                              ...(endedAt === undefined ? {} : { endedAt }),
+                          }
+                        : {}),
                     state,
                     reason,
                     attached,
@@ -888,6 +909,104 @@ export class AgentSupervision {
         );
     }
 
+    /** Historical contacts without exact accepted source proof cannot manage or suppress owner alerts. */
+    #receiptSourceCurrent(receipt: IntentReceipt, doc: SupervisionData = this.#doc): boolean {
+        if (receipt.sourceInputId === undefined || receipt.sourceAdmissionSerial === undefined) {
+            return false;
+        }
+
+        const input = doc.inputs?.[String(receipt.sourceInputId)];
+        const admission =
+            input?.requestId === undefined
+                ? undefined
+                : doc.admissions?.[hash([receipt.chatId, input.requestId])];
+        const person = requestPerson(admission?.requestId);
+
+        return (
+            input?.inputId === receipt.sourceInputId &&
+            admission !== undefined &&
+            person?.wrote === true &&
+            person.userId === receipt.ownerId &&
+            [input, admission].every(
+                (source) =>
+                    source.revoked !== true &&
+                    source.agentId === receipt.agentId &&
+                    source.chatId === receipt.chatId &&
+                    source.tokenHash === receipt.tokenHash &&
+                    source.epoch === receipt.agentEpoch &&
+                    source.admissionSerial === receipt.sourceAdmissionSerial,
+            )
+        );
+    }
+
+    /** Passive catalogue activity; report origins and idle model runs do not change management. */
+    manages(chat: ConversationId): boolean {
+        const scope = this.#app.pip.agents.scope(chat);
+        const meta = this.#app.sessionMeta(chat);
+        const identity = scope === undefined ? undefined : this.#identities[scope.agentId];
+        const user = scope === undefined ? undefined : this.#app.config.userById(scope.ownerId);
+
+        if (
+            scope === undefined ||
+            identity === undefined ||
+            identity.ownerId !== scope.ownerId ||
+            user?.role !== "owner" ||
+            meta?.archived === true ||
+            !this.#app.canSee(user, chat) ||
+            !this.#app.config.pipEnabled ||
+            !this.#app.workItems.enabled
+        ) {
+            return false;
+        }
+
+        return Object.values(this.#doc.requests).some((receipt) => {
+            if (
+                receipt.chatId !== Number(chat) ||
+                receipt.agentId !== identity.agentId ||
+                receipt.ownerId !== user.id ||
+                receipt.tokenHash !== user.tokenHash ||
+                receipt.agentEpoch !== identity.epoch ||
+                receipt.status !== "accepted" ||
+                receipt.controllerEpoch === undefined ||
+                !this.#receiptSourceCurrent(receipt) ||
+                !(
+                    receipt.action === undefined ||
+                    receipt.action === "delegate" ||
+                    (receipt.action === "send" && receipt.target === receipt.controllerId)
+                )
+            ) {
+                return false;
+            }
+
+            const controller = idOf(receipt.controllerId);
+            const item = this.#app.workItems.itemFor(controller);
+            const grant = item?.supervisor;
+
+            if (
+                item?.id !== receipt.workItemId ||
+                grant?.agentId !== identity.agentId ||
+                grant.agentEpoch !== identity.epoch ||
+                grant.attachmentEpoch !== receipt.attachmentEpoch ||
+                (grant.maxActions !== undefined && grant.actions >= grant.maxActions)
+            ) {
+                return false;
+            }
+
+            try {
+                const owner = this.#app.workItems.controllerCurrent(
+                    controller,
+                    receipt.controllerEpoch,
+                );
+
+                this.#app.spend.check(owner, controller);
+
+                return owner.id === user.id;
+            } catch {
+                return false;
+            }
+        });
+    }
+
     /** Exact accepted delegation origin. Association/history alone never suppresses a human question. */
     notificationParent(item: Readonly<WorkItem>): ConversationId | undefined {
         const grant = item.supervisor;
@@ -905,7 +1024,8 @@ export class AgentSupervision {
                 entry.agentEpoch === grant.agentEpoch &&
                 entry.attachmentEpoch === grant.attachmentEpoch &&
                 entry.controllerId === grant.conversationId &&
-                entry.controllerEpoch === grant.epoch,
+                entry.controllerEpoch === grant.epoch &&
+                this.#receiptSourceCurrent(entry),
         );
         const user = this.#app.config.userById(grant.ownerId);
         const origin = receipt === undefined ? undefined : idOf(receipt.chatId);
@@ -1684,6 +1804,39 @@ export class AgentSupervision {
         }
     }
 
+    /** Close fences this source's existing authority, never its identity or independent children. */
+    async fenceSource(tx: Tx, chat: ConversationId): Promise<void> {
+        await this.fenceParents(tx, chat);
+        const doc = await tx.doc(AgentSupervisionDoc);
+
+        for (const source of [
+            ...Object.values(doc.admissions ?? {}),
+            ...Object.values(doc.inputs ?? {}),
+        ]) {
+            if (source.chatId === Number(chat)) {
+                source.revoked = true;
+            }
+        }
+    }
+
+    async #requireSourceInput(tx: Tx, source: InputAuthority): Promise<void> {
+        const doc = await tx.doc(AgentSupervisionDoc);
+        const meta = (await tx.doc(SessionsDoc)).items[String(source.chatId)];
+        const admission =
+            source.requestId === undefined
+                ? undefined
+                : doc.admissions?.[hash([source.chatId, source.requestId])];
+        const input =
+            source.inputId === undefined ? undefined : doc.inputs?.[String(source.inputId)];
+
+        if (meta?.archived || source.revoked || admission?.revoked || input?.revoked) {
+            throw new HttpError(
+                409,
+                "This Chat's source input was closed; restoring history requires fresh owner input.",
+            );
+        }
+    }
+
     /** Capture authority before native acceptance can schedule its first provider hook. */
     async acceptInput(
         tx: Tx,
@@ -1695,6 +1848,13 @@ export class AgentSupervision {
         const scope = this.#scope(chat, user);
         const identity = await this.#identity(tx, scope.agentId, user);
         const doc = await tx.doc(AgentSupervisionDoc);
+
+        await this.#requireSourceInput(tx, {
+            agentId: identity.agentId,
+            epoch: identity.epoch,
+            tokenHash: user.tokenHash,
+            chatId: Number(this.#chat(chat)),
+        });
         const key = hash([Number(chat), requestId]);
         const continuation = Object.entries(doc.parentTasks ?? {}).find(
             ([, task]) =>
@@ -1728,7 +1888,8 @@ export class AgentSupervision {
 
         if (
             previous !== undefined &&
-            (previous.agentId !== pin.agentId ||
+            (previous.revoked ||
+                previous.agentId !== pin.agentId ||
                 previous.epoch !== pin.epoch ||
                 previous.tokenHash !== pin.tokenHash ||
                 previous.chatId !== pin.chatId)
@@ -1919,6 +2080,7 @@ export class AgentSupervision {
                                 );
                             }
 
+                            await this.#requireSourceInput(tx, previous);
                             const supersededContinuation =
                                 previous.parentTask !== undefined &&
                                 ownerAuthority !== undefined &&
@@ -2462,6 +2624,7 @@ export class AgentSupervision {
 
     /** Fresh control needs actual accepted owner input, not a report or a superseded generation. */
     async #requireOwnerInput(tx: Tx, source: InputAuthority, ownerId: string): Promise<void> {
+        await this.#requireSourceInput(tx, source);
         const doc = await tx.doc(AgentSupervisionDoc);
         const admission = Object.values(doc.admissions ?? {}).find(
             (entry) =>
@@ -3013,6 +3176,7 @@ export class AgentSupervision {
                     owner?.role === "owner" &&
                     pin.tokenHash === owner.tokenHash
                 ) {
+                    await this.#requireSourceInput(tx, pin as InputAuthority);
                     await this.#requireParentInput(tx, pin as InputAuthority, Number(api.taskId));
 
                     return {

@@ -1047,8 +1047,21 @@ const handlers = {
         }));
         handoffSessionsChanged(sessions);
     },
-    namedAgents: (agents) =>
-        store.set({ namedAgents: store.state.me?.role === "owner" ? agents : [] }),
+    namedAgents: (agents) => {
+        const next = store.state.me?.role === "owner" ? agents : [];
+        const open = new Set(next.flatMap((agent) => agent.chatIds ?? []));
+        const removed = store.state.namedAgents.flatMap((agent) =>
+            (agent.chatIds ?? []).filter((id) => !open.has(id)),
+        );
+
+        // Native catalogue removal (archive/deletion) also discards inactive local composers in
+        // this browser. It is not a separate close registry and never creates server authority.
+        for (const id of removed) {
+            drafts.discard(id);
+        }
+
+        store.set({ namedAgents: next });
+    },
     "folder-favorites": (folderFavorites) => store.set({ folderFavorites }),
     projects: (data) => store.set({ projects: data.projects, projectsLoaded: true }),
     models: (models) => store.set({ models }),
@@ -2126,6 +2139,19 @@ const draftRevisions = new Map();
 export const drafts = {
     get: (id) => localStorage.getItem(`pocket.draft.${id ?? "home"}`) ?? "",
     revision: (id) => draftRevisions.get(id) ?? 0,
+    // Native named-Chat Close also discards the composer’s folded-paste bodies, not sent history.
+    discard: (id) => {
+        draftRevisions.set(id, drafts.revision(id) + 1);
+
+        for (const kind of ["draft", "pastes"]) {
+            try {
+                localStorage.removeItem(`pocket.${kind}.${id ?? "home"}`);
+            } catch {
+                // Unavailable browser storage must not hide the authoritative native Close.
+                // The mounted composer also clears its own text, paste and attachment state.
+            }
+        }
+    },
     set: (id, text) => {
         // Even edit/undo back to identical text is a newer draft than an in-flight submission.
         draftRevisions.set(id, drafts.revision(id) + 1);

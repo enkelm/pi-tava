@@ -32,7 +32,7 @@ const fixtures: Record<string, string> = {
     "home.js": inert("Splash"),
     "launcher.js": inert("Launcher"),
     "notify.js": inert("registerWorker updateBadge"),
-    "peeks.js": `export const PEEK_WIDE={matches:false}; ${inert("PeekHost PeekStrip peekTiles peeksWanted togglePeeks PeeksButton")}`,
+    "peeks.js": `export const PEEK_WIDE={matches:false}; ${inert("PeekHost PeekStrip peekContext peekTiles peeksOn peeksWanted setManagedPeeks togglePeeks PeeksButton")}`,
     "pip.js": inert("closePip openPip PipHost pipAvailable togglePip"),
     "sessions.js": `${inert("Drawer Rail ResizeHandle SessionList")} export const toSessions=()=>{};`,
     "private.js": inert("PrivatePane"),
@@ -59,7 +59,7 @@ const fixtures: Record<string, string> = {
     "sheets/gallery.js": inert(
         "galleryAvailable GalleryEntrySheet GalleryShareSheet GallerySheet GallerySourceSheet GalleryUpdateSheet",
     ),
-    "sheets/pi-sessions.js": inert("ImportSheet piSessionsAvailable"),
+    "sheets/pi-sessions.js": inert("ImportSheet ShareImportSheet piSessionsAvailable"),
     "sheets/folder.js": inert("CwdSheet"),
     "sheets/memory.js": inert("MemorySheet"),
     "sheets/menu.js": `import {html,Sheet} from '../ui.js';

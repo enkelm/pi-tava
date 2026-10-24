@@ -17,6 +17,7 @@ import { WorkContext, type WorkReadInput } from "./work-items/context.ts";
 import type { PocketApp } from "./app.ts";
 import { APP_ROOT, type User } from "./config.ts";
 import { PipWorkDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
+import { AgentIdentitiesDoc } from "./agent-identity-docs.ts";
 import { HttpError } from "./errors.ts";
 import { Handoffs, humanDirection } from "./handoffs.ts";
 export type { HandoffResult } from "./handoffs.ts";
@@ -131,12 +132,14 @@ export class WorkItems {
 
             return user;
         };
+
         const authorize = async () => {
             check();
             await api.commit((tx) => app.pip.agents.supervision.requireInvocation(tx, api), ctx);
 
             return check();
         };
+
         const reader = this.reader(source, authorize, ctx, "private");
 
         return reader.read({
@@ -1060,6 +1063,52 @@ export class WorkItems {
             throw new HttpError(404, "Not a session");
         }
 
+        if (meta.pip !== undefined || meta.pipAgent === true || meta.pipWorkItemId !== undefined) {
+            const identities = await tx.doc(AgentIdentitiesDoc);
+            const identity =
+                meta.pipAgentId === undefined ? undefined : identities.items[meta.pipAgentId];
+            const pending = Object.values(identities.requests).find(
+                (request) =>
+                    request.chatId === Number(id) &&
+                    request.firstInputRequestId !== undefined &&
+                    !request.accepted,
+            );
+            const saved =
+                pending === undefined ||
+                (await tx.submissionByRequest(id, pending.firstInputRequestId!))?.type === "input";
+
+            if (
+                user.role !== "owner" ||
+                meta.pip !== user.id ||
+                meta.ownerOnly !== true ||
+                meta.pipAgent !== true ||
+                meta.pipWorkItemId !== undefined ||
+                meta.workItemId !== undefined ||
+                this.#app.rootOf(id) !== id ||
+                identity === undefined ||
+                identity.deletedAt !== undefined ||
+                identity.ownerId !== user.id ||
+                !identity.chatIds.includes(Number(id)) ||
+                !saved ||
+                patch.archived === undefined ||
+                patch.title !== undefined
+            ) {
+                throw new HttpError(
+                    409,
+                    "Only a current owner's bound saved named Chat can be archived or restored here.",
+                );
+            }
+
+            if (patch.archived) {
+                await this.#app.pip.agents.contacts.fenceTarget(tx, id);
+                const subagents = await tx.doc(SubagentsDoc, id);
+
+                if (subagents.sending !== undefined) {
+                    subagents.sending.discarded = true;
+                }
+            }
+        }
+
         // Renaming moves a thread up the list; archive/restore retains its position.
         if (patch.title !== undefined) {
             meta.title = patch.title || undefined;
@@ -1068,7 +1117,11 @@ export class WorkItems {
 
         if (patch.archived !== undefined) {
             if (patch.archived) {
-                await this.#app.pip.agents.supervision.fenceParents(tx, id);
+                if (meta.pipAgent === true) {
+                    await this.#app.pip.agents.supervision.fenceSource(tx, id);
+                } else {
+                    await this.#app.pip.agents.supervision.fenceParents(tx, id);
+                }
             }
 
             if (meta.workItemId === undefined) {

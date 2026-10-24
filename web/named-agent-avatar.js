@@ -6,7 +6,9 @@ let library;
 
 function loadBlobatar() {
     if (!library) {
-        library = import("blobatar/react").then((module) => module.Blobatar);
+        library = Promise.all([import("blobatar/react"), import("blobatar/expression")]).then(
+            ([{ Blobatar }, { thinking, idle }]) => ({ Blobatar, thinking, idle }),
+        );
         library.catch(() => {
             library = undefined;
         });
@@ -16,17 +18,17 @@ function loadBlobatar() {
 }
 
 /** Decorative identity beside the name. A missing module/image leaves its reserved space quiet. */
-export function NamedAgentAvatar({ agentId, size = 28 }) {
-    const [Blobatar, setBlobatar] = useState(null);
+export function NamedAgentAvatar({ agentId, size = 28, animated = false, thinking = false }) {
+    const [loaded, setLoaded] = useState(null);
     const [failed, setFailed] = useState(false);
 
     useEffect(() => {
         let mounted = true;
 
         loadBlobatar().then(
-            (component) => {
+            (module) => {
                 if (mounted) {
-                    setBlobatar(() => component);
+                    setLoaded(module);
                 }
             },
             () => {
@@ -47,10 +49,12 @@ export function NamedAgentAvatar({ agentId, size = 28 }) {
         style=${{ width: size, height: size }}
     >
         ${
-            Blobatar &&
+            loaded &&
             !failed &&
-            html`<${Blobatar}
+            html`<${loaded.Blobatar}
                 name=${`pip:${agentId}`}
+                animate=${animated ? "always" : undefined}
+                expression=${thinking ? loaded.thinking : loaded.idle}
                 size=${size}
                 alt=""
                 aria-hidden="true"

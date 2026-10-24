@@ -1,11 +1,11 @@
 // Named identities keep saved chats and unsent local drafts in one compact navigation rail.
 import { Fragment } from "preact";
-import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { store, navigate } from "./store.js";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { actions, drafts, navigate, notify, store } from "./store.js";
 import { html, Icon } from "./ui.js";
 import { namedAgentsAvailable } from "./named-agents.js";
 import { toSessions } from "./sessions.js";
-import { closedAgentTabs, setClosedAgentTabs } from "./agent-tab-state.js";
+import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import {
     agentDrafts,
     closeAgentDraft,
@@ -15,6 +15,8 @@ import {
 } from "./agent-drafts.js";
 
 const focusAfterClose = new Map();
+// Pending HTTP requests only, shared by the rail and picker; never a closed-Chat registry.
+const closeRequests = new Set();
 const titleOf = (chat) => chat.title || (chat.draft ? "New chat" : `Chat ${chat.id}`);
 let pending = null;
 
@@ -63,25 +65,28 @@ function navigateAgentTab(agentId, source) {
 
 function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) {
     const tabsKey = `${userId}:${agent.agentId}`;
-    const [, setClosed] = useState(null);
-    const closedTabs = () => closedAgentTabs(userId, agent.agentId);
-    const closed = closedTabs();
+    const [closing, setClosing] = useState(new Set());
+    const inFlight = useRef(new Set());
     const links = useRef(new Map());
     const tabs = useRef(new Map());
     const switcher = useRef(null);
-    const chats = [...(agent.chats ?? (agent.chatIds ?? []).map((id) => ({ id })))];
+    const chats = [...(agent.chats ?? (agent.chatIds ?? []).map((id) => ({ id })))].filter(
+        (chat) => !chat.archived,
+    );
 
     // An exact saved route may arrive before its catalogue event; never infer identity from that event alone.
-    if (typeof source === "number" && !chats.some((chat) => chat.id === source)) {
+    if (
+        typeof source === "number" &&
+        !store.state.view.conversation?.archived &&
+        !chats.some((chat) => chat.id === source)
+    ) {
         chats.push({ id: source, title: store.state.view.conversation?.title });
     }
 
-    const visible = [
-        ...chats.filter((chat) => !closed.has(chat.id) || chat.id === source),
-        ...agentDrafts(agent.agentId),
-    ];
+    const visible = [...chats, ...agentDrafts(agent.agentId)];
     const visibleIds = visible.map((chat) => chat.id).join(",");
     const selected = visible.find((chat) => chat.id === source);
+    const selectedTitle = selected ? titleOf(selected) : "Closed chat";
     const current = () =>
         store.state.me?.id === userId &&
         tabChromeAgent()?.agentId === agent.agentId &&
@@ -101,23 +106,6 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
         }
     };
 
-    const dismissTabs = (ids) => {
-        setClosedAgentTabs(userId, agent.agentId, ids);
-        setClosed(ids);
-        // The header rail, phone picker and sidebar entry share the same UI-only dismissal set.
-        store.set({});
-    };
-
-    useLayoutEffect(() => {
-        // Reopen the exact selected route before interaction, never from an outgoing passive effect:
-        // closing the last tab can leave that route selected until native goHome's queue settles.
-        if (current() && typeof source === "number" && closedTabs().has(source)) {
-            const ids = new Set(closedTabs());
-
-            ids.delete(source);
-            dismissTabs(ids);
-        }
-    }, [source, tabsKey]);
     useEffect(() => {
         if (picker) {
             return;
@@ -138,25 +126,132 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
         }
     }, [source, visibleIds]);
 
-    const closeTab = (chat, event) => {
+    const closeTab = async (chat, event) => {
         event.preventDefault();
         event.stopPropagation();
 
-        if (!current()) {
+        const requestKey = `${tabsKey}:${chat.id}`;
+
+        if (!current() || closeRequests.has(requestKey)) {
             return;
         }
 
         const at = visible.findIndex((item) => item.id === chat.id);
-        const next = visible[at + 1] ?? visible[at - 1];
 
         if (chat.draft) {
             closeAgentDraft(chat.id);
         } else {
-            const ids = new Set(closedTabs());
+            if (
+                !confirm(
+                    `Close “${titleOf(chat)}” everywhere? This stops this Chat and its orchestration. Independent child Work Items keep running. Unsent drafts are discarded. Saved history remains recoverable through History → Restore.`,
+                ) ||
+                !current()
+            ) {
+                return;
+            }
 
-            ids.add(chat.id);
-            dismissTabs(ids);
+            const beforeChat = store.state.namedAgents
+                .find((item) => item.agentId === agent.agentId)
+                ?.chats?.find((item) => item.id === chat.id);
+            const beforeView = store.state.view.conversation;
+            const draftRevision = drafts.revision(chat.id);
+
+            closeRequests.add(requestKey);
+            inFlight.current.add(chat.id);
+            setClosing(new Set(inFlight.current));
+
+            try {
+                await actions.updateSession(chat.id, { archived: true });
+            } catch (error) {
+                if (current()) {
+                    notify("error", error.message || "Could not close this Chat.");
+                }
+
+                return;
+            } finally {
+                closeRequests.delete(requestKey);
+                inFlight.current.delete(chat.id);
+                setClosing(new Set(inFlight.current));
+            }
+
+            if (store.state.me?.id !== userId) {
+                return;
+            }
+
+            const latestChat = store.state.namedAgents
+                .find((item) => item.agentId === agent.agentId)
+                ?.chats?.find((item) => item.id === chat.id);
+            const latestView = store.state.view.conversation;
+
+            // Native events may already include a subsequent Restore. A delayed HTTP response
+            // cannot replace newer authoritative snapshots or clear their fresh composer.
+            if (
+                (latestChat && latestChat !== beforeChat && !latestChat.archived) ||
+                (latestView?.id === chat.id && latestView !== beforeView && !latestView.archived)
+            ) {
+                return;
+            }
+
+            const stillHere = current();
+
+            // Cleanup belongs to the successfully closed Chat, not the selected route. Do it
+            // before removing its row, so a later catalogue event cannot lose the removal edge.
+            if (drafts.revision(chat.id) === draftRevision) {
+                drafts.discard(chat.id);
+            }
+
+            // Reflect the accepted native archive until its catalogue/view event arrives. No local
+            // dismissal registry: a fresh browser reads the same archived state from the server.
+            store.set((state) => ({
+                namedAgents: state.namedAgents.map((item) =>
+                    item.agentId !== agent.agentId
+                        ? item
+                        : {
+                              ...item,
+                              id:
+                                  item.id === chat.id
+                                      ? ((item.chats ?? [])
+                                            .filter(
+                                                (entry) => entry.id !== chat.id && !entry.archived,
+                                            )
+                                            .at(-1)?.id ?? null)
+                                      : item.id,
+                              chats: item.chats?.filter((entry) => entry.id !== chat.id),
+                              chatIds: item.chatIds?.filter((id) => id !== chat.id),
+                          },
+                ),
+                ...(state.view.conversation?.id === chat.id
+                    ? {
+                          view: {
+                              ...state.view,
+                              conversation: { ...state.view.conversation, archived: true },
+                          },
+                      }
+                    : {}),
+            }));
+
+            if (!stillHere) {
+                return;
+            }
         }
+
+        const liveAgent = store.state.namedAgents.find((item) => item.agentId === agent.agentId);
+        const eligible = [
+            ...(liveAgent?.chats ?? (liveAgent?.chatIds ?? []).map((id) => ({ id }))),
+            ...agentDrafts(agent.agentId),
+        ].filter(
+            (item) =>
+                item.id !== chat.id &&
+                !item.archived &&
+                !closeRequests.has(`${tabsKey}:${item.id}`),
+        );
+        const byId = new Map(eligible.map((item) => [item.id, item]));
+        // Resolve neighbors after acknowledgement: a sibling Close may have removed the old
+        // neighbor, or it may still be pending and therefore ineligible as a destination.
+        const next =
+            [...visible.slice(at + 1), ...visible.slice(0, at).reverse()]
+                .map((item) => byId.get(item.id))
+                .find(Boolean) ?? eligible[0];
 
         if (picker && chat.id !== source) {
             links.current.get(source)?.focus({ preventScroll: true });
@@ -286,20 +381,32 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
                 choose(chat);
             }}
         >
+            <${NamedAgentAvatar}
+                agentId=${agent.agentId}
+                size=${22}
+                animated=${true}
+                thinking=${chat.busy || chat.managing}
+            />
             <span class="agent-tab-title">${titleOf(chat)}</span>
             ${chat.draft && html`<span class="small muted">Draft</span>`}
-            ${chat.busy && html`<span class="agent-tab-busy" aria-label="Working"></span>`}
+            ${
+                (chat.busy || chat.managing) &&
+                html`<span class="sr-only">
+                    ${chat.busy ? "Working" : "Managing orchestration"}
+                </span>`
+            }
         </a>
         <button
             class="agent-tab-close"
             type="button"
             aria-label=${`Close ${titleOf(chat)} ${chat.draft ? "draft" : "tab"}, chat ${chat.id}`}
+            disabled=${closing.has(chat.id) || closeRequests.has(`${tabsKey}:${chat.id}`)}
             title=${
                 chat.draft
                     ? chat.requestId
                         ? "Close draft; pending send receipt is kept"
                         : "Discard unsent draft"
-                    : "Close tab; chat and running work are kept"
+                    : "Close everywhere; restore saved history from History"
             }
             onClick=${(event) => closeTab(chat, event)}
         ><${Icon} name="close" size=${14} /></button>
@@ -308,7 +415,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
     if (picker) {
         return html`<${Fragment}>
             <p class="small muted">
-                Closing a saved tab keeps its chat and running work. Find it again in History.
+                Closing a saved Chat archives it everywhere and stops this Chat. Independent child Work Items keep running. Restore saved history from History.
             </p>
             <nav class="agent-chat-choices" aria-label=${`${agent.name} open chats`}>
                 ${visible.map((chat) => chatItem(chat, true))}
@@ -325,12 +432,25 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
             class="agent-chat-switch"
             type="button"
             ref=${switcher}
-            aria-label=${`${titleOf(selected ?? {})}: switch chats`}
+            aria-label=${`${selectedTitle}: switch chats`}
+            aria-description=${
+                selected?.busy
+                    ? "Working"
+                    : selected?.managing
+                      ? "Managing orchestration"
+                      : undefined
+            }
             aria-haspopup="dialog"
             aria-expanded=${expanded}
             onClick=${(event) => current() && onChoose?.(event)}
         >
-            <span class="agent-tab-title">${titleOf(selected ?? {})}</span>
+            <${NamedAgentAvatar}
+                agentId=${agent.agentId}
+                size=${22}
+                animated=${true}
+                thinking=${selected?.busy || selected?.managing}
+            />
+            <span class="agent-tab-title">${selectedTitle}</span>
             <${Icon} name="down" size=${14} />
         </button>
         <button

@@ -18,7 +18,8 @@ const bridge = {
         get state() {
             return active.state;
         },
-        set: (value: Props) => active.patch(value),
+        set: (value: Props | ((state: Props) => Props)) =>
+            active.patch(typeof value === "function" ? value(active.state) : value),
         subscribe(listener: () => void) {
             listeners.add(listener);
 
@@ -26,6 +27,13 @@ const bridge = {
         },
     },
     api: (...args: any[]) => active.api(...args),
+    sessionActions: { updateSession: (...args: any[]) => active.updateSession(...args) },
+    drafts: {
+        revision: (id: number) => active.draftRevision(id),
+        set: (...args: any[]) => active.setDraft(...args),
+        discard: (id: number) => active.setDraft(id, ""),
+    },
+    notify: (...args: any[]) => active.notice(...args),
     uid: () => active.uid(),
     navigate: (id: number) => active.navigate(id),
     toSessions: () => active.toSessions(),
@@ -62,22 +70,21 @@ const bridge = {
     },
 };
 const descriptor = Object.getOwnPropertyDescriptor(globalThis, "agentTabsUiFixture");
-const storageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
-const storage = new Map<string, string>();
+const confirmDescriptor = Object.getOwnPropertyDescriptor(globalThis, "confirm");
 
 Object.defineProperty(globalThis, "agentTabsUiFixture", { configurable: true, value: bridge });
-Object.defineProperty(globalThis, "sessionStorage", {
+Object.defineProperty(globalThis, "confirm", {
     configurable: true,
-    value: {
-        getItem: (key: string) => storage.get(key) ?? null,
-        setItem: (key: string, value: string) => storage.set(key, value),
-        removeItem: (key: string) => storage.delete(key),
+    value: (message: string) => {
+        active.confirm.messages.push(message);
+
+        return active.confirm.allow;
     },
 });
 after(() => {
     for (const [key, previous] of [
         ["agentTabsUiFixture", descriptor],
-        ["sessionStorage", storageDescriptor],
+        ["confirm", confirmDescriptor],
     ] as const) {
         if (previous) {
             Object.defineProperty(globalThis, key, previous);
@@ -90,7 +97,7 @@ const sources: Record<string, string> = {
     "preact/hooks":
         "export const {useState,useRef,useEffect,useLayoutEffect}=globalThis.agentTabsUiFixture.hooks;",
     "./store.js":
-        "export const {store,api,uid,navigate,openSheet,closeSheet,projectsAvailable}=globalThis.agentTabsUiFixture;",
+        "export const {store,api,uid,navigate,openSheet,closeSheet,projectsAvailable,drafts,notify}=globalThis.agentTabsUiFixture; export const actions=globalThis.agentTabsUiFixture.sessionActions;",
     "./sessions.js": "export const {toSessions}=globalThis.agentTabsUiFixture;",
     "./named-agents.js":
         "const b=globalThis.agentTabsUiFixture; export const namedAgentsAvailable=()=>b.store.state.me?.role==='owner' && b.store.state.server?.privateAgents>=4; export const openAgentSettings=(id,agentId,section)=>b.openSheet({type:'named-agent',id,agentId,section});",
@@ -109,8 +116,14 @@ const sources: Record<string, string> = {
         "export const BrowserButton=(props)=>globalThis.agentTabsUiFixture.marker('BrowserButton',props);",
     "./chat.js":
         "export const PeopleButton=(props)=>globalThis.agentTabsUiFixture.marker('PeopleButton',props);",
-    "./peeks.js":
-        "export const PeeksButton=(props)=>globalThis.agentTabsUiFixture.marker('PeeksButton',props);",
+    "./peeks.js": `const b=globalThis.agentTabsUiFixture;
+        export const PeeksButton=(props)=>b.marker('PeeksButton',props);
+        export const peeksOn=()=>b.store.state.managedPeeksOn===true;
+        export const togglePeeks=()=>b.store.set({managedPeeksOn:!peeksOn()});
+        export const setManagedPeeks=(scope,read)=>{
+            const value={...scope,...read}; b.store.set({managedPeeks:value});
+            return ()=>{if(b.store.state.managedPeeks===value)b.store.set({managedPeeks:null});};
+        };`,
     "./files-panel.js":
         "export const {setFilesOpen}=globalThis.agentTabsUiFixture,filesAvailable=()=>true,FilesButton=(props)=>globalThis.agentTabsUiFixture.marker('FilesButton',props);",
     "./extension-ui.js":
@@ -209,6 +222,11 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
     const fibers = new Map<string, Fiber>();
     const effects: (() => void)[] = [];
     const requests: any[] = [];
+    const mutations: any[] = [];
+    const notices: unknown[][] = [];
+    const draftWrites: unknown[][] = [];
+    const draftRevisions = new Map<number, number>();
+    const confirm = { allow: true, messages: [] as string[] };
     const navigated: (number | null)[] = [];
     const returned: string[] = [];
     const opened: Props[] = [];
@@ -222,7 +240,7 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
     let attached = new Set<string>();
     const state: Props = {
         me: { id: `tabs-owner-${++owners}`, role: "owner" },
-        server: { privateAgents: 4, extensions: ["pocket-memory"] },
+        server: { privateAgents: 4, peeks: true, extensions: ["pocket-memory"] },
         localDrafts: [],
         agentDraft: null,
         sessions: [],
@@ -288,6 +306,16 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
         state,
         hooks,
         actions,
+        confirm,
+        notice: (...args: unknown[]) => notices.push(args),
+        draftRevision: (id: number) => draftRevisions.get(id) ?? 0,
+        setDraft: (id: number, text: string) => {
+            draftRevisions.set(id, (draftRevisions.get(id) ?? 0) + 1);
+            draftWrites.push([id, text]);
+            state.retained.drafts[id] = text;
+        },
+        updateSession: (id: number, patch: Props) =>
+            new Promise((resolve, reject) => mutations.push({ id, patch, resolve, reject })),
         folders,
         edges,
         changes: { files: [{ path: "src/feature.ts", added: 2, removed: 1 }], repo: true },
@@ -456,6 +484,10 @@ function fixture(t: TestContext, Component = AgentTabs, initial: Props = {}) {
     return {
         state,
         requests,
+        mutations,
+        notices,
+        draftWrites,
+        confirm,
         navigated,
         returned,
         opened,
@@ -563,16 +595,15 @@ const closeInitial = "Close Initial setup tab, chat 7";
 const closeActive = "Close Accessibility review tab, chat 19";
 const closeFollowup = "Close Follow up tab, chat 27";
 
-test("dismissal is local: sibling controls preserve retained chats, choose the next/previous route, and leave the last chat for Sessions", async (t) => {
+test("saved Close waits for native archive acknowledgement before removing tabs or navigating", async (t) => {
     for (const direction of ["next", "previous"] as const) {
-        await t.test(direction, (t) => {
+        await t.test(direction, async (t) => {
             const f = fixture(t);
 
             threeChats(f);
-            const metadata = structuredClone(f.state.namedAgents);
-            const retained = structuredClone(f.state.retained);
+            const inactiveId = direction === "next" ? 7 : 27;
             const inactive = f.label(direction === "next" ? closeInitial : closeFollowup);
-            const link = chatLink(f, direction === "next" ? 7 : 27);
+            const link = chatLink(f, inactiveId);
             const parent = f
                 .all()
                 .find((node) => [node.props.children].flat(Infinity).includes(link));
@@ -580,7 +611,7 @@ test("dismissal is local: sibling controls preserve retained chats, choose the n
             assert.ok(parent);
             assert.ok(
                 [parent.props.children].flat(Infinity).includes(inactive),
-                "close and link are siblings, never nested interactive controls",
+                "Close is a sibling of its link",
             );
             assert.equal(
                 nodes(link).some((node) => node.type === "button"),
@@ -588,110 +619,169 @@ test("dismissal is local: sibling controls preserve retained chats, choose the n
             );
             f.focus(inactive);
             f.click(inactive);
-            assert.deepEqual(f.navigated, [], "closing an inactive tab never activates its anchor");
+            assert.deepEqual(
+                f.mutations.map(({ id, patch }) => ({ id, patch })),
+                [{ id: inactiveId, patch: { archived: true } }],
+            );
+            assert.ok(
+                chatLink(f, inactiveId),
+                "the tab stays visible until the server accepts Close",
+            );
+            assert.deepEqual(f.draftWrites, []);
+            assert.deepEqual(f.navigated, []);
+            const confirmation = f.confirm.messages[0];
+
+            assert.ok(confirmation);
+            assert.match(confirmation, /stops this Chat and its orchestration/);
+            assert.match(confirmation, /Independent child Work Items keep running/);
+            assert.match(confirmation, /Unsent drafts.*discarded/);
+            assert.match(confirmation, /History/);
+            f.click(inactive);
+            assert.equal(
+                f.mutations.length,
+                1,
+                "duplicate clicks cannot submit duplicate archives",
+            );
+            f.mutations[0].resolve({});
+            await f.settle();
+            assert.equal(
+                f.all().some((node) => node.props.href === "/s/" + inactiveId),
+                false,
+            );
             assert.equal(f.state.conversationId, 19);
-            assert.equal(f.focused(), `/s/19`, "focus returns to the selected link, not body");
+            assert.equal(f.focused(), "/s/19");
+            assert.deepEqual(f.draftWrites, [[inactiveId, ""]]);
             f.focus(f.label(closeActive));
             f.click(f.label(closeActive));
+            assert.equal(
+                f.state.conversationId,
+                19,
+                "selected route also waits for acknowledgement",
+            );
+            assert.equal(f.state.retained.drafts[19], "Unsaved active draft");
+            f.mutations[1].resolve({});
+            await f.settle();
             const neighbor = direction === "next" ? 27 : 7;
 
             assert.deepEqual(f.navigated, [neighbor]);
-            assert.equal(
-                f.state.view.conversation,
-                null,
-                "route transition temporarily has no room metadata",
-            );
+            assert.equal(f.state.retained.drafts[19], "");
             f.route(neighbor);
-            assert.equal(
-                f.focused(),
-                `/s/${neighbor}`,
-                "focus intent survives the view-empty transition",
-            );
+            assert.equal(f.focused(), "/s/" + neighbor);
             f.click(f.label(direction === "next" ? closeFollowup : closeInitial));
+            f.mutations[2].resolve({});
+            await f.settle();
             assert.deepEqual(f.returned, ["sessions"]);
-            assert.deepEqual(f.navigated, [neighbor]);
+            assert.deepEqual(f.state.namedAgents[0].chats, []);
             assert.equal(
                 f.requests.length,
                 0,
-                "dismissal cannot create, stop, archive or delete a chat",
-            );
-            assert.deepEqual(f.state.namedAgents, metadata, "retained chat metadata is unchanged");
-            assert.deepEqual(
-                f.state.retained,
-                retained,
-                "drafts, history and running work survive every dismissal",
+                "Close uses native metadata mutation, never a model request",
             );
         });
     }
 });
 
-test("dismissed tabs survive reload only for their owner and identity, and an exact retained route reopens them", async (t) => {
-    const f = fixture(t);
-    const owner = f.state.me;
-    const agent = f.state.namedAgents[0];
+test("every saved Close asks permission, and cancellation or rejection preserves tab and drafts", async (t) => {
+    for (const activity of ["idle", "busy", "managing"]) {
+        await t.test(activity, async (t) => {
+            const f = fixture(t);
 
-    f.click(f.label(closeInitial));
-    assert.ok(storage.has(`pocket.pipClosedTabs.${owner.id}.stable-agent`));
-    f.patch({ view: { conversation: null } });
-    const reloaded = await import(
-        new URL("../web/agent-tabs.js?dismissed-reload", import.meta.url).href
-    );
-    const resumed = fixture(t, reloaded.AgentTabs);
-
-    resumed.patch({ me: owner });
-    assert.equal(
-        resumed.all().some((node) => node.props.href === "/s/7"),
-        false,
-    );
-    assert.ok(chatLink(resumed, 19));
-    resumed.patch({ me: { id: `${owner.id}-other`, role: "owner" } });
-    assert.ok(chatLink(resumed, 7), "another owner has no inherited closed tabs");
-    resumed.patch({
-        me: owner,
-        namedAgents: [{ ...agent, agentId: "other-agent" }],
-        view: { conversation: { id: 19, pipAgentId: "other-agent" } },
-    });
-    assert.ok(chatLink(resumed, 7), "another identity has its own closed-tab set");
-    resumed.patch({
-        namedAgents: [agent],
-        view: { conversation: { id: 19, pipAgentId: "stable-agent" } },
-    });
-    assert.equal(
-        resumed.all().some((node) => node.props.href === "/s/7"),
-        false,
-    );
-    resumed.route(7);
-    assert.ok(chatLink(resumed, 7), "ordinary exact navigation reopens the retained chat");
-    assert.equal(resumed.requests.length, 0, "reopening only changes local tab visibility");
+            f.patch({
+                namedAgents: [
+                    {
+                        ...f.state.namedAgents[0],
+                        chats: [
+                            {
+                                id: 7,
+                                title: "Initial setup",
+                                busy: activity === "busy",
+                                managing: activity === "managing",
+                            },
+                            f.state.namedAgents[0].chats[1],
+                        ],
+                    },
+                ],
+            });
+            f.confirm.allow = false;
+            f.click(f.label(closeInitial));
+            assert.equal(f.confirm.messages.length, 1);
+            assert.equal(f.mutations.length, 0);
+            assert.ok(chatLink(f, 7));
+            assert.deepEqual(f.draftWrites, []);
+            f.confirm.allow = true;
+            f.click(f.label(closeInitial));
+            assert.equal(f.confirm.messages.length, 2);
+            f.mutations[0].reject(new Error("Archive denied"));
+            await f.settle();
+            assert.ok(chatLink(f, 7));
+            assert.deepEqual(f.draftWrites, []);
+            assert.equal(f.state.retained.drafts[7], "Unsaved first draft");
+            assert.deepEqual(f.navigated, []);
+            assert.match(JSON.stringify(f.notices), /Archive denied/);
+        });
+    }
 });
 
-test("link keys move focus without activation and Delete dismisses with neighbor focus", (t) => {
+test("accepted Close cleans its own draft after source departure but cannot affect another owner or redirect", async (t) => {
+    for (const mode of ["source", "owner"]) {
+        await t.test(mode, async (t) => {
+            const f = fixture(t);
+
+            f.click(f.label(closeActive));
+            const accepted = f.mutations[0];
+
+            assert.deepEqual(accepted.patch, { archived: true });
+
+            if (mode === "source") {
+                f.route(7);
+            } else {
+                f.patch({ me: { id: "different-owner", role: "owner" } });
+            }
+
+            accepted.resolve({});
+            await f.settle();
+            assert.equal(f.state.conversationId, mode === "source" ? 7 : 19);
+            assert.deepEqual(f.navigated, []);
+            assert.deepEqual(f.returned, []);
+            assert.deepEqual(
+                f.draftWrites,
+                mode === "source" ? [[19, ""]] : [],
+                "closed-Chat cleanup is independent of navigation, but remains owner-fenced",
+            );
+        });
+    }
+});
+
+test("link keys move focus without activation and Delete archives before choosing a neighbor", async (t) => {
     const f = fixture(t);
 
     threeChats(f);
     f.focus(chatLink(f, 19));
     assert.equal(f.key(chatLink(f, 19), "ArrowRight"), true);
-    assert.equal(f.focused(), `/s/27`);
+    assert.equal(f.focused(), "/s/27");
     f.key(chatLink(f, 27), "Home");
-    assert.equal(f.focused(), `/s/7`);
+    assert.equal(f.focused(), "/s/7");
     f.key(chatLink(f, 7), "End");
-    assert.equal(f.focused(), `/s/27`);
+    assert.equal(f.focused(), "/s/27");
     f.key(chatLink(f, 27), "ArrowLeft");
-    assert.equal(f.focused(), `/s/19`);
-    assert.deepEqual(f.navigated, [], "arrow keys focus links; they do not select routes");
-    assert.equal(f.key(chatLink(f, 19), "Enter"), false, "Enter remains native link activation");
+    assert.equal(f.focused(), "/s/19");
+    assert.deepEqual(f.navigated, []);
+    assert.equal(f.key(chatLink(f, 19), "Enter"), false);
     assert.equal(f.key(chatLink(f, 19), "Delete"), true);
+    assert.deepEqual(f.navigated, []);
+    assert.deepEqual(f.mutations[0].patch, { archived: true });
+    f.mutations[0].resolve({});
+    await f.settle();
     assert.deepEqual(f.navigated, [27]);
     f.route(27);
-    assert.equal(f.focused(), `/s/27`);
+    assert.equal(f.focused(), "/s/27");
     assert.equal(
         f.all().some((node) => node.props.href === "/s/19"),
         false,
     );
-    assert.equal(f.requests.length, 0);
 });
 
-test("last-tab dismissal returns focus to visible existing navigation, never under a newer sheet", async (t) => {
+test("last-tab Close returns focus to visible existing navigation, never under a newer sheet", async (t) => {
     for (const mode of ["agent", "collapsed-group", "folded-sidebar", "newer-sheet"]) {
         await t.test(mode, async (t) => {
             const previous = Object.getOwnPropertyDescriptor(globalThis, "document");
@@ -709,10 +799,7 @@ test("last-tab dismissal returns focus to visible existing navigation, never und
 
             Object.defineProperty(globalThis, "document", {
                 configurable: true,
-                value: {
-                    querySelectorAll: () => [group, agent],
-                    querySelector: () => rail,
-                },
+                value: { querySelectorAll: () => [group, agent], querySelector: () => rail },
             });
             t.after(() => {
                 if (previous) {
@@ -724,10 +811,13 @@ test("last-tab dismissal returns focus to visible existing navigation, never und
             const f = fixture(t);
 
             f.click(f.label(closeInitial));
+            f.mutations[0].resolve({});
+            await f.settle();
             f.click(f.label(closeActive));
+            f.mutations[1].resolve({});
 
             if (mode === "newer-sheet") {
-                f.patch({ sheet: { type: "settings" } });
+                queueMicrotask(() => f.patch({ sheet: { type: "settings" } }));
             }
 
             await f.settle();
@@ -742,7 +832,6 @@ test("last-tab dismissal returns focus to visible existing navigation, never und
                         ? "group"
                         : "rail",
             );
-            assert.equal(f.requests.length, 0);
         });
     }
 });
@@ -925,6 +1014,117 @@ test("controller titles use one leading native PiP icon without changing native 
     }
 });
 
+test("every saved tab and phone switcher leads with its agent avatar and exposes active status", (t) => {
+    const f = fixture(t);
+
+    f.patch({
+        namedAgents: [
+            {
+                ...f.state.namedAgents[0],
+                chats: [
+                    { id: 7, title: "Initial setup", busy: false, managing: true },
+                    { id: 19, title: "Accessibility review", busy: true },
+                    { id: 27, title: "Follow up", busy: false },
+                ],
+            },
+        ],
+    });
+
+    for (const [id, thinking] of [
+        [7, true],
+        [19, true],
+        [27, false],
+    ] as const) {
+        const children = nodes(chatLink(f, id));
+        const avatar = children.find((node) => node.type === "test-avatar");
+        const title = children.find((node) => node.props.class === "agent-tab-title");
+
+        assert.ok(avatar);
+        assert.equal(avatar.props.agentId, "stable-agent");
+        assert.equal(avatar.props.size, 22);
+        assert.equal(avatar.props.animated, true);
+        assert.equal(Boolean(avatar.props.thinking), thinking);
+        assert.ok(children.indexOf(avatar) < children.indexOf(title), "avatar precedes title");
+
+        if (thinking) {
+            assert.ok(
+                children.some((node) =>
+                    /Working|Managing|Running|Orchestrat/i.test(
+                        node.props["aria-label"] ?? textOf(node),
+                    ),
+                ),
+                "activity is accessible without relying on avatar animation",
+            );
+        }
+    }
+
+    const switcherButton = f.label("Accessibility review: switch chats");
+    const switcher = nodes(switcherButton);
+    const avatar = switcher.find((node) => node.type === "test-avatar");
+
+    assert.ok(avatar);
+    assert.equal(avatar.props.agentId, "stable-agent");
+    assert.equal(avatar.props.size, 22);
+    assert.equal(avatar.props.animated, true);
+    assert.equal(Boolean(avatar.props.thinking), true);
+    assert.ok(
+        switcher.indexOf(avatar) <
+            switcher.findIndex((node) => node.props.class === "agent-tab-title"),
+    );
+    assert.match(
+        [switcherButton.props["aria-label"], switcherButton.props["aria-description"]].join(" "),
+        /Working/,
+        "the phone switcher's explicit accessible name must not hide its selected Chat's activity",
+    );
+    f.click(f.label("New chat with Reviewer"));
+    const draft = f
+        .all()
+        .find((node) => node.props.role === "button" && node.props["aria-current"] === "page");
+    const draftAvatar = nodes(draft).find((node) => node.type === "test-avatar");
+
+    assert.ok(draftAvatar, "local draft tabs share the named identity avatar");
+    assert.equal(draftAvatar.props.agentId, "stable-agent");
+    assert.equal(draftAvatar.props.size, 22);
+    assert.equal(draftAvatar.props.animated, true);
+    assert.equal(Boolean(draftAvatar.props.thinking), false);
+});
+
+test("an archived native view cannot regenerate a saved source tab missing from the catalogue", async (t) => {
+    for (const archived of [false, true]) {
+        await t.test(archived ? "archived" : "catalogue event pending", (t) => {
+            const f = fixture(t);
+
+            f.patch({
+                namedAgents: [
+                    {
+                        ...f.state.namedAgents[0],
+                        chatIds: [7],
+                        chats: [f.state.namedAgents[0].chats[0]],
+                    },
+                ],
+                view: {
+                    conversation: {
+                        id: 19,
+                        pipAgentId: "stable-agent",
+                        title: "Accessibility review",
+                        archived,
+                    },
+                },
+            });
+            assert.equal(
+                f.all().some((node) => node.props.href === "/s/19"),
+                !archived,
+            );
+            assert.ok(chatLink(f, 7));
+            assert.deepEqual(
+                f.mutations,
+                [],
+                "rendering an archived route never restores it implicitly",
+            );
+        });
+    }
+});
+
 test("saved navigation uses exact selected room identity and capability", (t) => {
     const f = fixture(t);
 
@@ -990,9 +1190,18 @@ test("named header excludes workspace utilities while preserving context and the
 
     headerContext(f);
     assert.match(f.renderedText(), /Initial setup.*Accessibility review/s);
-    const avatar = nodes(f.label("Reviewer: settings")).find((node) => node.type === "test-avatar");
+    const settings = f.label("Reviewer: settings");
+    const cog = nodes(settings).find((node) => node.type === "test-icon");
+    const header = f.all().find((node) => node.type === "header");
+    const buttons = nodes(header).filter((node) => node.type === "button");
 
-    assert.equal(avatar.props.agentId, "stable-agent");
+    assert.equal(cog.props.name, "settings");
+    assert.equal(buttons.at(-2), settings, "settings is immediately before the native menu");
+    assert.equal(buttons.at(-1).props["aria-label"], "Menu");
+    assert.ok(
+        nodes(header).some((node) => node.type === "test-avatar"),
+        "tab avatars stay inside native header chrome",
+    );
     assert.equal(textOf(f.label("Reviewer: settings")), "");
     assert.ok(
         !f
@@ -1036,7 +1245,7 @@ test("named header excludes workspace utilities while preserving context and the
     );
 });
 
-test("phone chooser registers outside the header and closes through sheet state", (t) => {
+test("phone chooser closes a saved Chat only after native archive acknowledgement", async (t) => {
     const f = fixture(t, Topbar);
     const opener = f.label("Accessibility review: switch chats");
 
@@ -1053,48 +1262,132 @@ test("phone chooser registers outside the header and closes through sheet state"
     });
     assert.equal(f.label("Accessibility review: switch chats").props["aria-expanded"], true);
     assert.ok(sheet);
-    assert.match(
-        f.renderedText(sheet),
-        /Closing a saved tab.*Initial setup.*Accessibility review/s,
-    );
+    assert.match(f.renderedText(sheet), /archives.*stops.*Initial setup.*Accessibility review/s);
     assert.doesNotMatch(f.renderedText(sheet), /\[object Object\]/);
-    assert.ok(
-        !nodes(header).some((node) => node.type === "test-sheet"),
-        "the overlay must escape topbar containment",
-    );
+    assert.ok(!nodes(header).some((node) => node.type === "test-sheet"));
     const choices = f.label("Reviewer open chats");
     const inactive = nodes(choices).find((node) => node.props["aria-label"] === closeInitial);
     const selected = nodes(choices).find((node) => node.props.href === "/s/19");
 
     f.focus(inactive);
     f.click(inactive);
+    assert.ok(nodes(f.label("Reviewer open chats")).some((node) => node.props.href === "/s/7"));
+    assert.deepEqual(f.mutations[0].patch, { archived: true });
+    f.mutations[0].resolve({});
+    await f.settle();
     assert.equal(
         f.focusedElement(),
         selected.element,
-        "inactive dismissal keeps focus inside the chooser",
+        "inactive Close keeps focus inside the chooser",
     );
     assert.equal(f.navigated.length, 0);
     sheet.props.onClose();
     assert.ok(!f.all().some((node) => node.type === "test-sheet"));
     assert.equal(f.state.sheet, null);
     assert.equal(f.label("Accessibility review: switch chats").props["aria-expanded"], false);
-    assert.equal(f.navigated.length, 0);
 });
 
-test("History retains dismissed chats and reopens their exact routes without new work", (t) => {
+function restoreButton(f: ReturnType<typeof fixture>, title: string) {
+    const row = nodes(f.label("Reviewer saved chats")).find(
+        (node) =>
+            node.props.class?.split(" ").includes("agent-history-chat") &&
+            textOf(node).includes(title),
+    );
+    const button = nodes(row).find(
+        (node) => node.type === "button" && /Restore/.test(textOf(node)),
+    );
+
+    assert.ok(button, "archived History rows expose an explicit Restore button");
+
+    return button;
+}
+
+test("History explicitly restores an archived Chat before navigating and leaves ordinary open read-only", async (t) => {
     const f = fixture(t, Topbar);
 
-    f.click(f.label(closeInitial));
-    assert.ok(!f.all().some((node) => node.props.href === "/s/7"));
     f.click(f.label("History"));
-    const history = f.label("Reviewer saved chats");
+    f.requests.at(-1).resolve({
+        agentId: "stable-agent",
+        chats: [
+            { id: 45, title: "Archived work", archived: true },
+            { id: 7, title: "Initial setup", archived: false },
+        ],
+    });
+    await f.settle();
+    const restore = restoreButton(f, "Archived work");
 
-    assert.ok(nodes(history).some((node) => node.props.href === "/s/7"));
-    f.click(nodes(history).find((node) => node.props.href === "/s/7"));
+    assert.equal(
+        nodes(f.label("Reviewer saved chats")).some(
+            (node) => node.type === "a" && node.props.href === "/s/45",
+        ),
+        false,
+        "an archived row cannot navigate around Restore",
+    );
+    f.click(restore);
+    assert.deepEqual(
+        f.mutations.map(({ id, patch }) => ({ id, patch })),
+        [{ id: 45, patch: { archived: false } }],
+    );
+    assert.deepEqual(f.navigated, []);
+    assert.ok(f.state.sheet);
+    f.mutations[0].reject(new Error("Restore denied"));
+    await f.settle();
+    assert.deepEqual(f.navigated, []);
+    assert.ok(f.state.sheet);
+    assert.match(JSON.stringify(f.notices) + f.text(), /Restore denied/);
+    f.click(restoreButton(f, "Archived work"));
+    f.mutations[1].resolve({});
+    await f.settle();
+    assert.equal(f.navigated.at(-1), 45);
+    assert.equal(f.state.sheet, null);
+    f.route(45);
+    assert.equal(chatLink(f, 45).props["aria-current"], "page");
+    f.click(f.label("History"));
+    f.requests
+        .at(-1)
+        .resolve({ agentId: "stable-agent", chats: [{ id: 7, title: "Initial setup" }] });
+    await f.settle();
+    f.click(nodes(f.label("Reviewer saved chats")).find((node) => node.props.href === "/s/7"));
     assert.equal(f.navigated.at(-1), 7);
-    f.route(7);
-    assert.equal(chatLink(f, 7).props["aria-current"], "page");
-    assert.ok(f.requests.every((request) => request.body === undefined));
+    assert.equal(f.mutations.length, 2, "an already open Chat needs no restore mutation");
+    assert.ok(
+        f.requests.every((request) => request.body === undefined),
+        "History cannot start model work",
+    );
+});
+
+test("late Restore acknowledgements cannot navigate from a departed History source or owner", async (t) => {
+    for (const mode of ["source", "owner"]) {
+        await t.test(mode, async (t) => {
+            const f = fixture(t, Topbar);
+
+            f.click(f.label("History"));
+            f.requests.at(-1).resolve({
+                agentId: "stable-agent",
+                chats: [{ id: 45, title: "Archived work", archived: true }],
+            });
+            await f.settle();
+            f.click(restoreButton(f, "Archived work"));
+            assert.equal(f.mutations[0].id, 45);
+
+            if (mode === "source") {
+                f.route(7);
+            } else {
+                f.patch({ me: { id: "different-owner", role: "owner" } });
+            }
+
+            const sheet = f.state.sheet;
+
+            f.mutations[0].resolve({});
+            await f.settle();
+            assert.deepEqual(f.navigated, []);
+            assert.equal(
+                f.state.sheet,
+                sheet,
+                "late Restore must not replace another owner's sheet",
+            );
+        });
+    }
 });
 
 test("draft context actions address the identity, not the previous saved chat", (t) => {
@@ -1130,7 +1423,7 @@ test("draft context actions address the identity, not the previous saved chat", 
     assert.deepEqual(f.opened.at(-1), { type: "memory", conversationId: "agent:stable-agent" });
 });
 
-test("selected-chat controller links expose only current rows and complete history keeps unavailable rows inert", async (t) => {
+test("orchestrator button toggles native Peeks, while complete contact history stays in the menu", async (t) => {
     const f = fixture(t, Topbar);
 
     assert.equal(f.requests[0].path, "c/19/private-agent");
@@ -1167,11 +1460,23 @@ test("selected-chat controller links expose only current rows and complete histo
 
     f.requests[0].resolve(data);
     await f.settle();
-    const strip = f.label("Current orchestrators for this chat");
+    const peeks = f.label("Orchestrator Peeks");
 
-    assert.match(textOf(strip), /Current work/);
-    assert.doesNotMatch(textOf(strip), /Historical work|Do not expose/);
-    f.click(f.label("1 current orchestrator, 1 active: all Work Items for this chat"));
+    assert.equal(peeks.props["aria-pressed"], false);
+    assert.equal(peeks.props["aria-description"], "1 currently managed, 1 active");
+    f.click(peeks);
+    assert.equal(f.label("Orchestrator Peeks").props["aria-pressed"], true);
+    assert.equal(
+        f.state.sheet ?? null,
+        null,
+        "Peeks uses the native tile surface, not the contact sheet",
+    );
+    f.click(f.label("Menu"));
+    f.click(
+        nodes(f.label("Reviewer actions")).find(
+            (node) => node.type === "button" && textOf(node) === "All Work Items",
+        ),
+    );
     const panelRead = f.requests.at(-1);
 
     assert.equal(panelRead.path, "c/19/private-agent");
@@ -1187,7 +1492,7 @@ test("selected-chat controller links expose only current rows and complete histo
 
     assert.doesNotMatch(f.text(), /Do not expose this title/);
     assert.ok(!f.all().some((node) => node.props.href === "/s/50"));
-    f.click(nodes(strip).find((node) => node.props.href === "/s/30"));
+    f.click(f.all().find((node) => node.props.href === "/s/30"));
     assert.equal(f.navigated.at(-1), 30);
     assert.ok(f.requests.every((request) => request.body === undefined));
 });
@@ -1220,7 +1525,10 @@ test("native catalogue control revisions refresh current orchestrators without s
         ],
     });
     await f.settle();
-    assert.match(textOf(f.label("Current orchestrators for this chat")), /Newly delegated/);
+    assert.equal(
+        f.label("Orchestrator Peeks").props["aria-description"],
+        "1 currently managed, 1 active",
+    );
     f.patch({
         namedAgents: f.state.namedAgents.map((agent: Props) => ({ ...agent, controlRevision: 2 })),
     });
@@ -1241,7 +1549,10 @@ test("native catalogue control revisions refresh current orchestrators without s
         ],
     });
     await f.settle();
-    assert.doesNotMatch(textOf(f.label("Current orchestrators for this chat")), /Newly delegated/);
+    assert.equal(
+        f.label("Orchestrator Peeks").props["aria-description"],
+        "No current orchestrators",
+    );
     assert.equal(f.state.conversationId, 19);
     assert.ok(f.requests.every((request) => request.body === undefined));
 });
@@ -1287,7 +1598,7 @@ test("controller reads reject mismatched identities and ignore late departed-sou
                     f
                         .all()
                         .some((node) =>
-                            String(node.props["aria-label"]).startsWith(
+                            String(node.props["aria-description"]).startsWith(
                                 "Orchestrators unavailable",
                             ),
                         ),

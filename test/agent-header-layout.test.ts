@@ -97,7 +97,7 @@ test("phones use a bounded compact chooser while only the wider chat rail scroll
     assert.equal(declaration(".agent-header-context", "display"), "none");
 });
 
-test("tablet panes regain tabs and visible current-controller links without restoring ordinary tools", () => {
+test("tablet panes regain tabs and agent context without restoring ordinary tools", () => {
     assert.equal(declaration(".agent-tabs-strip", "display", "min-width: 430px"), "flex");
     assert.equal(declaration(".agent-chat-switch", "display", "min-width: 430px"), "none");
     const tabs = rules.find(
@@ -107,11 +107,7 @@ test("tablet panes regain tabs and visible current-controller links without rest
     );
 
     assert.ok(tabs?.media.includes("@media (min-width: 700px)"));
-    assert.equal(
-        declaration(".agent-current-orchestrators:has(a)", "display", "min-width: 700px"),
-        "flex",
-    );
-    assert.equal(declaration(".agent-current-orchestrators", "overflow-x"), "auto");
+
     assert.equal(declaration(".agent-header-context", "display", "min-width: 880px"), "flex");
 });
 
@@ -126,7 +122,10 @@ test("local chrome retains coarse-pointer targets, native scroll, press feedback
     assert.equal(declaration(".agent-topbar :is(a, button)", "user-select"), "none");
     assert.equal(declaration(".named-agents-head.on", "box-shadow"), "inset 0 -2px var(--accent)");
     assert.equal(declaration(".named-agent-open", "width"), "100%");
-    assert.equal(declaration(".agent-history-list a", "-webkit-touch-callout"), "none");
+    assert.equal(
+        declaration(".agent-history-list :is(a, button)", "-webkit-touch-callout"),
+        "none",
+    );
     assert.equal(
         declaration(".agent-topbar :is(a, button):active", "background"),
         "var(--pressed)",

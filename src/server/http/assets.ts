@@ -34,6 +34,8 @@ export const VENDOR: Record<string, string> = {
     "preact-compat.mjs": join(MODULES, "preact", "compat", "dist", "compat.mjs"),
     "preact-jsx-runtime.mjs": join(MODULES, "preact", "jsx-runtime", "dist", "jsxRuntime.mjs"),
     "blobatar-react.mjs": join(MODULES, "blobatar", "dist", "react.js"),
+    "blobatar-expression.mjs": join(MODULES, "blobatar", "dist", "expression.js"),
+    "blobatar-motion.css": join(MODULES, "blobatar", "dist", "motion.css"),
     "htm.mjs": join(MODULES, "htm", "dist", "htm.module.js"),
     "marked.mjs": join(MODULES, "marked", "lib", "marked.esm.js"),
     "purify.mjs": join(MODULES, "dompurify", "dist", "purify.es.mjs"),

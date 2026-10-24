@@ -881,11 +881,12 @@ export class AgentExecution {
         }
     }
 
-    async release(chatId: ConversationId): Promise<void> {
+    /** Coordination may return the identity's writer; Chat Close must return only its own. */
+    async release(chatId: ConversationId, { exactChat = false } = {}): Promise<void> {
         const root = this.#root(chatId);
         const lease = root === undefined ? undefined : this.#lease(root);
 
-        if (lease !== undefined) {
+        if (lease !== undefined && (!exactChat || lease.chatId === Number(root))) {
             const item = this.#app.workItems.itemFor(idOf(lease.source));
 
             if (item !== undefined) {

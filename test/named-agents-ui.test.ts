@@ -778,6 +778,45 @@ test("genuine Blobatar images keep their identity through rename and remount and
     assert.deepEqual(remounted.navigated, [8], "a failed image cannot disable its PiP");
 });
 
+test("animated identity uses genuine inline Blobatar thinking and returns to its idle face", async (t) => {
+    const { NamedAgentAvatar } = await import(
+        new URL("../web/named-agent-avatar.js", import.meta.url).href
+    );
+    const f = fixture(t, {
+        NamedAgentSheet,
+        openAgentSettings,
+        NamedAgents: () =>
+            h(NamedAgentAvatar, {
+                agentId: "agent-reviewer",
+                animated: true,
+                thinking: active.state.thinking === true,
+            }),
+    });
+
+    await f.settle();
+    const idle = f.find("svg");
+
+    assert.match(f.find("g").props.className, /mo-always/);
+    assert.equal(idle.props["aria-hidden"], "true");
+    assert.equal(
+        idle.props.role,
+        undefined,
+        "the face is decoration; callers announce actual activity",
+    );
+    const body = f.find("g").props.dangerouslySetInnerHTML.__html;
+
+    f.patch({ thinking: true });
+    await f.settle();
+    const thinking = f.find("g");
+
+    assert.match(thinking.props.className, /mo-expr/);
+    assert.notDeepEqual(f.find("svg").props.style, idle.props.style);
+    f.patch({ thinking: false });
+    await f.settle();
+    assert.equal(f.find("g").props.dangerouslySetInnerHTML.__html, body);
+    assert.deepEqual(f.find("svg").props.style, idle.props.style);
+});
+
 test("settings have charter and Memory without inbox or attachment configuration", async (t) => {
     const f = fixture(t);
 

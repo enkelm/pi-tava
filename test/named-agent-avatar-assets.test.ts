@@ -9,7 +9,7 @@ import { VENDOR, WEB } from "../src/server/http/assets.ts";
 for (const [name, contents] of [
     [
         "the official React Blobatar entry links through its scoped Preact runtime without global React aliases",
-        'export { Blobatar } from "blobatar/react";',
+        'export { Blobatar } from "blobatar/react"; export { thinking, idle } from "blobatar/expression";',
     ],
     [
         "the real app static entry links its conversation header and tab modules through the public browser assets",

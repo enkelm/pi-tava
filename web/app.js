@@ -12,7 +12,15 @@ import { startEdgeBack, startSwipes, useDragToClose } from "./gestures.js";
 import { Splash } from "./home.js";
 import { Launcher } from "./launcher.js";
 import { registerWorker, updateBadge } from "./notify.js";
-import { PEEK_WIDE, PeekHost, PeekStrip, peekTiles, peeksWanted, togglePeeks } from "./peeks.js";
+import {
+    PEEK_WIDE,
+    PeekHost,
+    PeekStrip,
+    peekContext,
+    peekTiles,
+    peeksWanted,
+    togglePeeks,
+} from "./peeks.js";
 import { closePip, openPip, PipHost, pipAvailable, togglePip } from "./pip.js";
 import { Drawer, Rail, ResizeHandle, SessionList, toSessions } from "./sessions.js";
 import { PrivatePane } from "./private.js";
@@ -268,6 +276,7 @@ function App() {
     const people = !placed && !browsing && !filing && peopleDocked(state);
     const peeking = !placed && peeksWanted(state);
     const tiles = peeking ? peekTiles(state) : [];
+    const peekScope = peeking ? peekContext(state) : null;
     // The column takes the place beside the conversation when Browser and People leave it free; otherwise a strip,
     // which only shows when there are tiles.
     const peekColumn = peeking && PEEK_WIDE.matches && !browsing && !filing && !people;
@@ -300,14 +309,16 @@ function App() {
                       : page
                         ? html`<${ExtensionPage} key=${`${state.page.module}:${state.page.id}`} />`
                         : inAgentDraft
-                          ? html`<${Topbar} /><${AgentDraftPane} key=${state.agentDraft.id} />`
+                          ? html`<${Topbar} />
+                              ${peeking && !peekColumn && html`<${PeekStrip} tiles=${tiles} context=${peekScope} />`}
+                              <${AgentDraftPane} key=${state.agentDraft.id} />`
                           : inConversation
                             ? html`<${Topbar} />
                                 ${
                                     peeking &&
-                                    tiles.length > 0 &&
+                                    (tiles.length > 0 || peekScope !== null) &&
                                     !peekColumn &&
-                                    html`<${PeekStrip} tiles=${tiles} />`
+                                    html`<${PeekStrip} tiles=${tiles} context=${peekScope} />`
                                 }
                                 <${Transcript} key=${state.conversationId} />
                                 ${
@@ -320,10 +331,11 @@ function App() {
             }
         </div>
         ${
-            inConversation &&
+            (inConversation || inAgentDraft) &&
             html`<${PeekHost}
                 shown=${peekColumn}
                 tiles=${tiles}
+                context=${peekScope}
                 replaced=${browsing || filing || people}
             />`
         }

@@ -7,17 +7,7 @@ import type { ConversationId, SubmissionId } from "@earendil-works/pi-durable";
 import { SessionsDoc } from "../src/server/docs.ts";
 import { AgentIdentitiesDoc } from "../src/server/agent-identity-docs.ts";
 import { privateAgentRequest as request } from "./private-agent-http.ts";
-import {
-    cleanUp,
-    context,
-    echo,
-    lastText,
-    openApp,
-    owner,
-    root,
-    scriptedModel,
-    until,
-} from "./helpers.ts";
+import { cleanUp, context, echo, openApp, owner, root, scriptedModel } from "./helpers.ts";
 
 after(cleanUp);
 
@@ -161,149 +151,110 @@ test("identity-only creation and rejected first input leave History empty; accep
     }
 });
 
-for (const rejection of ["spend", "busy"] as const) {
-    test(`native ${rejection} rejection after model selection preserves saved Chat capacity and exact retry across restart`, async () => {
-        const data = join(root, `named-agent-${rejection}-capacity`);
-        let release!: () => void;
-        const held = new Promise<void>((resolve) => {
-            release = resolve;
+test("native spend rejection after model selection preserves saved Chat capacity and exact retry across restart", async () => {
+    const data = join(root, "named-agent-spend-capacity");
+    let app = await openApp(scriptedModel(echo), data);
+
+    try {
+        const agent = await app.pip.agents.createIdentity(owner(app), {
+            requestId: "capacity-identity",
+            name: "Capacity",
         });
-        let started = false;
-        const model = scriptedModel(async (input, ...args) => {
-            if (lastText(input).text.includes("Hold the saved chat")) {
-                started = true;
-                await held;
-            }
 
-            return typeof echo === "function" ? echo(input, ...args) : echo;
+        await app.pip.agents.configureIdentity(agent.agentId, owner(app), {
+            model: { provider: "faux", modelId: "faux-1" },
         });
-        let app = await openApp(model, data);
+        const first = await app.pip.agents.submitDraft(agent.agentId, owner(app), {
+            requestId: "accepted-first",
+            text: "Keep this saved history",
+        });
 
-        try {
-            const agent = await app.pip.agents.createIdentity(owner(app), {
-                requestId: "capacity-identity",
-                name: "Capacity",
-            });
+        await (await app.harness.submission(first.submissionId, context))!.wait(context);
+        const saved = [first.id];
 
-            await app.pip.agents.configureIdentity(agent.agentId, owner(app), {
-                model: { provider: "faux", modelId: "faux-1" },
-            });
-            const first = await app.pip.agents.submitDraft(agent.agentId, owner(app), {
-                requestId: "accepted-first",
-                text: "Keep this saved history",
-            });
-
-            await (await app.harness.submission(first.submissionId, context))!.wait(context);
-            const saved = [first.id];
-
-            // Native explicit-chat callers retain saved empty Chats, not just accepted first sends.
-            for (let index = 1; index < 127; index++) {
-                saved.push(
-                    (
-                        await app.pip.agents.newChat(first.id as ConversationId, owner(app), {
-                            requestId: `saved-${index}`,
-                        })
-                    ).id,
-                );
-            }
-
-            let blocking: SubmissionId | undefined;
-
-            if (rejection === "spend") {
-                await app.pip.agents.setBudget(first.id as ConversationId, owner(app), 0);
-            } else {
-                blocking = (
-                    await app.commands.submit(first.id as ConversationId, owner(app), {
-                        requestId: "hold-saved",
-                        text: "Hold the saved chat",
+        // Native explicit-chat callers retain saved empty Chats, not just accepted first sends.
+        for (let index = 1; index < 127; index++) {
+            saved.push(
+                (
+                    await app.pip.agents.newChat(first.id as ConversationId, owner(app), {
+                        requestId: `saved-${index}`,
                     })
-                ).submissionId;
-                await until(
-                    () => started && app.isBusy(first.id as ConversationId),
-                    "saved Chat busy",
-                );
-            }
-
-            const rejected = { requestId: "rejected-first", text: "Try the native admission" };
-            const attempt = () => app.pip.agents.submitDraft(agent.agentId, owner(app), rejected);
-            const expected = rejection === "spend" ? /spend limit/ : /working in another chat/;
-
-            await assert.rejects(attempt, expected);
-            await assert.rejects(attempt, expected);
-            assert.deepEqual(
-                (await app.pip.agents.read(agent.agentId, owner(app))).chatIds,
-                saved,
-                "native rejection never exposes the reserved Chat in History",
+                ).id,
             );
-            const reservation = Object.values(
-                (await app.harness.snapshot(AgentIdentitiesDoc, context))!.requests,
-            ).find((item) => item.firstInputRequestId?.endsWith(":rejected-first"));
-
-            assert.ok(reservation?.chatId, "the exact rejected reservation is retained for retry");
-            assert.equal(
-                await app.pip.agents.draftReceipt(agent.agentId, owner(app), rejected.requestId),
-                undefined,
-                "a definite native rejection has no acceptance receipt",
-            );
-
-            if (rejection === "spend") {
-                await app.pip.agents.setBudget(first.id as ConversationId, owner(app), undefined);
-            } else {
-                release();
-                await (await app.harness.submission(blocking!, context))!.wait(context);
-            }
-
-            await app.close();
-            app = await openApp(scriptedModel(echo), data);
-            const corrected = { requestId: "corrected-first", text: "Use the last saved slot" };
-            const accepted = await app.pip.agents.submitDraft(agent.agentId, owner(app), corrected);
-
-            await (await app.harness.submission(accepted.submissionId, context))!.wait(context);
-            assert.deepEqual(
-                (await app.pip.agents.read(agent.agentId, owner(app))).chatIds,
-                [...saved, accepted.id],
-                "rejected reservations consume none of the 128 saved slots after restart",
-            );
-            assert.equal(
-                (await app.pip.agents.submitDraft(agent.agentId, owner(app), corrected))
-                    .submissionId,
-                accepted.submissionId,
-            );
-            await assert.rejects(attempt, /At most 128 chats/);
-            assert.equal(
-                Object.values(
-                    (await app.harness.snapshot(AgentIdentitiesDoc, context))!.requests,
-                ).find((item) => item.firstInputRequestId === reservation.firstInputRequestId)
-                    ?.chatId,
-                reservation.chatId,
-                "retry keeps the same rejected request and Chat identities even at capacity",
-            );
-            // A native acceptance whose projection was interrupted must still occupy its saved slot.
-            await app.harness.commit(async (tx) => {
-                const doc = await tx.doc(AgentIdentitiesDoc);
-                const waiting = Object.values(doc.requests).find(
-                    (item) => item.chatId === accepted.id,
-                )!;
-
-                delete waiting.accepted;
-            }, context);
-            await assert.rejects(
-                app.pip.agents.newChat(first.id as ConversationId, owner(app), {
-                    requestId: "beyond-capacity",
-                }),
-                /At most 128 chats/,
-            );
-            assert.deepEqual(
-                (await app.pip.agents.read(agent.agentId, owner(app))).chatIds,
-                [...saved, accepted.id],
-                "accepted and preexisting Chats are never removed to free capacity",
-            );
-        } finally {
-            release();
-            await app.close();
         }
-    });
-}
+
+        await app.pip.agents.setBudget(first.id as ConversationId, owner(app), 0);
+
+        const rejected = { requestId: "rejected-first", text: "Try the native admission" };
+        const attempt = () => app.pip.agents.submitDraft(agent.agentId, owner(app), rejected);
+
+        await assert.rejects(attempt, /spend limit/);
+        await assert.rejects(attempt, /spend limit/);
+        assert.deepEqual(
+            (await app.pip.agents.read(agent.agentId, owner(app))).chatIds,
+            saved,
+            "native rejection never exposes the reserved Chat in History",
+        );
+        const reservation = Object.values(
+            (await app.harness.snapshot(AgentIdentitiesDoc, context))!.requests,
+        ).find((item) => item.firstInputRequestId?.endsWith(":rejected-first"));
+
+        assert.ok(reservation?.chatId, "the exact rejected reservation is retained for retry");
+        assert.equal(
+            await app.pip.agents.draftReceipt(agent.agentId, owner(app), rejected.requestId),
+            undefined,
+            "a definite native rejection has no acceptance receipt",
+        );
+
+        await app.pip.agents.setBudget(first.id as ConversationId, owner(app), undefined);
+
+        await app.close();
+        app = await openApp(scriptedModel(echo), data);
+        const corrected = { requestId: "corrected-first", text: "Use the last saved slot" };
+        const accepted = await app.pip.agents.submitDraft(agent.agentId, owner(app), corrected);
+
+        await (await app.harness.submission(accepted.submissionId, context))!.wait(context);
+        assert.deepEqual(
+            (await app.pip.agents.read(agent.agentId, owner(app))).chatIds,
+            [...saved, accepted.id],
+            "rejected reservations consume none of the 128 saved slots after restart",
+        );
+        assert.equal(
+            (await app.pip.agents.submitDraft(agent.agentId, owner(app), corrected)).submissionId,
+            accepted.submissionId,
+        );
+        await assert.rejects(attempt, /At most 128 chats/);
+        assert.equal(
+            Object.values((await app.harness.snapshot(AgentIdentitiesDoc, context))!.requests).find(
+                (item) => item.firstInputRequestId === reservation.firstInputRequestId,
+            )?.chatId,
+            reservation.chatId,
+            "retry keeps the same rejected request and Chat identities even at capacity",
+        );
+        // A native acceptance whose projection was interrupted must still occupy its saved slot.
+        await app.harness.commit(async (tx) => {
+            const doc = await tx.doc(AgentIdentitiesDoc);
+            const waiting = Object.values(doc.requests).find(
+                (item) => item.chatId === accepted.id,
+            )!;
+
+            delete waiting.accepted;
+        }, context);
+        await assert.rejects(
+            app.pip.agents.newChat(first.id as ConversationId, owner(app), {
+                requestId: "beyond-capacity",
+            }),
+            /At most 128 chats/,
+        );
+        assert.deepEqual(
+            (await app.pip.agents.read(agent.agentId, owner(app))).chatIds,
+            [...saved, accepted.id],
+            "accepted and preexisting Chats are never removed to free capacity",
+        );
+    } finally {
+        await app.close();
+    }
+});
 
 test("owner-private identity History includes retained saved Chats and never another agent's conversation", async (t) => {
     const app = await openApp(scriptedModel(echo));

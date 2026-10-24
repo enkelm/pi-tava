@@ -5,7 +5,7 @@
 // live: once scrolling settles, the tab tells the server which (`POST /api/peeks`), and the rest keep the lines they
 // last had. Their state marks stay current from the session list, which covers every session.
 import { Component } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { folderColor } from "./avatar.js";
 import { describeCall } from "./calls.js";
 import { finishedUnseen, markSeen, seenSince } from "./seen.js";
@@ -79,8 +79,112 @@ const rank = (session, state, pinned) =>
 /** The last choice of tiles, and what it was made from: most renders (a streaming answer's) change none of it. */
 let chosen = { from: [], tiles: [] };
 
+// Named-agent Peeks reuse the same tiles and visible-only stream, never the public catalogue.
+const managedShown = new Set();
+let chosenManaged = { from: [], tiles: [] };
+const managedKey = (userId, agentId) => `${userId}:${agentId}`;
+const peekSource = (state) => state.agentDraft?.id ?? state.conversationId;
+
+function peekAgent(state = store.state) {
+    if (state.me?.role !== "owner" || state.server?.privateAgents < 4 || state.missing) {
+        return null;
+    }
+
+    const draft = state.agentDraft;
+    const agentId =
+        draft?.userId === state.me.id && state.conversationId === null
+            ? draft.agentId
+            : state.view.conversation?.id === state.conversationId
+              ? state.view.conversation?.pipAgentId
+              : null;
+
+    return state.namedAgents?.find((agent) => agent.agentId === agentId) ?? null;
+}
+
+/** Publish one owner/identity-bound passive read; a departing header cannot clear its successor. */
+export function setManagedPeeks(scope, read) {
+    const value = {
+        ...scope,
+        loading: read.loading,
+        error: read.error,
+        refresh: read.refresh,
+        controllers: (read.data?.controllers ?? []).filter(
+            (controller) => controller.current === true && controller.accessible !== false,
+        ),
+    };
+
+    store.set({ managedPeeks: value });
+
+    return () => {
+        if (store.state.managedPeeks === value) {
+            store.set({ managedPeeks: null });
+        }
+    };
+}
+
+/** Private scope also supplies honest loading, error and empty states in the native Peeks surfaces. */
+export function peekContext(state = store.state) {
+    const agent = peekAgent(state);
+
+    if (!agent) {
+        return null;
+    }
+
+    const read = state.managedPeeks;
+    const matching =
+        read?.userId === state.me.id &&
+        read.agentId === agent.agentId &&
+        read.source === peekSource(state);
+
+    return {
+        agentId: agent.agentId,
+        userId: state.me.id,
+        source: peekSource(state),
+        label: `${agent.name} orchestrators`,
+        loading: !matching || read.loading,
+        error: matching ? read.error : undefined,
+        refresh: matching ? read.refresh : undefined,
+    };
+}
+
 /** The sessions shown as tiles now, in tile order. */
 export function peekTiles(state = store.state) {
+    const agent = peekAgent(state);
+
+    if (agent) {
+        const read = state.managedPeeks;
+        const from = [read, state.me.id, agent.agentId, peekSource(state)];
+
+        if (!from.every((value, index) => value === chosenManaged.from[index])) {
+            const matching =
+                read?.userId === state.me.id &&
+                read.agentId === agent.agentId &&
+                read.source === peekSource(state);
+
+            chosenManaged = {
+                from,
+                tiles:
+                    !matching || read.loading || read.error
+                        ? []
+                        : read.controllers.map((controller) => ({
+                              id: controller.conversationId,
+                              title: `PiP · ${controller.title}`,
+                              cwd: controller.cwd ?? "",
+                              location: controller.location,
+                              busy: controller.busy === true,
+                              waiting: controller.waiting === true,
+                              endedAt: controller.endedAt,
+                              managedState: controller.state,
+                              managedAgentId: agent.agentId,
+                              managedUserId: state.me.id,
+                              managedSource: peekSource(state),
+                          })),
+            };
+        }
+
+        return chosenManaged.tiles;
+    }
+
     const from = [
         state.sessions,
         state.conversationId,
@@ -121,19 +225,45 @@ export function peekTiles(state = store.state) {
     return chosen.tiles;
 }
 
-/** Peek tiles are turned on in this browser. */
-export const peeksOn = () => prefs().peeks === true;
+/** Ordinary peeks keep their browser preference; private management is a separate identity-scoped view. */
+export const peeksOn = () => {
+    const agent = peekAgent();
+
+    return agent
+        ? managedShown.has(managedKey(store.state.me.id, agent.agentId))
+        : prefs().peeks === true;
+};
 
 /** Peeks show in this session: turned on, a server that sends them, and a session open. */
 export function peeksWanted(state = store.state) {
     return (
-        peeksOn() && state.server?.peeks === true && state.conversationId !== null && !state.missing
+        peeksOn() &&
+        state.server?.peeks === true &&
+        (peekAgent(state) !== null ||
+            (state.conversationId !== null &&
+                state.view.conversation?.id === state.conversationId)) &&
+        !state.missing
     );
 }
 
 /** Turn peek tiles on or off. Turned on where nothing would show yet, a notice says what will. */
 export function togglePeeks() {
     const on = !peeksOn();
+    const agent = peekAgent();
+
+    if (agent) {
+        const key = managedKey(store.state.me.id, agent.agentId);
+
+        if (on) {
+            managedShown.add(key);
+        } else {
+            managedShown.delete(key);
+        }
+
+        store.set({});
+
+        return;
+    }
 
     setPrefs({ peeks: on });
 
@@ -561,7 +691,10 @@ class PeekTile extends Component {
         const title = session.title ?? "New session";
         const open = () => navigate(session.id);
         // A call answered elsewhere can stay on a tile scrolled away: the session list says whether one still waits.
-        const approval = session.waiting ? peek?.approvals?.[0] : undefined;
+        const approval =
+            session.waiting || (session.managedState && status === "waiting")
+                ? peek?.approvals?.[0]
+                : undefined;
         const lines = peek?.lines;
         // The last few lines, which the tile gives two lines of text each.
         const shown = compact ? (lines ?? []).slice(-1) : lines?.slice(-3);
@@ -639,26 +772,45 @@ function tileProps(tiles, compact) {
     const steer = canSteer();
     const order = new Map(workspaceOrder().map((session, index) => [session.id, index]));
 
-    return tiles.map((session) => {
-        const status = session.waiting
-            ? "waiting"
-            : session.busy
-              ? "working"
-              : finishedUnseen(session, state)
-                ? "done"
-                : "idle";
-        const label =
-            status === "waiting"
-                ? steer
-                    ? "needs you"
-                    : "waiting"
-                : status === "working"
+    const agent = peekAgent(state);
+    const visible = tiles.filter(
+        (session) =>
+            !session.managedState ||
+            (session.managedUserId === state.me?.id &&
+                session.managedAgentId === agent?.agentId &&
+                session.managedSource === peekSource(state)),
+    );
+
+    return visible.map((session) => {
+        const peek = state.peeks?.[session.id];
+        const managedWaiting =
+            session.managedState &&
+            (session.managedState === "needs owner" || peek?.approvals?.length > 0);
+        const status =
+            session.waiting || managedWaiting
+                ? "waiting"
+                : session.busy || session.managedState === "active"
                   ? "working"
-                  : status === "done"
-                    ? "done · new"
-                    : session.id === lastLeft
-                      ? "just left"
-                      : "pinned";
+                  : finishedUnseen(session, state)
+                    ? "done"
+                    : "idle";
+        const label = session.managedState
+            ? status === "waiting"
+                ? "needs you"
+                : session.busy
+                  ? "orchestrating · working"
+                  : "orchestrating"
+            : status === "waiting"
+              ? steer
+                  ? "needs you"
+                  : "waiting"
+              : status === "working"
+                ? "working"
+                : status === "done"
+                  ? "done · new"
+                  : session.id === lastLeft
+                    ? "just left"
+                    : "pinned";
 
         return {
             key: session.id,
@@ -680,20 +832,48 @@ function tileProps(tiles, compact) {
  * The column while it shows, and a moment after, so it can slide out. Not when People or the Browser panel takes its
  * place: that one slides in instead. While it leaves it keeps the tiles it had.
  */
-export function PeekHost({ shown, tiles, replaced }) {
-    const [kept, leaving] = usePresence(shown ? tiles : null, 180);
+export function PeekHost({ shown, tiles, replaced, context = null }) {
+    const value = useMemo(() => (shown ? { tiles, context } : null), [shown, tiles, context]);
+    const [kept, leaving] = usePresence(value, 180);
+    const agent = peekAgent();
+    const revoked =
+        kept &&
+        (kept.context
+            ? kept.context.userId !== store.state.me?.id ||
+              kept.context.agentId !== agent?.agentId ||
+              kept.context.source !== peekSource(store.state)
+            : agent !== null);
 
     if (shown) {
-        return html`<${PeekColumn} tiles=${tiles} />`;
+        return html`<${PeekColumn} tiles=${tiles} context=${context} />`;
     }
 
-    return kept === null || !leaving || replaced
+    return kept === null || !leaving || replaced || revoked
         ? null
-        : html`<${PeekColumn} tiles=${kept} leaving=${true} />`;
+        : html`<${PeekColumn} tiles=${kept.tiles} context=${kept.context} leaving=${true} />`;
+}
+
+function PeekEmpty({ context }) {
+    return html`<div class="peeks-empty" role="status">
+        <${Icon} name=${context ? "pip" : "tiles"} size=${28} />
+        <p>${
+            context
+                ? context.loading
+                    ? "Loading managed orchestrators…"
+                    : context.error || "No orchestrators currently managed by this agent."
+                : "Other sessions show here while they work, wait for you, or finish."
+        }</p>
+        <p class="muted small">${
+            context
+                ? "Only orchestrators currently managed from this Chat. Historical and observation-only contacts are not shown."
+                : "Pinned sessions stay here. Alt+P hides this."
+        }</p>
+        ${context?.error && context.refresh && html`<button class="button small" onClick=${context.refresh}>Retry</button>`}
+    </div>`;
 }
 
 /** Wide screens: the tiles as a column beside the conversation, scrolling, with the way to calls waiting out of view. */
-function PeekColumn({ tiles, leaving = false }) {
+function PeekColumn({ tiles, context = null, leaving = false }) {
     const list = useRef(null);
     const props = tileProps(tiles, false);
     const away = useAwayWaiting(list, props.map((tile) => `${tile.key}:${tile.status}`).join());
@@ -717,19 +897,12 @@ function PeekColumn({ tiles, leaving = false }) {
         class=${`peeks window ${leaving ? "leaving" : ""}`}
         data-part="peeks"
         data-state=${leaving ? "closing" : undefined}
-        aria-label="Peeks"
+        aria-label=${context?.label ?? "Peeks"}
         inert=${leaving}
     >
         <div class="peeks-list" ref=${list}>
             ${props.map((each) => html`<${PeekTile} ...${each} />`)}
-            ${
-                props.length === 0 &&
-                html`<div class="peeks-empty">
-                    <${Icon} name="tiles" size=${28} />
-                    <p>Other sessions show here while they work, wait for you, or finish.</p>
-                    <p class="muted small">Pinned sessions stay here. Alt+P hides this.</p>
-                </div>`
-            }
+            ${props.length === 0 && html`<${PeekEmpty} context=${context} />`}
         </div>
         ${jump(away.up, "▲", (ids) => ids.at(-1))}
         ${jump(away.down, "▼", (ids) => ids[0])}
@@ -737,12 +910,15 @@ function PeekColumn({ tiles, leaving = false }) {
 }
 
 /** Narrow screens, or with a panel beside the conversation: the tiles as a strip under the top bar, swiped sideways. */
-export function PeekStrip({ tiles }) {
+export function PeekStrip({ tiles, context = null }) {
     const list = useRef(null);
 
     useOnScreen(list);
 
-    return html`<div class="peek-strip" ref=${list} role="region" aria-label="Peeks">
-        ${tileProps(tiles, true).map((each) => html`<${PeekTile} ...${each} />`)}
+    const props = tileProps(tiles, true);
+
+    return html`<div class="peek-strip" ref=${list} role="region" aria-label=${context?.label ?? "Peeks"}>
+        ${props.map((each) => html`<${PeekTile} ...${each} />`)}
+        ${props.length === 0 && context && html`<${PeekEmpty} context=${context} />`}
     </div>`;
 }

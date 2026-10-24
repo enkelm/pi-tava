@@ -4,7 +4,6 @@ import { api, closeSheet, navigate, openSheet, store, uid } from "./store.js";
 import { html, Icon, Loader, Sheet, Spinner, timeAgo } from "./ui.js";
 import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import { agentDrafts, openAgentDraft, selectAgentDraft } from "./agent-drafts.js";
-import { closedAgentTabs } from "./agent-tab-state.js";
 import { ModelPicker } from "./sheets/model.js";
 import { openSidebarOptions, useSidebarContext } from "./sidebar-context.js";
 
@@ -96,10 +95,10 @@ function openIdentity(agent) {
 
     store.set({ sidebarTab: "sessions", drawer: false });
 
-    const closed = closedAgentTabs(store.state.me.id, agent.agentId);
-    const chats = agent.chats ?? (agent.chatIds ?? []).map((id) => ({ id }));
-    const open = chats.find((chat) => !closed.has(chat.id));
-    const preferred = agent.id != null && !closed.has(agent.id) ? agent.id : open?.id;
+    const chats = (agent.chats ?? (agent.chatIds ?? []).map((id) => ({ id }))).filter(
+        (chat) => !chat.archived,
+    );
+    const preferred = chats.some((chat) => chat.id === agent.id) ? agent.id : chats[0]?.id;
 
     if (preferred != null) {
         navigate(preferred);

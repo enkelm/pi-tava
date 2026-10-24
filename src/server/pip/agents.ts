@@ -43,13 +43,22 @@ export type PrivateAgentRecord = AgentCharter & {
     agentId: string;
     chatIds: number[];
     chats: PrivateAgentChat[];
+    managing: boolean;
     project?: { id: string; available: boolean; name?: string };
     model?: { provider: string; modelId: string };
     thinkingLevel?: ModelThinkingLevel;
     controllers: Awaited<ReturnType<AgentSupervision["controllers"]>>;
 };
 export type PrivateAgentIdentityRecord = Omit<PrivateAgentRecord, "id"> & { id: number | null };
-export type PrivateAgentChat = { id: number; title: string; busy: boolean; updatedAt: number };
+export type PrivateAgentChat = {
+    id: number;
+    title: string;
+    busy: boolean;
+    /** Active native child orchestration, including its idle waits between provider requests. */
+    managing: boolean;
+    archived: boolean;
+    updatedAt: number;
+};
 export type PrivateAgentSummary = {
     id: number | null;
     controlRevision: number;
@@ -58,6 +67,7 @@ export type PrivateAgentSummary = {
     chats: PrivateAgentChat[];
     name: string;
     busy: boolean;
+    managing: boolean;
     updatedAt: number;
     /** Identity configuration, not a selected chat/default; no workspace or charter text in the catalogue. */
     modelInfo: Omit<ReturnType<typeof agentInfo>, "cwd" | "instructions">;
@@ -311,7 +321,10 @@ export class PipAgents {
         return identity.chatIds.filter((id) => !pending.has(id) || this.#draftAdmissions.has(id))
             .length;
     }
-    #chats(identity: Readonly<PrivateIdentity>): PrivateAgentChat[] {
+    #chats(
+        identity: Readonly<PrivateIdentity>,
+        { includeArchived = false } = {},
+    ): PrivateAgentChat[] {
         const pending = this.#pendingChats(this.#doc, identity.agentId);
 
         return identity.chatIds.flatMap((id) => {
@@ -319,13 +332,15 @@ export class PipAgents {
 
             return pending.has(id) ||
                 meta?.pipAgentId !== identity.agentId ||
-                meta.archived === true
+                (!includeArchived && meta.archived === true)
                 ? []
                 : [
                       {
                           id,
                           title: meta.title ?? `Chat ${id}`,
                           busy: this.#app.isBusy(cid(id)),
+                          managing: this.supervision.manages(cid(id)),
+                          archived: meta.archived === true,
                           updatedAt: meta.updatedAt,
                       },
                   ];
@@ -362,14 +377,17 @@ export class PipAgents {
                     this.#app.signInNeeded,
                 );
 
+                const chats = this.#chats(item);
+
                 return {
-                    id: this.#chats(item).at(-1)?.id ?? null,
+                    id: chats.at(-1)?.id ?? null,
                     controlRevision: this.supervision.projectionRevision,
                     agentId: item.agentId,
-                    chatIds: this.#chats(item).map((chat) => chat.id),
-                    chats: this.#chats(item),
+                    chatIds: chats.map((chat) => chat.id),
+                    chats,
                     name: item.record.name,
                     busy: item.chatIds.some((id) => this.#app.isBusy(cid(id))),
+                    managing: chats.some((chat) => chat.managing),
                     updatedAt: item.record.updatedAt,
                     modelInfo,
                 };
@@ -397,12 +415,14 @@ export class PipAgents {
             typeof id === "string" ? [] : await this.supervision.controllers(id, user);
 
         this.#owns(id, user);
+        const chats = this.#chats(identity, { includeArchived: true });
 
         return {
             id: typeof id === "string" ? (this.#chats(identity).at(-1)?.id ?? null) : Number(id),
             agentId: identity.agentId,
-            chatIds: this.#chats(identity).map((chat) => chat.id),
-            chats: this.#chats(identity),
+            chatIds: chats.map((chat) => chat.id),
+            chats,
+            managing: chats.some((chat) => chat.managing),
             ...cloned(identity.record),
             ...(identity.model === undefined ? {} : { model: cloned(identity.model) }),
             ...(identity.thinkingLevel === undefined
@@ -1123,7 +1143,7 @@ export class PipAgents {
             }
         }, context);
     }
-    /** Serialize admission across all chats; no second queued paid run can overlap an agent's lane. */
+    /** Serialize short admission/capacity updates; each Chat's native run remains independent. */
     async input<T>(
         id: ConversationId,
         supplied: User,
@@ -1144,15 +1164,6 @@ export class PipAgents {
             .catch(() => {})
             .then(async () => {
                 this.#owns(root, user, true);
-
-                for (const chat of this.#owns(root, user, true).chatIds) {
-                    if (chat !== Number(root) && this.#app.isBusy(cid(chat))) {
-                        throw new HttpError(
-                            409,
-                            "This agent is working in another chat. Wait for it to settle.",
-                        );
-                    }
-                }
 
                 const draft = this.#pendingChats(this.#doc, identity.agentId).has(Number(root));
 

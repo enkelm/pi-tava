@@ -1,3 +1,5 @@
+@import url("/vendor/blobatar-motion.css");
+
 /* Persistent private PiPs share the source tabs' typography and flat navigation states. */
 .named-agents {
     flex: 0 0 auto;
@@ -92,8 +94,38 @@
     background: var(--hover);
 }
 
-.named-agent-avatar img {
+.named-agent-avatar :is(img, svg) {
     display: block;
+}
+
+.agent-tab .sr-only,
+.named-agent-input-avatar .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* Keep identity beside the input itself, not among send/attachment toolbar actions. */
+.message-box-input {
+    display: flex;
+    align-items: flex-start;
+    min-width: 0;
+}
+
+.named-agent-input-avatar {
+    display: inline-flex;
+    flex: none;
+    margin: calc(12px * var(--space-y)) 0 0 calc(12px * var(--space-x));
+}
+
+.message-box-input textarea {
+    flex: 1;
+    min-width: 0;
+    width: 0;
+    padding-left: 8px;
 }
 
 .named-agent-name {
@@ -150,51 +182,10 @@
     align-items: center;
 }
 
-/* Current controllers stay visible beside tabs on wider panes; the count/disclosure remains on phones. */
-.agent-current-orchestrators {
-    display: none;
-    flex: 0 1 28%;
-    align-items: center;
-    min-width: 0;
-    max-width: 300px;
-    gap: 4px;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    scrollbar-width: thin;
-    scrollbar-color: var(--line) transparent;
-}
-
-.agent-current-controller {
-    display: grid;
-    flex: 0 0 auto;
-    align-content: center;
-    min-width: 80px;
-    max-width: 160px;
-    min-height: 40px;
-    gap: 2px;
-    padding: 4px 8px;
-    border-radius: var(--r-row);
-    color: var(--text);
-    font-size: 0.78rem;
-    text-decoration: none;
-}
-
-.agent-current-controller > span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 .topbar.agent-topbar > .agent-controller-summary {
     width: auto;
     gap: 4px;
     padding-inline: 6px;
-}
-
-@container topbar (min-width: 700px) {
-    .agent-current-orchestrators:has(a) {
-        display: flex;
-    }
 }
 
 /* Phone navigation stays within the pane. Only the tablet/desktop tabs scroll. */
@@ -317,24 +308,16 @@
     padding: 8px;
 }
 
-.agent-tab-busy {
-    flex: none;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-}
-
 .agent-topbar :is(a, button):focus-visible,
 .agent-chat-choices :is(a, button):focus-visible,
-.agent-history-list a:focus-visible {
+.agent-history-list :is(a, button):focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -3px;
 }
 
 .agent-topbar :is(a, button):active,
 .agent-chat-choices :is(a, button):active,
-.agent-history-list a:active {
+.agent-history-list :is(a, button):active {
     background: var(--pressed);
 }
 
@@ -348,7 +331,7 @@
 /* Suppress browser tap/callout artifacts only on controls, never on readable sheet content. */
 .agent-topbar :is(a, button),
 .agent-chat-choices :is(a, button),
-.agent-history-list a {
+.agent-history-list :is(a, button) {
     touch-action: manipulation;
     user-select: none;
     -webkit-user-select: none;

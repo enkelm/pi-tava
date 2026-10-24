@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi
 import type { ConversationId } from "@earendil-works/pi-durable";
 import {
     cleanUp,
+    context,
     lastText,
     newSession,
     openApp,
@@ -184,16 +185,20 @@ test("only the live owner can inspect, edit or create private identities; stale 
     }
 });
 
-test("one reasoning lane covers every chat and settings cannot race a running sibling", async () => {
+test("distinct chats complete independently while shared settings cannot race a running sibling", async () => {
+    let firstStarted = false;
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
         release = resolve;
     });
     const app = await openApp(
-        scriptedModel(async () => {
-            await held;
+        scriptedModel(async (request) => {
+            if (lastText(request).text.includes("Hold this response")) {
+                firstStarted = true;
+                await held;
+            }
 
-            return fauxAssistantMessage([fauxText("Done")]);
+            return fauxAssistantMessage([fauxText(`Done: ${lastText(request).text}`)]);
         }),
         join(root, "agent-lane"),
     );
@@ -206,8 +211,38 @@ test("one reasoning lane covers every chat and settings cannot race a running si
         const answer = say(app, cid(a.id), "Hold this response");
 
         try {
-            await until(() => app.isBusy(cid(a.id)), "first chat starts");
-            await assert.rejects(say(app, cid(a2.id), "Concurrent chat"), /another chat/);
+            await until(
+                () => firstStarted,
+                "the first native provider response is deliberately held",
+            );
+            await say(app, cid(a2.id), "Concurrent chat");
+            assert.ok(
+                app.isBusy(cid(a.id)),
+                "the sibling did not abort or supersede the held source",
+            );
+            const reply = await (await app.conversation(cid(a2.id))).context(context);
+
+            assert.match(
+                JSON.stringify(reply.messages.at(-1)),
+                /Done: .*Concurrent chat/,
+                "the second native chat completes without releasing the first response",
+            );
+            const fresh = await app.pip.agents.submitDraft(a.agentId, user, {
+                requestId: "fresh-while-busy",
+                text: "First send in another chat",
+            });
+
+            await (await app.harness.submission(fresh.submissionId, context))!.wait(context);
+            const freshReply = await (await app.conversation(cid(fresh.id))).context(context);
+
+            assert.match(
+                JSON.stringify(freshReply.messages.at(-1)),
+                /Done: .*First send in another chat/,
+            );
+            assert.ok(
+                app.isBusy(cid(a.id)),
+                "first-send admission also leaves its sibling running",
+            );
             await assert.rejects(
                 app.pip.agents.update(cid(a2.id), user, { expectedRevision: 1, name: "Busy edit" }),
                 /working/,
@@ -222,6 +257,10 @@ test("one reasoning lane covers every chat and settings cannot race a running si
             release();
             await answer;
         }
+
+        const firstReply = await (await app.conversation(cid(a.id))).context(context);
+
+        assert.match(JSON.stringify(firstReply.messages.at(-1)), /Done: .*Hold this response/);
     } finally {
         release?.();
         await app.close();

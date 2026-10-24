@@ -1,10 +1,13 @@
 // Selected-chat projection over real native association/contact; only the model is scripted.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
+import { AgentDoc, type ConversationId, type TaskId } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { PipWorkDoc, SessionsDoc } from "../src/server/docs.ts";
+import { privateAgentRequest as nativeRequest } from "./private-agent-http.ts";
+import type { PrivateAgentIdentityRecord } from "../src/server/pip/agents.ts";
 import {
+    type App,
     cleanUp,
     context,
     fakeTab,
@@ -19,9 +22,15 @@ import {
 
 after(cleanUp);
 
-function controlModel() {
+async function request(app: App, path: string, body?: unknown, token = app.config.ownerToken) {
+    const response = await nativeRequest(app, path, body, token);
+
+    return { status: response.status, body: await response.json() };
+}
+
+function controlModel(controllerResponse?: () => Promise<void>) {
     let calls = 0;
-    const model = scriptedModel((request) => {
+    const model = scriptedModel(async (request) => {
         calls++;
         const system = JSON.stringify(
             request.messages.filter((message) => message.role === "system"),
@@ -62,6 +71,7 @@ function controlModel() {
         }
 
         if (system.includes("the private supervisor for Work Item")) {
+            await controllerResponse?.();
             const action = last.text.includes("\nask\n")
                 ? "ask"
                 : last.text.includes("\nfinish\n")
@@ -91,7 +101,15 @@ function controlModel() {
 }
 
 test("current controllers follow the exact chat's live contact, never its historical contacts or latest report context", async (t) => {
-    const scripted = controlModel();
+    let controllerStarted = false;
+    let releaseController!: () => void;
+    const heldController = new Promise<void>((resolve) => {
+        releaseController = resolve;
+    });
+    const scripted = controlModel(async () => {
+        controllerStarted = true;
+        await heldController;
+    });
     const app = await openApp(scripted.model);
 
     t.after(() => app.close());
@@ -121,8 +139,15 @@ test("current controllers follow the exact chat's live contact, never its histor
 
     await until(() => revision() >= 0, "owner receives the native control projection revision");
     const initialRevision = revision();
-    const rows = async (chat: ConversationId) =>
-        (await app.pip.agents.read(chat, owner(app))).controllers;
+
+    const rows = async (chat: ConversationId) => {
+        const response = await request(app, `c/${chat}/private-agent`);
+
+        assert.equal(response.status, 200);
+
+        return (response.body as PrivateAgentIdentityRecord).controllers;
+    };
+
     const itemIds = (entries: Awaited<ReturnType<typeof rows>>) =>
         entries.map((entry) => entry.workItemId).sort();
     const currentIds = (entries: Awaited<ReturnType<typeof rows>>) =>
@@ -152,7 +177,17 @@ test("current controllers follow the exact chat's live contact, never its histor
     assert.equal((await rows(first))[0]!.current, false, "association alone is not control");
     assert.deepEqual(await rows(second), [], "association belongs to its actual source chat");
 
-    await say(app, first, `CONTROL_send_${firstController}`);
+    try {
+        await say(app, first, `CONTROL_send_${firstController}`);
+        await until(() => controllerStarted, "native controller provider response is held");
+        const generating = (await rows(first))[0]!;
+
+        assert.equal(generating.busy, true, "Peek busy follows the actual native model run");
+        assert.equal(generating.current, true);
+    } finally {
+        releaseController();
+    }
+
     await settle(firstWork);
 
     await until(
@@ -211,10 +246,106 @@ test("current controllers follow the exact chat's live contact, never its histor
     assert.deepEqual(
         itemIds(await rows(first)),
         [firstItem, secondItem].sort(),
-        "history is not pruned when control moves",
+        "history is not pruned when another chat contacts the controller",
     );
-    assert.deepEqual(currentIds(await rows(first)), [secondItem]);
+    assert.deepEqual(
+        currentIds(await rows(first)),
+        [firstItem, secondItem].sort(),
+        "an ordinary send to an active controller retains its epoch and earlier accepted chat contacts",
+    );
     assert.deepEqual(currentIds(await rows(second)), [firstItem]);
+    const tiles = (await rows(second)).filter((entry) => entry.current && entry.accessible);
+
+    assert.deepEqual(itemIds(tiles), [firstItem], "Peeks remain scoped to the selected Chat");
+    const tile = tiles[0]!;
+
+    assert.equal(tile.title, app.workItems.itemFor(firstWork)!.title);
+    assert.equal(tile.cwd, app.defaultCwd);
+    assert.equal(tile.location, undefined);
+    assert.equal(tile.state, "active");
+    assert.equal(tile.busy, false, "orchestration is distinct from model generation");
+    assert.equal(tile.waiting, false, "waiting for work events is not tool approval");
+    assert.equal(tile.endedAt, app.endedAt(firstController));
+    assert.equal(typeof tile.endedAt, "number");
+    // Persisted destination metadata after real admission; this read must not probe an SSH host.
+    await app.harness.commit(async (tx) => {
+        (await tx.doc(SessionsDoc)).items[String(firstController)]!.location = {
+            kind: "ssh",
+            host: "peek-metadata-fixture",
+        };
+    }, context);
+
+    try {
+        assert.deepEqual((await rows(second))[0]!.location, {
+            kind: "ssh",
+            host: "peek-metadata-fixture",
+        });
+    } finally {
+        await app.harness.commit(async (tx) => {
+            delete (await tx.doc(SessionsDoc)).items[String(firstController)]!.location;
+        }, context);
+    }
+
+    assert.ok(!app.sessions(owner(app)).some((entry) => entry.id === Number(firstController)));
+    const beforePeek = scripted.calls();
+
+    assert.equal(
+        (
+            await request(app, "peeks", {
+                connection: tab.client.connection,
+                ids: tiles.map((entry) => entry.conversationId),
+            })
+        ).status,
+        200,
+    );
+    await until(
+        () =>
+            tiles.every((entry) =>
+                tab.events.some(
+                    (event) =>
+                        event.event === "peek" &&
+                        event.data.conversationId === entry.conversationId,
+                ),
+            ),
+        "the existing Peek stream reads owner-private controllers",
+    );
+    assert.equal(scripted.calls(), beforePeek, "chat reads and Peeks cannot activate work");
+    const draft = await request(app, `pip/agents/${app.pip.agents.identity(first)!.agentId}`);
+
+    assert.equal(draft.status, 200);
+    assert.deepEqual(draft.body.controllers, [], "an unsaved draft has no originating work");
+    const guest = app.config.addUser("Guest", "guest");
+
+    assert.equal(
+        (
+            await request(
+                app,
+                `pip/agents/${app.pip.agents.identity(first)!.agentId}`,
+                undefined,
+                guest.token,
+            )
+        ).status,
+        403,
+    );
+    const guestTab = fakeTab(undefined, guest.user);
+
+    await app.attach(guestTab.client);
+
+    try {
+        await request(
+            app,
+            "peeks",
+            { connection: guestTab.client.connection, ids: [firstController] },
+            guest.token,
+        );
+        assert.deepEqual(
+            [...(guestTab.client.peeks ?? [])],
+            [],
+            "private controller Peeks stay owner-only",
+        );
+    } finally {
+        app.detach(guestTab.client);
+    }
 
     await until(
         () => revision() === app.pip.agents.supervision.projectionRevision,
@@ -281,6 +412,42 @@ test("pending native questions and finished work retain truthful state without i
     assert.equal(question.current, true, "a pending question does not give away the native grant");
     assert.equal(question.accessible, true);
     assert.equal(question.reason, "Which permitted scope should this native work use?");
+    assert.equal(question.waiting, false, "a native question is not a pending tool approval");
+    const approval = app.approvals.request(
+        {
+            id: "managed-controller-approval",
+            conversationId: controller,
+            taskId: 1 as TaskId,
+            tool: "work_handoff",
+            subject: "Native controller approval",
+            reason: "Human decision required",
+            createdAt: Date.now(),
+        },
+        context,
+    );
+
+    try {
+        const response = await request(app, `c/${chat}/private-agent`);
+        const entry = (response.body as PrivateAgentIdentityRecord).controllers.find(
+            (row) => row.workItemId === questionItem.id,
+        )!;
+
+        assert.equal(response.status, 200);
+        assert.equal(
+            entry.waiting,
+            true,
+            "native pending tool approvals set waiting independently of questions",
+        );
+        assert.equal(entry.state, "needs owner");
+    } finally {
+        app.approvals.answer("managed-controller-approval", { allow: false, by: owner(app).name });
+        await approval;
+    }
+
+    assert.equal(
+        (await rows()).find((entry) => entry.workItemId === questionItem.id)!.waiting,
+        false,
+    );
 
     await app.commands.abort(controller, owner(app));
     const stopped = (await rows()).find((entry) => entry.workItemId === questionItem.id)!;
@@ -345,6 +512,11 @@ test("selected-chat history retains inaccessible work and rejects stale owner au
     assert.equal(unavailable[0]!.current, false);
     assert.equal(unavailable[0]!.title, "Unavailable Work Item");
     assert.equal(unavailable[0]!.activeThreadId, undefined);
+    assert.equal(unavailable[0]!.cwd, undefined, "unavailable work never leaks Peek metadata");
+    assert.equal(unavailable[0]!.location, undefined);
+    assert.equal(unavailable[0]!.busy, undefined);
+    assert.equal(unavailable[0]!.waiting, undefined);
+    assert.equal(unavailable[0]!.endedAt, undefined);
 
     await app.harness.commit(async (tx) => {
         (await tx.doc(SessionsDoc)).items[String(controller)]!.pip = owner(app).id;

@@ -4,14 +4,13 @@ import { useEffect, useState } from "preact/hooks";
 import { AgentHistory } from "./agent-history.js";
 import { selectedAgentDraft } from "./agent-drafts.js";
 import { openAgentSettings } from "./named-agents.js";
-import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import { folderColor } from "./avatar.js";
 import { BrowserButton } from "./browser-panel.js";
 import { PeopleButton } from "./chat.js";
 import { useChanges } from "./diff.js";
 import { FilesButton, filesAvailable, setFilesOpen } from "./files-panel.js";
 import { ExtensionSessionControls } from "./extension-ui.js";
-import { PeeksButton } from "./peeks.js";
+import { PeeksButton, peeksOn, setManagedPeeks, togglePeeks } from "./peeks.js";
 import { toSessions } from "./sessions.js";
 import { branchAvailable, headLabel } from "./sheets/branch.js";
 import { openSubagents } from "./subagents.js";
@@ -280,7 +279,7 @@ function useChatOrchestrators({ agent, source, current }) {
     return { read, refresh: () => current() && setRevision((value) => value + 1) };
 }
 
-function ControllerLink({ controller, current, close, compact = false }) {
+function ControllerLink({ controller, current, close }) {
     if (controller.accessible === false) {
         return html`<div class="named-agent-controller-link" aria-disabled="true">
             <span>Unavailable Work Item</span>
@@ -289,9 +288,9 @@ function ControllerLink({ controller, current, close, compact = false }) {
     }
 
     return html`<a
-        class=${compact ? "agent-current-controller" : "named-agent-controller-link"}
+        class="named-agent-controller-link"
         href=${`/s/${controller.conversationId}`}
-        aria-label=${`Open ${compact ? "current " : ""}orchestrator for ${controller.title}, ${controller.state}`}
+        aria-label=${`Open orchestrator for ${controller.title}, ${controller.state}`}
         title=${`${controller.title}: ${controller.state}`}
         onClick=${(event) => {
             if (!current()) {
@@ -472,7 +471,17 @@ function NamedAgentTopbar({ agent, source, userId }) {
         sheet.userId === userId
             ? sheet.panel
             : null;
-    const { read } = useChatOrchestrators({ agent, source, current });
+    const { read, refresh } = useChatOrchestrators({ agent, source, current });
+
+    useEffect(() => {
+        if (current()) {
+            return setManagedPeeks(
+                { userId, agentId: agent.agentId, source },
+                { ...read, refresh },
+            );
+        }
+    }, [read, source, userId, agent.agentId]);
+
     const currentControllers = (read.data?.controllers ?? []).filter(
         (item) => item.current === true && item.accessible !== false,
     );
@@ -481,7 +490,10 @@ function NamedAgentTopbar({ agent, source, userId }) {
         ? "Loading orchestrators"
         : read.error
           ? "Orchestrators unavailable"
-          : `${currentControllers.length} current orchestrator${currentControllers.length === 1 ? "" : "s"}${working ? `, ${working} active` : ""}`;
+          : currentControllers.length === 0
+            ? "No current orchestrators"
+            : `${currentControllers.length} currently managed${working ? `, ${working} active` : ""}`;
+    const peeking = peeksOn();
 
     return html`<${Fragment}>
         <style>@import url("/named-agents.css") layer(pocket);</style>
@@ -492,33 +504,18 @@ function NamedAgentTopbar({ agent, source, userId }) {
                 title="Sessions"
                 onClick=${() => localCurrent() && toSessions()}
             ><${Icon} name="back" size=${22} /></button>
-            <button
-                class="icon-button agent-header-avatar"
-                aria-label=${`${agent.name}: settings`}
-                title=${`${agent.name}: settings`}
-                onClick=${() => settings()}
-            ><${NamedAgentAvatar} agentId=${agent.agentId} /></button>
             <${AgentTabs}
                 onChoose=${() => show("chats")}
                 expanded=${panel === "chats"}
             />
-            <nav class="agent-current-orchestrators" aria-label="Current orchestrators for this chat">
-                ${currentControllers.map(
-                    (controller) => html`<${ControllerLink}
-                    key=${controller.workItemId}
-                    controller=${controller}
-                    current=${current}
-                    compact=${true}
-                />`,
-                )}
-            </nav>
             <button
-                class=${`icon-button agent-controller-summary ${working ? "on" : ""}`}
-                aria-label=${`${controllerState}: all Work Items for this chat`}
-                title=${`${controllerState} · All Work Items for this chat`}
-                aria-haspopup="dialog"
-                aria-expanded=${panel === "orchestrators"}
-                onClick=${() => show("orchestrators")}
+                class=${`icon-button agent-controller-summary ${peeking ? "on" : ""}`}
+                aria-label="Orchestrator Peeks"
+                aria-description=${controllerState}
+                title=${`${peeking ? "Hide" : "Show"} orchestrator Peeks · ${controllerState}`}
+                aria-pressed=${peeking}
+                disabled=${store.state.server?.peeks !== true}
+                onClick=${() => current() && togglePeeks()}
             >
                 <${Icon} name="pip" size=${18} />
                 ${!read.loading && !read.error && currentControllers.length > 0 && html`<span class="count">${currentControllers.length}</span>`}
@@ -540,6 +537,12 @@ function NamedAgentTopbar({ agent, source, userId }) {
                 aria-expanded=${panel === "history"}
                 onClick=${() => show("history")}
             ><${Icon} name="clock" size=${18} /></button>
+            <button
+                class="icon-button agent-header-settings"
+                aria-label=${`${agent.name}: settings`}
+                title=${`${agent.name}: settings`}
+                onClick=${() => settings()}
+            ><${Icon} name="settings" size=${18} /></button>
             <button
                 class="icon-button topbar-menu"
                 aria-label="Menu"

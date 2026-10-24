@@ -25,7 +25,7 @@ import { Browsers } from "../src/server/browser.ts";
 import { findBrowser } from "../src/server/browser/discovery.ts";
 import type { BrowserPage } from "../src/server/browser/page.ts";
 import { VIEWPORTS } from "../src/server/browser/viewport.ts";
-import { SubagentsDoc } from "../src/server/docs.ts";
+import { PipWorkDoc, SubagentsDoc } from "../src/server/docs.ts";
 import { createHandler } from "../src/server/http.ts";
 import type { Client } from "../src/server/room.ts";
 
@@ -40,6 +40,43 @@ const route: FauxResponseStep = (request) => {
     const messages = (request as { messages: { role: string; content: unknown }[] }).messages;
     const asked = messages.findLast((message) => message.role === "user");
     const done = messages.slice(messages.indexOf(asked!)).filter((m) => m.role === "toolResult");
+    const system = JSON.stringify(messages.filter((message) => message.role === "system"));
+
+    if (system.includes("the owner's persistent private agent")) {
+        if (role !== "user") {
+            assert.match(text, /"status":"accepted"/);
+
+            return fauxAssistantMessage("Native Peek control accepted.");
+        }
+
+        const command = /PEEK_CONTROL_(\d+)/.exec(text);
+
+        assert.ok(command, text);
+
+        return fauxAssistantMessage(
+            [
+                fauxToolCall("agent_work", {
+                    action: "send",
+                    session: Number(command[1]),
+                    report: false,
+                    text: "Observe this Work Item only, then wait for native work events.",
+                }),
+            ],
+            { stopReason: "toolUse" },
+        );
+    }
+
+    if (system.includes("the private supervisor for Work Item")) {
+        return fauxAssistantMessage(
+            [
+                fauxToolCall("work_supervise", {
+                    action: "wait",
+                    text: "Waiting for native Peek work events.",
+                }),
+            ],
+            { stopReason: "toolUse" },
+        );
+    }
 
     if (role === "user" && text.endsWith("start a helper")) {
         return fauxAssistantMessage(
@@ -704,5 +741,166 @@ test(
         );
         app.approvals.answer("long-call", { allow: false, by: "test" });
         await asked;
+    },
+);
+
+test(
+    "named-agent Orchestrator Peeks follow only the selected saved Chat on desktop and phone",
+    real,
+    async () => {
+        const firstWork = await newSession(app, app.defaultCwd, "worker");
+        const secondWork = await newSession(app, app.defaultCwd, "worker");
+        const firstController = (
+            await app.pip.orchestration.control(firstWork, owner(app), { action: "open" })
+        ).orchestration!.conversationId as ConversationId;
+        const secondController = (
+            await app.pip.orchestration.control(secondWork, owner(app), { action: "open" })
+        ).orchestration!.conversationId as ConversationId;
+        const first = (
+            await app.pip.agents.create(owner(app), {
+                name: "Peek coordinator",
+                requestId: "peek-coordinator",
+            })
+        ).id as ConversationId;
+        const second = (
+            await app.pip.agents.newChat(first, owner(app), { requestId: "peek-second-chat" })
+        ).id as ConversationId;
+
+        for (const [chat, controller] of [
+            [first, firstController],
+            [second, secondController],
+        ] as const) {
+            await say(app, chat, `PEEK_CONTROL_${controller}`);
+            await until(async () => {
+                const work = await app.harness.snapshot(PipWorkDoc, controller, context);
+
+                return (
+                    work?.reason === "Waiting for native Peek work events." &&
+                    !app.isBusy(controller)
+                );
+            }, "the Chat's actual native controller to yield");
+        }
+
+        const previousPage = page;
+        const managedPage = await browsers.open(3);
+        const switcher = `document.querySelector('.agent-topbar [aria-label="Orchestrator Peeks"]')`;
+        const managedPressed = () =>
+            inPage<string | null>(
+                `return JSON.stringify(${switcher}?.getAttribute("aria-pressed") ?? null)`,
+            );
+
+        const expectOnly = async (controller: ConversationId, where = ".peeks") => {
+            await until(
+                async () =>
+                    JSON.stringify((await tiles(where)).map((tile) => tile.id)) ===
+                    JSON.stringify([Number(controller)]),
+                `only selected Chat controller ${controller} in ${where}`,
+            );
+            const shown = await sameAsScreen(
+                `only selected Chat controller ${controller} live`,
+                where === ".peeks" ? ".peeks-list" : where,
+            );
+
+            assert.deepEqual(shown, [Number(controller)]);
+            assert.deepEqual(
+                await serverPeeks(),
+                shown,
+                "native subscription matches on-screen tiles",
+            );
+            const tile = (await tiles(where))[0]!;
+
+            assert.equal(
+                tile.label,
+                "orchestrating",
+                "an idle controller has not finished its work",
+            );
+            assert.equal(tile.status, "working");
+            assert.equal(
+                await inPage<boolean>(
+                    `return JSON.stringify(document.querySelector('${where} .peek[data-peek="${Number(controller)}"] button[aria-label="Mark as seen"]') !== null)`,
+                ),
+                false,
+                "an actively managed tile has no accessible finished-state action",
+            );
+        };
+
+        page = managedPage;
+
+        try {
+            await page.setViewport(DESKTOP);
+            await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
+            await page.evaluate(
+                `localStorage.setItem("pocket.pinned", JSON.stringify([${Number(ids.pinned)}]))`,
+            );
+            await page.navigate(`${base}/s/${first}`);
+            await until(
+                async () => (await managedPressed()) === "false",
+                "the native Peeks switch",
+            );
+            const header = await inPage<{ labels: (string | null)[]; avatarSettings: boolean }>(`
+                const bar = document.querySelector(".agent-topbar");
+
+                return JSON.stringify({
+                    labels: [...bar.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
+                    avatarSettings: bar.querySelector(".agent-header-avatar") !== null,
+                });
+            `);
+
+            assert.deepEqual(header.labels.slice(-2), ["Peek coordinator: settings", "Menu"]);
+            assert.equal(header.avatarSettings, false, "no leading settings Blobatar");
+            assert.ok(
+                ids.working.some((id) => app.isBusy(id)),
+                "ordinary busy work exists to exclude",
+            );
+            await page.click({ selector: '.agent-topbar [aria-label="Orchestrator Peeks"]' });
+            await until(async () => (await managedPressed()) === "true", "managed Peeks enabled");
+            await expectOnly(firstController);
+
+            await page.click({ selector: `.agent-tabs-strip a[href="/s/${second}"]` });
+            await until(
+                async () =>
+                    (await inPage<string>(`return JSON.stringify(location.pathname)`)) ===
+                    `/s/${second}`,
+                "the actual second Chat tab to open",
+            );
+            await expectOnly(secondController);
+            assert.equal(await managedPressed(), "true", "same identity keeps Peeks enabled");
+
+            await page.setViewport(VIEWPORTS.mobile);
+            await expectOnly(secondController, ".peek-strip");
+            await until(async () => (await tiles()).length === 0, "desktop column leaves on phone");
+            await page.click({ selector: '.agent-topbar [aria-label="Orchestrator Peeks"]' });
+            await until(async () => (await managedPressed()) === "false", "phone Peeks disabled");
+            await until(
+                async () => (await tiles(".peek-strip")).length === 0,
+                "phone strip closes",
+            );
+            await until(
+                async () => (await serverPeeks())?.length === 0,
+                "closed Peeks stop streaming",
+            );
+
+            await page.click({ selector: '.agent-topbar [aria-label="Orchestrator Peeks"]' });
+            await expectOnly(secondController, ".peek-strip");
+            await app.commands.abort(secondController, owner(app));
+            await until(
+                async () => (await tiles(".peek-strip")).length === 0,
+                "native Stop removes revoked control without navigation",
+            );
+            await until(
+                async () => (await serverPeeks())?.length === 0,
+                "revoked control stops streaming",
+            );
+            assert.equal(
+                await inPage<string>(`return JSON.stringify(location.pathname)`),
+                `/s/${second}`,
+                "revocation updated the selected Chat in place",
+            );
+        } finally {
+            page = previousPage;
+            await browsers.close(3);
+            await app.commands.abort(firstController, owner(app));
+            await app.commands.abort(secondController, owner(app));
+        }
     },
 );
