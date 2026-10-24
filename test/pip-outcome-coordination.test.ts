@@ -45,7 +45,8 @@ test("native busy handoff stays passive; distinct equal-text outcomes wake once 
             calls++;
 
             return calls === 1
-                ? tool("work_handoff", {
+                ? tool("handoff", {
+                      action: "start",
                       session: Number(source),
                       targetType: "researcher",
                       summary:

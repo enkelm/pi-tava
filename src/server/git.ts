@@ -15,6 +15,8 @@ export type GitOptions = {
     readOnly?: boolean;
     backend?: WorkspaceBackend;
     context?: Context;
+    /** Native preparation revalidates its captured source before each subprocess. */
+    check?: () => Promise<void>;
     /** Trusted core callers can suppress checkout/global config; mandatory safety variables win. */
     env?: Record<string, string>;
 };
@@ -29,7 +31,10 @@ export class GitError extends Error {
 }
 
 /** Raw stdout, for bundles/objects and callers that independently validate pathname encodings. */
-export function gitBytes(cwd: string, args: string[], options: GitOptions = {}): Promise<Buffer> {
+export async function gitBytes(cwd: string, args: string[], options: GitOptions = {}): Promise<Buffer> {
+    await options.check?.();
+    options.context?.abortSignal?.throwIfAborted();
+
     if (options.backend !== undefined) {
         return options.backend.gitBytes(cwd, args, options);
     }

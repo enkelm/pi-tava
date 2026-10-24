@@ -367,6 +367,7 @@ export class AgentExecution {
         ctx: Context,
         run: (api: ToolExecutionApi, context: Context) => Promise<T>,
         effect = true,
+        sourceCheck?: (tx: Tx) => Promise<void>,
     ): Promise<T> {
         const root = this.#root(api.conversationId);
 
@@ -386,13 +387,34 @@ export class AgentExecution {
             ...(ctx.abortSignal ? [ctx.abortSignal] : []),
         ]);
         const scoped = withAbortSignal(signal, ctx);
-        const monitor = setInterval(() => this.changed(), 50);
+        let checking = Promise.resolve();
+        let pending = false;
+        const monitor = setInterval(() => {
+            this.changed();
+
+            if (sourceCheck !== undefined && !pending) {
+                pending = true;
+                checking = api
+                    .commit(sourceCheck, scoped)
+                    .catch((error: unknown) => {
+                        pin.controller.abort(error);
+                    })
+                    .finally(() => {
+                        pending = false;
+                    });
+            }
+        }, 50);
 
         monitor.unref();
 
         try {
             this.#assert(pin);
             await this.#temporary(pin.agentId);
+
+            if (sourceCheck !== undefined) {
+                await api.commit(sourceCheck, scoped);
+            }
+
             const user = this.#app.config.userById(pin.ownerId)!;
             const env = this.#app.envFor(
                 pin.lease === undefined ? api.conversationId : idOf(pin.lease.source),
@@ -402,9 +424,30 @@ export class AgentExecution {
             return await this.#current.run(pin, () => run({ ...api, env }, scoped));
         } finally {
             clearInterval(monitor);
+            await checking;
             this.#operations.delete(pin);
             done();
         }
+    }
+
+    /** Native handoff preparation uses the same invocation pin and cancellation as coding tools. */
+    runHandoff<T>(
+        api: ToolExecutionApi,
+        ctx: Context,
+        run: (api: ToolExecutionApi, context: Context) => Promise<T>,
+        effect: boolean,
+    ): Promise<T> {
+        return this.#run(
+            api,
+            ctx,
+            run,
+            effect,
+            effect
+                ? async (tx) => {
+                      await this.#app.pip.agents.supervision.requireHandoffInvocation(tx, api);
+                  }
+                : undefined,
+        );
     }
 
     /** Called by environment operations, not a tool-name allowlist or a caller-supplied authority token. */

@@ -1,10 +1,51 @@
 # Handoffs and Work Items
 
-A handoff starts a fresh thread with a compact brief and transfers responsibility for the work. It does not reset, fork or compact the source conversation. Earlier conversations remain available for reading and discussion, but they cannot regain write access.
+A handoff passes work and a compact brief using the actual source's native authority. An execution-thread handoff starts a successor and transfers responsibility; it does not reset, fork or compact the source, and permanently retires its write access. A named agent instead delegates from its retained private Chat. A Work Item controller transfers its exact current execution thread, never the controller Chat.
+
+## Source-aware agent handoffs
+
+`handoff` is the public workflow creation/delegation/transfer tool. Its **status** and **start**
+operations derive the actor from the real native invocation, not a supplied agent, owner or epoch.
+
+- **Execution main:** the existing human-input correlation, explicit slash route, transition graph,
+  same/new-work relationship and permanent source retirement remain unchanged. Couriers, schedules
+  and helper reports cannot authorize a transfer; status disables choices without current human authority.
+- **Named main Chat:** `start` with `targetType` and `relationship: "new-work"` uses native starter
+  creation, opens its independent Work Item controller, then sends one exact source-fenced native
+  assignment. Supported starters come from the existing profile catalogue. Native `folder`, `repo`,
+  `title`, `worktree`, owner-chosen `model` and `report` options retain their creation safeguards.
+  Alternatively, `session` selects an exact supported existing recipient, without a role or creation
+  options; it is never silently redirected to a controller. The originating Chat remains private,
+  usable and outside execution membership. Cross-filesystem brief transport is not implemented and
+  refuses explicitly. Pending helpers and temporary writer interventions must settle first.
+- **Work Item controller:** `start` requires `session` to identify the exact observed active execution
+  source plus `targetType`; only same-work transfer is supported. Native generation epoch/action
+  admission, source inspection, full execution/helper settlement, membership and writer checks stay
+  with the existing controller adapter. Passive status retains native epoch/grant checks without
+  consuming an action allowance. Its existing registered-profile policy remains distinct
+  from the ordinary human transition graph; controller status reports that policy rather than
+  advertising ordinary diff-gated choices that do not match admission.
+
+Named handoffs save an actual temporary brief under their native filesystem invocation pin. They
+export the supplied delegated summary/notes and exact source link, not unrelated private Chat history
+or the complete private owner instruction. Original accepted owner-input identity remains in the
+native private authority/assignment records. The controller receives the task text and execution brief path through its existing assignment service;
+this does not grant arbitrary filesystem-reading tools to private controllers. Exact execution/Chat
+recipients receive a read instruction. New-work receipts link the originating Chat, named identity,
+Work Item, controller, execution thread, file and accepted native send/submission. The returned
+controller-send `requestId` can be passed directly to `work_supervise wait` continuation—do not send
+a duplicate assignment to obtain a receipt. A refused or pending native contact is not reported as
+successful assignment, even if an inert thread/controller was already created.
+
+New public `session_start` calls explicitly select `threadType: "chat"` and create ordinary Chats.
+Stored execute-phase workflow calls and `work_handoff` retain their registered legacy adapters and
+receipt identities. Idle legacy controller selections switch to `handoff`; active selections retain
+the old adapter for accepted replay and also gain the unified tool. No durable document kind, scope,
+history or fork contract changes.
 
 ## Handoff file
 
-The existing handoff tool writes the summary and exact human direction to an actual
+An execution-thread handoff writes the summary and exact human direction to an actual
 `handoff.md` in a private `pi-coop-handoff-*` temporary directory before creating the successor.
 The successor receives a short prompt with that absolute path and uses the existing `read` tool.
 For SSH work the file is written on the SSH target, where the successor also runs.
@@ -355,14 +396,14 @@ Repository rules govern local integration and delivery details. They cannot disa
 
 ## Registered named-parent continuation
 
-A named agent’s main Chat can explicitly keep an unfinished owner-authorized task suspended after an accepted `agent_work send` to a Work Item controller:
+A named agent’s main Chat can explicitly keep an unfinished owner-authorized task suspended after an accepted `handoff` controller assignment or `agent_work send` to a Work Item controller:
 
 ```json
 {
     "action": "wait",
     "text": "Wait for A’s assigned outcome, then inspect its evidence.",
     "continuation": {
-        "requestId": "<exact accepted agent_work send requestId>",
+        "requestId": "<exact accepted controller-send requestId>",
         "remaining": "Inspect A; decide whether B and C remain within the original owner scope."
     }
 }

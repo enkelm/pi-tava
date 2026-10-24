@@ -39,7 +39,7 @@ A thread for human-authorized local integration, commits, hook fixes, cleanup an
 A thread after Land for external delivery, including pushes, pull request creation and ticket updates. Each external action needs separate human approval.
 
 **Handoff**:
-A human-requested transfer, executed by the source agent, to a successor thread with a brief describing the work and its current state. It continues the same Work Item or starts distinct new work; its intended type is explicit or clarified with the human, not an agent readiness decision.
+An authorized passing of work and its brief to another thread: an execution thread transfers responsibility to a successor, while a named agent delegates from its retained Chat. A Work Item controller transfers only that item's current execution thread; the destination follows the human's scope, not an agent readiness decision.
 
 **Work Item**:
 One piece of work carried through related threads, named after its first thread. Its members share placement and are archived or restored together.

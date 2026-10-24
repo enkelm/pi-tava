@@ -20,6 +20,8 @@ import { PipWorkDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
 import { AgentIdentitiesDoc } from "./agent-identity-docs.ts";
 import { HttpError } from "./errors.ts";
 import { Handoffs, humanDirection } from "./handoffs.ts";
+import { namedHandoff, type SourceHandoffRequest } from "./work-items/named-handoff.ts";
+import { controllerHandoff } from "./work-items/controller-handoff.ts";
 export type { HandoffResult } from "./handoffs.ts";
 import { threadRolePrompt } from "./thread-prompts.ts";
 import { type AgentProfile, workflowOptions } from "./session-workflows.ts";
@@ -154,8 +156,42 @@ export class WorkItems {
     get tasks() {
         return [this.#handoffs.task, this.#handoffs.summaryTask] as const;
     }
-    invoke(...args: Parameters<Handoffs["invoke"]>) {
-        return this.withControl(args[1].conversationId, () => this.#handoffs.invoke(...args));
+    invoke(request: SourceHandoffRequest, api: ToolExecutionApi, ctx: Context): Promise<unknown> {
+        const root = this.#app.rootOf(api.conversationId);
+
+        // Controllers have their own lock/epoch adapter. Never put their Chat through the
+        // ordinary writer-transfer path, or recursively acquire withControl via perform.
+        if (this.#app.pip.orchestration.isScoped(root)) {
+            return controllerHandoff(this.#app, request, api, ctx);
+        }
+
+        if (this.#app.pip.isNamedCaller(api.conversationId)) {
+            return this.#app.pip.agents.execution.runHandoff(
+                api,
+                ctx,
+                (bound, scoped) => namedHandoff(this.#app, request, bound, scoped),
+                request.action === "start",
+            );
+        }
+
+        if (this.#app.sessionMeta(root)?.pip !== undefined) {
+            throw new HttpError(403, "This private Chat has no native workflow handoff authority.");
+        }
+
+        if (request.session !== undefined || (request.action === "start" && (
+            request.folder !== undefined || request.repo !== undefined || request.title !== undefined ||
+            request.model !== undefined || request.report !== undefined || request.instructions !== undefined
+        ))) {
+            throw new HttpError(400, "Execution handoffs transfer this main thread, not a selected recipient or creation folder.");
+        }
+
+        if (request.action === "start" && request.targetType === undefined) {
+            throw new HttpError(400, "Choose the requested destination type.");
+        }
+
+        return this.withControl(api.conversationId, () => this.#handoffs.invoke(
+            request as Parameters<Handoffs["invoke"]>[0], api, ctx,
+        ));
     }
 
     controllerStart(...args: Parameters<Handoffs["controllerStart"]>) {
@@ -534,43 +570,61 @@ export class WorkItems {
     readonly tool = defineTool({
         name: "handoff",
         description:
-            "Inspect workflow state and eligible destinations, or execute a human-requested handoff with a compact summary. Explicit /handoff routes must match. Infer a role for ordinary English/freeform direction; ask follow-ups before starting when ambiguous or unavailable. Only the main thread can start, after all other work has settled. Incoming couriers alone cannot authorize another handoff.",
+            "The single source-aware workflow handoff. Inspect status first. An execution main transfers itself and retires; explicit /handoff routes must match. A named main Chat retains its identity and may create new work (targetType and new-work, optional folder/repo/title/worktree/model/report), or hand a brief to an exact existing native recipient (session, no targetType; never silently retargeted). A Work Item controller transfers only its exact settled active execution thread: pass that expected session and targetType, same-work. Sources/epochs/authority come from the real invocation, never supplied identities. Busy helpers must settle. Reports/couriers alone grant no fresh authority; publication always needs separate approval.",
         replay: "safe",
         executionMode: "sequential",
         parameters: Type.Union([
-            Type.Object({ action: Type.Literal("status") }, { additionalProperties: false }),
+            Type.Object(
+                { action: Type.Literal("status"), session: Type.Optional(Type.Integer()) },
+                { additionalProperties: false },
+            ),
             Type.Object(
                 {
                     action: Type.Literal("start"),
                     // A registered ID is at most 64 module + ':' + 64 local characters.
-                    targetType: Type.String({ minLength: 1, maxLength: 129 }),
+                    targetType: Type.Optional(Type.String({ minLength: 1, maxLength: 129 })),
+                    session: Type.Optional(Type.Integer({ description: "Exact native recipient for a named Chat; exact expected active execution source for a controller." })),
+                    folder: Type.Optional(Type.String()),
+                    repo: Type.Optional(Type.String()),
+                    title: Type.Optional(Type.String()),
+                    model: Type.Optional(Type.String({ description: "Only a model explicitly chosen by the owner; never a fallback." })),
+                    report: Type.Optional(Type.Boolean()),
                     relationship: Type.Optional(
                         Type.Union([Type.Literal("same-work"), Type.Literal("new-work")]),
                     ),
                     worktree: Type.Optional(
                         Type.Boolean({
                             description:
-                                "Only for explicit human-requested new-work handoffs: prepare a separate Git worktree on the source destination. Default inherits the checkout; the source is still retired.",
+                                "For new work only: prepare a separate Git worktree using the native destination creation path. Execution transfers still retire their source; named main Chats are retained.",
                         }),
                     ),
                     summary: Type.String({ minLength: 1 }),
+                    instructions: Type.Optional(Type.String({ description: "Additional controller/named handoff notes, not new owner input." })),
                 },
                 { additionalProperties: false },
             ),
         ]),
-        execute: async (request, api, ctx) => ({
-            content: [
-                {
-                    type: "text",
-                    text: JSON.stringify(await this.invoke(request, api, ctx)),
-                },
-            ],
-        }),
+        execute: async (request, api, ctx) => {
+            const result = await this.invoke(request, api, ctx);
+
+            return {
+                content: [{ type: "text", text: JSON.stringify(result) }],
+                ...(typeof result === "object" && result !== null && "status" in result &&
+                result.status !== "accepted" && request.action === "start"
+                    ? { isError: true }
+                    : {}),
+            };
+        },
     });
 
     readonly sections = [
         section("thread_role", (input) => {
             const id = this.#app.rootOf(input.conversationId);
+
+            if (this.#app.sessionMeta(id)?.pip !== undefined) {
+                return undefined;
+            }
+
             const kind = this.#app.sessionMeta(id)?.threadType ?? "worker";
 
             const profile = this.profile(kind);
@@ -583,6 +637,11 @@ export class WorkItems {
         }),
         section("workflow", async (input, ctx) => {
             const id = this.#app.rootOf(input.conversationId);
+
+            if (this.#app.sessionMeta(id)?.pip !== undefined) {
+                return undefined;
+            }
+
             const handoffs = await input.read.snapshot(HandoffsDoc, ctx);
             const inbound = Object.values(handoffs?.handoffs ?? {}).find(
                 (record) => record.targetThreadId === Number(id),

@@ -13,7 +13,7 @@ import { git, GitError, type GitOptions } from "./git.ts";
 import { isMissingWorkspaceFile, WorkspaceBackend } from "./workspace-backend.ts";
 
 /** Re-evaluated for every child process, including failed-creation cleanup. */
-export type WorktreePolicy = Pick<GitOptions, "offline" | "backend">;
+export type WorktreePolicy = Pick<GitOptions, "offline" | "backend" | "context" | "check">;
 
 export type Worktree = {
     /** The worktree's folder. */
@@ -54,6 +54,7 @@ export async function worktreeStorage(
 
     if (missing) {
         // No -p or chmod: a pre-existing path is never followed or made more permissive.
+        await policy.check?.();
         const result = getOrThrow(
             await backend.exec(["mkdir", "-m", "700", folder], { timeout: 15 }, policy, false),
         );
@@ -107,7 +108,7 @@ export async function planWorktreeCopy(
     policy: WorktreePolicy,
     maxPaths = Infinity,
 ): Promise<{ files: { path: string; size: number }[]; skipped: string[] }> {
-    const backend = policy.backend ?? WorkspaceBackend.local(root);
+    const backend = policy.backend ?? WorkspaceBackend.local(root, policy.context);
     const { join } = backend.paths;
     const paths = (
         await git(root, ["ls-files", "--others", "--exclude-standard", "-z"], policy)
@@ -153,12 +154,13 @@ export async function planWorktreeCopy(
 
 /** Copy the repository's new (untracked, not ignored) files into the worktree. Returns the ones left out for size. */
 async function copyNewFiles(root: string, into: string, policy: WorktreePolicy): Promise<string[]> {
-    const backend = policy.backend ?? WorkspaceBackend.local(root);
+    const backend = policy.backend ?? WorkspaceBackend.local(root, policy.context);
     const { join } = backend.paths;
     const { files, skipped } = await planWorktreeCopy(root, policy);
     let copied = 0;
 
     for (const { path, size } of files) {
+        await policy.check?.();
         await backend.copyFile(
             join(root, path),
             join(into, path),
@@ -179,7 +181,7 @@ export async function planWorktree(
     policy: WorktreePolicy = {},
     identity?: string,
 ): Promise<Worktree> {
-    const backend = policy.backend ?? WorkspaceBackend.local(cwd);
+    const backend = policy.backend ?? WorkspaceBackend.local(cwd, policy.context);
     const slug =
         label
             .toLowerCase()
@@ -213,7 +215,7 @@ export async function createWorktree(
     policy: WorktreePolicy = {},
     reserved?: Worktree,
 ): Promise<{ worktree: Worktree; cwd: string; skipped: string[] }> {
-    const backend = policy.backend ?? WorkspaceBackend.local(cwd);
+    const backend = policy.backend ?? WorkspaceBackend.local(cwd, policy.context);
     const { resolve } = backend.paths;
     const root = await repositoryOf(cwd, policy);
 
@@ -248,7 +250,7 @@ export async function createWorktree(
         throw new HttpError(409, "The reserved worktree does not match this source or storage.");
     }
 
-    await backend.mkdir(folder);
+    await backend.mkdir(folder, policy.check);
     await git(root, ["worktree", "add", "-b", worktree.branch, worktree.path, "HEAD"], {
         ...policy,
         readOnly: false,
@@ -266,6 +268,7 @@ export async function createWorktree(
 
         const skipped = await copyNewFiles(root, worktree.path, policy);
 
+        await policy.check?.();
         backend.checkAccess(true);
 
         return { worktree, cwd: resolve(worktree.path, within), skipped };
@@ -339,7 +342,7 @@ export async function removeWorktree(
     force: boolean,
     policy: WorktreePolicy = {},
 ): Promise<void> {
-    const backend = policy.backend ?? WorkspaceBackend.local(worktree.source);
+    const backend = policy.backend ?? WorkspaceBackend.local(worktree.source, policy.context);
 
     requireWorktreeDestination(worktree, backend);
 
@@ -412,7 +415,7 @@ export async function sourceFolder(
     cwd: string,
     policy: WorktreePolicy = {},
 ): Promise<string> {
-    const backend = policy.backend ?? WorkspaceBackend.local(worktree.source);
+    const backend = policy.backend ?? WorkspaceBackend.local(worktree.source, policy.context);
 
     requireWorktreeDestination(worktree, backend);
     const root = await repositoryOf(worktree.source, policy);

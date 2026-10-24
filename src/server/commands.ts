@@ -22,6 +22,7 @@ import {
     type ConversationCreateOptions,
     type ConversationId,
     type ConversationHandle,
+    configure as configureAgent,
     defineTask,
     type EntryId,
     InboxDoc,
@@ -90,6 +91,17 @@ import {
 const context = BACKGROUND_CONTEXT;
 
 export type Attachment = { path: string; name: string; mime: string; size: number };
+
+/** Trusted native creation carries its real invocation fence through preparation and publication. */
+export type SessionCreationSource = {
+    context: Context;
+    requireCurrent(tx: Tx): Promise<void>;
+};
+
+type CreateSessionOptions = {
+    projectDefaults?: boolean;
+    source?: SessionCreationSource;
+};
 
 export type CreateSessionRequest = {
     cwd?: string;
@@ -382,10 +394,11 @@ export class Commands {
     async createSession(
         user: User,
         request: CreateSessionRequest,
-        { projectDefaults = true }: { projectDefaults?: boolean } = {},
+        options: CreateSessionOptions = {},
     ): Promise<{ id: ConversationId }> {
         user = { ...user };
         this.#requireCreate(user);
+        await this.#requireCreationSource(options.source);
         const asked = optionalText(request.requestId, "requestId");
         const key = asked === undefined ? undefined : `${user.id}:${clientKey(asked)}`;
         const input = JSON.stringify({
@@ -400,7 +413,7 @@ export class Commands {
         });
 
         if (key === undefined) {
-            return this.#createSession(user, request, undefined, projectDefaults);
+            return this.#createSession(user, request, undefined, options);
         }
 
         const pending = this.#creating.get(key);
@@ -413,10 +426,14 @@ export class Commands {
                 );
             }
 
-            return pending.promise;
+            const result = await pending.promise;
+
+            await this.#requireCreationSource(options.source);
+
+            return result;
         }
 
-        const promise = this.#createSession(user, request, { key, input }, projectDefaults);
+        const promise = this.#createSession(user, request, { key, input }, options);
 
         this.#creating.set(key, { input, promise });
 
@@ -447,18 +464,30 @@ export class Commands {
         }
     }
 
+    async #requireCreationSource(source?: SessionCreationSource): Promise<void> {
+        if (source !== undefined) {
+            source.context.abortSignal?.throwIfAborted();
+            await this.#app.harness.commit((tx) => source.requireCurrent(tx), source.context);
+            source.context.abortSignal?.throwIfAborted();
+        }
+    }
+
     async #createSession(
         user: User,
         request: CreateSessionRequest,
-        receipt?: { key: string; input: string },
-        projectDefaults = true,
+        receipt: { key: string; input: string } | undefined,
+        { projectDefaults = true, source }: CreateSessionOptions,
     ): Promise<{ id: ConversationId }> {
         const app = this.#app;
+        const ctx = source?.context ?? context;
+        const check = () => this.#requireCreationSource(source);
 
         if (receipt !== undefined) {
-            const saved = (await app.harness.snapshot(SessionCreatesDoc, context))?.items[
+            const saved = (await app.harness.snapshot(SessionCreatesDoc, ctx))?.items[
                 receipt.key
             ];
+
+            await check();
 
             if (saved !== undefined) {
                 if (saved.input !== receipt.input) {
@@ -474,6 +503,7 @@ export class Commands {
             }
         }
 
+        await check();
         const selection = app.projects.prepare(user, request);
         const given = optionalText(request.title, "title");
         const title = (given === undefined ? undefined : oneLine(given)) || undefined;
@@ -506,7 +536,9 @@ export class Commands {
                 ? selection.cwd!
                 : location === undefined
                   ? app.workspace.checkDirectory(askedFolder)
-                  : await app.sshSessions.prepare(user, { cwd: askedFolder, location }, context);
+                  : await app.sshSessions.prepare(user, { cwd: askedFolder, location }, ctx);
+
+        await check();
         const now = Date.now();
         const create = (backend?: WorkspaceBackend) =>
             this.#inPlace(
@@ -514,6 +546,7 @@ export class Commands {
                 request.worktree === true,
                 title ?? basename(folder),
                 async ({ cwd, worktree }) => {
+                    await check();
                     this.#requireCreate(user);
                     // An internal caller about to apply a person's explicit model keeps its previous starting pair.
                     const remoteDefault =
@@ -521,8 +554,10 @@ export class Commands {
                         user.role === "owner" &&
                         location !== undefined &&
                         app.config.defaultModel === undefined
-                            ? await app.sshSessions.modelDefault(user, location.host, cwd, context)
+                            ? await app.sshSessions.modelDefault(user, location.host, cwd, ctx)
                             : undefined;
+
+                    await check();
                     const initial =
                         remoteDefault ??
                         this.#defaultModel(
@@ -540,6 +575,8 @@ export class Commands {
                                     : { thinkingLevel: initial.thinkingLevel }),
                             },
                             init: async (tx, id) => {
+                                ctx.abortSignal?.throwIfAborted();
+                                await source?.requireCurrent(tx);
                                 this.#requireCreate(user);
                                 const placement = await app.projects.place(tx, selection);
                                 const sessions = await tx.doc(SessionsDoc);
@@ -565,16 +602,20 @@ export class Commands {
                                 }
                             },
                         },
-                        context,
+                        ctx,
                     );
 
                     return { id: conversation.id };
                 },
-                { offline: selection.threadType !== "chat", backend },
+                { offline: selection.threadType !== "chat", backend, context: ctx, check },
             );
 
         return location !== undefined && request.worktree === true
-            ? app.sshSessions.prepare(user, { location, cwd: folder }, context, create)
+            ? app.sshSessions.prepare(user, { location, cwd: folder }, ctx, async (backend) => {
+                  await check();
+
+                  return create(backend);
+              })
             : create();
     }
 
@@ -593,8 +634,9 @@ export class Commands {
             return create({ cwd, skipped: [] });
         }
 
+        await policy.check?.();
         const folder = await worktreeStorage(
-            policy.backend ?? WorkspaceBackend.local(cwd),
+            policy.backend ?? WorkspaceBackend.local(cwd, policy.context),
             join(this.#app.dataDir, "worktrees"),
             policy,
         );
@@ -1659,9 +1701,12 @@ export class Commands {
             cwd?: string;
             pipPanel?: boolean;
         },
+        source?: SessionCreationSource,
     ): Promise<void> {
         const app = this.#app;
+        const ctx = source?.context ?? context;
 
+        await this.#requireCreationSource(source);
         app.requireSee(user, id);
         await app.requireDriver(id, user);
 
@@ -1746,7 +1791,16 @@ export class Commands {
         } else {
             await app.requireDriver(id, user);
             app.requireSee(user, id);
-            await conversation.configure(change, context);
+
+            if (source === undefined) {
+                await conversation.configure(change, ctx);
+            } else {
+                await app.harness.commit(async (tx) => {
+                    ctx.abortSignal?.throwIfAborted();
+                    await source.requireCurrent(tx);
+                    await configureAgent(tx, id, change);
+                }, ctx);
+            }
         }
 
         if (cwd !== undefined && app.sessionMeta(id) !== undefined) {

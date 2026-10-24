@@ -376,15 +376,47 @@ export class Handoffs {
         api: ToolExecutionApi,
         ctx: Context,
     ): Promise<unknown> {
-        return request.action === "start"
-            ? this.#startFromInput(api, ctx, request)
-            : this.#app.workItems.list(
-                  api.conversationId,
-                  this.#requester(api.conversationId),
-                  api.conversationId === this.#app.rootOf(api.conversationId)
-                      ? api.taskId
-                      : undefined,
-              );
+        if (request.action === "start") {
+            return this.#startFromInput(api, ctx, request);
+        }
+
+        const status = await this.#app.workItems.list(
+            api.conversationId,
+            this.#requester(api.conversationId),
+            api.conversationId === this.#app.rootOf(api.conversationId) ? api.taskId : undefined,
+        );
+        let reason: string | undefined;
+        let route: ReturnType<typeof parseHandoffCommand> = undefined;
+
+        try {
+            const source = await api.commit((tx) => this.#humanInput(tx, api.conversationId, api.taskId), ctx);
+
+            route = parseHandoffCommand(source.body);
+
+            if (this.#app.workItems.itemFor(api.conversationId)?.supervisor?.status === "running") {
+                reason = "PiP currently controls this Work Item; this invocation cannot transfer its writer.";
+            }
+        } catch (error) {
+            if (!(error instanceof HttpError)) {
+                throw error;
+            }
+
+            reason = error.message;
+        }
+
+        return {
+            ...status,
+            options: status.options.map((option) => {
+                const refusal = reason ?? (
+                    (route?.targetType !== undefined && route.targetType !== option.targetType) ||
+                    (route?.relationship !== undefined && route.relationship !== option.relationship)
+                        ? "The handoff must match the human's explicit /handoff route"
+                        : undefined
+                );
+
+                return refusal === undefined ? option : { ...option, enabled: false, reason: refusal };
+            }),
+        };
     }
 
     /** A real private PiP invocation controls an explicit source through WorkItems' live grant. */

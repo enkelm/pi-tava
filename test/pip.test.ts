@@ -69,7 +69,11 @@ const route: FauxResponseStep = (request) => {
 
     switch (verb) {
         case "start":
-            return tool("session_start", { message: [first, ...rest].join(" "), folder: work });
+            return tool("session_start", {
+                threadType: "chat",
+                message: [first, ...rest].join(" "),
+                folder: work,
+            });
         case "send":
             return tool("session_send", { session: Number(first), message: rest.join(" ") });
         case "list":

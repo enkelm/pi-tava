@@ -6,17 +6,23 @@
  * would let them hand Pi work.
  */
 import { execFile } from "node:child_process";
+import type { Context } from "@earendil-works/chord";
 import { describe, HttpError } from "./errors.ts";
 import { git } from "./git.ts";
 import { snippet } from "./projection.ts";
 
 /** Runs `gh` with arguments, in a folder; resolves to what it printed, or rejects with what it said went wrong. */
-export type Gh = (args: string[], cwd?: string, timeoutMs?: number) => Promise<string>;
+export type Gh = (
+    args: string[],
+    cwd?: string,
+    timeoutMs?: number,
+    context?: Context,
+) => Promise<string>;
 
 const GH_TIMEOUT_MS = 60_000;
 
 /** The `gh` on this machine, never asking anything: watches run with nobody there to answer. */
-export const runGh: Gh = (args, cwd, timeoutMs = GH_TIMEOUT_MS) =>
+export const runGh: Gh = (args, cwd, timeoutMs = GH_TIMEOUT_MS, context) =>
     new Promise((resolve, reject) => {
         execFile(
             "gh",
@@ -24,6 +30,7 @@ export const runGh: Gh = (args, cwd, timeoutMs = GH_TIMEOUT_MS) =>
             {
                 ...(cwd === undefined ? {} : { cwd }),
                 timeout: timeoutMs,
+                signal: context?.abortSignal,
                 maxBuffer: 64 * 1024 * 1024,
                 env: {
                     ...process.env,
@@ -276,8 +283,8 @@ export async function requirePush(gh: Gh, repo: string): Promise<RepoInfo> {
 }
 
 /** The GitHub repository a folder's `origin` remote points at; undefined outside one, or for another kind of remote. */
-export async function originRepo(folder: string): Promise<string | undefined> {
-    const url = await git(folder, ["remote", "get-url", "origin"]).then(
+export async function originRepo(folder: string, context?: Context): Promise<string | undefined> {
+    const url = await git(folder, ["remote", "get-url", "origin"], { context }).then(
         (out) => out.trim(),
         () => "",
     );

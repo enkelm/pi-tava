@@ -72,8 +72,8 @@ export class WorkspaceBackend {
         this.#options = options;
     }
 
-    static local(cwd: string): WorkspaceBackend {
-        return new WorkspaceBackend(new NodeExecutionEnv({ cwd }), { remote: false });
+    static local(cwd: string, context?: Context): WorkspaceBackend {
+        return new WorkspaceBackend(new NodeExecutionEnv({ cwd }), { remote: false, context });
     }
 
     /** Final reauthorization after compound reads which intentionally tolerate individual missing files. */
@@ -239,10 +239,12 @@ export class WorkspaceBackend {
         return output;
     }
 
-    async mkdir(path: string): Promise<void> {
-        getOrThrow(
-            await this.env.createDir(await this.absolute(path), { recursive: true }, this.context),
-        );
+    async mkdir(path: string, check?: () => Promise<void>): Promise<void> {
+        const absolute = await this.absolute(path);
+
+        await check?.();
+        this.context.abortSignal?.throwIfAborted();
+        getOrThrow(await this.env.createDir(absolute, { recursive: true }, this.context));
     }
 
     async remove(path: string): Promise<void> {
@@ -255,18 +257,26 @@ export class WorkspaceBackend {
         limit: number,
         options: GitOptions = {},
     ): Promise<void> {
-        await this.mkdir(this.paths.dirname(into));
+        await this.mkdir(this.paths.dirname(into), options.check);
 
         if (!this.remote) {
-            await copyFile(await this.absolute(from), await this.absolute(into));
+            const source = await this.absolute(from);
+            const target = await this.absolute(into);
+
+            await options.check?.();
+            this.context.abortSignal?.throwIfAborted();
+            await copyFile(source, target);
 
             return;
         }
 
         const info = await this.lstat(from);
         const bytes = await this.readBytes(from, limit);
+        const target = await this.absolute(into);
 
-        getOrThrow(await this.env.writeFile(await this.absolute(into), bytes, this.context));
+        await options.check?.();
+        this.context.abortSignal?.throwIfAborted();
+        getOrThrow(await this.env.writeFile(target, bytes, this.context));
         // chmod is fixed argv, confined under the same live policy as worktree creation. No shell fragments.
         const result = getOrThrow(
             await this.exec(
@@ -289,6 +299,8 @@ export class WorkspaceBackend {
         policy: GitOptions,
         readOnly: boolean,
     ) {
+        await policy.check?.();
+        this.context.abortSignal?.throwIfAborted();
         this.#options.authorize?.(!readOnly);
         const offline =
             this.#options.offline?.() === true ||
@@ -327,6 +339,8 @@ export class WorkspaceBackend {
 
     /** Git stdout is bytes, not ExecutionEnv's potentially lossy UTF-8 output stream. */
     async gitBytes(cwd: string, args: string[], options: GitOptions = {}): Promise<Buffer> {
+        await options.check?.();
+        this.context.abortSignal?.throwIfAborted();
         this.#options.authorize?.(options.readOnly === false);
         const release = options.readOnly === false ? this.#options.reserveWrite?.() : undefined;
 

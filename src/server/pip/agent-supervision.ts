@@ -31,6 +31,7 @@ import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
 import { AgentContactsDoc } from "./agent-contacts-doc.ts";
 import { hasPendingSubagentReports } from "../subagent-reports.ts";
 import { nativePassiveOutcome, passiveReport, type PassiveOutcome } from "./outcomes.ts";
+import { userContent } from "../resend.ts";
 
 const context = BACKGROUND_CONTEXT;
 const AGENT_EPOCH = "private-supervisor-epoch";
@@ -3131,6 +3132,40 @@ export class AgentSupervision {
 
         await this.#source(tx, api, identity);
         await this.#app.pip.agents.contacts.requireInvocation(tx, api);
+    }
+
+    /** Unified handoff creation/contact needs fresh owner authority in this exact main Chat. */
+    async requireHandoffInvocation(tx: Tx, api: ToolExecutionApi) {
+        if (api.conversationId !== this.#app.rootOf(api.conversationId)) {
+            throw new HttpError(403, "Only the named agent's originating main Chat can hand off work.");
+        }
+
+        await this.requireInvocation(tx, api);
+        const scope = this.#app.pip.agents.scope(api.conversationId)!;
+        const user = this.#owner(this.#app.config.userById(scope.ownerId)!);
+        const identity = await this.#identity(tx, scope.agentId, user);
+        const source = await this.#source(tx, api, identity);
+
+        await this.#requireOwnerInput(tx, source, user.id);
+        const admission = Object.values((await tx.doc(AgentSupervisionDoc)).admissions ?? {}).find(
+            (entry) => entry.chatId === source.chatId && entry.admissionSerial === source.admissionSerial,
+        );
+        const native = await tx.submissionByRequest(api.conversationId, admission!.requestId!);
+        const entry = native?.type === "input" && native.entry !== undefined
+            ? await tx.entry(native.entry)
+            : undefined;
+
+        if (entry?.kind !== "pi.user") {
+            throw new HttpError(409, "The handoff's accepted owner instruction is unavailable.");
+        }
+
+        return {
+            user,
+            agentId: identity.agentId,
+            agentName: identity.record.name,
+            chatId: source.chatId,
+            instructions: userContent(entry.model?.[0]).text,
+        };
     }
 
     async #source(

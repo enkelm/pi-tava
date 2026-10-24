@@ -23,7 +23,7 @@ import {
 import type { PocketApp } from "../app.ts";
 import { AgentIdentitiesDoc } from "../agent-identity-docs.ts";
 import { PipWorkDoc, SubagentsDoc } from "../docs.ts";
-import { HandoffsDoc } from "../workflow-docs.ts";
+import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
 import { HttpError, describe } from "../errors.ts";
 import { clientKey, requestFor } from "../requests.ts";
 import { AgentSupervisionDoc, type AgentContact } from "./agent-supervision.ts";
@@ -293,6 +293,62 @@ export class AgentContacts {
         };
     }
 
+    async #requireContactAllowance(
+        tx: Tx,
+        root: ConversationId,
+        attachment: WorkItem["supervisor"],
+    ): Promise<void> {
+        if (
+            attachment !== undefined &&
+            ((await tx.doc(PipWorkDoc, idOf(attachment.conversationId))).question !== undefined ||
+                (attachment.maxActions !== undefined &&
+                    attachment.actions >= attachment.maxActions) ||
+                (attachment.maxCost !== undefined &&
+                    this.#app.spend.workSpent(root) >= attachment.maxCost))
+        ) {
+            throw new HttpError(
+                409,
+                "The native orchestrator requires an owner answer or has exhausted its action/spend cap.",
+            );
+        }
+    }
+
+    /** Passive send admission shared by unified handoff status and fresh exact contacts. */
+    async requireSendRecipient(api: ToolExecutionApi, session: number, ctx: Context): Promise<void> {
+        const target = idOf(session);
+        const identity = this.#app.pip.agents.identity(this.#app.rootOf(api.conversationId));
+        const user = identity === undefined ? undefined : this.#app.config.userById(identity.ownerId);
+
+        if (identity === undefined || user?.role !== "owner") {
+            throw new HttpError(403, "Use this persistent agent's current native invocation.");
+        }
+
+        await api.commit((tx) => this.#app.pip.agents.supervision.requireInvocation(tx, api), ctx);
+        this.#app.requireSee(user, target);
+        this.#lifecycle(target, true, identity.agentId);
+        this.#app.spend.check(user, target);
+        const recipient = await this.#app.conversation(target);
+        const resolved = await recipient.agent(ctx);
+
+        if (!resolved.extensions.some((extension) => extension.name === "pocket-core")) {
+            throw new HttpError(409, "This recipient disabled pocket-core's native activation/effect fences. Restore its native lifecycle extension before private input; no tools or access were added.");
+        }
+
+        this.#lifecycle(target, true, identity.agentId);
+        this.#app.requireSee(user, target);
+        await api.commit(async (tx) => {
+            await this.#app.pip.agents.supervision.requireInvocation(tx, api);
+            const root = this.#app.rootOf(target);
+            const item = this.#app.workItems.itemFor(root);
+            const attachment =
+                item === undefined
+                    ? undefined
+                    : (await tx.doc(HandoffsDoc)).workItems[item.id]?.supervisor;
+
+            await this.#requireContactAllowance(tx, root, attachment);
+        }, ctx);
+    }
+
     async contact(api: ToolExecutionApi, args: AgentContact, ctx: Context) {
         if (args.action === "read") {
             return this.read(api, args.session, ctx);
@@ -347,16 +403,7 @@ export class AgentContacts {
         const entries = await this.#app.transcripts.allEntries(target, true);
 
         if (args.action === "send") {
-            const recipient = await this.#app.conversation(target);
-            const resolved = await recipient.agent(ctx);
-
-            if (!resolved.extensions.some((extension) => extension.name === "pocket-core")) {
-                throw new HttpError(
-                    409,
-                    "This recipient disabled pocket-core's native activation/effect fences. Restore its native lifecycle extension before private input; no tools or access were added.",
-                );
-            }
-
+            await this.requireSendRecipient(api, Number(target), ctx);
             await this.#app.pip.agents.execution.release(sourceChat);
         }
 
@@ -434,20 +481,7 @@ export class AgentContacts {
                     };
 
                     if (mutates && attachment !== undefined) {
-                        if (
-                            (await tx.doc(PipWorkDoc, idOf(attachment.conversationId))).question !==
-                                undefined ||
-                            (attachment.maxActions !== undefined &&
-                                attachment.actions >= attachment.maxActions) ||
-                            (attachment.maxCost !== undefined &&
-                                this.#app.spend.workSpent(root) >= attachment.maxCost)
-                        ) {
-                            throw new HttpError(
-                                409,
-                                "The native orchestrator requires an owner answer or has exhausted its action/spend cap.",
-                            );
-                        }
-
+                        await this.#requireContactAllowance(tx, root, attachment);
                         attachment.actions++;
                     }
 

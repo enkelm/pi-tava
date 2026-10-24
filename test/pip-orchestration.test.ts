@@ -280,7 +280,8 @@ test("a work supervisor attaches without resending, drives a real handoff, and r
                 }),
             () => tool("work_context", { session: Number(source), action: "thread" }),
             () =>
-                tool("work_handoff", {
+                tool("handoff", {
+                    action: "start",
                     session: Number(source),
                     targetType: "researcher",
                     summary:
@@ -609,7 +610,8 @@ test("work-scoped PiP cannot escape through private tools, arbitrary reads or an
                     threadIds: [review],
                 }),
             () =>
-                tool("work_handoff", {
+                tool("handoff", {
+                    action: "start",
                     session: Number(other),
                     targetType: "researcher",
                     summary: "Do not create an unrelated successor.",
@@ -700,7 +702,8 @@ test("a committed controller handoff replays after restart without a second targ
         const plan = [
             () => tool("work_context", { session: Number(source), action: "thread" }),
             () =>
-                tool("work_handoff", {
+                tool("handoff", {
+                    action: "start",
                     session: Number(source),
                     targetType: "researcher",
                     summary: "Continue this exact investigation.",
@@ -763,7 +766,7 @@ test("a committed controller handoff replays after restart without a second targ
         "safe native tool replay and finish",
     );
     const result = (await app.transcripts.allEntries(controller, true)).findLast(
-        (entry) => entry.kind === "toolResult" && entry.name === "work_handoff",
+        (entry) => entry.kind === "toolResult" && entry.name === "handoff",
     );
 
     assert.ok(result?.kind === "toolResult");

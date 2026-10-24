@@ -44,6 +44,7 @@ import type { WorkReadInput } from "./work-items/context.ts";
 import { PipSupervision } from "./pip/supervision.ts";
 import { PipAgents } from "./pip/agents.ts";
 import type { User } from "./config.ts";
+import type { SessionCreationSource } from "./commands.ts";
 import { AuthorsDoc, FollowsDoc, PipAskedDoc, SessionsDoc, type PipMentionSource } from "./docs.ts";
 import { NOTE_ENTRY } from "./entry-format.ts";
 import { describe, HttpError } from "./errors.ts";
@@ -85,6 +86,7 @@ export const PIP_WITHOUT = [
     "bash",
     "write",
     "edit",
+    "handoff",
     "work_handoff",
     "work_supervise",
     "private_notes",
@@ -1240,6 +1242,11 @@ export class Pip {
         return fenced(JSON.stringify(result));
     }
 
+    /** Shared passive eligibility check; reading status alone is not execution inspection. */
+    requireHandoffInspection(pipId: ConversationId, sessionId: number): void {
+        this.#requireLooked(pipId, sessionId, "hand off");
+    }
+
     async controllerHandoff(
         pipId: ConversationId,
         sessionId: number,
@@ -1256,7 +1263,7 @@ export class Pip {
         }
 
         return this.#app.workItems.controllerStart(pipId, source, epoch, request, api, ctx, () =>
-            this.#requireLooked(pipId, sessionId, "hand off"),
+            this.requireHandoffInspection(pipId, sessionId),
         );
     }
 
@@ -1473,10 +1480,28 @@ export class Pip {
             worktree?: boolean;
             model?: string;
             message?: string;
+            threadType?: string;
+            /** Native adapter retry identity, never a caller-selected authority token. */
+            requestId?: string;
         },
+        source?: SessionCreationSource,
     ): Promise<ConversationId> {
         const app = this.#app;
         const user = this.#person(pipId);
+
+        if (this.isNamedCaller(pipId) && source === undefined) {
+            throw new HttpError(403, "Named creation requires its current native invocation.");
+        }
+
+        const check = async () => {
+            source?.context.abortSignal?.throwIfAborted();
+
+            if (source !== undefined) {
+                await app.harness.commit((tx) => source.requireCurrent(tx), source.context);
+            }
+        };
+
+        await check();
         // Before anything is made: a model that is not there, or that nobody chose, leaves no session behind.
         const model =
             request.model === undefined
@@ -1493,22 +1518,36 @@ export class Pip {
             throw new Error("Give a folder or a repository, not both.");
         }
 
+        if (request.threadType !== undefined && request.threadType !== "chat" && (
+            !this.isNamedCaller(pipId) || this.#app.workItems.profile(request.threadType)?.starter !== true
+        )) {
+            throw new HttpError(409, "Choose an available native starter or an ordinary Chat.");
+        }
+
+        await check();
         this.#count(user, "start", STARTS_PER_HOUR);
         const folder =
-            request.repo === undefined ? request.folder : await this.checkout(pipId, request.repo);
+            request.repo === undefined
+                ? request.folder
+                : await this.checkout(pipId, request.repo, source);
+
+        await check();
         const { id } = await app.commands.createSession(
             user,
             {
                 ...(folder === undefined ? {} : { cwd: folder }),
                 ...(request.title === undefined ? {} : { title: request.title }),
-                ...(this.isNamedCaller(pipId) ? { threadType: "worker" } : {}),
+                ...(request.threadType !== undefined
+                    ? { threadType: request.threadType }
+                    : this.isNamedCaller(pipId) ? { threadType: "worker" } : {}),
                 worktree: request.worktree === true,
+                ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
             },
-            { projectDefaults: model === undefined },
+            { projectDefaults: model === undefined, source },
         );
 
         if (model !== undefined) {
-            await app.commands.configure(id, user, { model });
+            await app.commands.configure(id, user, { model }, source);
         }
 
         // PiP made it, and knows what it is doing: nothing yet.
@@ -1560,16 +1599,42 @@ export class Pip {
      * someone else's would bring its own instructions into a session that can run commands. A clone is made beside its
      * place and moved there once complete, so a clone cut off midway is never taken for one.
      */
-    async checkout(pipId: ConversationId, repo: string): Promise<string> {
+    async checkout(
+        pipId: ConversationId,
+        repo: string,
+        source?: SessionCreationSource,
+    ): Promise<string> {
         const app = this.#app;
         const user = this.#person(pipId);
+
+        if (this.isNamedCaller(pipId) && source === undefined) {
+            throw new HttpError(403, "Named checkout requires its current native invocation.");
+        }
+
+        const check = async () => {
+            source?.context.abortSignal?.throwIfAborted();
+
+            if (source !== undefined) {
+                await app.harness.commit((tx) => source.requireCurrent(tx), source.context);
+            }
+        };
+        const gh = source === undefined
+            ? app.watches.gh
+            : async (args: string[], cwd?: string, timeoutMs?: number) => {
+                  await check();
+                  const result = await app.watches.gh(args, cwd, timeoutMs, source.context);
+
+                  await check();
+
+                  return result;
+              };
         const named = parseRepo(repo);
 
         if (named === undefined) {
             throw new Error(`${repo} is not a repository: say owner/name, or its address.`);
         }
 
-        const info = await requirePush(app.watches.gh, named);
+        const info = await requirePush(gh, named);
 
         // What GitHub answered becomes a path: nothing in it may climb out of `repos/`.
         if (parseRepo(info.repo) !== info.repo) {
@@ -1588,14 +1653,25 @@ export class Pip {
         folders.add(app.defaultCwd);
 
         for (const folder of [clone, ...[...folders].slice(0, 200)]) {
-            if (existsSync(folder) && sameRepo(await this.#origin(folder), info.repo)) {
-                return (
-                    await git(folder, ["rev-parse", "--show-toplevel"]).catch(() => folder)
-                ).trim();
+            await check();
+
+            if (
+                existsSync(folder) &&
+                sameRepo(await this.#origin(folder, source?.context), info.repo)
+            ) {
+                await check();
+                const root = await git(folder, ["rev-parse", "--show-toplevel"], {
+                    context: source?.context,
+                }).catch(() => folder);
+
+                await check();
+
+                return root.trim();
             }
         }
 
-        let cloning = this.#cloning.get(info.repo);
+        // A named invocation cannot borrow a different producer's in-flight clone or cancellation.
+        let cloning = source === undefined ? this.#cloning.get(info.repo) : undefined;
 
         if (cloning === undefined) {
             // Not the repository's checkout, or the loop above had taken it: never clone into it.
@@ -1605,14 +1681,18 @@ export class Pip {
                 );
             }
 
+            await check();
             mkdirSync(dirname(clone), { recursive: true });
-            this.#clearParts(clone);
+
+            if (source === undefined) {
+                this.#clearParts(clone);
+            }
             // `~` is in no GitHub repository's name: no clone of another repository is ever taken for a part.
             const part = `${clone}~part-${randomUUID().slice(0, 8)}`;
 
-            cloning = app.watches
-                .gh(["repo", "clone", info.repo, part], undefined, CLONE_TIMEOUT_MS)
-                .then(() => {
+            cloning = gh(["repo", "clone", info.repo, part], undefined, CLONE_TIMEOUT_MS)
+                .then(async () => {
+                    await check();
                     renameSync(part, clone);
                     this.#origins.delete(clone);
 
@@ -1624,8 +1704,15 @@ export class Pip {
 
                     throw error;
                 })
-                .finally(() => this.#cloning.delete(info.repo));
-            this.#cloning.set(info.repo, cloning);
+                .finally(() => {
+                    if (source === undefined) {
+                        this.#cloning.delete(info.repo);
+                    }
+                });
+
+            if (source === undefined) {
+                this.#cloning.set(info.repo, cloning);
+            }
         }
 
         try {
@@ -1658,7 +1745,7 @@ export class Pip {
     }
 
     /** A folder's GitHub repository, kept a few minutes: PiP asks of many folders. */
-    async #origin(folder: string): Promise<string | undefined> {
+    async #origin(folder: string, context?: Context): Promise<string | undefined> {
         const now = Date.now();
         const known = this.#origins.get(folder);
 
@@ -1666,7 +1753,7 @@ export class Pip {
             return known.repo;
         }
 
-        const repo = await originRepo(folder);
+        const repo = await originRepo(folder, context);
 
         this.#origins.set(folder, { repo, at: now });
 
