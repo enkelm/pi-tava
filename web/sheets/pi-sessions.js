@@ -282,13 +282,17 @@ function SessionFolders({ sessions, busy, onChoose, saved = false }) {
 }
 
 // The saved catalogue and its bounded previews share the same confirmation as Live.
-function SavedSessions({ visible, busy, onBusyChange, onPreview, onManual }) {
+function SavedSessions({ visible, busy, isActive, onChoose, onManual, fieldId }) {
     const [listing, setListing] = useState(null);
     const [loading, setLoading] = useState(false);
     const [query, setQuery] = useState("");
     const [error, setError] = useState("");
     const alive = useRef(true);
-    const pending = useRef(false);
+    const generation = useRef(0);
+    const latest = useRef(null);
+
+    latest.current = { visible, isActive };
+    const current = () => alive.current && latest.current.visible && latest.current.isActive();
 
     useEffect(
         () => () => {
@@ -298,21 +302,27 @@ function SavedSessions({ visible, busy, onBusyChange, onPreview, onManual }) {
     );
 
     const load = async () => {
+        if (!current()) {
+            return;
+        }
+
+        const turn = ++generation.current;
+
         setLoading(true);
         setError("");
 
         try {
             const result = await api("pi-sessions/history");
 
-            if (alive.current) {
+            if (current() && turn === generation.current) {
                 setListing(result);
             }
         } catch (failure) {
-            if (alive.current) {
+            if (current() && turn === generation.current) {
                 setError(failure.message);
             }
         } finally {
-            if (alive.current) {
+            if (alive.current && turn === generation.current) {
                 setLoading(false);
             }
         }
@@ -322,33 +332,13 @@ function SavedSessions({ visible, busy, onBusyChange, onPreview, onManual }) {
         if (visible && listing === null && !loading && !error) {
             load();
         }
-    }, [visible, listing, loading, error]);
+    }, [visible, listing, loading, error, busy]);
 
-    const choose = async (session) => {
-        if (pending.current || busy) {
-            return;
-        }
+    const choose = (session) => {
+        if (current()) {
+            setError("");
 
-        pending.current = true;
-        onBusyChange?.(true);
-        setError("");
-
-        try {
-            const result = await api("pi-sessions/preview", { path: session.path });
-
-            if (alive.current) {
-                onPreview(result);
-            }
-        } catch (failure) {
-            if (alive.current) {
-                setError(failure.message);
-            }
-        } finally {
-            pending.current = false;
-
-            if (alive.current) {
-                onBusyChange?.(false);
-            }
+            return onChoose(session);
         }
     };
 
@@ -364,7 +354,7 @@ function SavedSessions({ visible, busy, onBusyChange, onPreview, onManual }) {
     return html`<div class="import-saved" hidden=${!visible}>
         <div class="import-search-row">
             <input
-                id="import-history-search"
+                id=${fieldId("import-history-search")}
                 type="search"
                 aria-label="Search saved Pi sessions"
                 placeholder="Search titles and folders"
@@ -420,16 +410,24 @@ function SavedSessions({ visible, busy, onBusyChange, onPreview, onManual }) {
     </div>`;
 }
 
-/** One confirmation for both saved files and snapshots of live instances. */
+/**
+ * One confirmation for saved/live history. isCurrentOpening owns lifetime across retained children;
+ * isActive and visible gate current dispatch/results. onComplete replaces default sheet navigation;
+ * idPrefix isolates retained inline controls from native import children.
+ */
 export function ImportPanel({
     initialPreview = null,
     fromPrivate = false,
     visible = true,
+    idPrefix = "",
     onBusyChange,
     onCreated,
     isCurrentOpening,
+    isActive,
+    onComplete,
 }) {
     const allowed = piSessionsAvailable();
+    const fieldId = (name) => (idPrefix ? `${idPrefix}-${name}` : name);
     const [mode, setMode] = useState("running");
     const [historyVisited, setHistoryVisited] = useState(false);
     const [listing, setListing] = useState(null);
@@ -447,11 +445,27 @@ export function ImportPanel({
     const alive = useRef(true);
     const pending = useRef(false);
     const generation = useRef(0);
-    const scope = useRef({ account: accountKey(), sheet: store.state.sheet });
+    const accessKey = () =>
+        JSON.stringify([
+            accountKey(),
+            store.state.me?.sessions,
+            store.state.me?.projectAccess,
+            store.state.me?.continuePiSessions,
+        ]);
+    const scope = useRef({ account: accessKey(), sheet: store.state.sheet });
+    const latest = useRef(null);
+    const reportedBusy = useRef(null);
     const inScope = () =>
         alive.current &&
-        scope.current.account === accountKey() &&
-        (isCurrentOpening ? isCurrentOpening() : scope.current.sheet === store.state.sheet);
+        scope.current.account === accessKey() &&
+        (latest.current.isCurrentOpening
+            ? latest.current.isCurrentOpening()
+            : scope.current.sheet === store.state.sheet);
+    const current = () =>
+        inScope() &&
+        piSessionsAvailable() &&
+        latest.current.visible &&
+        (!latest.current.isActive || latest.current.isActive());
     const selected = preview?.models.find((item) => `${item.provider}/${item.id}` === model);
     const active = Boolean(preview?.activeId);
     const owner = store.state.me?.role === "owner";
@@ -460,22 +474,51 @@ export function ImportPanel({
     const chosenProject = (store.state.projects ?? []).find((item) => item.id === projectId);
     const intent = useRef(null);
     const confirmed = useRef(null);
-    const intentKey = JSON.stringify([
-        accountKey(),
-        preview?.path,
-        preview?.activeId,
-        preview?.sha256,
-        preview?.leafId,
-        preview?.existing,
-        preview?.existingTitle,
-        model,
-        thinking,
-        sharing,
-        projectId,
-        chosenProject?.name,
-    ]);
 
+    // Re-read the actual destination even before a catalogue event has caused a render.
+    const reviewKey = () => {
+        const project = (store.state.projects ?? []).find((item) => item.id === projectId);
+
+        return JSON.stringify([
+            accessKey(),
+            mode,
+            path.trim(),
+            leafId.trim(),
+            preview?.path,
+            preview?.activeId,
+            preview?.sha256,
+            preview?.leafId,
+            preview?.existing,
+            preview?.existingTitle,
+            preview?.visibility,
+            preview?.projectId,
+            model,
+            thinking,
+            sharing,
+            projectId,
+            project ? [project.name, project.cwd, project.location] : null,
+        ]);
+    };
+
+    const intentKey = reviewKey();
+
+    latest.current = {
+        visible,
+        isCurrentOpening,
+        isActive,
+        onComplete,
+        onCreated,
+        onBusyChange,
+        reviewKey,
+        mode,
+        preview,
+    };
     intent.current = intentKey;
+    const requestCurrent = (turn, key) =>
+        current() &&
+        turn === generation.current &&
+        intent.current === key &&
+        latest.current.reviewKey() === key;
     const acknowledged = consent === intentKey;
 
     const resetConsent = () => {
@@ -492,8 +535,26 @@ export function ImportPanel({
         },
         [],
     );
+
+    const reportBusy = (value) => {
+        const callback = latest.current.onBusyChange;
+
+        if (
+            inScope() &&
+            (reportedBusy.current?.callback !== callback || reportedBusy.current?.value !== value)
+        ) {
+            reportedBusy.current = { callback, value };
+            callback?.(value);
+        }
+    };
+
+    const changeBusy = (value) => {
+        setBusy(value);
+        reportBusy(value);
+    };
+
     useEffect(() => {
-        onBusyChange?.(busy);
+        reportBusy(busy);
     }, [busy, onBusyChange]);
 
     const clearPreview = () => {
@@ -503,7 +564,7 @@ export function ImportPanel({
     };
 
     const showPreview = (result) => {
-        if (!inScope()) {
+        if (!inScope() || !piSessionsAvailable()) {
             return;
         }
 
@@ -534,11 +595,17 @@ export function ImportPanel({
     }, [initialPreview]);
 
     const refresh = async () => {
-        if (!piSessionsAvailable()) {
+        if (
+            !current() ||
+            pending.current ||
+            latest.current.mode !== "running" ||
+            latest.current.preview
+        ) {
             return;
         }
 
         const turn = ++generation.current;
+        const key = intentKey;
 
         setLoading(true);
         setError("");
@@ -546,11 +613,11 @@ export function ImportPanel({
         try {
             const result = await api("pi-sessions/active");
 
-            if (alive.current && turn === generation.current) {
+            if (requestCurrent(turn, key)) {
                 setListing(result);
             }
         } catch (failure) {
-            if (alive.current && turn === generation.current) {
+            if (requestCurrent(turn, key)) {
                 setError(failure.message);
             }
         } finally {
@@ -567,7 +634,7 @@ export function ImportPanel({
     }, [allowed, visible, mode, preview, busy]);
 
     const selectSource = (source) => {
-        if (busy || pending.current) {
+        if (!current() || busy || pending.current) {
             return;
         }
 
@@ -593,37 +660,49 @@ export function ImportPanel({
                         : "live"
                     : null;
 
-        if (next && !busy) {
+        if (next && current() && !busy && !pending.current) {
             event.preventDefault();
             selectSource(next);
-            event.currentTarget.querySelector(`#import-tab-${next}`).focus();
+            event.currentTarget.querySelector(`#${fieldId(`import-tab-${next}`)}`).focus();
         }
     };
 
-    const choose = async (session) => {
-        if (!inScope() || !piSessionsAvailable() || pending.current) {
+    const choose = async (session, saved = false) => {
+        if (
+            !current() ||
+            latest.current.preview ||
+            latest.current.mode !== (saved ? "history" : "running") ||
+            pending.current ||
+            intent.current !== intentKey ||
+            latest.current.reviewKey() !== intentKey
+        ) {
             return;
         }
 
+        const turn = ++generation.current;
+
         pending.current = true;
-        setBusy(true);
+        changeBusy(true);
         setError("");
 
         try {
-            const result = await api("pi-sessions/active/preview", { id: session.id });
+            const result = await api(
+                saved ? "pi-sessions/preview" : "pi-sessions/active/preview",
+                saved ? { path: session.path } : { id: session.id },
+            );
 
-            if (alive.current) {
+            if (requestCurrent(turn, intentKey)) {
                 showPreview(result);
             }
         } catch (failure) {
-            if (alive.current) {
+            if (requestCurrent(turn, intentKey)) {
                 setError(failure.message);
             }
         } finally {
             pending.current = false;
 
             if (alive.current) {
-                setBusy(false);
+                changeBusy(false);
             }
         }
     };
@@ -632,30 +711,24 @@ export function ImportPanel({
         event.preventDefault();
 
         if (
-            !inScope() ||
-            !piSessionsAvailable() ||
+            !current() ||
+            intent.current !== intentKey ||
+            latest.current.reviewKey() !== intentKey ||
             pending.current ||
             (preview &&
                 (!selected ||
                     !acknowledged ||
-                    intent.current !== intentKey ||
                     confirmed.current !== intentKey ||
                     (projectId && !chosenProject)))
         ) {
             return;
         }
 
-        const account = accountKey();
-        const opening = store.state.sheet;
-        const current = () =>
-            alive.current &&
-            accountKey() === account &&
-            store.state.sheet === opening &&
-            intent.current === intentKey &&
-            piSessionsAvailable();
+        const turn = ++generation.current;
+        const completing = () => requestCurrent(turn, intentKey);
 
         pending.current = true;
-        setBusy(true);
+        changeBusy(true);
         setError("");
 
         try {
@@ -665,7 +738,7 @@ export function ImportPanel({
                     ...(leafId.trim() ? { leafId: leafId.trim() } : {}),
                 });
 
-                if (current()) {
+                if (completing()) {
                     showPreview(result);
                 }
             } else {
@@ -681,7 +754,7 @@ export function ImportPanel({
                     ...(preview.existing === undefined ? {} : { existingId: preview.existing }),
                 });
 
-                if (!current()) {
+                if (!completing()) {
                     return;
                 }
 
@@ -692,14 +765,19 @@ export function ImportPanel({
                         : "Saved history copied. The original Pi is unchanged.",
                 );
 
-                if (alive.current) {
+                const { onComplete: complete, onCreated: created } = latest.current;
+
+                if (complete) {
+                    complete(result.id);
+                } else {
                     closeSheet();
                     navigate(result.id);
-                    onCreated?.(result.id);
                 }
+
+                created?.(result.id);
             }
         } catch (failure) {
-            if (current()) {
+            if (completing()) {
                 setError(failure.message);
 
                 if (failure.status === 409) {
@@ -714,7 +792,7 @@ export function ImportPanel({
             pending.current = false;
 
             if (alive.current) {
-                setBusy(false);
+                changeBusy(false);
             }
         }
     };
@@ -737,12 +815,12 @@ export function ImportPanel({
                 ${["live", "history"].map(
                     (source) => html`<button
                     key=${source}
-                    id=${`import-tab-${source}`}
+                    id=${fieldId(`import-tab-${source}`)}
                     type="button"
                     role="tab"
                     class=${sourceTab === source ? "on" : ""}
                     aria-selected=${sourceTab === source}
-                    aria-controls=${`import-panel-${source}`}
+                    aria-controls=${fieldId(`import-panel-${source}`)}
                     tabindex=${sourceTab === source ? 0 : -1}
                     disabled=${busy}
                     onClick=${() => selectSource(source)}
@@ -754,9 +832,9 @@ export function ImportPanel({
         </div>`
         }
         <section
-            id=${fromPrivate ? undefined : `import-panel-${sourceTab}`}
+            id=${fromPrivate ? undefined : fieldId(`import-panel-${sourceTab}`)}
             role=${fromPrivate ? undefined : "tabpanel"}
-            aria-labelledby=${fromPrivate ? undefined : `import-tab-${sourceTab}`}
+            aria-labelledby=${fromPrivate ? undefined : fieldId(`import-tab-${sourceTab}`)}
         >
             ${
                 mode === "running" &&
@@ -788,11 +866,18 @@ export function ImportPanel({
                 html`<${SavedSessions}
                 visible=${visible && mode === "history" && !preview}
                 busy=${busy}
-                onBusyChange=${setBusy}
-                onPreview=${showPreview}
+                fieldId=${fieldId}
+                isActive=${() =>
+                    current() &&
+                    latest.current.mode === "history" &&
+                    !latest.current.preview &&
+                    !pending.current}
+                onChoose=${(session) => choose(session, true)}
                 onManual=${() => {
-                    clearPreview();
-                    setMode("file");
+                    if (current() && latest.current.mode === "history" && !pending.current) {
+                        clearPreview();
+                        setMode("file");
+                    }
                 }}
             />`
             }
@@ -821,9 +906,11 @@ export function ImportPanel({
                         !preview &&
                         html`
                         <div class="field">
-                            <label class="label" for="import-path">Session file on this server</label>
+                            <label class="label" for=${fieldId("import-path")}>
+                                Session file on this server
+                            </label>
                             <input
-                                id="import-path"
+                                id=${fieldId("import-path")}
                                 value=${path}
                                 placeholder="/absolute/path/to/session.jsonl"
                                 autocomplete="off"
@@ -838,9 +925,11 @@ export function ImportPanel({
                             />
                         </div>
                         <div class="field">
-                            <label class="label" for="import-leaf">Branch entry ID, optional</label>
+                            <label class="label" for=${fieldId("import-leaf")}>
+                                Branch entry ID, optional
+                            </label>
                             <input
-                                id="import-leaf"
+                                id=${fieldId("import-leaf")}
                                 value=${leafId}
                                 placeholder="Last saved branch"
                                 autocomplete="off"
@@ -857,7 +946,10 @@ export function ImportPanel({
                     }
                     ${
                         preview &&
-                        html`<section id="import-preview" aria-label="Import preview">
+                        html`<section
+                        id=${fieldId("import-preview")}
+                        aria-label="Import preview"
+                    >
                         <h3>${preview.title}</h3>
                         <p class="small import-cwd">${preview.cwd}</p>
                         <p class="small muted">${active ? "Move copies saved history; Pi keeps running." : "Copies saved history without changing the original."} Unfinished work is not resumed here.</p>
@@ -866,9 +958,11 @@ export function ImportPanel({
                             html`<p class="small">Opens existing Chat #${preview.existing}: ${preview.existingTitle ?? "Imported Pi session"}. Sharing publishes its entire current history, including messages added since import, and future messages, not just the source excerpts below.</p>`
                         }
                         <div class="field">
-                            <label class="label" for="import-model">Destination model</label>
+                            <label class="label" for=${fieldId("import-model")}>
+                                Destination model
+                            </label>
                             <select
-                                id="import-model"
+                                id=${fieldId("import-model")}
                                 value=${model}
                                 required
                                 disabled=${busy}
@@ -891,9 +985,11 @@ export function ImportPanel({
                             ${preview.models.length === 0 && html`<p class="small">No models are available. Ask the owner to configure a provider, then preview again.</p>`}
                         </div>
                         <div class="field">
-                            <label class="label" for="import-thinking">Destination thinking level</label>
+                            <label class="label" for=${fieldId("import-thinking")}>
+                                Destination thinking level
+                            </label>
                             <select
-                                id="import-thinking"
+                                id=${fieldId("import-thinking")}
                                 value=${thinking}
                                 disabled=${busy || !selected}
                                 onChange=${(event) => {
@@ -905,9 +1001,11 @@ export function ImportPanel({
                             </select>
                         </div>
                         <div class="field">
-                            <label class="label" for="import-visibility">Visibility</label>
+                            <label class="label" for=${fieldId("import-visibility")}>
+                                Visibility
+                            </label>
                             <select
-                                id="import-visibility"
+                                id=${fieldId("import-visibility")}
                                 value=${sharing ? "shared" : "owner"}
                                 disabled=${busy || fromPrivate || !owner || alreadyShared}
                                 onChange=${(event) => {
@@ -923,7 +1021,7 @@ export function ImportPanel({
                         ${
                             owner &&
                             html`<${ImportProjectField}
-                            id="import-project"
+                            id=${fieldId("import-project")}
                             value=${projectId}
                             busy=${busy || alreadyShared}
                             onChange=${(event) => {
@@ -952,7 +1050,7 @@ export function ImportPanel({
                         </details>
                         <label class="check">
                             <input
-                                id="import-consent"
+                                id=${fieldId("import-consent")}
                                 type="checkbox"
                                 checked=${acknowledged}
                                 disabled=${busy}

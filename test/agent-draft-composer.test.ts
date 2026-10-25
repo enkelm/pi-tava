@@ -27,7 +27,13 @@ function templates(value: unknown): Template[] {
     return [];
 }
 
-function fixture() {
+function fixture({
+    projectId,
+    server = { privateAgents: 4, agentDraftProjects: 1 },
+}: {
+    projectId?: string | null;
+    server?: { privateAgents: number; agentDraftProjects?: number };
+} = {}) {
     let slots: unknown[] = [];
     const composerSlots = slots;
     const paneSlots: unknown[] = [];
@@ -38,11 +44,12 @@ function fixture() {
     const uploads: { agentId: string; file: { name: string } }[] = [];
     const requests: { path: string; body: any; resolve: (value: unknown) => void }[] = [];
     const notices: string[] = [];
+    const navigations: unknown[] = [];
     const sheets: any[] = [];
     const store = {
         state: {
             me: { id: "owner", role: "owner" },
-            server: { privateAgents: 4 },
+            server,
             namedAgents: [{ agentId: "ada" }] as any[],
             agentDraft: null as any,
             conversationId: null as number | null,
@@ -97,7 +104,8 @@ function fixture() {
         },
         uid: () => `request-${++next}`,
         URL: { createObjectURL: () => `blob:${++next}`, revokeObjectURL() {} },
-        navigate: (_id: unknown, options?: any) => {
+        navigate: (id: unknown, options?: any) => {
+            navigations.push(id ?? options?.agentDraft?.id);
             store.state.agentDraft = options?.agentDraft ?? null;
         },
         api: (path: string, body: unknown) =>
@@ -130,7 +138,15 @@ function fixture() {
                 throw new Error("An unsaved Chat used ordinary shell dispatch");
             },
         },
-        attempt: async (action: () => Promise<unknown>) => action(),
+        attempt: async (action: () => Promise<unknown>) => {
+            try {
+                return await action();
+            } catch (error) {
+                notices.push((error as Error).message);
+
+                return undefined;
+            }
+        },
         notify: (_level: string, message: string) => notices.push(message),
         openSheet: (sheet: unknown) => sheets.push(sheet),
         drafts: {
@@ -210,7 +226,7 @@ function fixture() {
     );
     evaluate("composer", "Composer");
     evaluate("agent-draft-pane", "AgentDraftPane");
-    const draft = context.openAgentDraft("ada");
+    const draft = context.openAgentDraft("ada", { projectId });
     let tree: Template;
 
     const render = () => {
@@ -259,6 +275,7 @@ function fixture() {
         uploads,
         requests,
         notices,
+        navigations,
         sheets,
         input,
         enter,
@@ -483,6 +500,88 @@ test("draft native Composer stages pasted/dropped images, previews/removes files
     assert.equal(f.requests[0]?.body.thinkingLevel, undefined);
     f.requests[0]!.resolve({ id: 101, agentId: "ada", submissionId: 7 });
     await f.flush();
+});
+
+test("project first Send on an older backend renders an explanation and keeps native text, pasted content and staged files editable", async () => {
+    const f = fixture({ projectId: "chosen-project", server: { privateAgents: 4 } });
+
+    f.type("Review @notes.txt ");
+    const prefix = f.draft.text;
+    const long = Array.from({ length: 25 }, (_, n) => `line ${n}`).join("\n");
+
+    f.input().onPaste({
+        clipboardData: { files: [], getData: () => long },
+        currentTarget: { selectionStart: prefix.length, selectionEnd: prefix.length },
+        preventDefault() {},
+    });
+    f.input().onPaste({
+        clipboardData: { files: [{ name: "paste.png", type: "image/png", size: 3 }] },
+        preventDefault() {},
+    });
+    await f.flush();
+    assert.equal(f.uploads[0]?.agentId, "ada");
+    assert.match(f.draft.text, /\[Pasted text #1/);
+    const text = f.draft.text;
+    const files = JSON.stringify(f.draft.files);
+    const pastes = JSON.stringify(f.draft.pastes);
+    const navigations = f.navigations.length;
+
+    f.enter();
+    await f.flush();
+    assert.equal(
+        f.requests.length,
+        0,
+        "failed Send cannot fall through to configure or saved Chat input",
+    );
+    const alert = templates(f.render()).find((each) =>
+        each.strings.some((part) => part.includes('role="alert"')),
+    );
+
+    assert.ok(alert, "the native Composer renders its draft failure as an alert");
+    assert.ok(alert.values.includes(f.draft.error));
+    assert.match(f.draft.error, /server|backend/i);
+    assert.match(f.draft.error, /updat/i);
+    assert.match(f.draft.error, /restart/i);
+    assert.match(f.draft.error, /reload/i);
+    assert.equal(f.notices.at(-1), f.draft.error);
+    assert.equal(f.input().value, text);
+    assert.equal(f.input().readOnly, false);
+    assert.equal(f.draft.requestId, undefined);
+    assert.equal(f.draft.payload, undefined);
+    assert.equal(f.draft.projectId, "chosen-project");
+    assert.equal(JSON.stringify(f.draft.files), files);
+    assert.equal(JSON.stringify(f.draft.pastes), pastes);
+    const file = templates(f.render()).find((each) =>
+        bound(each, "aria-label").includes("Remove paste.png"),
+    );
+
+    assert.ok(file, "the staged file remains in the Composer");
+    assert.equal(bound(file, "disabled")[0], false);
+    assert.equal(f.navigations.length, navigations);
+    assert.equal(f.store.state.conversationId, null);
+    assert.equal(f.sheets.length, 0);
+    f.type(`${text} revised`);
+    assert.equal(f.draft.text, `${text} revised`);
+    f.store.state.server.agentDraftProjects = 1;
+    f.render();
+    await f.flush();
+    assert.equal(
+        f.requests.length,
+        0,
+        "capability arrival does not dispatch the retained composition",
+    );
+    f.enter();
+    await f.flush();
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.requests[0]!.path, "pip/agents/ada/submit");
+    assert.equal(f.requests[0]!.body.projectId, "chosen-project");
+    assert.equal(f.requests[0]!.body.text, `${prefix}${long} revised`);
+    assert.equal(f.requests[0]!.body.attachments[0].path, "/staged/paste.png");
+    assert.equal(f.requests[0]!.body.inlineFiles, true);
+    assert.equal(f.requests[0]!.body.model, undefined);
+    f.requests[0]!.resolve({ id: 109, agentId: "ada", submissionId: 7 });
+    await f.flush();
+    assert.equal(f.navigations.at(-1), 109);
 });
 
 test("draft model/thinking arguments configure their captured identity, never the newly selected Chat", async () => {

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test, type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -10,6 +10,7 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import { awaitWithContext, BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AgentSupervisionDoc } from "../src/server/pip/agent-supervision.ts";
 import { PipWorkDoc, SessionCreatesDoc } from "../src/server/docs.ts";
+import { sshFixture } from "./ssh-fixture.ts";
 import {
     cleanUp,
     lastText,
@@ -434,6 +435,310 @@ for (const isolated of [false, true]) {
     test(`named handoff retains its Chat and returns one native controller assignment usable by continuation (${isolated ? "worktree" : "folder"})`, (t) =>
         namedHandoff(t, isolated));
 }
+
+test("named new-work inherits exact saved Chat placement without adopting project destinations", async (t) => {
+    const data = join(root, "named-handoff-project-placement");
+    const research = join(root, "named-handoff-research");
+
+    mkdirSync(research, { recursive: true });
+    let args: Record<string, string | number> | undefined;
+    const model = scriptedModel((request) => {
+        const last = lastText(request);
+        const named = JSON.stringify(
+            request.messages.filter((message) => message.role === "system"),
+        ).includes("the owner's persistent private agent");
+
+        return named && last.role === "user" && args !== undefined
+            ? fauxAssistantMessage([fauxToolCall("handoff", args)], { stopReason: "toolUse" })
+            : fauxAssistantMessage("The bounded assignment is settled.");
+    });
+    const ssh = await sshFixture();
+    let app = await openApp(model, data);
+
+    t.after(async () => {
+        await app.close();
+        await ssh.close();
+    });
+    const user = owner(app);
+    const generic = await app.pip.ensure(user);
+
+    await app.commands.configure(generic, user, {
+        model: { provider: "faux", modelId: "faux-1" },
+        thinkingLevel: "off",
+    });
+    const projects: string[] = [];
+
+    for (const name of [
+        "Identity default",
+        "Explicit Chat move",
+        "Remote organizational default",
+    ]) {
+        const remote = name.startsWith("Remote");
+        const cwd = remote ? ssh.root : join(root, name);
+
+        if (!remote) {
+            mkdirSync(cwd, { recursive: true });
+            mkdirSync(join(cwd, ".pi"));
+            writeFileSync(
+                join(cwd, ".pi", "settings.json"),
+                JSON.stringify({
+                    defaultProvider: "faux",
+                    defaultModel: "faux-2",
+                }),
+            );
+        }
+
+        projects.push(
+            (
+                await app.projects.create(user, {
+                    name,
+                    cwd,
+                    ...(remote ? { location: { kind: "ssh", host: "fixture-host" } } : {}),
+                    requestId: `project-${projects.length}`,
+                })
+            ).id,
+        );
+    }
+
+    const made = await app.pip.agents.create(user, {
+        name: "One identity with independent Chats",
+        projectId: projects[0],
+        requestId: "placement-parent",
+    });
+    const first = made.id as ConversationId;
+
+    await app.commands.configure(first, user, {
+        model: { provider: "faux", modelId: "faux-1" },
+        thinkingLevel: "off",
+    });
+    const second = (await app.pip.agents.newChat(first, user, { requestId: "sibling" }))
+        .id as ConversationId;
+    const remoteInput = await app.pip.agents.submitDraft(made.agentId, user, {
+        projectId: projects[2],
+        text: "Initialize an independent pinned SSH Chat.",
+        requestId: "remote-source-chat",
+    });
+
+    await (await app.harness.submission(remoteInput.submissionId, BACKGROUND_CONTEXT))!.wait(
+        BACKGROUND_CONTEXT,
+    );
+    const remoteChat = remoteInput.id as ConversationId;
+    const remoteResearch = join(ssh.root, "research");
+
+    mkdirSync(remoteResearch);
+    assert.deepEqual(app.locationOf(remoteChat), { kind: "ssh", host: "fixture-host" });
+    const cases = [
+        { chat: first, projectId: projects[0], folder: research },
+        { chat: second, projectId: projects[1], folder: research },
+        { chat: second, projectId: null, folder: undefined },
+        { chat: first, projectId: projects[2], folder: undefined },
+        { chat: remoteChat, projectId: projects[0], folder: undefined },
+        { chat: remoteChat, projectId: null, folder: remoteResearch },
+    ];
+    const saved: {
+        id: ConversationId;
+        projectId: string | undefined;
+        cwd: string;
+        location: ReturnType<typeof app.locationOf>;
+    }[] = [];
+    let firstController = 0;
+
+    for (const [index, value] of cases.entries()) {
+        await app.projects.assign(user, value.chat, { projectId: value.projectId });
+        const sourceBefore = structuredClone(app.sessionMeta(value.chat));
+        const title = `Native placement case ${index}`;
+
+        args = {
+            action: "start",
+            targetType: "worker",
+            relationship: "new-work",
+            title,
+            summary: "Observe this bounded native Work Item; no execution or publication.",
+            ...(value.folder === undefined ? {} : { folder: value.folder }),
+        };
+        const input = {
+            text: `Delegate native placement case ${index}.`,
+            requestId: `placement-${index}`,
+        };
+        const accepted = await app.commands.submit(value.chat, user, input);
+
+        await (await app.harness.submission(accepted.submissionId, BACKGROUND_CONTEXT))!.wait(
+            BACKGROUND_CONTEXT,
+        );
+        const result = (await app.transcripts.allEntries(value.chat, true)).findLast(
+            (entry) => entry.kind === "toolResult" && entry.name === "handoff",
+        );
+
+        assert.ok(result?.kind === "toolResult");
+        assert.equal(result.isError, false, result.text);
+        const receipt = JSON.parse(result.text);
+        const target = receipt.threadId as ConversationId;
+        const expectedProject = value.projectId ?? undefined;
+        const location = app.locationOf(value.chat);
+        const expectedCwd =
+            value.folder === undefined
+                ? location === undefined
+                    ? app.defaultCwd
+                    : app.cwdOf(value.chat)
+                : location === undefined
+                  ? value.folder
+                  : realpathSync(value.folder);
+
+        assert.equal(app.sessionMeta(target)?.projectId, expectedProject, title);
+        assert.deepEqual(
+            app.locationOf(target),
+            location,
+            "project membership must not change the pinned namespace",
+        );
+        assert.equal(
+            app.cwdOf(target),
+            expectedCwd,
+            "folder/default stays independent of placement",
+        );
+        const targetState = await app.agentState(target);
+
+        assert.ok(targetState);
+        assert.deepEqual(targetState.model, { provider: "faux", modelId: "faux-1" });
+        assert.equal(app.sessionMeta(value.chat)?.projectId, sourceBefore?.projectId);
+        assert.equal(app.cwdOf(value.chat), sourceBefore?.cwd);
+        assert.equal(receipt.sourceChatId, Number(value.chat));
+        assert.equal(receipt.agentId, made.agentId);
+        assert.equal(app.workItems.itemFor(value.chat), undefined);
+        assert.equal(
+            (await app.commands.submit(value.chat, user, input)).submissionId,
+            accepted.submissionId,
+        );
+        await until(() => !app.isBusy(receipt.controllerId), "placement controller settles");
+        saved.push({ id: target, projectId: expectedProject, cwd: expectedCwd, location });
+
+        if (index === 0) {
+            firstController = receipt.controllerId;
+        }
+    }
+
+    // Contacting an exact, explicitly moved recipient must not copy the source's new placement.
+    await app.projects.assign(user, saved[0]!.id, { projectId: projects[1] });
+    saved[0]!.projectId = projects[1];
+    args = {
+        action: "start",
+        session: firstController,
+        summary: "Observe the exact moved recipient.",
+    };
+    await say(
+        app,
+        first,
+        "Hand this brief to the exact existing controller; do not create another item.",
+    );
+    const contact = (await app.transcripts.allEntries(first, true)).findLast(
+        (entry) => entry.kind === "toolResult" && entry.name === "handoff",
+    );
+
+    assert.ok(contact?.kind === "toolResult");
+    assert.equal(contact.isError, false, contact.text);
+    assert.equal(JSON.parse(contact.text).operation, "contact");
+    await until(
+        () => !app.isBusy(firstController as ConversationId),
+        "exact moved controller settles",
+    );
+    await say(
+        app,
+        remoteChat,
+        "Try the exact local controller from SSH; refuse rather than retarget it.",
+    );
+    const refused = (await app.transcripts.allEntries(remoteChat, true)).findLast(
+        (entry) => entry.kind === "toolResult" && entry.name === "handoff",
+    );
+
+    assert.ok(refused?.kind === "toolResult");
+    assert.equal(refused.isError, true, refused.text);
+    assert.match(refused.text, /across filesystem destinations is unavailable/);
+    let githubCalls = 0;
+
+    t.mock.method(app.watches, "gh", async () => {
+        githubCalls++;
+
+        throw new Error("A pinned SSH source must never request a host-local checkout.");
+    });
+
+    const refusals: { chat: ConversationId; options: Record<string, string>; reason: RegExp }[] = [
+        {
+            chat: remoteChat,
+            options: { repo: "fixture/never-checkout" },
+            reason: /Repository checkout from a named SSH Chat is unavailable/,
+        },
+        {
+            chat: first,
+            options: { projectId: projects[1]! },
+            reason: /projectId/,
+        },
+    ];
+
+    for (const refusal of refusals) {
+        args = {
+            action: "start",
+            targetType: "worker",
+            summary: "Refuse unsupported creation authority.",
+            ...refusal.options,
+        };
+        await say(app, refusal.chat, "Refuse this unsupported creation request without rerouting.");
+        const result = (await app.transcripts.allEntries(refusal.chat, true)).findLast(
+            (entry) => entry.kind === "toolResult" && entry.name === "handoff",
+        );
+
+        assert.ok(result?.kind === "toolResult");
+        assert.equal(result.isError, true, result.text);
+        assert.match(result.text, refusal.reason);
+    }
+
+    assert.equal(githubCalls, 0, "SSH creation cannot acquire a host-local repository");
+    const denied = app.config.addUser("No project access", "guest", undefined, undefined, {}).user;
+    const local = app.config.addUser("Local projects only", "guest", undefined, undefined, {
+        local: true,
+    }).user;
+
+    for (const value of saved) {
+        assert.equal(
+            app.canSee(denied, value.id),
+            false,
+            "placement alone grants no project access",
+        );
+    }
+
+    assert.equal(app.canSee(local, saved[0]!.id), true, "the same local grant can see local work");
+    assert.equal(
+        app.canSee(local, saved[4]!.id),
+        false,
+        "a local project's pinned SSH override stays private to machine grants",
+    );
+    assert.equal(
+        Object.keys((await app.harness.snapshot(SessionCreatesDoc, BACKGROUND_CONTEXT))!.items)
+            .length,
+        cases.length,
+    );
+    await app.close();
+    app = await openApp(model, data);
+
+    for (const value of saved) {
+        assert.equal(
+            app.sessionMeta(value.id)?.projectId,
+            value.projectId,
+            "saved placement survives reopen",
+        );
+        assert.equal(app.cwdOf(value.id), value.cwd);
+        assert.deepEqual(app.locationOf(value.id), value.location);
+    }
+
+    assert.equal(
+        (await app.pip.agents.read(made.agentId, owner(app))).projectId,
+        projects[0],
+        "delegation never edits the identity default",
+    );
+    assert.equal(
+        Object.keys((await app.harness.snapshot(SessionCreatesDoc, BACKGROUND_CONTEXT))!.items)
+            .length,
+        cases.length,
+    );
+});
 
 test("named exact-recipient handoff status preserves the controller's pending question refusal", async (t) => {
     let target = 0;

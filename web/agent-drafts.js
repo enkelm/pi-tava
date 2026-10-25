@@ -78,7 +78,7 @@ export function selectAgentDraft(id) {
     }
 }
 
-export function openAgentDraft(agentId) {
+export function openAgentDraft(agentId, { projectId } = {}) {
     if (!owner() || !store.state.namedAgents.some((agent) => agent.agentId === agentId)) {
         return;
     }
@@ -90,6 +90,7 @@ export function openAgentDraft(agentId) {
         text: "",
         title: "New chat",
         draft: true,
+        ...(projectId === undefined ? {} : { projectId }),
     };
 
     account().push(draft);
@@ -214,6 +215,18 @@ export async function recoverAgentDraft(id) {
     }
 }
 
+const projectIntent = (draft, payload) =>
+    draft.projectId !== undefined || payload?.projectId !== undefined;
+
+function projectSendCompatibility(draft) {
+    const next = "Ask the owner to safely update/restart the backend, then reload this page.";
+    const kept = "Your draft, files and chosen project are kept.";
+
+    return draft.requestId
+        ? `This server does not advertise project-aware named-agent first Send. ${next} ${kept} Your earlier attempt may already be accepted. Check result only reads its receipt; do not start a replacement Chat.`
+        : `This server does not advertise project-aware named-agent first Send. ${next} Nothing was sent. ${kept}`;
+}
+
 export function sendAgentDraft(id, composition) {
     const draft = account().find((item) => item.id === id && !item.closed);
     const payload = draft?.payload ??
@@ -233,13 +246,28 @@ export function sendAgentDraft(id, composition) {
         return flights.get(draft);
     }
 
+    // privateAgents:4 predates explicit first-send project intent. Never omit that intent to
+    // make an older backend accept it, nor allocate a request identity for a locally blocked send.
+    if (projectIntent(draft, payload) && !(store.state.server?.agentDraftProjects >= 1)) {
+        draft.error = projectSendCompatibility(draft);
+        save(draft.userId);
+
+        return Promise.reject(new Error(draft.error));
+    }
+
     // A later rejection cannot disprove an earlier lost acknowledgement. Only a fresh
     // attempt's definite HTTP rejection permits editing, as in the saved Chat composer.
     const fresh = !draft.requestId;
 
     draft.requestId ??= uid();
-    // Freeze expanded pastes, file identities and inline intent before dispatch, not just the visible text.
-    draft.payload = JSON.parse(JSON.stringify(payload));
+    // Freeze expanded pastes, files and project intent once; a retry must not rebind an
+    // uncertain native request to later draft metadata or a newly supplied composition.
+    draft.payload ??= JSON.parse(
+        JSON.stringify({
+            ...payload,
+            ...(draft.projectId === undefined ? {} : { projectId: draft.projectId }),
+        }),
+    );
     draft.error = "";
     save(draft.userId);
     const wasSelected = selectedAgentDraft() === draft;
@@ -252,10 +280,28 @@ export function sendAgentDraft(id, composition) {
 
             return accepted(draft, result, wasSelected);
         } catch (error) {
-            if (fresh && error.status >= 400 && error.status < 500) {
+            // A stale hello or mixed backend can still reject the known native request shape.
+            // Do not call an unrelated malformed-field error a version mismatch.
+            const mismatch =
+                error.status === 400 &&
+                error.message === "Unknown private agent setting" &&
+                draft.payload.projectId !== undefined &&
+                Object.keys(draft.payload).every((field) =>
+                    ["text", "attachments", "inlineFiles", "projectId"].includes(field),
+                );
+            const failure = mismatch
+                ? Object.assign(
+                      new Error(
+                          "The backend rejected this project-aware Chat request and may still be running older code. Ask the owner to safely update/restart it, then reload. Your draft, files and chosen project are kept.",
+                      ),
+                      { status: error.status },
+                  )
+                : error;
+
+            if (fresh && failure.status >= 400 && failure.status < 500) {
                 delete draft.requestId;
                 delete draft.payload;
-                draft.error = `${error.message} Your message was not accepted. You can edit it and send again.`;
+                draft.error = `${failure.message} Your message was not accepted. You can edit it and send again.`;
 
                 if (draft.closed) {
                     const drafts = accounts.get(draft.userId) ?? [];
@@ -266,12 +312,12 @@ export function sendAgentDraft(id, composition) {
                     }
                 }
             } else {
-                draft.error = `${error.message} Acceptance is uncertain. Your draft is kept. Retry sends the same request; Check result only recovers its acknowledgement.`;
+                draft.error = `${failure.message} Acceptance is uncertain. Your draft is kept. Retry sends the same request; Check result only recovers its acknowledgement.`;
             }
 
             save(draft.userId);
 
-            throw error;
+            throw failure;
         } finally {
             flights.delete(draft);
             save(draft.userId);

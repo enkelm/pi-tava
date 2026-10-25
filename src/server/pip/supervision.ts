@@ -295,7 +295,8 @@ export class PipSupervision {
     }
 
     navigation(id: ConversationId, supplied: User) {
-        const grant = this.#app.workItems.itemFor(id)?.supervisor;
+        const item = this.#app.workItems.itemFor(id);
+        const grant = item?.supervisor;
 
         return supplied.role === "owner" && grant?.ownerId === supplied.id
             ? {
@@ -303,6 +304,7 @@ export class PipSupervision {
                       conversationId: grant.conversationId,
                       status: grant.status === "running" ? "running" : "reclaimed",
                       epoch: grant.epoch,
+                      ...(this.#app.pip.agents.supervision.parentChat(item!, supplied) ?? {}),
                   },
               }
             : {};

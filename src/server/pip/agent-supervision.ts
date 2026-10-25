@@ -24,7 +24,7 @@ import type { PocketApp } from "../app.ts";
 import type { User } from "../config.ts";
 import { AgentIdentitiesDoc, type PrivateIdentity } from "../agent-identity-docs.ts";
 import { currentStateCheckpoints } from "../doc-checkpoint.ts";
-import { PipWorkDoc, SessionsDoc, SubagentsDoc } from "../docs.ts";
+import { PipWorkDoc, SessionCreatesDoc, SessionsDoc, SubagentsDoc } from "../docs.ts";
 import { clientKey, requestFor, requestPerson } from "../requests.ts";
 import { HttpError, describe } from "../errors.ts";
 import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
@@ -255,6 +255,7 @@ export class AgentSupervision {
     readonly #deliveries = new Map<string, Promise<void>>();
     #doc: SupervisionData = { agents: {}, requests: {}, controls: {} };
     #identities: Record<string, PrivateIdentity> = {};
+    #creates: Record<string, { id: number; input: string }> = {};
     #ready = false;
     #queued = false;
     #running: Promise<void> | undefined;
@@ -940,8 +941,9 @@ export class AgentSupervision {
         );
     }
 
-    /** Passive catalogue activity; report origins and idle model runs do not change management. */
-    manages(chat: ConversationId): boolean {
+    /** The same live native source/grant check backs activity and exact-parent navigation. */
+    #managingReceipt(receipt: IntentReceipt): boolean {
+        const chat = idOf(receipt.chatId);
         const scope = this.#app.pip.agents.scope(chat);
         const meta = this.#app.sessionMeta(chat);
         const identity = scope === undefined ? undefined : this.#identities[scope.agentId];
@@ -955,56 +957,271 @@ export class AgentSupervision {
             meta?.archived === true ||
             !this.#app.canSee(user, chat) ||
             !this.#app.config.pipEnabled ||
-            !this.#app.workItems.enabled
+            !this.#app.workItems.enabled ||
+            receipt.agentId !== identity.agentId ||
+            receipt.ownerId !== user.id ||
+            receipt.tokenHash !== user.tokenHash ||
+            receipt.agentEpoch !== identity.epoch ||
+            receipt.status !== "accepted" ||
+            receipt.controllerEpoch === undefined ||
+            !this.#receiptSourceCurrent(receipt) ||
+            !(
+                receipt.action === undefined ||
+                receipt.action === "delegate" ||
+                (receipt.action === "send" && receipt.target === receipt.controllerId)
+            )
         ) {
             return false;
         }
 
-        return Object.values(this.#doc.requests).some((receipt) => {
+        const controller = idOf(receipt.controllerId);
+        const item = this.#app.workItems.itemFor(controller);
+        const grant = item?.supervisor;
+
+        if (
+            item?.id !== receipt.workItemId ||
+            grant?.agentId !== identity.agentId ||
+            grant.agentEpoch !== identity.epoch ||
+            grant.attachmentEpoch !== receipt.attachmentEpoch ||
+            (grant.maxActions !== undefined && grant.actions >= grant.maxActions)
+        ) {
+            return false;
+        }
+
+        try {
+            const owner = this.#app.workItems.controllerCurrent(
+                controller,
+                receipt.controllerEpoch,
+            );
+
+            this.#app.spend.check(owner, controller);
+
+            return owner.id === user.id;
+        } catch {
+            return false;
+        }
+    }
+
+    /** Passive catalogue activity; report origins and idle model runs do not change management. */
+    manages(chat: ConversationId): boolean {
+        return Object.values(this.#doc.requests).some(
+            (receipt) => receipt.chatId === Number(chat) && this.#managingReceipt(receipt),
+        );
+    }
+
+    /** Owner-private navigation only. Several current sources are not one guessed latest parent. */
+    parentChat(
+        item: Readonly<WorkItem>,
+        supplied: User,
+    ): { parentChatId: number; agentId: string } | undefined {
+        const user = this.#app.config.userById(supplied.id);
+        const grant = item.supervisor;
+
+        if (
+            user?.role !== "owner" ||
+            user.tokenHash !== supplied.tokenHash ||
+            grant?.ownerId !== user.id ||
+            grant.agentId === undefined ||
+            grant.status !== "running"
+        ) {
+            return undefined;
+        }
+
+        let parent: { parentChatId: number; agentId: string } | undefined;
+
+        for (const receipt of Object.values(this.#doc.requests)) {
             if (
-                receipt.chatId !== Number(chat) ||
-                receipt.agentId !== identity.agentId ||
-                receipt.ownerId !== user.id ||
-                receipt.tokenHash !== user.tokenHash ||
-                receipt.agentEpoch !== identity.epoch ||
-                receipt.status !== "accepted" ||
-                receipt.controllerEpoch === undefined ||
-                !this.#receiptSourceCurrent(receipt) ||
-                !(
-                    receipt.action === undefined ||
-                    receipt.action === "delegate" ||
-                    (receipt.action === "send" && receipt.target === receipt.controllerId)
+                receipt.workItemId !== item.id ||
+                receipt.controllerId !== grant.conversationId ||
+                receipt.submissionId === undefined ||
+                !this.#managingReceipt(receipt)
+            ) {
+                continue;
+            }
+
+            if (parent !== undefined && parent.parentChatId !== receipt.chatId) {
+                return undefined;
+            }
+
+            parent = { parentChatId: receipt.chatId, agentId: receipt.agentId };
+        }
+
+        return parent;
+    }
+
+    #validGroupingParent(
+        parent: { chatId: number; agentId: string; ownerId: string },
+        supplied: User,
+    ): boolean {
+        const user = this.#app.config.userById(supplied.id);
+        const identity = this.#identities[parent.agentId];
+        const chat = this.#app.sessionMeta(idOf(parent.chatId));
+
+        return (
+            user?.role === "owner" &&
+            user.tokenHash === supplied.tokenHash &&
+            parent.ownerId === user.id &&
+            identity?.ownerId === user.id &&
+            identity.chatIds.includes(parent.chatId) &&
+            chat?.pipAgent === true &&
+            chat.pipAgentId === parent.agentId &&
+            chat.pip === user.id &&
+            chat.ownerOnly === true &&
+            this.#app.canSee(user, idOf(parent.chatId))
+        );
+    }
+
+    /** Immutable creation receipt proof only: an ordinary controller send is not ownership. */
+    #creationParent(
+        receipt: IntentReceipt,
+        item: Readonly<WorkItem>,
+        creates: Record<string, { id: number; input: string }>,
+    ) {
+        if (
+            receipt.status !== "accepted" ||
+            receipt.submissionId === undefined ||
+            receipt.workItemId !== item.id ||
+            receipt.sourceConversationId !== receipt.chatId ||
+            receipt.sourceTaskId === undefined ||
+            receipt.sourceCallId === undefined ||
+            receipt.action !== "send" ||
+            receipt.target !== receipt.controllerId
+        ) {
+            return undefined;
+        }
+
+        const request = `native-handoff-${hash([receipt.sourceConversationId, receipt.sourceTaskId, receipt.sourceCallId])}`;
+        const creation = creates[`${receipt.ownerId}:${clientKey(request)}`];
+
+        return creation?.id === item.originThreadId
+            ? { chatId: receipt.chatId, agentId: receipt.agentId, ownerId: receipt.ownerId }
+            : undefined;
+    }
+
+    #groupingParents(item: Readonly<WorkItem>, user: User, creates = this.#creates) {
+        if (item.parentChat !== undefined) {
+            return item.parentChat !== null && this.#validGroupingParent(item.parentChat, user)
+                ? [item.parentChat]
+                : [];
+        }
+
+        const parents = new Map<number, { chatId: number; agentId: string; ownerId: string }>();
+
+        for (const receipt of Object.values(this.#doc.requests)) {
+            const parent = this.#creationParent(receipt, item, creates);
+
+            if (parent !== undefined && this.#validGroupingParent(parent, user)) {
+                parents.set(parent.chatId, parent);
+            }
+        }
+
+        return [...parents.values()];
+    }
+
+    /** Passive owner-private grouping survives Stop/finish. It never grants control or activity. */
+    groupingParent(item: Readonly<WorkItem>, user: User) {
+        const parents = this.#groupingParents(item, user);
+
+        return parents.length === 1 ? { groupingParentChatId: parents[0]!.chatId } : undefined;
+    }
+
+    /** A fresh accepted creation records ownership; replay cannot overwrite an explicit detach/move. */
+    async ownCreated(tx: Tx, workItemId: string, api: ToolExecutionApi): Promise<void> {
+        const item = (await tx.doc(HandoffsDoc)).workItems[workItemId];
+        const creates = (await tx.doc(SessionCreatesDoc)).items;
+        const receipt = Object.values((await tx.doc(AgentSupervisionDoc)).requests).find(
+            (entry) =>
+                entry.sourceConversationId === Number(api.conversationId) &&
+                entry.sourceTaskId === Number(api.taskId) &&
+                entry.sourceCallId === api.callId &&
+                item !== undefined &&
+                this.#creationParent(entry, item, creates) !== undefined,
+        );
+
+        if (item === undefined || receipt === undefined) {
+            throw new HttpError(
+                409,
+                "No accepted exact native creation proves this Chat owns the Work Item.",
+            );
+        }
+
+        if (item.parentChat === undefined) {
+            item.parentChat = {
+                chatId: receipt.chatId,
+                agentId: receipt.agentId,
+                ownerId: receipt.ownerId,
+            };
+        }
+    }
+
+    /** Capture the complete owned scope before source revocation; never guess shared current control. */
+    async closeChildren(tx: Tx, chat: ConversationId, user: User): Promise<ConversationId[]> {
+        const items = (await tx.doc(HandoffsDoc)).workItems;
+        const creates = (await tx.doc(SessionCreatesDoc)).items;
+        const sessions = (await tx.doc(SessionsDoc)).items;
+        const children: { item: WorkItem; parent: NonNullable<WorkItem["parentChat"]> }[] = [];
+
+        for (const item of Object.values(items)) {
+            const parents = this.#groupingParents(item, user, creates);
+
+            if (!parents.some((parent) => parent.chatId === Number(chat))) {
+                continue;
+            }
+
+            if (item.projectId !== sessions[String(chat)]?.projectId) {
+                throw new HttpError(
+                    409,
+                    "A child Work Item has different current project placement. Clarify its ownership and placement before closing this Chat.",
+                );
+            }
+
+            if (
+                parents.length !== 1 ||
+                Object.values(this.#doc.requests).some(
+                    (receipt) =>
+                        receipt.workItemId === item.id &&
+                        receipt.chatId !== Number(chat) &&
+                        this.#managingReceipt(receipt),
                 )
             ) {
-                return false;
-            }
-
-            const controller = idOf(receipt.controllerId);
-            const item = this.#app.workItems.itemFor(controller);
-            const grant = item?.supervisor;
-
-            if (
-                item?.id !== receipt.workItemId ||
-                grant?.agentId !== identity.agentId ||
-                grant.agentEpoch !== identity.epoch ||
-                grant.attachmentEpoch !== receipt.attachmentEpoch ||
-                (grant.maxActions !== undefined && grant.actions >= grant.maxActions)
-            ) {
-                return false;
-            }
-
-            try {
-                const owner = this.#app.workItems.controllerCurrent(
-                    controller,
-                    receipt.controllerEpoch,
+                throw new HttpError(
+                    409,
+                    "This Chat's child ownership or current control is shared or ambiguous. Clarify the exact Work Item ownership before closing it.",
                 );
+            }
 
-                this.#app.spend.check(owner, controller);
+            children.push({ item, parent: parents[0]! });
+        }
 
-                return owner.id === user.id;
-            } catch {
+        // Validate the whole plan before persisting even passive fallback ownership.
+        for (const { item, parent } of children) {
+            item.parentChat ??= parent;
+        }
+
+        return children.map(({ item }) => idOf(item.originThreadId));
+    }
+
+    /** Owned busy execution also requires confirmation when its stopped controller/Chat is idle. */
+    runningChildren(chat: ConversationId, user: User): boolean {
+        const seen = new Set<string>();
+
+        return Object.keys(this.#app.sessionCatalogue()).some((key) => {
+            const item = this.#app.workItems.itemFor(idOf(Number(key)));
+
+            if (item === undefined || seen.has(item.id)) {
                 return false;
             }
+
+            seen.add(item.id);
+
+            return (
+                item.archived !== true &&
+                this.groupingParent(item, user)?.groupingParentChatId === Number(chat) &&
+                (item.supervisor?.status === "running" ||
+                    item.threadIds.some((member) =>
+                        this.#app.conversationsOf(idOf(member)).some((id) => this.#app.isBusy(id)),
+                    ))
+            );
         });
     }
 
@@ -3137,7 +3354,10 @@ export class AgentSupervision {
     /** Unified handoff creation/contact needs fresh owner authority in this exact main Chat. */
     async requireHandoffInvocation(tx: Tx, api: ToolExecutionApi) {
         if (api.conversationId !== this.#app.rootOf(api.conversationId)) {
-            throw new HttpError(403, "Only the named agent's originating main Chat can hand off work.");
+            throw new HttpError(
+                403,
+                "Only the named agent's originating main Chat can hand off work.",
+            );
         }
 
         await this.requireInvocation(tx, api);
@@ -3148,12 +3368,14 @@ export class AgentSupervision {
 
         await this.#requireOwnerInput(tx, source, user.id);
         const admission = Object.values((await tx.doc(AgentSupervisionDoc)).admissions ?? {}).find(
-            (entry) => entry.chatId === source.chatId && entry.admissionSerial === source.admissionSerial,
+            (entry) =>
+                entry.chatId === source.chatId && entry.admissionSerial === source.admissionSerial,
         );
         const native = await tx.submissionByRequest(api.conversationId, admission!.requestId!);
-        const entry = native?.type === "input" && native.entry !== undefined
-            ? await tx.entry(native.entry)
-            : undefined;
+        const entry =
+            native?.type === "input" && native.entry !== undefined
+                ? await tx.entry(native.entry)
+                : undefined;
 
         if (entry?.kind !== "pi.user") {
             throw new HttpError(409, "The handoff's accepted owner instruction is unavailable.");
@@ -3474,6 +3696,7 @@ export class AgentSupervision {
     async recover(): Promise<void> {
         this.#identities =
             (await this.#app.harness.snapshot(AgentIdentitiesDoc, context))?.items ?? {};
+        this.#creates = (await this.#app.harness.snapshot(SessionCreatesDoc, context))?.items ?? {};
         this.#doc = (await this.#app.harness.snapshot(AgentSupervisionDoc, context)) ?? {
             agents: {},
             requests: {},
@@ -3499,6 +3722,15 @@ export class AgentSupervision {
             ) {
                 this.#identities = (
                     change.value as { items: Record<string, PrivateIdentity> }
+                ).items;
+            }
+
+            if (
+                change.type === "document" &&
+                change.record.kind === SessionCreatesDoc.definition.kind
+            ) {
+                this.#creates = (
+                    change.value as { items: Record<string, { id: number; input: string }> }
                 ).items;
             }
 

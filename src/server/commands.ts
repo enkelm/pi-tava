@@ -839,7 +839,12 @@ export class Commands {
         };
     }
 
-    async updateSession(id: ConversationId, user: User, patch: SessionPatch): Promise<void> {
+    async updateSession(
+        id: ConversationId,
+        user: User,
+        patch: SessionPatch,
+        options: { archiveOwned?: true } = {},
+    ): Promise<"unchanged" | void> {
         const app = this.#app;
 
         app.requireSee(user, id);
@@ -850,9 +855,18 @@ export class Commands {
             throw new HttpError(400, "archived must be true or false");
         }
 
+        if (patch.archived === false && app.workItems.itemFor(id) !== undefined) {
+            user = await app.workItems.waitForRestore(id, user);
+        }
+
         const before = app.sessionMeta(id);
 
         const namedChat = before?.pipAgent === true;
+
+        if (options.archiveOwned && (!namedChat || patch.archived !== true)) {
+            throw new HttpError(409, "Owned Close requires a saved named Chat.");
+        }
+
         const placing = Object.hasOwn(patch, "projectId");
 
         if (
@@ -879,12 +893,19 @@ export class Commands {
             return;
         }
 
+        let unchanged = false;
         const update = () =>
             app.harness.commit(async (tx) => {
-                await app.workItems.updateSession(tx, id, user, {
-                    ...(patch.title === undefined ? {} : { title: oneLine(patch.title) }),
-                    ...(patch.archived === undefined ? {} : { archived: patch.archived }),
-                });
+                return app.workItems.updateSession(
+                    tx,
+                    id,
+                    user,
+                    {
+                        ...(patch.title === undefined ? {} : { title: oneLine(patch.title) }),
+                        ...(patch.archived === undefined ? {} : { archived: patch.archived }),
+                    },
+                    options,
+                );
             }, context);
 
         if (namedChat) {
@@ -894,11 +915,21 @@ export class Commands {
                 .then(async () => {
                     // Fence source authority in order with tool admission, then release that lane
                     // before joining tools which may themselves already be queued on it.
-                    await app.pip.agents.supervision.perform(id, update);
+                    const children = await app.pip.agents.supervision.perform(id, update);
+
+                    if (children === undefined) {
+                        unchanged = true;
+
+                        return;
+                    }
 
                     if (patch.archived === true) {
-                        // Independent Work Item roots and sibling Chats are not cancellation scopes.
-                        await (await app.conversation(id)).abort(context, { background: true });
+                        // Ownership was captured before revoking this source. Join outside the lane:
+                        // children may have native tools waiting for the same admission locks.
+                        await Promise.all([
+                            (await app.conversation(id)).abort(context, { background: true }),
+                            ...children.map((child) => app.workItems.interrupt(child)),
+                        ]);
                         await app.pip.agents.execution.release(id, { exactChat: true });
                         await app.pip.agents.contacts.settleRevoked();
                     }
@@ -918,6 +949,10 @@ export class Commands {
             await update();
         }
 
+        if (unchanged) {
+            return "unchanged";
+        }
+
         const title = patch.title === undefined ? undefined : oneLine(patch.title);
 
         if (title !== undefined && title !== "" && title !== before?.title) {
@@ -933,6 +968,11 @@ export class Commands {
                     : "brought the session back from the archive",
             );
         }
+    }
+
+    /** Native lifecycle join only; callers must wait outside transactions and supervision locks. */
+    namedChatLifecycle(id: ConversationId): Promise<void> | undefined {
+        return this.#namedChatUpdates.get(id);
     }
 
     #requireOpenNamedChat(id: ConversationId): void {

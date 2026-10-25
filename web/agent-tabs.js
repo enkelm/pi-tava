@@ -1,7 +1,7 @@
 // Named identities keep saved chats and unsent local drafts in one compact navigation rail.
 import { Fragment } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { actions, drafts, navigate, notify, store } from "./store.js";
+import { api, drafts, navigate, notify, store } from "./store.js";
 import { html, Icon } from "./ui.js";
 import { namedAgentsAvailable } from "./named-agents.js";
 import { toSessions } from "./sessions.js";
@@ -141,6 +141,15 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
         if (chat.draft) {
             closeAgentDraft(chat.id);
         } else {
+            if (!(store.state.server.agentChatArchiveChildren >= 1)) {
+                notify(
+                    "error",
+                    "This server cannot safely close a Chat with its children yet. Update/restart the server, then reload. The Chat was kept open.",
+                );
+
+                return;
+            }
+
             const beforeChat = store.state.namedAgents
                 .find((item) => item.agentId === agent.agentId)
                 ?.chats?.find((item) => item.id === chat.id);
@@ -148,9 +157,9 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
             const activity = beforeChat ?? chat;
 
             if (
-                ((activity.busy || activity.managing) &&
+                ((activity.busy || activity.managing || activity.runningChildren) &&
                     !confirm(
-                        `Close “${titleOf(chat)}” everywhere? This stops this Chat and its orchestration. Independent child Work Items keep running. Unsent drafts are discarded. Saved history remains recoverable through History → Restore.`,
+                        `Close “${titleOf(chat)}” everywhere? This stops and archives this Chat and its current owned child Work Items. Already completed external effects cannot be undone. Unsent drafts are discarded. History remains recoverable; restore child Work Items separately. Restore never resumes old work.`,
                     )) ||
                 !current()
             ) {
@@ -165,7 +174,20 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
             setClosing(new Set(inFlight.current));
 
             try {
-                await actions.updateSession(chat.id, { archived: true });
+                const result = await api(
+                    `pip/agents/${encodeURIComponent(agent.agentId)}/close-chat-v1`,
+                    { chatId: chat.id },
+                );
+
+                if (
+                    result?.ok !== true ||
+                    result.chatId !== chat.id ||
+                    result.scope !== "owned-v1"
+                ) {
+                    throw new Error(
+                        "The server did not acknowledge the owned Close scope. Reload to inspect the native state; do not retry blindly.",
+                    );
+                }
             } catch (error) {
                 if (current()) {
                     notify("error", error.message || "Could not close this Chat.");
@@ -199,7 +221,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
             const stillHere = current();
 
             // Cleanup belongs to the successfully closed Chat, not the selected route. Do it
-            // before removing its row, so a later catalogue event cannot lose the removal edge.
+            // before marking its row archived, so a later catalogue event cannot lose that edge.
             if (drafts.revision(chat.id) === draftRevision) {
                 drafts.discard(chat.id);
             }
@@ -220,7 +242,17 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
                                             )
                                             .at(-1)?.id ?? null)
                                       : item.id,
-                              chats: item.chats?.filter((entry) => entry.id !== chat.id),
+                              chats: item.chats?.map((entry) =>
+                                  entry.id === chat.id
+                                      ? {
+                                            ...entry,
+                                            archived: true,
+                                            busy: false,
+                                            managing: false,
+                                            runningChildren: false,
+                                        }
+                                      : entry,
+                              ),
                               chatIds: item.chatIds?.filter((id) => id !== chat.id),
                           },
                 ),
@@ -410,7 +442,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
                     ? chat.requestId
                         ? "Close draft; pending send receipt is kept"
                         : "Discard unsent draft"
-                    : "Close everywhere; restore saved history from History"
+                    : "Close Chat and owned Work Items everywhere; saved history stays recoverable"
             }
             onClick=${(event) => closeTab(chat, event)}
         ><${Icon} name="close" size=${14} /></button>
@@ -419,7 +451,7 @@ function ChatTabs({ agent, userId, source, picker, onChoose, expanded, close }) 
     if (picker) {
         return html`<${Fragment}>
             <p class="small muted">
-                Closing a saved Chat archives it everywhere and stops this Chat. Independent child Work Items keep running. Restore saved history from History.
+                Closing a saved Chat stops and archives it and its owned child Work Items everywhere. History stays recoverable. Restore Work Items separately; restoring never resumes old work.
             </p>
             <nav class="agent-chat-choices" aria-label=${`${agent.name} open chats`}>
                 ${visible.map((chat) => chatItem(chat, true))}

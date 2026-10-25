@@ -25,7 +25,6 @@ import {
 import type { User } from "../config.ts";
 import type { CreateSessionRequest, SessionPatch } from "../commands.ts";
 import { HttpError } from "../errors.ts";
-import { FileLists } from "../files.ts";
 import { draftUploadDirectory } from "../agent-draft-uploads.ts";
 import { receiveUpload } from "./uploads.ts";
 import type { ImportRequest } from "../pi-sessions.ts";
@@ -60,7 +59,6 @@ function lanAddresses(): string[] {
 export function createApi(options: HttpOptions, auth: Auth) {
     const { app } = options;
     const { events, poll } = createEventStreams(app);
-    const draftFiles = new FileLists();
 
     const requireUser = (request: IncomingMessage): User => {
         const user = auth.user(request);
@@ -404,11 +402,17 @@ export function createApi(options: HttpOptions, auth: Auth) {
             }
 
             if (fourth === "files" && method === "GET") {
-                app.requireSteer(user);
-                // First-send conversations use this same native local default folder, not a home Chat.
-                const listing = await draftFiles.get(app.defaultCwd);
-
-                app.pip.agents.ownedIdentity(third, user);
+                const listing = await withReadContext({ request, response }, (context) =>
+                    app.pip.agents.draftFiles(
+                        third,
+                        user,
+                        {
+                            projectId: url.searchParams.get("projectId") ?? undefined,
+                            requestId: url.searchParams.get("requestId") ?? undefined,
+                        },
+                        context,
+                    ),
+                );
 
                 return json(
                     response,
@@ -421,6 +425,47 @@ export function createApi(options: HttpOptions, auth: Auth) {
                               truncated: listing.truncated,
                           },
                 );
+            }
+
+            // Versioned path, not an ignored SessionPatch flag: old servers cannot partially Close.
+            if (fourth === "close-chat-v1" && method === "POST") {
+                const body = await readJson<{ chatId?: unknown } | null>(request);
+
+                if (
+                    body === null ||
+                    typeof body !== "object" ||
+                    Array.isArray(body) ||
+                    Object.keys(body).some((key) => key !== "chatId") ||
+                    !Number.isSafeInteger(body.chatId) ||
+                    Number(body.chatId) <= 0
+                ) {
+                    throw new HttpError(400, "Choose one exact saved Chat with chatId.");
+                }
+
+                const chat = conversationId(String(body.chatId));
+
+                if (app.pip.agents.scope(chat)?.agentId !== third) {
+                    throw new HttpError(
+                        409,
+                        "This saved Chat does not belong to the selected identity.",
+                    );
+                }
+
+                const outcome = await app.commands.updateSession(
+                    chat,
+                    user,
+                    { archived: true },
+                    { archiveOwned: true },
+                );
+
+                if (outcome === "unchanged") {
+                    throw new HttpError(
+                        409,
+                        "This Chat is already closed. No additional child Work Items were changed. Restore this Chat before a fresh Close, or manage its Work Items separately.",
+                    );
+                }
+
+                return json(response, 200, { ok: true, chatId: Number(chat), scope: "owned-v1" });
             }
 
             if (fourth === "configure" && method === "POST") {

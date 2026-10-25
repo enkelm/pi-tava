@@ -73,11 +73,26 @@ async function admission(app: PocketApp, api: ToolExecutionApi, ctx: Context, se
             throw new HttpError(403, "Use an authorized ordinary Chat, execution thread, controller or literal helper, not another private identity.");
         }
 
-        if (JSON.stringify(app.locationOf(root)) !== JSON.stringify(app.locationOf(api.conversationId))) {
-            throw new HttpError(409, "Native handoff brief delivery across filesystem destinations is unavailable.");
+        const item = app.workItems.itemFor(root);
+        // A controller has no execution filesystem. Its brief belongs to the exact active
+        // thread, not the controller's host-local metadata or the project's defaults.
+        const destination =
+            app.pip.orchestration.isScoped(id) && item !== undefined
+                ? (item.activeThreadId as ConversationId)
+                : root;
+
+        app.requireSee(source.user, destination);
+
+        if (
+            JSON.stringify(app.locationOf(destination)) !==
+            JSON.stringify(app.locationOf(api.conversationId))
+        ) {
+            throw new HttpError(
+                409,
+                "Native handoff brief delivery across filesystem destinations is unavailable.",
+            );
         }
 
-        const item = app.workItems.itemFor(root);
         const grant = item?.supervisor;
 
         if (grant?.agentId !== undefined && grant.agentId !== source.agentId) {
@@ -301,6 +316,10 @@ async function deliver(
         report: request.report,
     }, ctx);
     const item = app.workItems.itemFor(recipient as ConversationId);
+
+    if (threadId !== undefined && item !== undefined && assignment.status === "accepted") {
+        await api.commit((tx) => app.pip.agents.supervision.ownCreated(tx, item.id, api), ctx);
+    }
 
     return {
         ...assignment,

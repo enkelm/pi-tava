@@ -30,6 +30,21 @@ async function click(page: BrowserPage, selector: string) {
     await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
 }
 
+async function showDrawer(page: BrowserPage) {
+    if (!(await value(page, `!!document.querySelector('.drawer:not([data-state="closing"])')`))) {
+        await page.press(
+            (await value(page, `(await import('/ui.js')).APPLE`)) ? "Meta+B" : "Control+B",
+        );
+    }
+
+    await present(page, '.drawer:not([data-state="closing"]) .private-tabs');
+}
+
+async function closeDrawer(page: BrowserPage) {
+    await page.press("Escape");
+    await until(() => value(page, `!document.querySelector('.drawer')`), "drawer finished closing");
+}
+
 async function shot(page: BrowserPage, name: string) {
     const directory = process.env.PRIVATE_SCREENSHOT_DIR;
 
@@ -441,12 +456,13 @@ test(
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
-            await present(page, ".home-list .private-tabs");
+            await present(page, '[data-part="home"]');
+            await showDrawer(page);
             assert.equal(requests.length, 0, "Herdr is not fetched on Collab");
             assert.deepEqual(
                 await value(
                     page,
-                    `[...document.querySelectorAll('.home-list .private-tabs button')].map(tab => ({
+                    `[...document.querySelectorAll('.drawer .private-tabs button')].map(tab => ({
                         label: tab.textContent.trim(),
                         selected: tab.getAttribute('aria-selected'),
                         icon: !!tab.querySelector('[aria-hidden="true"]'),
@@ -476,16 +492,17 @@ test(
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.evaluate(`(await import('/store.js')).navigate(null)`);
-            await present(page, ".home-list .private-tabs");
+            await present(page, '[data-part="home"]');
+            await showDrawer(page);
             durableRequests.length = 0;
-            const collabTabs = await sourceTabDimensions(".home-list");
+            const collabTabs = await sourceTabDimensions(".drawer");
 
-            await page.click({ selector: ".home-list .private-tabs button:last-child" });
-            await present(page, ".home-list .private-pane-row");
+            await page.click({ selector: ".drawer .private-tabs button:last-child" });
+            await present(page, ".drawer .private-pane-row");
             const sectionState = () =>
                 value(
                     page,
-                    `[...document.querySelectorAll('.home-list .private-section-title > button')].map(button => {
+                    `[...document.querySelectorAll('.drawer .private-section-title > button')].map(button => {
                         const section = button.closest('section');
                         const panel = document.getElementById(button.getAttribute('aria-controls'));
                         return {
@@ -502,8 +519,9 @@ test(
             ];
 
             assert.deepEqual(await sectionState(), openSections, "both sections start open");
-            const herdrTabs = await sourceTabDimensions(".home-list");
+            const herdrTabs = await sourceTabDimensions(".drawer");
 
+            await closeDrawer(page);
             await page.setViewport(VIEWPORTS.desktop);
             const desktopHerdrTabs = await sourceTabDimensions(".sidebar");
 
@@ -513,6 +531,7 @@ test(
                 "desktop Herdr does not shrink its source tabs",
             );
             await page.setViewport(VIEWPORTS.mobile);
+            await showDrawer(page);
 
             for (const tabs of [collabTabs, herdrTabs, desktopCollabTabs, desktopHerdrTabs]) {
                 const [first, second] = tabs.buttons;
@@ -542,12 +561,12 @@ test(
                     })()`,
                 ),
                 true,
-                "simultaneously mounted sidebar and home lists control only their own panels",
+                "simultaneously mounted sidebar and drawer lists control only their own panels",
             );
             const writesBeforeFold = requests.filter((request) => request.method !== "GET").length;
 
             for (const section of ["spaces", "agents"]) {
-                const toggle = `.home-list .private-${section} .private-section-toggle`;
+                const toggle = `.drawer .private-${section} .private-section-toggle`;
 
                 await page.click({ selector: toggle });
                 assert.deepEqual(
@@ -562,7 +581,7 @@ test(
                 assert.equal(
                     await value(
                         page,
-                        `document.querySelector('.home-list .private-${section} .private-section-scroll').querySelectorAll('button, a[href], input, textarea, select, [tabindex]').length`,
+                        `document.querySelector('.drawer .private-${section} .private-section-scroll').querySelectorAll('button, a[href], input, textarea, select, [tabindex]').length`,
                     ),
                     0,
                     "folded content leaves no focusable rows behind",
@@ -588,23 +607,23 @@ test(
             assert.equal(
                 await value(
                     page,
-                    `document.querySelector('.home-list .private-import').textContent.trim()`,
+                    `document.querySelector('.drawer .private-import').textContent.trim()`,
                 ),
                 "Import",
                 "the sidebar import action has a visible label, not just an ambiguous icon",
             );
             assert.match(
-                await value<string>(page, `document.querySelector('.home-list').textContent`),
+                await value<string>(page, `document.querySelector('.drawer').textContent`),
                 /Spaces[\s\S]*Local Herdr[\s\S]*Pocket work[\s\S]*Agents[\s\S]*Pocket work[\s\S]*Main tab[\s\S]*pi · idle/,
             );
             assert.match(
-                await value<string>(page, `document.querySelector('.home-list').textContent`),
+                await value<string>(page, `document.querySelector('.drawer').textContent`),
                 /Unavailable[\s\S]*No workspaces/,
             );
             assert.deepEqual(
                 await value(
                     page,
-                    `[...document.querySelectorAll('.home-list .private-space-row .session-title')].map(row => row.textContent)`,
+                    `[...document.querySelectorAll('.drawer .private-space-row .session-title')].map(row => row.textContent)`,
                 ),
                 [
                     "Pocket work",
@@ -618,7 +637,7 @@ test(
             assert.equal(
                 await value(
                     page,
-                    `document.querySelectorAll('.home-list .private-worktree-children .private-space-row').length`,
+                    `document.querySelectorAll('.drawer .private-worktree-children .private-space-row').length`,
                 ),
                 2,
                 "only daemon-linked children with an open parent nest",
@@ -629,19 +648,16 @@ test(
             );
             const beforeFold = requests.length;
 
-            await click(page, ".home-list .private-worktree-toggle");
+            await click(page, ".drawer .private-worktree-toggle");
             assert.equal(
                 await value(
                     page,
-                    `document.querySelector('.home-list .private-worktree-toggle').getAttribute('aria-expanded')`,
+                    `document.querySelector('.drawer .private-worktree-toggle').getAttribute('aria-expanded')`,
                 ),
                 "false",
             );
             assert.equal(
-                await value(
-                    page,
-                    `document.querySelectorAll('.home-list .private-space-row').length`,
-                ),
+                await value(page, `document.querySelectorAll('.drawer .private-space-row').length`),
                 3,
             );
             assert.equal(
@@ -649,16 +665,13 @@ test(
                 beforeFold,
                 "folding is local, without terminal focus or input",
             );
-            await click(page, ".home-list .private-worktree-toggle");
+            await click(page, ".drawer .private-worktree-toggle");
             assert.equal(
-                await value(
-                    page,
-                    `document.querySelectorAll('.home-list .private-space-row').length`,
-                ),
+                await value(page, `document.querySelectorAll('.drawer .private-space-row').length`),
                 5,
             );
             await shot(page, "mobile-tree");
-            await click(page, ".home-list .private-pane-row");
+            await click(page, ".drawer .private-pane-row");
             await present(page, "#private-prompt");
             // Exercise the server's SPA fallback too, not just client-side route changes.
             await page.navigate(`${base}/private/${encodeURIComponent(paneId)}`);
@@ -894,6 +907,8 @@ test(
             );
             await page.evaluate(`document.querySelector('.private-transcript').scrollTop = 0`);
             await shot(page, "mobile-chat");
+            // Private Chat owns its keys, so retain this public drawer action for the existing
+            // nested-Back contract rather than sending a shared-route shortcut into Herdr.
             await page.evaluate(`(await import('/store.js')).store.set({ drawer: true })`);
             await present(page, ".drawer .private-pane-row");
             await until(
@@ -910,9 +925,11 @@ test(
                 () =>
                     value(
                         page,
-                        `location.pathname === '/' && !!document.querySelector('.home-list .private-pane-row')`,
+                        `location.pathname === '/' && !!document.querySelector('[data-part="home"]')
+                            && !!document.querySelector('.sidebar .private-pane-row')
+                            && !(await import('/store.js')).store.state.drawer`,
                     ),
-                "back to private list",
+                "Back returns to Home with the Herdr catalogue retained, without inventing a drawer layer",
             );
             await page.go(1, { wait: false });
             await present(page, "#private-prompt");

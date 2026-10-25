@@ -99,6 +99,7 @@ export function createHandler(options: HttpOptions) {
                 parts.length === 0 ||
                 parts[0] === "s" ||
                 parts[0] === "private" ||
+                (parts[0] === "projects" && parts.length === 2) ||
                 (parts[0] === "agents" && parts[2] === "drafts" && parts.length === 4)
             ) {
                 return serveApp(response, app.webRevision);

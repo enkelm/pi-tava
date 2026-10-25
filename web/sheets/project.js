@@ -11,11 +11,23 @@ export function ProjectForm({
     onCancel,
     visible = true,
     onBusyChange = () => {},
+    initialLocation = null,
+    onCreateAgent,
 }) {
     const owner = store.state.me?.role === "owner";
     const [name, setName] = useState(project?.name ?? "");
-    const [cwd, setCwd] = useState(project?.cwd ?? store.state.server?.defaultCwd ?? "~");
-    const [location, setLocation] = useState(project?.location ?? null);
+    const [cwd, setCwd] = useState(
+        project?.cwd ??
+            (initialLocation?.kind === "ssh" ? "~" : store.state.server?.defaultCwd) ??
+            "~",
+    );
+    const [location, setLocation] = useState(project?.location ?? initialLocation);
+    const [defaultAgentId, setDefaultAgentId] = useState(project?.defaultAgentId ?? "");
+    const agentDefaults =
+        owner &&
+        store.state.server?.privateAgents >= 4 &&
+        store.state.server?.projectAgentLinks >= 1;
+    const agents = store.state.namedAgents ?? [];
     const locationReady =
         location?.kind !== "ssh" ||
         (store.state.server?.sshWorkspaces >= 1 && location.host.trim());
@@ -35,7 +47,12 @@ export function ProjectForm({
         setError("");
 
         try {
-            const request = { name: name.trim(), cwd: cwd.trim(), location };
+            const request = {
+                name: name.trim(),
+                cwd: cwd.trim(),
+                location,
+                ...(agentDefaults ? { defaultAgentId: defaultAgentId || null } : {}),
+            };
             const result = project
                 ? await actions.updateProject(project.id, request)
                 : await actions.createProject({ ...request, requestId: requestId.current });
@@ -82,6 +99,37 @@ export function ProjectForm({
                 requestId.current = uid();
             }}
         />
+        ${
+            agentDefaults &&
+            html`<label>
+                <span class="label">Default named agent</span>
+                <select
+                    aria-label="Default named agent"
+                    value=${defaultAgentId}
+                    disabled=${busy}
+                    onChange=${(event) => {
+                        const value = event.currentTarget.value;
+
+                        if (value === "__create") {
+                            onCreateAgent?.((agent) => {
+                                setDefaultAgentId(agent.agentId);
+                                requestId.current = uid();
+                            });
+                        } else {
+                            setDefaultAgentId(value);
+                            requestId.current = uid();
+                        }
+                    }}
+                >
+                    <option value="">No default agent</option>
+                    ${defaultAgentId && !agents.some((agent) => agent.agentId === defaultAgentId) && html`<option value=${defaultAgentId} disabled>Unavailable agent</option>`}
+                    ${agents.map((agent) => html`<option key=${agent.agentId} value=${agent.agentId}>${agent.name}</option>`)}
+                    ${onCreateAgent && html`<option value="__create">Create named agent…</option>`}
+                </select>
+                <span class="muted small">A default for new chats, not an access boundary.</span>
+            </label>`
+        }
+        ${owner && store.state.server?.privateAgents >= 4 && !agentDefaults && html`<p class="muted small">This server cannot save project-agent defaults yet. Update/restart the server to change them; existing defaults are kept.</p>`}
         ${error && html`<p class="error" role="alert">${error}</p>`}
         <div class="row">
             <button

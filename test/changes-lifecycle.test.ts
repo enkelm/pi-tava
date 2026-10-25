@@ -61,11 +61,31 @@ const fixture = {
         useRef: (value: unknown) => (current.hooks[index++] ??= { current: value }),
         useMemo: (make: () => unknown) => make(),
     },
+    drafts: [] as {
+        id: string;
+        agentId: string;
+        projectId?: string | null;
+        requestId?: string;
+        payload?: { projectId?: string | null };
+    }[],
     store: {
         state: {
             conversationId: 1 as number | null,
+            agentDraft: null as { id: string; agentId: string } | null,
+            projects: [] as {
+                id: string;
+                cwd: string;
+                location?: { kind: "ssh"; host: string };
+                updatedAt?: number;
+            }[],
+            namedAgents: [] as {
+                agentId: string;
+                projectId?: string;
+                updatedAt?: number;
+                controlRevision?: number;
+            }[],
             me: { id: "owner", role: "owner", sessions: undefined as number[] | undefined },
-            server: { localReviews: 2 },
+            server: { localReviews: 2, defaultCwd: "/host" },
             view: { agent: { cwd: "/project" }, order: ["entry-1"], live: { busy: false } },
             filesLoaded: 0,
         },
@@ -94,6 +114,10 @@ const sources: Record<string, string> = {
         export const canSteer = () => store.state.me?.role !== 'viewer';
         export const actions = { changes: id => api('c/'+id+'/changes'), reviewChanges: id => api('c/'+id+'/reviews/changes') };
         export const attempt=()=>{},notify=()=>{},openSheet=()=>{};`,
+    "./agent-drafts.js": `export const selectedAgentDraft=()=>{
+        const f=globalThis.changesLifecycleFixture;
+        return f.drafts.find(draft=>draft.id===f.store.state.agentDraft?.id)??null;
+    };`,
     "./back.js": "export const useBack=()=>{};",
     "./chat.js": "export const jumpToEntry=()=>{};",
     "./highlight.js": "export const highlight=()=>{},highlightLines=()=>{},langOf=()=>{};",
@@ -142,10 +166,14 @@ async function setup(t: TestContext) {
     }
 
     t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 60_000 });
+    fixture.drafts = [];
     fixture.store.state = {
         conversationId: 1,
+        agentDraft: null,
+        projects: [],
+        namedAgents: [],
         me: { id: "owner", role: "owner", sessions: undefined },
-        server: { localReviews: 2 },
+        server: { localReviews: 2, defaultCwd: "/host" },
         view: { agent: { cwd: "/project" }, order: ["entry-1"], live: { busy: false } },
         filesLoaded: 0,
     };
@@ -541,4 +569,94 @@ test("mention lists are caller/cwd scoped and discard cancelled late results", a
         beforeRetry + 1,
         "a cancelled refresh does not count as a fresh answer",
     );
+});
+
+// The client owns draft-local cache/cancellation; native composition tests own the listing's
+// workspace and inline bytes. Two drafts of one identity must not share the previous root's names.
+test("draft mentions follow the selected project, exact draft and frozen first-send context", async (t) => {
+    const app = await setup(t);
+    const first = { id: "first", agentId: "ada", projectId: "local" };
+    const second = { id: "second", agentId: "ada", projectId: "remote" };
+
+    fixture.drafts = [first, second];
+    fixture.store.set({
+        conversationId: null,
+        agentDraft: { id: first.id, agentId: first.agentId },
+        namedAgents: [{ agentId: "ada", projectId: "local", updatedAt: 1 }],
+        projects: [
+            { id: "local", cwd: "/local" },
+            { id: "remote", cwd: "/remote", location: { kind: "ssh", host: "box" } },
+        ],
+    });
+    app.hold();
+    app.files.loadFiles();
+    app.requests
+        .at(-1)!
+        .resolve({ files: ["local-only.txt"], version: "local-v1", truncated: false });
+    await flush();
+    assert.equal(app.files.suggestFiles("").items[0].path, "local-only.txt");
+    fixture.store.set({ agentDraft: { id: second.id, agentId: second.agentId } });
+    assert.deepEqual(
+        app.files.suggestFiles("").items,
+        [],
+        "SSH draft cannot reuse local namesakes",
+    );
+    app.files.loadFiles();
+    const remote = app.requests.at(-1)!;
+
+    assert.equal(new URL(remote.path, "https://fixture/").searchParams.get("projectId"), "remote");
+    fixture.store.set({ agentDraft: { id: first.id, agentId: first.agentId } });
+    assert.equal(remote.signal?.aborted, true);
+    remote.resolve({ files: ["remote-only.txt"], version: "remote-v1", truncated: false });
+    await flush();
+    assert.equal(app.files.suggestFiles("").items[0].path, "local-only.txt");
+
+    for (const [draft, expected] of [
+        [{ id: "unassigned", agentId: "ada", projectId: null }, ""],
+        [{ id: "default", agentId: "ada" }, null],
+        [
+            {
+                id: "retry",
+                agentId: "ada",
+                projectId: "remote",
+                requestId: "uncertain",
+                payload: { projectId: "local" },
+            },
+            "local",
+        ],
+    ] as const) {
+        fixture.drafts.push(draft);
+        fixture.store.set({ agentDraft: { id: draft.id, agentId: draft.agentId } });
+        app.files.loadFiles();
+        const request = app.requests.at(-1)!;
+        const params = new URL(request.path, "https://fixture/").searchParams;
+
+        assert.equal(params.get("projectId"), expected);
+        assert.equal(params.get("requestId"), "requestId" in draft ? draft.requestId : null);
+        request.resolve({ files: [`${draft.id}.txt`], version: draft.id, truncated: false });
+        await flush();
+        assert.equal(app.files.suggestFiles("").items[0].path, `${draft.id}.txt`);
+    }
+
+    fixture.store.set({ agentDraft: { id: "default", agentId: "ada" } });
+    assert.equal(app.files.suggestFiles("").items[0].path, "default.txt");
+    fixture.store.set({
+        projects: fixture.store.state.projects.map((project) =>
+            project.id === "local" ? { ...project, cwd: "/moved-default" } : project,
+        ),
+    });
+    assert.deepEqual(
+        app.files.suggestFiles("").items,
+        [],
+        "editing the identity's effective default project also invalidates its cached paths",
+    );
+    app.files.loadFiles();
+    const moved = app.requests.at(-1)!;
+
+    assert.equal(new URL(moved.path, "https://fixture/").searchParams.has("since"), false);
+    fixture.store.set({ namedAgents: [{ agentId: "ada", projectId: "remote", updatedAt: 2 }] });
+    assert.equal(moved.signal?.aborted, true, "changing the identity default cancels the old root");
+    moved.resolve({ files: ["old-default.txt"], version: "moved", truncated: false });
+    await flush();
+    assert.deepEqual(app.files.suggestFiles("").items, [], "the former default cannot republish");
 });

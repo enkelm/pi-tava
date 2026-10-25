@@ -26,6 +26,8 @@ let active: {
 const storage = new Map<string, string>();
 const local = new Map<string, string>();
 const location = new URL("http://offline.invalid/s/19");
+let layoutWidth = 1280;
+let confirmClose = true;
 
 class Primitive {
     parentNode: Primitive | null = null;
@@ -159,7 +161,13 @@ const globals: Record<string, unknown> = {
     history: { state: { pocket: { layers: 0 } }, length: 1 },
     location,
     navigator: { platform: "", onLine: false },
-    matchMedia: () => Object.assign(new EventTarget(), { matches: false }),
+    matchMedia: (query: string) =>
+        Object.assign(new EventTarget(), {
+            matches:
+                query === "(min-width: 768px)"
+                    ? layoutWidth >= 768
+                    : query === "(min-width: 960px)" && layoutWidth >= 960,
+        }),
     addEventListener() {},
     removeEventListener() {},
     localStorage: {
@@ -175,12 +183,15 @@ const globals: Record<string, unknown> = {
     confirm: (message: string) => {
         active.confirms.push(message);
 
-        return true;
+        return confirmClose;
     },
     fetch: async (path: string, init: RequestInit) => {
         active.requests.push({ path, method: init.method ?? "GET" });
 
-        if (/\/api\/sessions\/\d+$/.test(path) && init.method === "POST") {
+        if (
+            (/\/api\/sessions\/\d+$/.test(path) || path.endsWith("/close-chat-v1")) &&
+            init.method === "POST"
+        ) {
             return new Promise<Response>((resolve, reject) =>
                 active.mutations.push({
                     path,
@@ -251,7 +262,7 @@ const imports = registerHooks({
             : { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };
     },
 });
-const { store, navigate, drafts, dismiss, connect } = await import(
+const { store, navigate, openSheet, closeSheet, drafts, dismiss, connect } = await import(
     new URL("../web/store.js", import.meta.url).href
 );
 const { Topbar, AgentHeaderSheet } = await import(
@@ -277,6 +288,8 @@ after(() => {
 });
 
 async function fixture(t: TestContext, { settle = true, lastSaved = false } = {}) {
+    layoutWidth = 1280;
+    confirmClose = true;
     active = { paths: [], requests: [], mutations: [], history: [], confirms: [] };
     const observed = active;
     const agent = {
@@ -310,7 +323,7 @@ async function fixture(t: TestContext, { settle = true, lastSaved = false } = {}
     store.state = {
         ...initial,
         me: { id: `lifecycle-owner-${++owners}`, role: "owner" },
-        server: { privateAgents: 4, extensions: ["pocket-memory"] },
+        server: { privateAgents: 4, agentChatArchiveChildren: 1, extensions: ["pocket-memory"] },
         namedAgents: [agent],
         conversationId: 19,
         view: { ...initial.view, conversation: { id: 19, pipAgentId: "agent-a" } },
@@ -401,8 +414,20 @@ async function fixture(t: TestContext, { settle = true, lastSaved = false } = {}
                 connect();
             }
         });
-    const acknowledge = (index = observed.mutations.length - 1) =>
-        perform(() => observed.mutations[index]!.resolve(Response.json({})));
+
+    const acknowledge = (index = observed.mutations.length - 1) => {
+        const mutation = observed.mutations[index]!;
+
+        return perform(() =>
+            mutation.resolve(
+                Response.json(
+                    mutation.path.endsWith("/close-chat-v1")
+                        ? { ok: true, chatId: mutation.patch.chatId, scope: "owned-v1" }
+                        : {},
+                ),
+            ),
+        );
+    };
 
     return {
         all,
@@ -421,11 +446,12 @@ async function fixture(t: TestContext, { settle = true, lastSaved = false } = {}
             const mutation = observed.mutations[index];
 
             assert.ok(mutation, "native session mutation was submitted");
-            const id = Number(mutation.path.split("/").at(-1));
+            const closing = mutation.path.endsWith("/close-chat-v1");
+            const id = closing ? mutation.patch.chatId : Number(mutation.path.split("/").at(-1));
             const saved = observed.history.find((chat) => chat.id === id);
 
             assert.ok(saved);
-            Object.assign(saved, mutation.patch);
+            Object.assign(saved, closing ? { archived: true } : mutation.patch);
             await acknowledge(index);
         },
         async catalogueEvent() {
@@ -435,7 +461,7 @@ async function fixture(t: TestContext, { settle = true, lastSaved = false } = {}
                 {
                     ...agent,
                     id: chats[0]?.id ?? null,
-                    chats: structuredClone(chats),
+                    chats: structuredClone(observed.history),
                     chatIds: chats.map((chat) => chat.id),
                 },
             ]);
@@ -464,6 +490,131 @@ const onlyReads = (f: Fixture) =>
         "this navigation-only scenario cannot mutate server state",
     );
 
+// The real store owns route transitions and modal-to-Home entry; component consumer tests
+// cannot detect a project route retaining a room or accidentally selecting a sibling Chat.
+test("project navigation opens no room and New Session enters Home with exact cancel context", async (t) => {
+    const f = await fixture(t);
+
+    await f.perform(() => {
+        store.set({ server: { ...store.state.server, projects: 1 } });
+        navigate(null, { projectId: "project-one" });
+    });
+    assert.equal(store.state.conversationId, null);
+    assert.equal(store.state.projectId, "project-one");
+    assert.equal(store.state.agentDraft, null);
+    assert.equal(store.state.view.conversation, null);
+    assert.equal(f.observed.paths.at(-1), "/projects/project-one");
+
+    for (const sheet of [
+        { type: "new-session", projectId: "project-two" },
+        // Alt+N, the launcher and legacy sidebar entry points use this native alias.
+        { type: "cwd", mode: "new", projectId: "project-two", cwd: "/chosen-folder" },
+    ]) {
+        await f.perform(() => openSheet(sheet));
+        assert.equal(store.state.projectId, null);
+        assert.equal(store.state.sheet, null, "creation is Home, not a modal");
+        assert.equal(store.state.homeCreation?.projectId, "project-two");
+        assert.equal(
+            store.state.homeCreation?.cwd,
+            sheet.cwd,
+            "native continuation context is retained",
+        );
+        assert.equal(store.state.homeCreation?.returnTo.projectId, "project-one");
+        assert.equal(f.observed.paths.at(-1), "/");
+        const destination = store.state.homeCreation!.returnTo;
+
+        await f.perform(() => navigate(destination.conversationId, destination));
+        assert.equal(store.state.projectId, "project-one");
+        assert.equal(store.state.homeCreation, null);
+    }
+
+    await f.perform(() => navigate(7));
+    assert.equal(store.state.conversationId, 7);
+    assert.equal(store.state.projectId, null);
+    assert.equal(store.state.homeCreation, null);
+    assert.equal(
+        f.observed.mutations.length,
+        0,
+        "navigation never creates, starts or edits native work",
+    );
+});
+
+// The store owns presentation routing, not the viewport renderer. The same native entry
+// intents must leave the current phone route/draft intact and return from child setup sheets.
+test("mobile creation keeps its source route and resumes the exact setup after child sheets", async (t) => {
+    const f = await fixture(t);
+
+    layoutWidth = 390;
+    await f.perform(() => store.set({ server: { ...store.state.server, projects: 1 } }));
+
+    for (const source of [
+        { id: null, options: {} },
+        { id: null, options: { projectId: "project-one" } },
+        { id: 19, options: {} },
+    ]) {
+        await f.perform(() => navigate(source.id, source.options));
+        const paths = f.observed.paths.length;
+
+        for (const intent of [
+            { type: "new-session" },
+            { type: "new-session", projectId: "project-two" },
+            { type: "cwd", mode: "new", cwd: "/chosen-folder" },
+        ]) {
+            await f.perform(() => openSheet(intent));
+            const setup = store.state.sheet;
+
+            assert.ok(setup, "phone creation opens a sheet instead of navigating to a page");
+            assert.equal(setup.type, "home-creation");
+            assert.equal(setup.projectId, intent.projectId ?? source.options.projectId ?? null);
+            assert.equal(setup.cwd, intent.cwd);
+            assert.equal(store.state.conversationId, source.id);
+            assert.equal(store.state.projectId, source.options.projectId ?? null);
+            assert.equal(f.observed.paths.length, paths, "opening setup is not route navigation");
+
+            await f.perform(() => openSheet({ type: "named-agent", agentId: null }));
+            assert.equal(store.state.sheet.creationParent, setup);
+            await f.perform(closeSheet);
+            assert.equal(store.state.sheet, setup, "cancel returns to the same setup opening");
+            await f.perform(() => openSheet({ type: "new-session", tab: "import" }));
+            await f.perform(() => openSheet({ ...store.state.sheet, tab: "new" }));
+            assert.equal(store.state.sheet, setup, "Start new returns without resetting setup");
+            await f.perform(closeSheet);
+            assert.equal(store.state.sheet, null);
+        }
+    }
+
+    composerRetained(f);
+    assert.equal(f.observed.mutations.length, 0, "opening or cancelling never creates a Chat");
+});
+
+// Tablet routing owns the width boundary independently of pointer/OS classification or rendered CSS.
+// The earlier phone-only case could pass while a normal portrait iPad still received phone creation.
+test("iPad portrait, landscape and Split View route New Session by available width", async (t) => {
+    const f = await fixture(t);
+
+    await f.perform(() => store.set({ server: { ...store.state.server, projects: 1 } }));
+
+    for (const width of [767, 768, 820, 1180, 540]) {
+        layoutWidth = width;
+        await f.perform(() => navigate(19));
+        await f.perform(() => openSheet({ type: "new-session", projectId: "project-two" }));
+
+        if (width < 768) {
+            assert.equal(store.state.sheet?.type, "home-creation", `${width}px uses a phone sheet`);
+            assert.equal(store.state.conversationId, 19);
+            await f.perform(closeSheet);
+        } else {
+            assert.equal(store.state.sheet, null, `${width}px uses the tablet/desktop page`);
+            assert.equal(store.state.conversationId, null);
+            assert.equal(store.state.homeCreation?.projectId, "project-two");
+            assert.equal(store.state.homeCreation?.returnTo.conversationId, 19);
+        }
+    }
+
+    composerRetained(f);
+    assert.equal(f.observed.mutations.length, 0);
+});
+
 test("real route metadata gaps keep named chrome instead of the plain Loading fallback", async (t) => {
     const f = await fixture(t);
     const memory = f.label("Memory");
@@ -488,6 +639,83 @@ test("real route metadata gaps keep named chrome instead of the plain Loading fa
     );
 });
 
+test("an idle exact Chat's running child requires cascade confirmation and cancellation is a complete no-op", async (t) => {
+    const f = await fixture(t);
+    const selected = store.state.namedAgents[0].chats.find((chat: Props) => chat.id === 19)!;
+
+    await f.perform(() => {
+        Object.assign(selected, { busy: false, managing: false, runningChildren: true });
+        store.set({ namedAgents: [...store.state.namedAgents] });
+    });
+    confirmClose = false;
+    const paths = [...f.observed.paths];
+
+    await f.click(f.label("Close Selected tab, chat 19"));
+    assert.equal(
+        f.observed.confirms.length,
+        1,
+        "exact native child activity cannot hide behind Chat busy:false",
+    );
+    assert.match(f.observed.confirms[0]!, /current.*child Work Items/i);
+    assert.match(f.observed.confirms[0]!, /already.*effects/i);
+    assert.match(f.observed.confirms[0]!, /restore.*Work Items.*separately/i);
+    assert.doesNotMatch(f.observed.confirms[0]!, /child Work Items keep running/i);
+    assert.equal(f.observed.mutations.length, 0);
+    assert.equal(store.state.conversationId, 19);
+    assert.deepEqual(f.observed.paths, paths);
+    composerRetained(f);
+    confirmClose = true;
+    await f.click(f.label("Close Selected tab, chat 19"));
+    assert.equal(f.observed.mutations.length, 1);
+    assert.equal(store.state.conversationId, 19, "cascade still awaits native acknowledgement");
+    await f.accept();
+    assert.equal(Boolean(link(f, 19)), false);
+});
+
+test("saved Close refuses an older backend before confirmation, dispatch or draft cleanup", async (t) => {
+    const f = await fixture(t);
+
+    await f.perform(() => store.set({ server: { privateAgents: 4 } }));
+    await f.click(f.label("Close Selected tab, chat 19"));
+    assert.equal(f.observed.mutations.length, 0);
+    assert.equal(f.observed.confirms.length, 0);
+    assert.equal(store.state.conversationId, 19);
+    assert.ok(link(f, 19));
+    composerRetained(f);
+});
+
+test("a stale advertised capability cannot fall back to legacy Chat-only Close after a versioned route refusal", async (t) => {
+    const f = await fixture(t);
+
+    await f.click(f.label("Close Selected tab, chat 19"));
+    const request = f.observed.mutations[0]!;
+
+    assert.equal(request.path, "/api/pip/agents/agent-a/close-chat-v1");
+    await f.perform(() =>
+        request.resolve(Response.json({ error: "No such private agent route" }, { status: 404 })),
+    );
+    assert.equal(f.observed.mutations.length, 1, "no legacy fallback or automatic retry");
+    assert.equal(store.state.conversationId, 19);
+    assert.ok(link(f, 19));
+    composerRetained(f);
+});
+
+test("a sibling's child activity never requires confirmation when closing another idle exact Chat", async (t) => {
+    const f = await fixture(t);
+
+    await f.perform(() => {
+        Object.assign(store.state.namedAgents[0].chats[0], {
+            runningChildren: true,
+            managing: true,
+        });
+        store.set({ namedAgents: [...store.state.namedAgents] });
+    });
+    await f.click(f.label("Close Last tab, chat 27"));
+    assert.equal(f.observed.confirms.length, 0);
+    assert.equal(f.observed.mutations.length, 1);
+    await f.accept();
+});
+
 test("acknowledged selected Close clears the real composer draft and supports a second pending destination Close", async (t) => {
     const f = await fixture(t);
 
@@ -497,7 +725,8 @@ test("acknowledged selected Close clears the real composer draft and supports a 
     const archive = f.observed.mutations[0];
 
     assert.ok(archive);
-    assert.deepEqual(archive.patch, { archived: true });
+    assert.deepEqual(archive.patch, { chatId: 19 });
+    assert.equal(archive.path, "/api/pip/agents/agent-a/close-chat-v1");
     await f.accept();
     assert.equal(drafts.get(19), "");
     assert.ok(drafts.revision(19) > f.retained.revision);
@@ -518,7 +747,9 @@ test("acknowledged selected Close clears the real composer draft and supports a 
     assert.ok(link(f, 7));
     assert.ok(
         f.observed.requests.every(
-            (request) => request.method === "GET" || /\/api\/sessions\/(19|27)$/.test(request.path),
+            (request) =>
+                request.method === "GET" ||
+                request.path === "/api/pip/agents/agent-a/close-chat-v1",
         ),
         "only native metadata mutations supplement passive reads",
     );
@@ -576,6 +807,47 @@ test("the phone picker can archive a selected tab during its pending native view
     assert.equal(store.state.sheet, null);
     assert.equal(store.state.conversationId, 19);
     assert.equal(Boolean(link(f, 7)), false);
+});
+
+test("accepted Close retains an archived Chat for discovery whether the native catalogue precedes its ACK or follows it", async (t) => {
+    for (const order of ["catalogue first", "ACK first"]) {
+        await t.test(order, async (t) => {
+            const f = await fixture(t);
+
+            await f.click(f.label("Close Selected tab, chat 19"));
+
+            if (order === "catalogue first") {
+                Object.assign(
+                    f.observed.history.find((chat) => chat.id === 19)!,
+                    {
+                        archived: true,
+                        busy: true,
+                        managing: true,
+                        runningChildren: true,
+                    },
+                );
+                await f.catalogueEvent();
+            }
+
+            await f.accept();
+            const agent = store.state.namedAgents[0];
+            const closed = agent.chats.find((chat: Props) => chat.id === 19);
+
+            assert.ok(
+                closed,
+                "ACK cleanup must retain the saved row even if no later catalogue event arrives",
+            );
+            assert.equal(closed.archived, true);
+            assert.equal(closed.busy, false);
+            assert.equal(closed.managing, false);
+            assert.equal(closed.runningChildren, false);
+            assert.equal(agent.chatIds.includes(19), false);
+            assert.notEqual(agent.id, 19);
+            assert.equal(Boolean(link(f, 19)), false);
+            assert.equal(store.state.conversationId, 27);
+            assert.equal(drafts.get(19), "");
+        });
+    }
 });
 
 test("archive acknowledgement survives native catalogue refresh, keyed header remount and sidebar re-entry", async (t) => {
@@ -640,7 +912,10 @@ test("native History Restore waits for metadata acknowledgement before reopening
     assert.equal(f.observed.mutations.length, 2);
     assert.ok(
         f.observed.requests.every(
-            (request) => request.method === "GET" || request.path === "/api/sessions/7",
+            (request) =>
+                request.method === "GET" ||
+                request.path === "/api/sessions/7" ||
+                request.path === "/api/pip/agents/agent-a/close-chat-v1",
         ),
     );
 });
@@ -656,7 +931,9 @@ test("closing the last saved Chat before passive effects returns home only after
     assert.equal(named(f), false);
     assert.equal(drafts.get(19), "");
     assert.equal(f.observed.paths.at(-1), "/");
-    assert.deepEqual(store.state.namedAgents[0].chats, []);
+    assert.deepEqual(store.state.namedAgents[0].chatIds, []);
+    assert.equal(store.state.namedAgents[0].chats.length, 1);
+    assert.equal(store.state.namedAgents[0].chats[0].archived, true);
 });
 
 test("sidebar re-entry prefers a remaining saved Chat and reuses a local draft when all saved Chats are archived", async (t) => {

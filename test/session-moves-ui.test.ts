@@ -17,7 +17,8 @@ import { VIEWPORTS } from "../src/server/browser/viewport.ts";
 import { createHandler } from "../src/server/http.ts";
 
 const sidebar = ".sidebar .sessions";
-const home = ".home-list .sessions";
+// Home owns creation; narrow-screen session interaction lives in the native drawer.
+const home = ".drawer .sessions";
 const dialog = '[role="dialog"]';
 const projectField = `${dialog} select[aria-label="Project"]`;
 const browserOptions = {
@@ -44,12 +45,38 @@ async function present(page: BrowserPage, selector: string, expected = true) {
     );
 }
 
+async function showList(page: BrowserPage, scope: string) {
+    const drawerOpen = await value<boolean>(
+        page,
+        `!!document.querySelector('.drawer:not([data-state="closing"])')`,
+    );
+
+    if (scope.startsWith(".drawer") && !drawerOpen) {
+        await page.press(
+            (await value<boolean>(page, `(await import('/ui.js')).APPLE`)) ? "Meta+B" : "Control+B",
+        );
+    } else if (scope.startsWith(".sidebar") && drawerOpen) {
+        await page.press("Escape");
+        await present(page, ".drawer", false);
+    }
+
+    await present(page, scope.replace(".drawer", ".drawer:not([data-state=closing])"));
+}
+
 async function click(page: BrowserPage, selector: string) {
+    if (selector.startsWith(".drawer")) {
+        await showList(page, home);
+    }
+
     await present(page, selector);
     await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
 }
 
 async function button(page: BrowserPage, scope: string, text: string) {
+    if (scope.startsWith(".drawer")) {
+        await showList(page, home);
+    }
+
     const expression = `[...document.querySelectorAll(${JSON.stringify(`${scope} button`)})]
         .find(element => element.textContent.trim() === ${JSON.stringify(text)}
             && element.getBoundingClientRect().width > 0)`;
@@ -60,7 +87,8 @@ async function button(page: BrowserPage, scope: string, text: string) {
 
 const row = (scope: string, id: ConversationId) => `${scope} .session-row[data-id="${id}"]`;
 const project = (scope: string, id: string) => `${scope} .project-section[data-project-id="${id}"]`;
-const head = (section: string) => `${section} > .project-group-head .group-head`;
+const head = (section: string) => `${section} > .project-group-head .project-open`;
+const collapse = (section: string) => `${section} > .project-group-head .project-disclosure`;
 const overlay = (scope: string, id: ConversationId) => `${row(scope, id)} .session-hold`;
 
 async function openOptions(page: BrowserPage, scope: string, id: ConversationId, title: string) {
@@ -83,6 +111,7 @@ async function pause(page: BrowserPage, ms: number) {
 }
 
 async function beginTouch(page: BrowserPage, scope: string, id: ConversationId) {
+    await showList(page, scope);
     await present(page, `${row(scope, id)} .session`);
     await page.evaluate(`
         await Promise.all(document.getAnimations()
@@ -181,6 +210,8 @@ async function touchDrag(page: BrowserPage, scope: string, id: ConversationId) {
 }
 
 async function selectRows(page: BrowserPage, scope: string, ids: ConversationId[]) {
+    await showList(page, scope);
+
     for (const id of ids) {
         await present(page, `${row(scope, id)} .session`);
         // Use keyboard-style Ctrl+click selection, without opening/navigating the conversation.
@@ -220,6 +251,7 @@ async function moved(
     assert.deepEqual(metadata(fixture.app, id), { ...before, projectId });
 
     for (const page of pages) {
+        await showList(page, scope);
         await present(page, row(scope, id));
         // The untouched peer can relocate its row only through committed catalogue event delivery.
         await until(
@@ -440,7 +472,7 @@ async function drag(page: BrowserPage, source: string, target: string, expand = 
         if (${expand}) {
             await new Promise(resolve => setTimeout(resolve, 800));
 
-            if (target.getAttribute('aria-expanded') !== 'true') {
+            if (target.closest('.project-section').querySelector('.project-disclosure').getAttribute('aria-expanded') !== 'true') {
                 throw new Error('Hover did not expand the collapsed project');
             }
         }
@@ -538,6 +570,8 @@ async function setup(name: string, viewport: "mobile" | "desktop") {
         await page.navigate(
             `http://127.0.0.1:${address.port}/login?token=${encodeURIComponent(token)}`,
         );
+        await present(page, '[data-part="home"]');
+        await showList(page, scope);
         await present(page, project(scope, beta.id));
 
         return page;
@@ -612,7 +646,7 @@ test(
                 { ...VIEWPORTS.tablet, width: 1180, height: 820 },
             ]) {
                 await page.setViewport(viewport);
-                const scope = viewport.width < 600 ? home : sidebar;
+                const scope = viewport.width < 960 ? home : sidebar;
 
                 group = `${scope} [data-work-item-id="${item.id}"]`;
                 const source = `${group} > .work-item-head > .session`;
@@ -620,6 +654,7 @@ test(
 
                 const backToList = async () => {
                     await page.evaluate(`(await import('/store.js')).navigate(null)`);
+                    await showList(page, scope);
                     await present(page, source);
                 };
 
@@ -767,16 +802,18 @@ test(
             ]) {
                 await page.setViewport({ ...VIEWPORTS.mobile, ...viewport });
                 assert.equal(await value(page, 'matchMedia("(pointer: coarse)").matches'), true);
-                const point = await beginTouch(page, sidebar, fixture.worker);
+                const scope = viewport.width < 960 ? home : sidebar;
+                const point = await beginTouch(page, scope, fixture.worker);
 
-                await present(page, overlay(sidebar, fixture.worker));
+                await present(page, overlay(scope, fixture.worker));
                 await finger(page, "touchmove", { x: point.x + 16, y: point.y });
                 await assertAnchor({ x: point.x + 16, y: point.y });
                 await finger(page, "touchend");
                 await dismiss();
 
                 // Project holds use a separate recognizer and must preserve their contact too.
-                const projectHead = head(project(sidebar, fixture.alpha));
+                await showList(page, scope);
+                const projectHead = head(project(scope, fixture.alpha));
                 const projectPoint = await value<{ x: number; y: number }>(
                     page,
                     `(() => {
@@ -827,12 +864,14 @@ test(
             );
             await button(page, menu, "Pin to the top");
             await present(page, menu, false);
+            await showList(page, home);
 
             // Safari may expose click as MouseEvent even when pointerdown has a pointerType.
             // Touch -> mouse -> keyboard must resolve the source button, not a device-wide mode.
             const sourceOptions = `${row(home, fixture.worker)} .session-options`;
 
             const pointerClick = async (pointer: string, detail = 1) => {
+                await showList(page, home);
                 await page.evaluate(`
                     const target = document.querySelector(${JSON.stringify(sourceOptions)});
                     target.dispatchEvent(new PointerEvent('pointerdown', {
@@ -855,6 +894,7 @@ test(
             await present(page, menu);
             await dismiss();
 
+            await showList(page, home);
             await page.evaluate(`document.querySelector(${JSON.stringify(source)}).dispatchEvent(
                 new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true }))`);
             await present(page, menu);
@@ -924,7 +964,7 @@ test(
             const chatBefore = metadata(fixture.app, fixture.chat);
             const destination = head(project(sidebar, fixture.beta));
 
-            await click(page, destination);
+            await click(page, collapse(project(sidebar, fixture.beta)));
             await selectRows(page, sidebar, [fixture.worker, fixture.chat]);
             fixture.denied.add(`/api/sessions/${fixture.chat}`);
             await drag(page, `${row(sidebar, fixture.worker)} .session`, destination, true);
@@ -1243,10 +1283,11 @@ test(
             }
 
             await page.press("Escape");
+            await present(page, ".drawer", false);
             assert.equal(
                 await value(page, "window.shortcutEscapes"),
-                1,
-                "ordinary Escape remains available when there is no hold",
+                0,
+                "ordinary Escape closes the drawer instead of leaking to stop-Pi when there is no hold",
             );
 
             const switching = await beginTouch(page, home, fixture.worker);
@@ -1455,7 +1496,7 @@ test(
             const before = metadata(fixture.app, fixture.worker);
             const destination = head(project(home, fixture.beta));
 
-            await click(page, destination);
+            await click(page, collapse(project(home, fixture.beta)));
             await button(page, `${home} .session-tabs:not(.private-tabs)`, "Recent");
             await touchDrag(page, home, fixture.worker);
             const tab = await page.locate({
@@ -1483,7 +1524,7 @@ test(
                 () =>
                     value<boolean>(
                         page,
-                        `document.querySelector(${JSON.stringify(destination)}).getAttribute('aria-expanded') === 'true'`,
+                        `document.querySelector(${JSON.stringify(collapse(project(home, fixture.beta)))}).getAttribute('aria-expanded') === 'true'`,
                     ),
                 "touch dwell expands the closed project",
             );
@@ -1508,6 +1549,8 @@ test(
                 .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
                 .map(animation => animation.finished.catch(() => {})))`);
             await page.click({ selector: ".topbar-back" });
+            await present(page, '[data-part="home"]');
+            await showList(page, home);
             await present(page, `${row(home, fixture.worker)} .session`);
 
             await touchDrag(page, home, fixture.worker);

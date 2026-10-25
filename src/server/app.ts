@@ -2119,6 +2119,11 @@ export class PocketApp {
                 pip: this.pip.available(user),
                 pipSettings: 1,
                 privateAgents: 4,
+                agentChatArchiveChildren: 1,
+                // First-send drafts preserve an explicit project or explicit no-project intent.
+                agentDraftProjects: 1,
+                // Identity/project links in owner catalogues and revision-checked settings.
+                projectAgentLinks: 1,
                 pipEnabled: this.config.pipEnabled,
                 // Shared mentions are separate from the owner's private PiP panel availability.
                 pipMentions: true,

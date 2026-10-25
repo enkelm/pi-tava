@@ -1,14 +1,25 @@
 // The HTTP/native boundary owns upload privacy and first-send payload delivery; Composer callbacks live in offline tests.
 import "./helpers.ts";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import type { ConversationId, SubmissionId } from "@earendil-works/pi-durable";
 import { SessionsDoc } from "../src/server/docs.ts";
 import { splitAttachments } from "../src/server/entry-format.ts";
 import { privateAgentRequest as request } from "./private-agent-http.ts";
-import { cleanUp, context, lastText, openApp, root, scriptedModel, work } from "./helpers.ts";
+import {
+    cleanUp,
+    context,
+    lastText,
+    openApp,
+    owner,
+    root,
+    scriptedModel,
+    until,
+    work,
+} from "./helpers.ts";
+import { sshFixture } from "./ssh-fixture.ts";
 
 after(cleanUp);
 
@@ -221,4 +232,257 @@ test("private draft uploads reserve no Chat; attachment-only and inline-file sen
 
     assert.deepEqual((await history.json()).chatIds, [accepted.id, inlineAccepted.id]);
     assert.deepEqual((await sibling.json()).chats, []);
+});
+
+test("draft file suggestions and native inline bytes share explicit, default, null and reserved project context", async (t) => {
+    const directory = join(root, "private-draft-file-context");
+    let app = await openApp(scriptedModel(), directory);
+
+    t.after(() => app.close());
+    app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
+    const sameName = "draft-context-shared.txt";
+    const contexts = [
+        { name: "default", cwd: join(root, "draft-default-context"), bytes: "IDENTITY PROJECT" },
+        { name: "selected", cwd: join(root, "draft-selected-context"), bytes: "SELECTED PROJECT" },
+        { name: "null", cwd: app.defaultCwd, bytes: "HOST DEFAULT" },
+    ];
+
+    for (const item of contexts) {
+        mkdirSync(item.cwd, { recursive: true });
+        writeFileSync(join(item.cwd, sameName), item.bytes);
+        writeFileSync(join(item.cwd, `draft-${item.name}-only.txt`), `${item.bytes} UNIQUE`);
+    }
+
+    const projects = await Promise.all(
+        contexts.slice(0, 2).map((item) =>
+            app.projects.create(owner(app), {
+                requestId: `draft-files-${item.name}`,
+                name: item.name,
+                cwd: item.cwd,
+            }),
+        ),
+    );
+    const agent = await app.pip.agents.createIdentity(owner(app), {
+        requestId: "draft-files-agent",
+        name: "Context",
+        projectId: projects[0]!.id,
+    });
+    const path = `pip/agents/${agent.agentId}`;
+    const saved: number[] = [];
+
+    for (const [index, item] of contexts.entries()) {
+        const projectId = index === 0 ? undefined : index === 1 ? projects[1]!.id : null;
+        const query = projectId === undefined ? "" : `?projectId=${projectId ?? ""}`;
+        const before = await app.harness.snapshot(SessionsDoc, context);
+        const response = await request(app, `${path}/files${query}`);
+
+        assert.equal(response.status, 200, await response.clone().text());
+        const listing = await response.json();
+        const unique = `draft-${item.name}-only.txt`;
+
+        assert.ok(
+            listing.files.includes(unique),
+            `${item.name}: suggest the effective root's file`,
+        );
+        assert.ok(listing.files.includes(sameName));
+
+        for (const other of contexts.filter((other) => other !== item)) {
+            assert.ok(!listing.files.includes(`draft-${other.name}-only.txt`));
+        }
+
+        assert.deepEqual(
+            await app.harness.snapshot(SessionsDoc, context),
+            before,
+            "listing creates no conversation or receipt",
+        );
+        const unchanged = await request(
+            app,
+            `${path}/files${query}${query ? "&" : "?"}since=${listing.version}`,
+        );
+
+        assert.deepEqual(await unchanged.json(), { version: listing.version, same: true });
+        const submitted = await request(app, `${path}/submit`, {
+            requestId: `draft-context-${item.name}`,
+            text: `Inspect @${sameName} and @${unique}`,
+            inlineFiles: true,
+            ...(projectId === undefined ? {} : { projectId }),
+        });
+
+        assert.equal(submitted.status, 200, await submitted.clone().text());
+        const accepted = await submitted.json();
+
+        saved.push(accepted.id);
+        await (await app.harness.submission(accepted.submissionId, context))!.wait(context);
+        assert.equal(app.cwdOf(accepted.id), item.cwd);
+        const view = await (await app.conversation(accepted.id)).context(context);
+        const text = lastText({
+            messages: view.messages.filter((message) => message.role === "user"),
+        }).text;
+
+        assert.ok(text.includes(`<file name="${join(item.cwd, sameName)}">`));
+        assert.ok(text.includes(`${item.bytes}\n</file>`));
+        assert.ok(text.includes(`${item.bytes} UNIQUE\n</file>`));
+
+        for (const other of contexts.filter((other) => other !== item)) {
+            assert.ok(
+                !text.includes(other.bytes),
+                "same-named files never load another context's bytes",
+            );
+        }
+    }
+
+    await app.pip.agents.setBudget(saved[0] as ConversationId, owner(app), 0);
+    const pendingRequestId = "draft-context-reserved";
+    const rejected = await request(app, `${path}/submit`, {
+        requestId: pendingRequestId,
+        text: "Keep this exact destination for a retry",
+    });
+
+    assert.equal(rejected.status, 409);
+    assert.match(await rejected.text(), /spend limit/);
+    await app.projects.update(owner(app), projects[0]!.id, { cwd: contexts[1]!.cwd });
+    const current = await request(app, `${path}/files`);
+    const reserved = await request(app, `${path}/files?requestId=${pendingRequestId}`);
+
+    assert.equal(current.status, 200);
+    assert.ok((await current.json()).files.includes("draft-selected-only.txt"));
+    assert.equal(reserved.status, 200, await reserved.clone().text());
+    const pinnedFiles = (await reserved.json()).files;
+
+    assert.ok(pinnedFiles.includes("draft-default-only.txt"));
+    assert.ok(!pinnedFiles.includes("draft-selected-only.txt"));
+    await app.close();
+    app = await openApp(scriptedModel(), directory);
+    const recovered = await request(
+        app,
+        `${path}/files?requestId=${pendingRequestId}&projectId=${projects[0]!.id}`,
+    );
+
+    assert.equal(recovered.status, 200, await recovered.clone().text());
+    assert.ok((await recovered.json()).files.includes("draft-default-only.txt"));
+    assert.deepEqual((await app.pip.agents.read(agent.agentId, owner(app))).chatIds, saved);
+    const sibling = await app.pip.agents.createIdentity(owner(app), {
+        requestId: "draft-files-sibling",
+        name: "Sibling",
+    });
+
+    for (const route of [
+        `${path}/files?requestId=missing`,
+        `pip/agents/${sibling.agentId}/files?requestId=${pendingRequestId}`,
+        `${path}/files?projectId=missing`,
+    ]) {
+        assert.equal(
+            (await request(app, route)).status,
+            404,
+            "invalid context never falls back to host files",
+        );
+    }
+
+    assert.equal(
+        (await request(app, `${path}/files?requestId=${pendingRequestId}&projectId=`)).status,
+        409,
+        "an explicit context cannot retarget a reserved first send",
+    );
+});
+
+test("remote draft file suggestions use native SSH, inline matching bytes and discard raced context or owner changes", async (t) => {
+    const host = "draft-context-fixture";
+    const ssh = await sshFixture(host);
+    const app = await openApp(scriptedModel(), join(root, "private-remote-draft-files"));
+    const cwd = join(ssh.root, "workspace");
+    const hold = join(ssh.root, "hold-sftp-12");
+    const ready = join(ssh.root, "sftp-12-ready");
+
+    t.after(async () => {
+        rmSync(hold, { force: true });
+        await app.close();
+        await ssh.close();
+    });
+    mkdirSync(cwd);
+    writeFileSync(join(cwd, "draft-remote-only.txt"), "REMOTE UNIQUE");
+    writeFileSync(join(cwd, "draft-remote-shared.txt"), "REMOTE SHARED");
+    writeFileSync(join(app.defaultCwd, "draft-remote-shared.txt"), "HOST TRAP");
+    app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
+    const project = await app.projects.create(owner(app), {
+        requestId: "draft-remote-project",
+        name: "Remote",
+        cwd,
+        location: { kind: "ssh", host },
+    });
+    const agent = await app.pip.agents.createIdentity(owner(app), {
+        requestId: "draft-remote-agent",
+        name: "Remote context",
+    });
+    const path = `pip/agents/${agent.agentId}`;
+    const query = `?projectId=${project.id}`;
+    const callsBefore = readFileSync(join(ssh.root, "calls"), "utf8");
+    const response = await request(app, `${path}/files${query}`);
+
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.deepEqual((await response.json()).files, [
+        "draft-remote-only.txt",
+        "draft-remote-shared.txt",
+    ]);
+    assert.notEqual(
+        readFileSync(join(ssh.root, "calls"), "utf8"),
+        callsBefore,
+        "remote suggestions cross the real SFTP boundary",
+    );
+    const submitted = await request(app, `${path}/submit`, {
+        requestId: "draft-remote-inline",
+        projectId: project.id,
+        text: "Inspect @draft-remote-shared.txt",
+        inlineFiles: true,
+    });
+
+    assert.equal(submitted.status, 200, await submitted.clone().text());
+    const accepted = await submitted.json();
+
+    await (await app.harness.submission(accepted.submissionId, context))!.wait(context);
+    const view = await (await app.conversation(accepted.id)).context(context);
+    const text = lastText({
+        messages: view.messages.filter((message) => message.role === "user"),
+    }).text;
+
+    assert.ok(text.includes("REMOTE SHARED\n</file>"));
+    assert.ok(!text.includes("HOST TRAP"));
+
+    for (const change of ["project", "identity", "owner"] as const) {
+        rmSync(ready, { force: true });
+        writeFileSync(hold, "hold listing");
+        const pending = request(app, `${path}/files${query}`);
+
+        try {
+            await until(() => existsSync(ready), "remote draft listing is in flight");
+
+            if (change === "project") {
+                await app.projects.update(owner(app), project.id, {
+                    cwd: app.defaultCwd,
+                    location: null,
+                });
+            } else if (change === "identity") {
+                await app.commands.abort(accepted.id, owner(app));
+            } else {
+                app.config.rotateOwnerToken();
+            }
+        } finally {
+            rmSync(hold, { force: true });
+            await pending;
+        }
+
+        const stale = await pending;
+
+        assert.ok(change === "owner" ? [401, 403].includes(stale.status) : stale.status === 409);
+        assert.ok(
+            !(await stale.text()).includes("draft-remote-only.txt"),
+            "stale file names never reach the requester",
+        );
+
+        if (change === "project") {
+            await app.projects.update(owner(app), project.id, {
+                cwd,
+                location: { kind: "ssh", host },
+            });
+        }
+    }
 });

@@ -1,9 +1,10 @@
 // The open sheet: which component shows it. The sheets themselves are in web/sheets/, and a few beside their features
 // (chat.js, notify.js, share.js).
 import { ChatSheet } from "./chat.js";
+import { HomeCreationSheet } from "./home.js";
 import { ExtensionSheet, onExtensionsGone } from "./extension-ui.js";
 import { ShareSheet } from "./share.js";
-import { AgentModelPicker, NamedAgentSheet } from "./named-agents.js";
+import { AgentModelPicker, NamedAgentSheet, NamedAgentsSheet } from "./named-agents.js";
 import { BranchPicker } from "./sheets/branch.js";
 import { FileSheet } from "./sheets/file.js";
 import { FindSheet } from "./sheets/find.js";
@@ -188,23 +189,39 @@ export function Sheets() {
         return auth;
     }
 
-    const key = sheetKey(sheet);
+    // Only this setup needs retention across child sheets: it owns native form drafts and
+    // identity-creation callbacks. The hidden layer has no focus, drag, Escape or Back handlers.
+    const creation = trail.find((step) => step.sheet.type === "home-creation")?.sheet;
+    const layers = creation && creation !== sheet ? [creation, sheet] : [sheet];
 
-    return html`<div class=${`sheet-host ${leaving ? "leaving" : ""}`} inert=${leaving}>
-            <${SheetBack.Provider} value=${trail.length > 1 ? goBack : null}>
-                <${SheetInfo.Provider} value=${{ type: sheet.type, closing: Boolean(leaving) }}>
-                    <${Boundary} key=${key} reset=${sheet}>${sheetBody(sheet)}<//>
+    return html`${layers.map((layer) => {
+        const active = layer === sheet;
+        const closing = active && leaving;
+
+        return html`<div
+            key=${sheetKey(layer)}
+            class=${`sheet-host ${closing ? "leaving" : ""}`}
+            hidden=${!active}
+            inert=${!active || closing}
+        >
+            <${SheetBack.Provider} value=${active && trail.length > 1 ? goBack : null}>
+                <${SheetInfo.Provider} value=${{ type: layer.type, closing: Boolean(closing) }}>
+                    <${Boundary} reset=${layer}>${sheetBody(layer, active && !closing)}<//>
                 <//>
             <//>
-        </div>
+        </div>`;
+    })}
         ${auth}`;
 }
 
-function sheetBody(sheet) {
+function sheetBody(sheet, active = true) {
     const { view, me } = store.state;
     let body = null;
 
     switch (sheet.type) {
+        case "home-creation":
+            body = html`<${HomeCreationSheet} sheet=${sheet} active=${active} />`;
+            break;
         case "import":
             body = piSessionsAvailable()
                 ? sheet.fromPrivate
@@ -217,6 +234,9 @@ function sheetBody(sheet) {
                               initialPreview=${sheet.initialPreview}
                           />`
                 : null;
+            break;
+        case "named-agents":
+            body = html`<${NamedAgentsSheet} />`;
             break;
         case "new-session":
             body = html`<${NewSessionSheet}

@@ -484,12 +484,28 @@ test(
 
                 await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
                 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-                const scope = viewport === "mobile" ? ".home-list .sessions" : ".sidebar .sessions";
+                const scope = viewport === "mobile" ? ".drawer .sessions" : ".sidebar .sessions";
 
                 const home = async (page: BrowserPage) => {
                     if (viewport === "mobile") {
-                        await click(page, '[aria-label^="Back to sessions"]');
+                        if (
+                            !(await value(page, `!!document.querySelector('[data-part="home"]')`))
+                        ) {
+                            await click(page, '[aria-label^="Back to sessions"]');
+                            await present(page, '[data-part="home"]');
+                        }
+
+                        if (
+                            !(await value(
+                                page,
+                                `!!document.querySelector('.drawer:not([data-state="closing"])')`,
+                            ))
+                        ) {
+                            await click(page, '.topbar [aria-label="Open sessions"]');
+                        }
                     }
+
+                    await present(page, scope);
                 };
 
                 try {
@@ -499,6 +515,7 @@ test(
                     await page.navigate(
                         `${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`,
                     );
+                    await home(page);
                     await click(page, `${scope} .session-row[data-id="${origin.id}"] .session`);
                     await present(page, ".topbar .handoff-button");
                     await present(page, '[role="dialog"][aria-label="Choose next thread"]', false);
@@ -942,6 +959,7 @@ test(
                     );
                     await page.press("Escape");
                     await present(page, optionsSurface, false);
+                    await home(page);
                     await fill(page, `${scope} .search input`, "独立");
                     await present(page, workItem);
                     assert.equal(

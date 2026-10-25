@@ -1,0 +1,243 @@
+@import url("/named-agents.css");
+
+/* Focused project landing and the native PiPs library, within the incumbent theme. */
+.project-view {
+    min-height: 0;
+    color: var(--body);
+}
+
+.project-view-content {
+    width: 100%;
+    max-width: 1040px;
+    margin-inline: auto;
+    padding: clamp(20px, 4vw, 48px);
+    padding-top: calc(clamp(20px, 4vw, 48px) + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(32px + var(--safe-bottom, env(safe-area-inset-bottom)));
+}
+
+.project-view .project-view-back {
+    min-height: 44px;
+    margin-bottom: 16px;
+}
+
+.project-view-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.project-view h1 {
+    flex: 1 1 240px;
+    min-width: 0;
+    margin: 0;
+    color: var(--text);
+    font-size: 1.6rem;
+    font-weight: 600;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.project-view-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.project-view-actions .button {
+    min-height: 44px;
+    white-space: normal;
+    text-align: start;
+}
+
+.project-view-context {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px 32px;
+    margin: 0;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--line);
+}
+
+.project-view-context > div {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.project-view-context dt {
+    margin-bottom: 4px;
+    color: var(--muted);
+}
+
+.project-view-context dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.project-view-agent {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.project-view-section {
+    margin-top: 32px;
+}
+
+.project-view-section h2 {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 0 0 10px;
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.project-view-empty {
+    margin: 0;
+    padding-block: 12px;
+    font-size: 0.9rem;
+}
+
+.project-view-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.project-view-list > li + li {
+    border-top: 1px solid var(--hair);
+}
+
+.project-view-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    min-height: 64px;
+    padding: 10px 8px;
+    border-radius: var(--r-row);
+    color: var(--body);
+    text-decoration: none;
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+}
+
+.project-view-row > svg,
+.project-view-row > .thread-type {
+    flex: none;
+}
+
+.project-view-row-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.project-view-row-title {
+    display: block;
+    color: var(--text);
+    font-size: 0.92rem;
+    overflow-wrap: anywhere;
+}
+
+.project-view-row-context {
+    display: block;
+    margin-top: 3px;
+    overflow-wrap: anywhere;
+}
+
+.project-view-row-status {
+    flex: 0 0 auto;
+    max-width: 30%;
+    text-align: end;
+    overflow-wrap: anywhere;
+}
+
+.project-view-threads {
+    margin: 0 8px 10px 38px;
+}
+
+.project-view :is(.project-view-threads, .project-view-archive) > summary {
+    min-height: 44px;
+    align-content: center;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.82rem;
+}
+
+.project-view-threads .project-view-row {
+    min-height: 56px;
+}
+
+.project-view-archive {
+    margin-top: 32px;
+    border-top: 1px solid var(--line);
+}
+
+.named-agent-library .named-agents-list {
+    max-height: none;
+    overflow: visible;
+}
+
+.named-agent-library .named-agent-open {
+    min-height: 56px;
+    padding-inline: 8px;
+}
+
+.named-agent-library-create {
+    justify-content: flex-start;
+    width: 100%;
+    min-height: 48px;
+    margin-top: 12px;
+    white-space: normal;
+    text-align: start;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .project-view-row:hover {
+        background: var(--hover);
+        text-decoration: none;
+    }
+
+    .named-agent-library .named-agent-open:hover {
+        background: var(--hover);
+    }
+}
+
+.project-view-row:active,
+.named-agent-library .named-agent-open:active {
+    background: var(--pressed);
+}
+
+.project-view-row:focus-visible,
+.named-agent-library .named-agent-open:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+}
+
+@media (min-width: 768px) {
+    .project-view .project-view-back {
+        display: none;
+    }
+}
+
+@media (max-width: 480px) {
+    .project-view-row {
+        gap: 8px;
+    }
+
+    .project-view-actions {
+        width: 100%;
+    }
+
+    .project-view-actions .button {
+        flex: 1 1 auto;
+    }
+
+    .project-view-threads {
+        margin-inline-start: 16px;
+    }
+}

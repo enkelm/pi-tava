@@ -1433,6 +1433,8 @@ export function Sheet({
     children,
     wide = false,
     bottom = false,
+    active = true,
+    inline = false,
     actions = null,
     class: panelClass = "",
     className = panelClass,
@@ -1440,11 +1442,21 @@ export function Sheet({
     const ref = useRef(null);
     const onBack = useContext(SheetBack);
     const info = useContext(SheetInfo);
+    const lastFocused = useRef(null);
 
-    useDragToClose(ref, { dir: "down", onClose, enabled: bottom || BOTTOM_SHEETS.matches });
+    useDragToClose(ref, {
+        dir: "down",
+        onClose,
+        enabled: active && !inline && (bottom || BOTTOM_SHEETS.matches),
+    });
 
     // Not the Esc that ends an input method's composing, which belongs to the field.
-    useEffect(() => {
+    // Retained setup must release its global listener before a child sheet takes it.
+    useLayoutEffect(() => {
+        if (!active || inline) {
+            return undefined;
+        }
+
         const onKey = (event) =>
             event.key === "Escape" &&
             !event.defaultPrevented &&
@@ -1455,24 +1467,28 @@ export function Sheet({
         addEventListener("keydown", onKey);
 
         return () => removeEventListener("keydown", onKey);
-    }, [onClose]);
+    }, [onClose, active, inline]);
     // Keys go to the sheet, not the message box behind it, unless something inside already took focus. Its field marked
     // autofocus takes them where a keyboard is at hand (the browser skips the attribute, the page already having focus);
     // on touch screens the sheet does, so no keyboard pops up over it.
     useEffect(() => {
         const sheet = ref.current;
 
-        if (sheet && !sheet.contains(document.activeElement)) {
-            const field = matchMedia("(pointer: coarse)").matches
-                ? null
-                : sheet.querySelector("[autofocus]");
+        if (active && !inline && sheet && !sheet.contains(document.activeElement)) {
+            const coarse = matchMedia("(pointer: coarse)").matches;
+            const previous = lastFocused.current;
+            const restore =
+                previous?.isConnected &&
+                sheet.contains(previous) &&
+                !(coarse && previous.matches("input, textarea, [contenteditable]"));
+            const field = coarse ? null : sheet.querySelector("[autofocus]");
 
-            (field ?? sheet).focus({ preventScroll: true });
+            (restore ? previous : (field ?? sheet)).focus({ preventScroll: true });
         }
-    }, []);
+    }, [active, inline]);
 
     return html`<div
-        class=${`overlay ${bottom ? "bottom-overlay" : ""}`}
+        class=${`overlay ${bottom ? "bottom-overlay" : ""} ${inline ? "inline-sheet-overlay" : ""}`}
         data-part="scrim"
         data-for="sheet"
         onMouseDown=${scrimPress(onClose)}
@@ -1484,11 +1500,14 @@ export function Sheet({
             data-size=${wide ? "wide" : undefined}
             data-state=${info?.closing ? "closing" : undefined}
             ref=${ref}
-            role="dialog"
-            aria-modal="true"
+            role=${inline ? undefined : "dialog"}
+            aria-modal=${active && !inline ? "true" : undefined}
             aria-label=${title}
             tabindex="-1"
             onKeyDown=${scrollFromKeys}
+            onFocus=${(event) => {
+                lastFocused.current = event.target;
+            }}
         >
             <header class="sheet-head" data-part="sheet-head">
                 <div class="grip" aria-hidden="true"></div>

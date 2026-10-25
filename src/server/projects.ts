@@ -36,9 +36,15 @@ export type CreateProject = {
     name?: unknown;
     cwd?: unknown;
     location?: unknown;
+    defaultAgentId?: unknown;
     requestId?: unknown;
 };
-export type UpdateProject = { name?: unknown; cwd?: unknown; location?: unknown };
+export type UpdateProject = {
+    name?: unknown;
+    cwd?: unknown;
+    location?: unknown;
+    defaultAgentId?: unknown;
+};
 export type AssignProject = { projectId?: unknown };
 
 function empty(): ProjectsData {
@@ -155,6 +161,12 @@ export class Projects {
         return user;
     }
 
+    #defaultAgent(user: User, id: string | undefined): void {
+        if (id !== undefined) {
+            this.#app.pip.agents.ownedIdentity(id, user);
+        }
+    }
+
     canAccess(supplied: User, id: string): boolean {
         const user = this.#app.config.userById(supplied.id);
         const item = Object.hasOwn(this.#doc.projects, id) ? this.#doc.projects[id] : undefined;
@@ -213,6 +225,20 @@ export class Projects {
                     delete copy.location;
                 }
 
+                if (user.role !== "owner" || scoped) {
+                    delete copy.defaultAgentId;
+                } else if (copy.defaultAgentId !== undefined) {
+                    try {
+                        this.#defaultAgent(user, copy.defaultAgentId);
+                    } catch (error) {
+                        if (!(error instanceof HttpError) || error.status !== 404) {
+                            throw error;
+                        }
+
+                        delete copy.defaultAgentId;
+                    }
+                }
+
                 return copy;
             });
 
@@ -226,9 +252,13 @@ export class Projects {
         const askedCwd = text(request.cwd, "cwd", 4096);
         const key = digest([user.id, text(request.requestId, "requestId", 160)]);
         const location = parseWorkspaceLocation(request.location);
-        const fingerprint = digest(
-            location === undefined ? [name, askedCwd] : [name, askedCwd, location],
-        );
+        const defaultAgentId = optionalId(request.defaultAgentId, "defaultAgentId");
+        const fingerprint = digest([
+            name,
+            askedCwd,
+            ...(location === undefined ? [] : [location]),
+            ...(defaultAgentId === undefined ? [] : [defaultAgentId]),
+        ]);
         const previous = this.#doc.requests[key];
 
         // A committed retry needs no SSH connection. The transaction below still arbitrates
@@ -241,6 +271,7 @@ export class Projects {
             return { id: previous.id };
         }
 
+        this.#defaultAgent(user, defaultAgentId);
         const cwd =
             location === undefined
                 ? this.#app.workspace.checkDirectory(askedCwd)
@@ -264,6 +295,7 @@ export class Projects {
                 throw new HttpError(413, "The project creation request limit has been reached");
             }
 
+            this.#defaultAgent(current, defaultAgentId);
             const id = `p-${randomUUID()}`;
             const now = Date.now();
 
@@ -272,6 +304,7 @@ export class Projects {
                 name,
                 cwd,
                 ...(location === undefined ? {} : { location }),
+                ...(defaultAgentId === undefined ? {} : { defaultAgentId }),
                 createdAt: now,
                 updatedAt: now,
                 createdBy: current.id,
@@ -286,6 +319,9 @@ export class Projects {
         supplied = { ...supplied };
         const user = this.#editor(supplied);
         const name = request.name === undefined ? undefined : text(request.name, "name", MAX_NAME);
+        const defaultAgentId = optionalId(request.defaultAgentId, "defaultAgentId");
+
+        this.#defaultAgent(user, defaultAgentId);
         const askedCwd = request.cwd === undefined ? undefined : text(request.cwd, "cwd", 4096);
         const original = project(this.#doc, id);
         const originalCwd = original.cwd;
@@ -306,7 +342,9 @@ export class Projects {
         await this.#app.harness.commit(async (tx) => {
             const doc = await tx.doc(ProjectsDoc);
 
-            this.#editor(supplied);
+            const current = this.#editor(supplied);
+
+            this.#defaultAgent(current, defaultAgentId);
             const item = project(doc, id);
 
             if (
@@ -332,7 +370,15 @@ export class Projects {
                 item.cwd = cwd;
             }
 
-            if (name !== undefined || cwd !== undefined) {
+            if (request.defaultAgentId !== undefined) {
+                if (defaultAgentId === undefined) {
+                    delete item.defaultAgentId;
+                } else {
+                    item.defaultAgentId = defaultAgentId;
+                }
+            }
+
+            if (name !== undefined || cwd !== undefined || request.defaultAgentId !== undefined) {
                 item.updatedAt = Date.now();
             }
         }, context);

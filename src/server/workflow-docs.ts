@@ -78,6 +78,8 @@ export type WorkItem = {
     title: string;
     projectId?: string;
     archived?: boolean;
+    /** Owner-private display/Close ownership, never a live controller grant. Null explicitly detaches legacy origins. */
+    parentChat?: { chatId: number; agentId: string; ownerId: string } | null;
     predecessorWorkItemId?: string;
     createdAt: number;
     /** Native direct-contact admissions, retained to avoid renewing action budgets on retries. */

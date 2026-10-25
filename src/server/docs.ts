@@ -154,6 +154,8 @@ export type Project = {
     cwd?: string;
     /** Creation-time default for new threads, omitted with cwd in scoped projections. */
     location?: WorkspaceLocation;
+    /** Owner-private named identity suggested for new chats; never an access grant. */
+    defaultAgentId?: string;
     createdAt: number;
     updatedAt: number;
     createdBy: string;

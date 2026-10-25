@@ -91,6 +91,8 @@ export const store = {
         /** Sessions marked unread in this browser: an id each, until opened again. */
         unread: unreadOf(),
         conversationId: routeConversation(),
+        projectId: routeProject(),
+        homeCreation: null,
         agentDraft: routeAgentDraft(),
         privateId: routePrivate(),
         sidebarTab: location.pathname.startsWith("/private") ? "private" : "sessions",
@@ -259,6 +261,17 @@ function routeConversation() {
     const match = /^\/s\/(\d+)\/?$/.exec(location.pathname);
 
     return match ? Number(match[1]) : null;
+}
+
+/** A project is a catalogue view, never a conversation or an implicit chat selection. */
+function routeProject() {
+    const match = /^\/projects\/([^/]+)\/?$/.exec(location.pathname);
+
+    try {
+        return match ? decodeURIComponent(match[1]) : null;
+    } catch {
+        return null;
+    }
 }
 
 /** Local draft routes identify only a browser view, never a Durable room. */
@@ -1465,7 +1478,14 @@ export function closeSignIn(flowId) {
 
 export function navigate(
     conversationId,
-    { replace = false, sheet = null, privateId = null, agentDraft = null } = {},
+    {
+        replace = false,
+        sheet = null,
+        privateId = null,
+        agentDraft = null,
+        projectId = null,
+        homeCreation = null,
+    } = {},
 ) {
     reviewNavigation++;
     const path =
@@ -1473,9 +1493,11 @@ export function navigate(
             ? `/agents/${encodeURIComponent(agentDraft.agentId)}/drafts/${encodeURIComponent(agentDraft.id)}`
             : privateId !== null
               ? `/private/${encodeURIComponent(privateId)}`
-              : conversationId === null
-                ? "/"
-                : `/s/${conversationId}`;
+              : projectId !== null
+                ? `/projects/${encodeURIComponent(projectId)}`
+                : conversationId === null
+                  ? "/"
+                  : `/s/${conversationId}`;
 
     if (location.pathname !== path || store.state.conversationId !== conversationId) {
         pushRoute(path, { replace });
@@ -1493,6 +1515,8 @@ export function navigate(
     if (
         store.state.conversationId === conversationId &&
         store.state.privateId === privateId &&
+        store.state.projectId === projectId &&
+        store.state.homeCreation?.id === homeCreation?.id &&
         store.state.agentDraft?.id === agentDraft?.id &&
         store.state.agentDraft?.agentId === agentDraft?.agentId &&
         source
@@ -1507,6 +1531,8 @@ export function navigate(
     store.set((state) => ({
         conversationId,
         privateId,
+        projectId,
+        homeCreation,
         agentDraft,
         ...(privateId !== null
             ? { sidebarTab: "private" }
@@ -1531,11 +1557,13 @@ export function navigate(
 onRoute(() => {
     reviewNavigation++;
     const id = routeConversation();
+    const projectId = routeProject();
     const privateId = routePrivate();
     const agentDraft = routeAgentDraft();
 
     if (
         id !== store.state.conversationId ||
+        projectId !== store.state.projectId ||
         privateId !== store.state.privateId ||
         agentDraft?.id !== store.state.agentDraft?.id ||
         agentDraft?.agentId !== store.state.agentDraft?.agentId
@@ -1544,6 +1572,8 @@ onRoute(() => {
         store.set({
             conversationId: id,
             privateId,
+            projectId,
+            homeCreation: null,
             agentDraft,
             ...(privateId !== null
                 ? { sidebarTab: "private" }
@@ -2073,7 +2103,82 @@ PEOPLE_DOCK.addEventListener("change", () => {
 });
 
 export function openSheet(sheet) {
-    store.set((state) => ({ ...sheetChange(sheet, state), drawer: false }));
+    if (
+        (sheet?.type === "new-session" || (sheet?.type === "cwd" && sheet.mode === "new")) &&
+        (!sheet.tab || sheet.tab === "new") &&
+        projectsAvailable() &&
+        canSteer() &&
+        !scoped()
+    ) {
+        const state = store.state;
+
+        // Returning from Import's Start new tab resumes the exact retained setup.
+        if (state.sheet?.creationParent) {
+            store.set({ sheet: state.sheet.creationParent, drawer: false });
+
+            return;
+        }
+
+        if (
+            state.homeCreation &&
+            state.conversationId === null &&
+            state.projectId === null &&
+            !state.agentDraft &&
+            state.privateId === null &&
+            !sheet.projectId &&
+            !sheet.cwd &&
+            !sheet.continuation
+        ) {
+            store.set({ sheet: null, drawer: false, launcher: false });
+
+            return;
+        }
+
+        if (!matchMedia("(min-width: 768px)").matches) {
+            store.set({
+                sheet: {
+                    ...sheet,
+                    type: "home-creation",
+                    id: uid(),
+                    projectId: sheet.projectId ?? state.projectId ?? null,
+                },
+                drawer: false,
+                launcher: false,
+            });
+
+            return;
+        }
+
+        const returnTo = {
+            conversationId: state.conversationId,
+            projectId: state.projectId,
+            privateId: state.privateId,
+            agentDraft: state.agentDraft,
+        };
+
+        navigate(null, {
+            homeCreation: {
+                ...sheet,
+                id: uid(),
+                projectId: sheet.projectId ?? state.projectId ?? null,
+                returnTo,
+            },
+        });
+
+        return;
+    }
+
+    store.set((state) => {
+        // Child sheets replace the visible sheet, not the unfinished creation state.
+        const parent =
+            state.sheet?.type === "home-creation" ? state.sheet : state.sheet?.creationParent;
+        const next =
+            sheet && parent && sheet !== parent && !sheet.creationParent
+                ? { ...sheet, creationParent: parent }
+                : sheet;
+
+        return { ...sheetChange(next, state), drawer: false };
+    });
 }
 
 /**
@@ -2130,7 +2235,7 @@ store.subscribe((state) => {
 });
 
 export function closeSheet() {
-    store.set({ sheet: null });
+    store.set({ sheet: store.state.sheet?.creationParent ?? null });
 }
 
 // Per-conversation composer drafts survive reloads, including the automatic ones after a live edit.

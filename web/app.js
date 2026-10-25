@@ -9,7 +9,8 @@ import { Composer, openingByAlt } from "./composer.js";
 import { FilesPanel, filesAvailable, setFilesOpen, toggleFiles } from "./files-panel.js";
 import { ExtensionPage } from "./extension-ui.js";
 import { startEdgeBack, startSwipes, useDragToClose } from "./gestures.js";
-import { Splash } from "./home.js";
+import { HomeCreationPage } from "./home.js";
+import { ProjectView } from "./project-view.js";
 import { Launcher } from "./launcher.js";
 import { registerWorker, updateBadge } from "./notify.js";
 import {
@@ -261,6 +262,12 @@ function App() {
     }
 
     const inConversation = state.conversationId !== null;
+    const inProject = state.projectId != null;
+    // A phone-originated setup may become a roomy dialog on iPad. Do not mount a
+    // second blank Home form underneath it; a real unfinished page keeps its own state.
+    const creationOverHome =
+        !state.homeCreation &&
+        (state.sheet?.type === "home-creation" || state.sheet?.creationParent);
     const inAgentDraft =
         state.agentDraft !== null && state.me.role === "owner" && state.server?.privateAgents >= 4;
     const inPrivate = state.privateId !== null;
@@ -282,7 +289,7 @@ function App() {
     const peekColumn = peeking && PEEK_WIDE.matches && !browsing && !filing && !people;
 
     return html`<div
-        class=${`layout ${inConversation || inAgentDraft || inPrivate || placed ? "" : "home"} ${inPrivate ? "private-layout" : ""} ${state.me.role === "owner" && state.sidebarTab === "private" ? "private-sidebar" : ""} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
+        class=${`layout ${inConversation || inAgentDraft || inPrivate || inProject || placed ? "" : "home"} ${inPrivate ? "private-layout" : ""} ${state.me.role === "owner" && state.sidebarTab === "private" ? "private-sidebar" : ""} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
         data-part="app"
     >
         <aside class="sidebar window" data-part="sidebar">
@@ -326,8 +333,14 @@ function App() {
                                     !state.missing &&
                                     html`<${Composer} key=${state.conversationId} />`
                                 }`
-                            : html`<div class="home-list"><${SessionList} home=${true} /></div>
-                                <${Splash} />`
+                            : inProject
+                              ? html`<${ProjectView}
+                                    key=${state.projectId}
+                                    projectId=${state.projectId}
+                                    onBack=${toSessions}
+                                />`
+                              : html`<div class="home-list"><${SessionList} home=${true} /></div>
+                                  ${!creationOverHome && html`<${HomeCreationPage} key=${`${state.me.id}:${state.homeCreation?.id ?? "home"}`} />`}`
             }
         </div>
         ${
@@ -388,7 +401,7 @@ document.addEventListener("focusin", focusWindow, true);
 const typingIn = (target) =>
     target instanceof HTMLElement &&
     (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
-const wide = () => matchMedia("(min-width: 960px)").matches;
+const wide = () => matchMedia("(min-width: 768px)").matches;
 
 /** Go to the session `by` places away in workspace order, wrapping around. */
 function step(by) {

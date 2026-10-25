@@ -15,25 +15,32 @@ export function ProjectSessionPanel({
     cwd: initialCwd,
     continuation,
     visible,
-    onBusyChange,
+    onBusyChange = () => {},
+    embedded = false,
+    oneTime = false,
 }) {
     const { projects, projectsLoaded, server, me } = store.state;
     const owner = me?.role === "owner";
     const [filter, setFilter] = useState("all");
     const [projectId, setProjectId] = useState(initialProjectId ?? null);
-    const [chatChoice, setChat] = useState(false);
+    const [chatChoice, setChat] = useState(oneTime);
     const chat = owner && chatChoice;
     const starters = (server?.agentProfiles ?? []).filter((profile) => profile.starter);
     const defaultStarter = starters.find((profile) => profile.id !== "chat")?.id;
-    const [threadType, setThreadType] = useState(defaultStarter ?? "chat");
+    const [threadType, setThreadType] = useState(oneTime ? "chat" : (defaultStarter ?? "chat"));
     const [creating, setCreating] = useState(false);
-    const [override, setOverride] = useState(initialCwd ?? null);
+    const defaultOverride = (id) =>
+        embedded && projects.find((each) => each.id === id)?.location?.kind === "ssh"
+            ? null
+            : (initialCwd ?? null);
+    const [override, setOverride] = useState(defaultOverride(initialProjectId));
     const [locationOverride, setLocationOverride] = useState(undefined);
     const [worktree, setWorktree] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const requestId = useRef(uid());
     const project = projects.find((each) => each.id === projectId);
+    const projectChanging = embedded && !oneTime && (initialProjectId ?? null) !== projectId;
     const location =
         !owner || locationOverride === undefined
             ? !chat
@@ -49,7 +56,9 @@ export function ProjectSessionPanel({
         "~";
     const noProjects = projectsLoaded && projects.length === 0;
     const typeLabel = threadTypeLabel({ threadType });
-    const profiles = starters.filter((profile) => chat || profile.id !== "chat");
+    const profiles = starters.filter((profile) =>
+        oneTime ? profile.id === "chat" : chat || profile.id !== "chat",
+    );
     const profileAvailable = profiles.some((profile) => profile.id === threadType);
     const listed = projectsMatchingFilter(projects, filter);
 
@@ -73,7 +82,7 @@ export function ProjectSessionPanel({
         requestId.current = uid();
     };
 
-    useBack(visible && chat, leaveChat);
+    useBack(visible && chat && !embedded, leaveChat);
     useBack(visible && creating, () => setCreating(false));
 
     const reload = () => {
@@ -82,7 +91,7 @@ export function ProjectSessionPanel({
     };
 
     useEffect(() => {
-        if (!store.state.projectsLoaded) {
+        if (!embedded && !store.state.projectsLoaded) {
             reload();
         }
     }, []);
@@ -90,7 +99,7 @@ export function ProjectSessionPanel({
     const chooseProject = (id) => {
         setProjectId(id);
         setLocationOverride(undefined);
-        setOverride(initialCwd ?? null);
+        setOverride(defaultOverride(id));
         setWorktree(false);
 
         if (threadType === "chat") {
@@ -100,6 +109,14 @@ export function ProjectSessionPanel({
         setError("");
         requestId.current = uid();
     };
+
+    // Home owns the project chooser. Keep native draft fields mounted across disclosure changes,
+    // but reset destination overrides/worktrees exactly as the native chooser does on a move.
+    useEffect(() => {
+        if (embedded && !oneTime && (initialProjectId ?? null) !== projectId) {
+            chooseProject(initialProjectId ?? null);
+        }
+    }, [embedded, oneTime, initialProjectId]);
 
     const chooseChat = () => {
         setChat(true);
@@ -115,6 +132,7 @@ export function ProjectSessionPanel({
         if (
             me?.role === "viewer" ||
             busy ||
+            projectChanging ||
             !locationReady ||
             !cwd.trim() ||
             !profileAvailable ||
@@ -154,7 +172,7 @@ export function ProjectSessionPanel({
         }
     };
 
-    if (owner && !chat && (creating || noProjects)) {
+    if (!embedded && owner && !chat && (creating || noProjects)) {
         return html`<div class="project-session-flow">
             <${ProjectForm}
                 visible=${visible}
@@ -200,13 +218,15 @@ export function ProjectSessionPanel({
 
     return html`<div class="project-session-flow">
         ${
-            chat
-                ? html`<div class="one-time-chat">
+            embedded
+                ? null
+                : chat
+                  ? html`<div class="one-time-chat">
                       <button class="button small" disabled=${busy} onClick=${leaveChat}>
                           <${Icon} name="back" size=${14} /> Projects
                       </button>
                   </div>`
-                : html`
+                  : html`
                       ${!projectsLoaded && !error && html`<${Loader} label="Loading projects" />`}
                       <${ProjectFilters}
                           projects=${projects}
@@ -240,7 +260,9 @@ export function ProjectSessionPanel({
         ${
             (chat || project) &&
             html`<div class="session-destination">
-                <label>
+                ${
+                    !oneTime &&
+                    html`<label>
                     <span class="label">Thread type</span>
                     <select
                         aria-label="Thread type"
@@ -255,7 +277,8 @@ export function ProjectSessionPanel({
                         ${!profileAvailable && html`<option value=${threadType} disabled>${typeLabel} (unavailable)</option>`}
                         ${profiles.map((profile) => html`<option value=${profile.id}>${profile.name}</option>`)}
                     </select>
-                </label>
+                </label>`
+                }
                 <${WorkspaceField}
                     key=${chat ? "chat" : projectId}
                     location=${location}
@@ -296,7 +319,7 @@ export function ProjectSessionPanel({
                 }
                 <button
                     class="button primary wide"
-                    disabled=${me?.role === "viewer" || busy || !locationReady || !cwd.trim() || !profileAvailable}
+                    disabled=${me?.role === "viewer" || busy || projectChanging || !locationReady || !cwd.trim() || !profileAvailable}
                     onClick=${start}
                 >
                     <${ThreadTypeTag} session=${{ threadType }} iconOnly=${true} />
@@ -305,6 +328,7 @@ export function ProjectSessionPanel({
             </div>`
         }
         ${
+            !embedded &&
             owner &&
             !chat &&
             html`<button class="button wide one-time-chat-button" disabled=${busy} onClick=${chooseChat}>

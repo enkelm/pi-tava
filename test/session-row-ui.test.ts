@@ -52,10 +52,44 @@ async function selectTab(name: "Recent" | "Folders" | "Archived"): Promise<void>
     );
 }
 
+async function showList(): Promise<void> {
+    if (
+        list === ".drawer" &&
+        !(await inPage<boolean>(
+            `return JSON.stringify(!!document.querySelector('.drawer:not([data-state="closing"])'))`,
+        ))
+    ) {
+        await page.press(
+            (await inPage<boolean>(`return JSON.stringify((await import('/ui.js')).APPLE)`))
+                ? "Meta+B"
+                : "Control+B",
+        );
+    }
+
+    await until(
+        () =>
+            inPage<boolean>(
+                `return JSON.stringify(!!document.querySelector(${JSON.stringify(row(active))}))`,
+            ),
+        "the current session list",
+    );
+    await page.evaluate(`await Promise.all(document.getAnimations()
+        .filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime))
+        .map(animation => animation.finished.catch(() => {})))`);
+}
+
 async function fresh(mobile = false): Promise<void> {
-    list = mobile ? ".home-list" : ".sidebar";
+    list = mobile ? ".drawer" : ".sidebar";
     await page.setViewport(mobile ? VIEWPORTS.mobile : DESKTOP);
     await page.navigate(`${base}/`);
+    await until(
+        () =>
+            inPage<boolean>(
+                `return JSON.stringify(!!document.querySelector('[data-part="home"]'))`,
+            ),
+        "Home loaded",
+    );
+    await showList();
     await until(
         async () =>
             await inPage<boolean>(
@@ -152,57 +186,79 @@ async function settled(expected: Partial<Touched>, what: string): Promise<Touche
 }
 
 /**
- * A finger on a row: down, held `ms` (moving `dy` on the way), and lifted, with the click a lift makes where it lifts,
- * on whatever is there by then.
+ * A contact on the real drawer row. A deliberate hold slides into Options after reveal;
+ * an ordinary tap keeps its compatibility click, while scroll intent never synthesizes one.
  */
-const finger = (id: ConversationId, { ms, dy = 0 }: { ms: number; dy?: number }) =>
-    inPage(`
+const finger = async (id: ConversationId, { ms, dy = 0 }: { ms: number; dy?: number }) => {
+    // Native actions may close the drawer. A new contact must target its visible, current row.
+    await showList();
+
+    return inPage(`
         const button = document.querySelector(${JSON.stringify(`${row(id)} > .session`)});
         const box = button.getBoundingClientRect();
         const x = box.x + box.width / 2;
         const y = box.y + box.height / 2;
-        const fire = (type, at = y) =>
-            button.dispatchEvent(
-                new PointerEvent(type, {
-                    bubbles: true,
-                    cancelable: true,
-                    pointerId: 7,
-                    pointerType: "touch",
-                    isPrimary: true,
-                    button: type === "pointermove" ? -1 : 0,
-                    clientX: x,
-                    clientY: at,
-                }),
-            );
+        const fire = (type, at = { x, y }) => {
+            const finger = new Touch({ identifier: 7, target: button, clientX: at.x, clientY: at.y });
+
+            return button.dispatchEvent(new TouchEvent(type, {
+                bubbles: true, cancelable: true,
+                touches: type === 'touchend' ? [] : [finger], changedTouches: [finger],
+            }));
+        };
         const wait = (time) => new Promise((resolve) => setTimeout(resolve, time));
 
-        fire("pointerdown");
+        fire('touchstart');
         await wait(Math.min(250, ${ms} / 2));
 
         if (${dy} !== 0) {
-            fire("pointermove", y + ${dy});
+            fire('touchmove', { x, y: y + ${dy} });
         }
 
         await wait(${ms} - Math.min(250, ${ms} / 2));
-        fire("pointerup", y + ${dy});
-        document
-            .elementFromPoint(x, y + ${dy})
-            .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1, clientX: x, clientY: y + ${dy} }));
+        const deliberate = ${ms} >= 450 && ${dy} === 0;
+        const release = { x: deliberate ? x + 16 : x, y: y + ${dy} };
+
+        if (deliberate) {
+            if (!button.closest('.session-row').querySelector('.session-hold')) {
+                throw new Error('The hold must reveal its chooser before a fresh slide');
+            }
+
+            fire('touchmove', release);
+            const deadline = Date.now() + 4000;
+
+            while (!document.querySelector('.sidebar-options-sheet')) {
+                if (Date.now() > deadline) {
+                    throw new Error('The fresh slide and dwell did not open Options');
+                }
+
+                await wait(20);
+            }
+        }
+
+        fire('touchend', release);
+
+        if (${dy} === 0) {
+            document.elementFromPoint(release.x, release.y)
+                .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1,
+                    clientX: release.x, clientY: release.y }));
+        }
 
         return JSON.stringify({ });
     `);
+};
 
 /** Tap one of the open sheet's items by its label. */
 async function choose(label: string): Promise<void> {
     await page.evaluate(`
-        [...document.querySelectorAll(".sheet-host:not(.leaving) .list-item")]
-            .find((each) => each.firstElementChild.textContent.trim() === ${JSON.stringify(label)})
+        [...document.querySelectorAll('.sidebar-options-sheet .sidebar-option')]
+            .find((each) => each.textContent.trim() === ${JSON.stringify(label)})
             .click();
     `);
 }
 
 test(
-    "touch screens: a finger held on a row opens its actions, a tap still opens it, and a scroll is not a press",
+    "touch screens: hold and slide opens row Options, a tap opens the thread, and a scroll is not a press",
     real,
     async () => {
         await fresh(true);
@@ -210,18 +266,21 @@ test(
         await finger(active, { ms: 600 });
         await settled(
             {
-                sheet: "session",
+                sheet: "sidebar-options",
                 path: "/",
             },
             "the row's actions, open",
         );
         await new Promise((resolve) => setTimeout(resolve, 300));
-        await settled({ sheet: "session", path: "/", layers: 1 }, "still open after the lift");
+        await settled(
+            { sheet: "sidebar-options", path: "/", layers: 2 },
+            "Options stays open over its drawer after lift",
+        );
         await choose("Pin to the top");
         await settled({ sheet: null, pinned: [Number(active)] }, "pinned, and the sheet closed");
         await finger(active, { ms: 600 });
-        await settled({ sheet: "session" }, "the pinned row offers Unpin");
-        await choose("Unpin from the top");
+        await settled({ sheet: "sidebar-options" }, "the pinned row offers Unpin");
+        await choose("Unpin");
         await settled({ sheet: null, pinned: [] }, "unpinned");
 
         // A finger that moves is scrolling or dragging: no press, no actions.

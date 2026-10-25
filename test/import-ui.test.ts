@@ -1,8 +1,8 @@
-// New Session and import flows in real browser views, with isolated contexts and a scripted model.
-// Chooser adaptation protects retained drafts/Back and non-owner creation, not project storage.
-// Regression: new Chat/browse layers lose drafts or expose Import without the explicit continuation capability.
+// Home creation and native Import sheets in isolated browser contexts with a scripted model.
+// Draft/Back coverage distinguishes an Import overlay from Start new's route back to Home.
+// Regression: folder layers lose drafts or Import escapes its explicit continuation capability.
 // Real rendered controls only; no new production seams or duplicate project/migration coverage.
-import { cleanUp, openApp, root, scriptedModel, until, work } from "./helpers.ts";
+import { cleanUp, openApp, owner, root, scriptedModel, until, work } from "./helpers.ts";
 import assert from "node:assert/strict";
 import {
     copyFileSync,
@@ -25,6 +25,7 @@ import { importFixture } from "./import-fixtures.ts";
 import { fakeHerdr } from "./active-import-fixture.ts";
 
 const chromium = findBrowser();
+const homePanel = '[data-part="home"]';
 
 after(cleanUp);
 
@@ -51,31 +52,68 @@ async function typeField(page: BrowserPage, selector: string, text: string) {
     );
 }
 
-async function sessionTab(page: BrowserPage, tab: "new" | "import") {
-    await present(page, `#session-tab-${tab}`);
-    await page.evaluate(`document.querySelector("#session-tab-${tab}").click()`);
+async function homeButton(page: BrowserPage, label: string) {
+    await present(page, homePanel);
     await until(
         () =>
             value(
                 page,
-                `document.querySelector("#session-tab-${tab}")?.getAttribute("aria-selected") === "true" &&
-                 document.querySelector("#session-panel-${tab}")?.hidden === false`,
+                `[...document.querySelectorAll('${homePanel} button')]
+            .some(button => button.textContent.trim() === ${JSON.stringify(label)})`,
             ),
-        `${tab} session panel`,
+        `Home: ${label}`,
     );
+    await page.evaluate(`[...document.querySelectorAll('${homePanel} button')]
+        .find(button => button.textContent.trim() === ${JSON.stringify(label)}).click()`);
+}
+
+async function sessionTab(page: BrowserPage, tab: "new" | "import") {
+    if (
+        tab === "import" &&
+        !(await value(page, `Boolean(document.querySelector('#session-tab-import'))`))
+    ) {
+        await homeButton(page, "Import from Pi…");
+    } else {
+        await present(page, `#session-tab-${tab}`);
+        await page.evaluate(`document.querySelector('#session-tab-${tab}').click()`);
+    }
+
+    if (tab === "new") {
+        await until(
+            () =>
+                value(
+                    page,
+                    `Boolean(document.querySelector('${homePanel}')) &&
+                !document.querySelector('[role="dialog"][aria-label="New Session"]') && location.pathname === '/'`,
+                ),
+            "Start new returns to Home rather than a retained modal tab",
+        );
+    } else {
+        await until(
+            () =>
+                value(
+                    page,
+                    `document.querySelector('#session-tab-import')?.getAttribute('aria-selected') === 'true'
+                && document.querySelector('#session-panel-import')?.hidden === false`,
+                ),
+            "native Import panel",
+        );
+    }
 }
 
 async function chatFolder(page: BrowserPage) {
-    await present(page, "#session-panel-new .one-time-chat-button");
-    await page.evaluate(
-        `document.querySelector('#session-panel-new .one-time-chat-button').click()`,
-    );
-    await present(page, "#session-panel-new .session-path button");
-    await page.evaluate(`
-        [...document.querySelectorAll('#session-panel-new .session-path button')]
-            .find(button => button.textContent.trim() === 'Change').click();
-    `);
-    await present(page, "#session-panel-new .dir-list");
+    await homeButton(page, "Start a one-time chat");
+    await present(page, `${homePanel} .session-path button`);
+    await page.evaluate(`[...document.querySelectorAll('${homePanel} .session-path button')]
+        .find(button => button.textContent.trim() === 'Change').click()`);
+    await homeButton(page, "Browse");
+    await present(page, `${homePanel} .dir-list`);
+}
+
+async function showSessions(page: BrowserPage) {
+    await present(page, '.topbar [aria-label="Open sessions"]');
+    await page.evaluate(`document.querySelector('.topbar [aria-label="Open sessions"]').click()`);
+    await present(page, ".drawer .sessions");
 }
 
 async function savedFileMode(page: BrowserPage) {
@@ -107,7 +145,7 @@ async function noLegacyImport(page: BrowserPage) {
     await page.evaluate(`(await import('/store.js')).closeSheet()`);
 }
 
-async function wideNewButton(page: BrowserPage, scope: string) {
+async function newSessionEntry(page: BrowserPage, scope: string) {
     const selector = `${scope} .new-button[aria-label="New session"]`;
 
     await present(page, selector);
@@ -139,14 +177,21 @@ async function wideNewButton(page: BrowserPage, scope: string) {
             const search = list.querySelector('.search input').closest('.search');
             const bounds = button.getBoundingClientRect();
             const searchBounds = search.getBoundingClientRect();
+            const entry = button.closest('.session-entry');
             const style = getComputedStyle(list);
             const contentWidth = list.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+            const agents = entry.querySelector('[aria-label="Named agents (PiPs)"]');
+            const agentsBounds = agents.getBoundingClientRect();
+            const gap = parseFloat(getComputedStyle(entry).columnGap);
 
             return {
                 text: button.textContent.trim(),
                 visible: bounds.width > 0 && bounds.height >= 40 && bounds.left >= 0 && bounds.right <= innerWidth,
                 belowSearch: bounds.top >= searchBounds.bottom,
-                fullWidth: Math.abs(bounds.width - contentWidth) <= 1 && Math.abs(bounds.left - searchBounds.left) <= 1,
+                fullWidth: Math.abs(entry.getBoundingClientRect().width - contentWidth) <= 1
+                    && Math.abs(bounds.width + agentsBounds.width + gap - contentWidth) <= 1
+                    && Math.abs(bounds.left - searchBounds.left) <= 1
+                    && agentsBounds.left >= bounds.right && agentsBounds.width >= 40,
                 headerActions: list.querySelectorAll('.sessions-head .new-button, .sessions-head [aria-label="Import Pi session"]').length,
             };
         })()`,
@@ -161,7 +206,7 @@ async function wideNewButton(page: BrowserPage, scope: string) {
             fullWidth: true,
             headerActions: 0,
         },
-        `${scope}: one wide New Session button below Search sessions`,
+        `${scope}: New Session fills the entry beside PiPs below Search sessions`,
     );
 }
 
@@ -255,22 +300,28 @@ test(
             await first.navigate(
                 `${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`,
             );
-            await wideNewButton(first, ".home-list");
+            await showSessions(first);
+            await newSessionEntry(first, ".drawer");
+            await first.press("Escape");
             await first.setViewport(VIEWPORTS.desktop);
-            await wideNewButton(first, ".sidebar");
+            await newSessionEntry(first, ".sidebar");
             await first.setViewport(VIEWPORTS.mobile);
-            await first.evaluate(
-                `document.querySelector('.home-list .new-button[aria-label="New session"]').click()`,
+            await showSessions(first);
+            await first.evaluate(`document.querySelector('.drawer .new-button').click()`);
+            await present(first, homePanel);
+            assert.equal(
+                await value(first, `document.querySelector('[role="dialog"]') === null`),
+                true,
             );
-            await present(first, '[role="dialog"][aria-label="New Session"]');
             await chatFolder(first);
+            await sessionTab(first, "import");
             assert.deepEqual(
                 await value(
                     first,
                     `(() => {
                     const dialog = document.querySelector('[role="dialog"][aria-label="New Session"]');
 
-                    return [...dialog.querySelectorAll('[role="tab"]')].map((tab) => ({
+                    return [...dialog.querySelectorAll('.new-session-tabs [role="tab"]')].map((tab) => ({
                         label: tab.textContent.trim(),
                         selected: tab.getAttribute('aria-selected'),
                         panelRole: dialog.querySelector('#' + tab.getAttribute('aria-controls'))?.getAttribute('role'),
@@ -281,45 +332,74 @@ test(
                 [
                     {
                         label: "Start new",
-                        selected: "true",
+                        selected: "false",
                         panelRole: "tabpanel",
                         associated: true,
                     },
                     {
                         label: "Import",
-                        selected: "false",
+                        selected: "true",
                         panelRole: "tabpanel",
                         associated: true,
                     },
                 ],
             );
+            await first.evaluate("history.back()");
+            await until(
+                () =>
+                    value(
+                        first,
+                        `!document.querySelector('[role="dialog"][aria-label="New Session"]')`,
+                    ),
+                "Back closes Import over Home without leaving the folder layer",
+            );
+            await present(first, `${homePanel} .dir-list`);
+            await first.evaluate("history.back()");
+            await until(
+                () =>
+                    value(
+                        first,
+                        `!document.querySelector('${homePanel} .dir-list')
+                    && Boolean(document.querySelector('${homePanel} .workspace-field-options'))`,
+                    ),
+                "Back closes Browse before the editable destination and one-time flow",
+            );
             const folderDraft = join(work, "folder draft");
 
             await typeField(
                 first,
-                '#session-panel-new input[aria-label="Working directory"]',
+                `${homePanel} input[aria-label="Working directory"]`,
                 folderDraft,
             );
             await first.evaluate(
-                `document.querySelector('#session-panel-new .session-destination > .check input[type="checkbox"]').click()`,
+                `document.querySelector('${homePanel} .session-destination > .check input[type="checkbox"]').click()`,
             );
             await sessionTab(first, "import");
             await savedFileMode(first);
             await typeField(first, "#import-path", fixture.path);
             await typeField(first, "#import-leaf", "draft-branch");
-            await sessionTab(first, "new");
+            await first.evaluate("history.back()");
+            await until(
+                () =>
+                    value(
+                        first,
+                        `!document.querySelector('[role="dialog"][aria-label="New Session"]')`,
+                    ),
+                "Back returns from Import to the still-mounted Home draft",
+            );
             assert.deepEqual(
                 await value(
                     first,
                     `({
-                    path: document.querySelector('#session-panel-new input[aria-label="Working directory"]').value,
-                    worktree: document.querySelector('#session-panel-new .session-destination > .check input[type="checkbox"]').checked,
+                    path: document.querySelector('${homePanel} input[aria-label="Working directory"]').value,
+                    worktree: document.querySelector('${homePanel} .session-destination > .check input[type="checkbox"]').checked,
                 })`,
                 ),
                 { path: folderDraft, worktree: true },
-                "switching tabs keeps the typed folder and worktree choice",
+                "closing the Import overlay keeps Home's typed folder and worktree choice",
             );
             await sessionTab(first, "import");
+            await savedFileMode(first);
             assert.deepEqual(
                 await value(
                     first,
@@ -329,12 +409,12 @@ test(
                     dialogs: document.querySelectorAll('[role="dialog"]').length,
                 })`,
                 ),
-                { path: fixture.path, leaf: "draft-branch", dialogs: 1 },
-                "switching tabs keeps the saved-file draft in the same dialog",
+                { path: "", leaf: "", dialogs: 1 },
+                "reopening Import creates a fresh saved-file draft, never another retained tab",
             );
             await until(
-                () => value(first, `history.state?.pocket?.layers === 1`),
-                "Import is active after Chat and folder layers leave the Back stack",
+                () => value(first, `history.state?.pocket?.layers >= 3`),
+                "Import overlays the native one-time and folder Back layers",
             );
             await first.evaluate("history.back()");
             await until(
@@ -343,11 +423,28 @@ test(
                         first,
                         `document.querySelector('[role="dialog"][aria-label="New Session"]') === null && location.pathname === '/'`,
                     ),
-                "one browser Back closes New Session after tab switches",
+                "one browser Back closes the native Import sheet",
             );
-            await first.evaluate(
-                `document.querySelector('.home-list .new-button[aria-label="New session"]').click()`,
+            await first.evaluate("history.back()");
+            await until(
+                () =>
+                    value(
+                        first,
+                        `![...document.querySelectorAll('${homePanel} .workspace-field-options')].some(panel => panel.getClientRects().length)
+                    && [...document.querySelectorAll('${homePanel} .session-destination')].some(panel => panel.getClientRects().length)`,
+                    ),
+                "Back closes folder editing before the one-time Home flow",
             );
+            await first.evaluate("history.back()");
+            await until(
+                () =>
+                    value(
+                        first,
+                        `![...document.querySelectorAll('${homePanel} .session-destination')].some(panel => panel.getClientRects().length)`,
+                    ),
+                "Back closes one-time creation without creating a session",
+            );
+            assert.equal(app.sessions().length, 0);
             await sessionTab(first, "import");
             await savedFileMode(first);
             // No actual file is read for this error; the path is rejected before filesystem access.
@@ -456,6 +553,19 @@ test(
             );
             await first.evaluate(`document.querySelector('[aria-label="Menu"]').click()`);
             await present(first, `a[href^="/api/pi-sessions/"]`);
+            await first.evaluate(`[...document.querySelectorAll('.sheet .list-item')]
+                .find(item => item.querySelector('span')?.textContent === 'Working directory').click()`);
+            await present(first, '[role="dialog"][aria-label="Working directory"] .dir-list');
+            assert.equal(
+                await value(
+                    first,
+                    `document.querySelector('#session-tab-new, #session-tab-import, .import-form') === null`,
+                ),
+                true,
+                "owner workspace changes remain a separate native sheet, not Home creation or Import",
+            );
+            await first.evaluate("history.back()");
+            await present(first, `a[href^="/api/pi-sessions/"]`);
             await first.evaluate(`
                 [...document.querySelectorAll('.sheet .list-item')]
                     .find((item) => item.querySelector('span')?.textContent === 'Import Pi session').click();
@@ -473,15 +583,41 @@ test(
                 () => value(first, `history.state?.pocket?.layers === 2`),
                 "the menu and New Session history entries",
             );
-            await sessionTab(first, "new");
             await first.evaluate("history.back()");
             await until(
                 () =>
                     value(
                         first,
-                        `document.querySelector('[role="dialog"][aria-label="New Session"]') === null && document.querySelector('a[href^="/api/pi-sessions/"]') !== null && location.pathname === ${JSON.stringify(sessionPath)}`,
+                        `document.querySelector('[role="dialog"][aria-label="New Session"]') === null
+                        && document.querySelector('a[href^="/api/pi-sessions/"]') !== null
+                        && location.pathname === ${JSON.stringify(sessionPath)}`,
                     ),
-                "one Back returns to the menu after a legacy Import tab switch",
+                "one Back from the native Import sheet restores its parent session menu",
+            );
+            await first.evaluate(`[...document.querySelectorAll('.sheet .list-item')]
+                .find(item => item.querySelector('span')?.textContent === 'Import Pi session').click()`);
+            await present(first, "#session-tab-import");
+            await first.evaluate(`document.querySelector('#session-tab-import').focus()`);
+            await first.press("ArrowLeft");
+            await until(
+                () =>
+                    value(
+                        first,
+                        `Boolean(document.querySelector('${homePanel}'))
+                    && !document.querySelector('[role="dialog"][aria-label="New Session"]') && location.pathname === '/'`,
+                    ),
+                "keyboard Start new returns to Home instead of selecting a retained modal tab",
+            );
+            await first.evaluate("history.back()");
+            await until(
+                () =>
+                    value(
+                        first,
+                        `location.pathname === ${JSON.stringify(sessionPath)}
+                    && !document.querySelector('[role="dialog"]')
+                    && document.body.textContent.includes('BROWSER_CONTINUATION')`,
+                    ),
+                "Back from Start new's Home route restores the original conversation, not a stale Import tab",
             );
             assert.equal(model.state.callCount, 1);
             const errors = [first, second]
@@ -526,6 +662,11 @@ test(
         const guest = app.config.addUser("Session guest", "guest");
         const viewer = app.config.addUser("Session viewer", "viewer");
         const granted = app.config.addUser("Granted session guest", "guest", undefined, true);
+        const project = await app.projects.create(owner(app), {
+            name: "Guest session project",
+            cwd: folder,
+            requestId: "guest-session-project",
+        });
         let discoveries = 0;
 
         // Even a permission regression must never contact the machine's actual Herdr instances.
@@ -561,43 +702,31 @@ test(
 
             await guestPage.setViewport(VIEWPORTS.mobile);
             await guestPage.navigate(`${base}/login?token=${encodeURIComponent(guest.token)}`);
-            await present(guestPage, '.new-button[aria-label="New session"]');
-            await guestPage.evaluate(
-                `document.querySelector('.new-button[aria-label="New session"]').click()`,
-            );
-            await present(guestPage, '[role="dialog"][aria-label="New Session"]');
-            await chatFolder(guestPage);
+            await homeButton(guestPage, "Guest session project");
+            await present(guestPage, `${homePanel} .session-destination`);
             assert.equal(
                 await value(
                     guestPage,
                     `document.querySelector('#session-tab-import, #session-panel-import, .import-manual, .import-form') === null`,
                 ),
                 true,
-                "an ordinary guest's New Session dialog exposes no import controls",
+                "ordinary guest Home exposes no import controls",
             );
-            await typeField(
-                guestPage,
-                '#session-panel-new input[aria-label="Working directory"]',
-                folder,
+            assert.deepEqual(
+                await value(
+                    guestPage,
+                    `({
+                    cwd: document.querySelector('${homePanel} .session-path .mono')?.title,
+                    change: [...document.querySelectorAll('${homePanel} button')]
+                        .some(button => ['Change', 'Start a one-time chat'].includes(button.textContent.trim())),
+                    arbitraryFolder: Boolean(document.querySelector('${homePanel} input[aria-label="Working directory"]')),
+                })`,
+                ),
+                { cwd: folder, change: false, arbitraryFolder: false },
+                "non-owners use the accessible project's saved destination, not owner-only arbitrary paths",
             );
-            await guestPage.evaluate(`
-                [...document.querySelectorAll('#session-panel-new .button.primary.wide')]
-                    .find(button => button.textContent.trim().startsWith('Use ')).click();
-            `);
-            await until(
-                () =>
-                    value(
-                        guestPage,
-                        `document.querySelector('#session-panel-new .dir-list') === null &&
-                         document.querySelector('#session-panel-new .session-path .mono')?.title === ${JSON.stringify(folder)}`,
-                    ),
-                "guest folder selection returns to the Chat destination",
-            );
-            assert.equal(app.sessions().length, 0, "picking a folder does not create a Chat yet");
-            await guestPage.evaluate(`
-                [...document.querySelectorAll('#session-panel-new .button.primary.wide')]
-                    .find(button => button.textContent.trim() === 'Start Chat').click();
-            `);
+            assert.equal(app.sessions().length, 0, "choosing a project does not create work yet");
+            await homeButton(guestPage, "Start Worker");
             await until(
                 () =>
                     value(
@@ -611,7 +740,8 @@ test(
 
             assert.ok(created, "the created session is in the catalogue");
             assert.equal(created.cwd, folder);
-            assert.equal(created.threadType, "chat");
+            assert.equal(created.threadType, "worker");
+            assert.equal(created.projectId, project.id);
             assert.equal(created.createdBy, guest.user.id);
             await guestPage.evaluate(`document.querySelector('[aria-label="Menu"]').click()`);
             await present(guestPage, ".sheet .list-item");
@@ -623,20 +753,15 @@ test(
                 false,
                 "the guest menu has no legacy Import entry",
             );
-            await guestPage.evaluate(`
-                [...document.querySelectorAll('.sheet .list-item')]
-                    .find((item) => item.querySelector('span')?.textContent === 'Working directory').click();
-            `);
-            await present(guestPage, '[role="dialog"][aria-label="Working directory"] .dir-list');
             assert.equal(
                 await value(
                     guestPage,
-                    `document.querySelector('#session-tab-new, #session-tab-import, .import-form') === null`,
+                    `[...document.querySelectorAll('.sheet .list-item')]
+                    .some(item => item.querySelector('span')?.textContent === 'Working directory')`,
                 ),
-                true,
-                "changing Working directory stays separate from New Session",
+                false,
+                "guest session menus do not expose owner-only workspace reconfiguration",
             );
-            await guestPage.press("Escape");
             await guestPage.press("Escape");
             await noLegacyImport(guestPage);
 
@@ -644,7 +769,8 @@ test(
 
             await viewerPage.setViewport(VIEWPORTS.mobile);
             await viewerPage.navigate(`${base}/login?token=${encodeURIComponent(viewer.token)}`);
-            await present(viewerPage, `.home-list .session-row[data-id="${created.id}"]`);
+            await showSessions(viewerPage);
+            await present(viewerPage, `.drawer .session-row[data-id="${created.id}"]`);
 
             for (const viewport of [VIEWPORTS.mobile, VIEWPORTS.desktop]) {
                 await viewerPage.setViewport(viewport);
@@ -708,10 +834,6 @@ test(
 
             await grantedPage.setViewport(VIEWPORTS.mobile);
             await grantedPage.navigate(`${base}/login?token=${encodeURIComponent(granted.token)}`);
-            await present(grantedPage, '.new-button[aria-label="New session"]');
-            await grantedPage.evaluate(
-                `document.querySelector('.new-button[aria-label="New session"]').click()`,
-            );
             await sessionTab(grantedPage, "import");
             await present(grantedPage, "#import-tab-live");
             await until(() => discoveries > 0, "explicitly granted guest can discover Pi sessions");
@@ -800,10 +922,6 @@ test(
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
-            await present(page, '.new-button[aria-label="New session"]');
-            await page.evaluate(
-                `document.querySelector('.new-button[aria-label="New session"]').click()`,
-            );
             await sessionTab(page, "import");
             await present(page, ".import-list .pi-session");
             assert.deepEqual(
@@ -992,8 +1110,6 @@ test(
 
             await page.setViewport(VIEWPORTS.mobile);
             await page.navigate(`${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`);
-            await present(page, '.home-list .new-button[aria-label="New session"]');
-            await page.evaluate(`document.querySelector('.home-list .new-button').click()`);
             await sessionTab(page, "import");
             await present(page, "#import-tab-history");
             await sourceToggle(page);
@@ -1170,13 +1286,7 @@ test(
             );
             await sourceToggle(page);
             await shot(page, "desktop-history-confirmation");
-            await sessionTab(page, "new");
-            await sessionTab(page, "import");
-            assert.equal(
-                await value(page, `document.querySelector('#import-consent').checked`),
-                false,
-                "switching New Session tabs never grants import consent",
-            );
+            // Back within History must retain its filter; Start new is tested separately below.
             await page.evaluate(`
                 [...document.querySelectorAll('#import-panel-history > button')]
                     .find(button => button.textContent.trim() === 'Back to History').click();
@@ -1213,6 +1323,36 @@ test(
                 ),
                 true,
                 "history selection never bypasses destination model and snapshot consent",
+            );
+            await page.evaluate(`document.querySelector('#import-consent').click()`);
+            assert.equal(
+                await value(page, `document.querySelector('#import-consent').checked`),
+                true,
+                "consent is granted only to this selected source before leaving Import",
+            );
+            assert.equal(app.sessions().length, 0, "consent alone never submits a Move");
+            await sessionTab(page, "new");
+            await sessionTab(page, "import");
+            await page.evaluate(`document.querySelector('#import-tab-history').click()`);
+            await present(page, "#import-history-search");
+            assert.equal(
+                await value(page, `document.querySelector('#import-history-search').value`),
+                "",
+                "reopening Import from Home starts a fresh picker instead of retaining a modal tab draft",
+            );
+            await present(page, row);
+            await page.evaluate(`document.querySelector(${JSON.stringify(row)}).click()`);
+            await present(page, "#import-consent");
+            assert.deepEqual(
+                await value(
+                    page,
+                    `({
+                    consent: document.querySelector('#import-consent').checked,
+                    disabled: document.querySelector('.import-form button[type=submit]').disabled,
+                })`,
+                ),
+                { consent: false, disabled: true },
+                "returning through Home and reopening the source never carries consent forward",
             );
             assert.equal(app.sessions().length, 0);
             assert.equal(readFileSync(savedPath, "utf8"), original);

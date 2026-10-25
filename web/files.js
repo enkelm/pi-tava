@@ -1,6 +1,7 @@
 // Files to mention with @ in the message box ("look at @src/app.ts"). The session folder's list comes from the server
 // once and is checked again in the background (an unchanged list costs one short reply); matching happens here as
 // people type, so suggestions never wait on the network. Pi gets the text as written and reads what it names.
+import { selectedAgentDraft } from "./agent-drafts.js";
 import { api, store } from "./store.js";
 
 /** How old a list may be before a new mention checks it again. */
@@ -20,12 +21,35 @@ const caller = () => {
     return user ? JSON.stringify([user.id, user.role, user.sessions ?? null]) : null;
 };
 
-const listKey = () =>
-    JSON.stringify([
+const draftProject = (draft) =>
+    Object.hasOwn(draft.payload ?? {}, "projectId") ? draft.payload.projectId : draft.projectId;
+
+const listKey = () => {
+    const draft = selectedAgentDraft();
+    const projectId = draft ? draftProject(draft) : undefined;
+    const identity = store.state.namedAgents?.find((item) => item.agentId === draft?.agentId);
+    const effectiveProjectId = projectId === undefined ? identity?.projectId : projectId;
+    const project = store.state.projects?.find((item) => item.id === effectiveProjectId);
+
+    return JSON.stringify([
         caller(),
         store.state.agentDraft?.agentId ?? store.state.conversationId,
         cwd() ?? null,
+        draft && {
+            id: draft.id,
+            projectId,
+            requestId: draft.requestId,
+            destination: [
+                project?.id,
+                project?.cwd ?? store.state.server?.defaultCwd,
+                project?.location,
+                project?.updatedAt,
+            ],
+            identity: [identity?.projectId, identity?.updatedAt, identity?.controlRevision],
+        },
     ]);
+};
+
 let userScope = caller();
 let departed = false;
 const awake = () => !departed && !document.hidden && navigator.onLine !== false;
@@ -80,8 +104,7 @@ function prepare(files) {
     return { paths, lower, bases, dirs: dirs.size };
 }
 
-const cwd = () =>
-    store.state.agentDraft ? store.state.server?.defaultCwd : store.state.view.agent?.cwd;
+const cwd = () => (store.state.agentDraft ? null : store.state.view.agent?.cwd);
 
 /**
  * Get or check the list of files for this conversation's folder, unless one was checked in the last few seconds. With
@@ -90,7 +113,8 @@ const cwd = () =>
 export function loadFiles({ ifMissing = false } = {}) {
     const id = store.state.conversationId;
 
-    const agentId = store.state.agentDraft?.agentId;
+    const draft = selectedAgentDraft();
+    const agentId = draft?.agentId;
 
     if ((id === null && !agentId) || caller() === null || !awake()) {
         return;
@@ -126,7 +150,25 @@ export function loadFiles({ ifMissing = false } = {}) {
     entry.loading = true;
     entry.controller = controller;
     lists.set(key, entry);
-    const since = entry.version === null ? "" : `?since=${encodeURIComponent(entry.version)}`;
+    const query = new URLSearchParams();
+
+    if (entry.version !== null) {
+        query.set("since", entry.version);
+    }
+
+    if (draft) {
+        const projectId = draftProject(draft);
+
+        if (projectId !== undefined) {
+            query.set("projectId", projectId ?? "");
+        }
+
+        if (draft.requestId) {
+            query.set("requestId", draft.requestId);
+        }
+    }
+
+    const since = query.size ? `?${query}` : "";
 
     const done = () => {
         if (current()) {

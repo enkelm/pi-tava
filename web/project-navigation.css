@@ -1,0 +1,223 @@
+/* Compact project navigation reuses the app's native controls, palette and Blobatars. */
+@import url("/named-agents.css");
+
+.session-entry {
+    display: flex;
+    flex: none;
+    align-items: center;
+    min-width: 0;
+    gap: 8px;
+}
+
+.session-entry:empty {
+    display: none;
+}
+
+.session-entry .new-button {
+    flex: 1;
+    min-width: 0;
+    min-height: 44px;
+}
+
+.session-entry .session-agents {
+    flex: none;
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
+}
+
+.project-group-head .project-disclosure {
+    flex: none;
+    width: 28px;
+    min-height: 40px;
+    color: var(--muted);
+}
+
+.project-group-head .project-open {
+    gap: 6px;
+    padding-inline: 2px;
+    white-space: nowrap;
+}
+
+.project-open .group-name {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.project-agent-name {
+    flex: 0 1 auto;
+    max-width: 45%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text);
+    font-weight: 600;
+}
+
+.project-name-separator {
+    flex: none;
+    white-space: pre;
+    color: var(--faint);
+}
+
+.project-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.project-open[aria-current="page"] {
+    color: var(--accent);
+}
+
+.project-section.closed .project-open .icon {
+    transform: none;
+}
+
+.project-group-actions .project-create {
+    display: grid;
+}
+
+/* Identity/project links are metadata, not Chat rows or live-control groups. */
+.project-related-agents {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    min-width: 0;
+    padding: 4px 8px 8px 28px;
+}
+
+.project-related-agents > .muted {
+    flex-basis: 100%;
+}
+
+.project-related-agent {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 0.8rem;
+}
+
+.project-related-agent > span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-chat {
+    min-width: 0;
+}
+
+.project-chat-head {
+    position: relative;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.project-chat-head .project-chat-disclosure {
+    position: static;
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    align-items: center;
+    align-self: stretch;
+    justify-content: flex-start;
+    gap: 2px;
+    width: 32px;
+    height: auto;
+    min-height: 44px;
+    padding: 6px 0 0;
+}
+
+.project-chat-open {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    min-height: 44px;
+    padding: 4px 6px;
+    border-radius: var(--r-row);
+    text-align: start;
+    color: var(--body);
+}
+
+.project-chat.has-items .project-chat-open {
+    padding-left: 4px;
+}
+
+.project-chat-open[aria-current="page"] {
+    background: var(--accent-soft);
+    color: var(--text);
+}
+
+.project-chat-title {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    font-size: 0.8rem;
+}
+
+.project-chat-name,
+.project-chat-context {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-chat-context {
+    color: var(--muted);
+    font-size: 0.7rem;
+}
+
+.project-chat.closed > .group-body {
+    grid-template-rows: 0fr;
+}
+
+.project-chat-items {
+    min-width: 0;
+    margin-left: 14px;
+    padding-left: 7px;
+    border-left: 1px solid var(--hair);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .project-chat-open:hover {
+        background: var(--hover);
+    }
+}
+
+@media (any-pointer: coarse) {
+    .project-group-head .project-disclosure,
+    .project-group-actions .project-create,
+    .project-chat-disclosure,
+    .project-chat-open {
+        min-height: 44px;
+    }
+
+    .project-group-head .project-disclosure {
+        width: 36px;
+    }
+
+    .project-chat-head .project-chat-disclosure {
+        width: 44px;
+    }
+
+    .project-chat-open {
+        gap: 12px;
+        padding-left: 12px;
+    }
+
+    .project-chat.has-items .project-chat-open {
+        padding-left: 0;
+    }
+}

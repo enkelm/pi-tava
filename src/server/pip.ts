@@ -1518,13 +1518,26 @@ export class Pip {
             throw new Error("Give a folder or a repository, not both.");
         }
 
-        if (request.threadType !== undefined && request.threadType !== "chat" && (
-            !this.isNamedCaller(pipId) || this.#app.workItems.profile(request.threadType)?.starter !== true
-        )) {
+        if (
+            request.threadType !== undefined &&
+            request.threadType !== "chat" &&
+            (!this.isNamedCaller(pipId) ||
+                this.#app.workItems.profile(request.threadType)?.starter !== true)
+        ) {
             throw new HttpError(409, "Choose an available native starter or an ordinary Chat.");
         }
 
         await check();
+        const named = this.isNamedCaller(pipId);
+        const location = named ? app.locationOf(pipId) : undefined;
+
+        if (location !== undefined && request.repo !== undefined) {
+            throw new HttpError(
+                409,
+                "Repository checkout from a named SSH Chat is unavailable; choose an existing folder on its pinned destination.",
+            );
+        }
+
         this.#count(user, "start", STARTS_PER_HOUR);
         const folder =
             request.repo === undefined
@@ -1532,14 +1545,29 @@ export class Pip {
                 : await this.checkout(pipId, request.repo, source);
 
         await check();
+        // The exact saved Chat supplies organization, not its identity's default project.
+        // Pin execution separately: membership must not adopt a project's cwd or SSH host.
+        // Keep the existing local fallback; SSH has no meaningful host-local default folder.
         const { id } = await app.commands.createSession(
             user,
             {
-                ...(folder === undefined ? {} : { cwd: folder }),
+                ...(named
+                    ? {
+                          projectId: app.sessionMeta(pipId)?.projectId ?? null,
+                          location: location ?? null,
+                          cwd:
+                              folder ??
+                              (location === undefined ? app.defaultCwd : app.cwdOf(pipId)),
+                      }
+                    : folder === undefined
+                      ? {}
+                      : { cwd: folder }),
                 ...(request.title === undefined ? {} : { title: request.title }),
                 ...(request.threadType !== undefined
                     ? { threadType: request.threadType }
-                    : this.isNamedCaller(pipId) ? { threadType: "worker" } : {}),
+                    : this.isNamedCaller(pipId)
+                      ? { threadType: "worker" }
+                      : {}),
                 worktree: request.worktree === true,
                 ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
             },
@@ -1618,16 +1646,19 @@ export class Pip {
                 await app.harness.commit((tx) => source.requireCurrent(tx), source.context);
             }
         };
-        const gh = source === undefined
-            ? app.watches.gh
-            : async (args: string[], cwd?: string, timeoutMs?: number) => {
-                  await check();
-                  const result = await app.watches.gh(args, cwd, timeoutMs, source.context);
 
-                  await check();
+        const gh =
+            source === undefined
+                ? app.watches.gh
+                : async (args: string[], cwd?: string, timeoutMs?: number) => {
+                      await check();
+                      const result = await app.watches.gh(args, cwd, timeoutMs, source.context);
 
-                  return result;
-              };
+                      await check();
+
+                      return result;
+                  };
+
         const named = parseRepo(repo);
 
         if (named === undefined) {
@@ -1687,6 +1718,7 @@ export class Pip {
             if (source === undefined) {
                 this.#clearParts(clone);
             }
+
             // `~` is in no GitHub repository's name: no clone of another repository is ever taken for a part.
             const part = `${clone}~part-${randomUUID().slice(0, 8)}`;
 

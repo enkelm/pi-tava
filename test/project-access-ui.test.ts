@@ -95,6 +95,7 @@ const fixture = {
     api: async (_path: string, _body: Props): Promise<Props> => ({}),
     errors: [] as string[],
     navigated: [] as number[],
+    notified: [] as unknown[][],
     remembered: [] as unknown[],
     opened: [] as Props[],
     closed: [] as Props[],
@@ -121,7 +122,7 @@ const sources: Record<string, string> = {
         export const {store,actions}=f;
         export const api=(...args)=>f.api(...args);
         export const attempt=fn=>Promise.resolve().then(fn).catch(error=>f.errors.push(error.message));
-        export const collab=()=>true,notify=()=>{},uid=()=>"request";
+        export const collab=()=>true,notify=(...args)=>f.notified.push(args),uid=()=>"request";
         export const closeSheet=()=>f.closed.push(store.state.sheet);
         export const projectsAvailable=()=>true,insertIntoComposer=()=>{},handoffsAvailable=()=>true;
         export const canSteer=()=>store.state.me?.role!=='viewer';
@@ -140,8 +141,6 @@ const sources: Record<string, string> = {
     "back.js": "export const useBack=()=>{};",
     "gestures.js": "export const useDragToClose=()=>{};",
     "avatar.js": "export const Avatar=()=>null,folderColor=()=>'';",
-    "thread-type.js":
-        "export const ThreadTypeTag=()=>null,threadTypeLabel=({threadType})=>threadType==='worker'?'Worker':'Chat';",
     "workspace-location.js": `export const LocationPicker=()=>null;
         export const conversationLocation=()=>globalThis.projectAccessUiFixture.store.state.view.conversation?.location??null;
         export const rememberSshFolder=(...args)=>globalThis.projectAccessUiFixture.remembered.push(args);`,
@@ -177,7 +176,7 @@ const sources: Record<string, string> = {
     "ssh-login.js": "export const SshLogin=()=>null;",
 };
 const owned =
-    /\/web\/(project-access|workspace-field|session-moves|launcher|sheets\/(people|project|session-projects|session|pi-sessions|sidebar-options|message|menu|worktree|branch))\.js$/;
+    /\/web\/(project-access|thread-type|workspace-field|session-moves|launcher|sheets\/(people|project|session-projects|session|pi-sessions|sidebar-options|message|menu|worktree|branch))\.js$/;
 
 registerHooks({
     resolve(specifier, context, next) {
@@ -324,6 +323,7 @@ function reset() {
 
     fixture.errors = [];
     fixture.navigated = [];
+    fixture.notified = [];
     fixture.remembered = [];
     fixture.opened = [];
     fixture.closed = [];
@@ -486,12 +486,625 @@ test("New Session preserves import choices across its own tabs but rejects a rep
 });
 
 function holdApi() {
-    const requests: { path: string; body: Props; resolve: (value: Props) => void }[] = [];
+    const requests: {
+        path: string;
+        body: Props;
+        resolve: (value: Props) => void;
+        reject: (failure: Error) => void;
+    }[] = [];
 
-    fixture.api = (path, body) => new Promise((resolve) => requests.push({ path, body, resolve }));
+    fixture.api = (path, body) =>
+        new Promise((resolve, reject) => requests.push({ path, body, resolve, reject }));
 
     return requests;
 }
+
+// Inline Home owns completion without owning store.sheet. The real panel, not an API mock,
+// must retain valid consent across child setup yet suppress hidden/retired asynchronous effects.
+// Existing standalone import tests cannot exercise this host predicate or completion override.
+// The saved picker is mounted through its rendered node, never a new production export.
+test("inline import completion follows its host instead of capturing the default sheet owner", async () => {
+    reset();
+    fixture.store.state.sheet = null;
+    fixture.store.state.projects = [];
+    const requests = holdApi();
+    const completed: number[] = [];
+    const obsoleteCompleted: number[] = [];
+    const created: number[] = [];
+    const busy: boolean[] = [];
+    const preview = importPreview();
+    const props: Props = {
+        initialPreview: preview,
+        visible: true,
+        isCurrentOpening: () => true,
+        isActive: () => fixture.store.state.homeCreation?.source === "import",
+        onComplete: (id: number) => obsoleteCompleted.push(id),
+        onCreated: (id: number) => created.push(id),
+        onBusyChange: (value: boolean) => busy.push(value),
+    };
+
+    fixture.store.state.homeCreation = { source: "import" };
+    const panel = mount(() => ImportPanel(props));
+
+    await flush();
+    await changeField(panel, "import-consent", true);
+    const retained = find(panel, (node) => node.type === "form").props.onSubmit;
+
+    props.visible = false;
+    fixture.store.state.sheet = { type: "project" };
+    render(panel);
+    const hiddenDispatch = retained({ preventDefault() {} });
+
+    assert.equal(requests.length, 0, "a retained hidden form cannot copy");
+    await hiddenDispatch;
+    assert.equal(field(panel, "import-consent").props.checked, true);
+    props.visible = true;
+    fixture.store.state.sheet = null;
+    render(panel);
+    const saving = submit(panel);
+
+    assert.deepEqual(busy, [false, true], "Home's pending gate closes before dispatch returns");
+    await flush();
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.body.projectId, null, "no Home project is inferred");
+    props.onComplete = (id: number) => completed.push(id);
+    render(panel);
+    // This logical host remains active even though its native sheet bookkeeping changes.
+    fixture.store.state.sheet = { type: "home", opening: "same-host" };
+    requests[0]!.resolve({ id: 48 });
+    await saving;
+    await flush();
+    assert.deepEqual(completed, [48]);
+    assert.deepEqual(obsoleteCompleted, [], "pending callbacks use the latest host contract");
+    assert.deepEqual(created, [48]);
+    assert.deepEqual(fixture.closed, [], "inline completion must not close a native child");
+    assert.deepEqual(fixture.navigated, [], "the inline host owns navigation");
+    assert.deepEqual(busy, [false, true, false]);
+    dispose(panel);
+});
+
+// A retained inline form can coexist with native Import & share. Labels, ARIA and tab focus
+// must resolve within their own form; browser geometry/focus execution remains separate evidence.
+test("retained inline import IDs cannot capture native import labels or tab focus", async (t) => {
+    reset();
+    fixture.store.state.sheet = null;
+    fixture.api = async () => ({ sessions: [], warnings: [] });
+    const preview = importPreview();
+    const props: Props = {
+        initialPreview: preview,
+        idPrefix: "home-import",
+        visible: true,
+        isCurrentOpening: () => true,
+        isActive: () => fixture.store.state.sheet === null,
+    };
+    const inline = mount(() => ImportPanel(props));
+
+    t.after(() => dispose(inline));
+    await flush();
+    props.visible = false;
+    fixture.store.state.sheet = { type: "import", fromPrivate: true };
+    render(inline);
+    const native = mount(() => ImportPanel({ initialPreview: preview, fromPrivate: true }));
+
+    t.after(() => dispose(native));
+    await flush();
+    const inlineIds = nodes(inline.tree)
+        .filter((node) => node.props.id)
+        .map((node) => node.props.id);
+    const nativeIds = nodes(native.tree)
+        .filter((node) => node.props.id)
+        .map((node) => node.props.id);
+
+    assert.equal(
+        inlineIds.some((id) => nativeIds.includes(id)),
+        false,
+        "hidden inline IDs must not steal native label targets",
+    );
+    assert.equal(field(native, "import-model").props.value, "provider/one");
+    assert.equal(field(inline, "home-import-import-model").props.value, "provider/one");
+    const selectors: string[] = [];
+    const keyEvent = {
+        key: "ArrowRight",
+        preventDefault() {},
+        currentTarget: {
+            querySelector: (selector: string) => ({ focus: () => selectors.push(selector) }),
+        },
+    };
+    const tabs = () => find(inline, (node) => node.props.role === "tablist");
+
+    tabs().props.onKeyDown(keyEvent);
+    assert.deepEqual(selectors, [], "a hidden retained panel must not focus its own tabs");
+    fixture.store.state.sheet = null;
+    props.visible = true;
+    render(inline);
+    tabs().props.onKeyDown(keyEvent);
+    await flush();
+    assert.deepEqual(selectors, ["#home-import-import-tab-history"]);
+    const selectedTab = find(
+        inline,
+        (node) => node.props.role === "tab" && node.props["aria-selected"],
+    );
+    const tabPanel = find(inline, (node) => node.props.role === "tabpanel");
+
+    assert.equal(selectedTab.props["aria-controls"], tabPanel.props.id);
+    assert.equal(tabPanel.props["aria-labelledby"], selectedTab.props.id);
+    const picker = mountImportChild(inline, (props) => typeof props.onManual === "function");
+
+    t.after(() => dispose(picker));
+    await flush();
+    assert.equal(field(picker, "home-import-import-history-search").props.type, "search");
+    button(picker, "Choose a file or branch").props.onClick();
+    await flush();
+    const labels = nodes(inline.tree).filter((node) => node.type === "label" && node.props.for);
+
+    assert.equal(labels.length, 2);
+
+    for (const label of labels) {
+        assert.ok(label.props.for.startsWith("home-import-"));
+        assert.equal(field(inline, label.props.for).type, "input");
+    }
+});
+
+test("inline imports recheck live opening, activity, access and reviewed destination before dispatch and completion", async (t) => {
+    const changes: [string, (props: Props, host: Props) => void, boolean?][] = [
+        ["hidden panel", (props) => (props.visible = false)],
+        ["another Home source without a render", () => (fixture.store.state.homeSource = "new")],
+        ["retired opening without a sheet change", (_props, host) => (host.current = false)],
+        ["updated lifetime predicate", (props) => (props.isCurrentOpening = () => false)],
+        ["updated activity predicate", (props) => (props.isActive = () => false)],
+        ["another account", () => (fixture.store.state.me.id = "other-owner")],
+        [
+            "revoked guest history access",
+            () => (fixture.store.state.me.continuePiSessions = false),
+            true,
+        ],
+        ["new guest project scope", () => (fixture.store.state.me.projectAccess = {}), true],
+        ["removed project", () => (fixture.store.state.projects = [])],
+        ["renamed project", () => (fixture.store.state.projects[0].name = "New audience")],
+        [
+            "changed project destination",
+            () => (fixture.store.state.projects[0].cwd = "/replacement"),
+        ],
+    ];
+
+    for (const phase of ["before dispatch", "late success", "late failure"]) {
+        for (const [name, change, guest] of changes) {
+            await t.test(`${name}: ${phase}`, async (t) => {
+                reset();
+                fixture.store.state.sheet = null;
+                fixture.store.state.homeSource = "import";
+                fixture.store.state.projects = projects.map((project) => ({ ...project }));
+
+                if (guest) {
+                    fixture.store.state.me = {
+                        id: "guest",
+                        role: "guest",
+                        continuePiSessions: true,
+                    };
+                }
+
+                const requests = holdApi();
+                const host = { current: true };
+                const completed: number[] = [];
+                const created: number[] = [];
+                const props: Props = {
+                    initialPreview: importPreview(),
+                    visible: true,
+                    isCurrentOpening: () => host.current,
+                    isActive: () => fixture.store.state.homeSource === "import",
+                    onComplete: (id: number) => completed.push(id),
+                    onCreated: (id: number) => created.push(id),
+                };
+                const panel = mount(() => ImportPanel(props));
+
+                t.after(() => dispose(panel));
+                await flush();
+
+                if (!guest) {
+                    await changeField(panel, "import-project", "local");
+                }
+
+                await changeField(panel, "import-consent", true);
+                const retained = find(panel, (node) => node.type === "form").props.onSubmit;
+                const saving = phase === "before dispatch" ? null : submit(panel);
+
+                change(props, host);
+
+                if (name === "hidden panel" || name.startsWith("updated")) {
+                    render(panel);
+                }
+
+                const staleDispatch = retained({ preventDefault() {} });
+
+                assert.equal(requests.length, phase === "before dispatch" ? 0 : 1);
+
+                if (phase !== "before dispatch") {
+                    if (phase === "late success") {
+                        requests[0]!.resolve({ id: 49 });
+                    } else {
+                        requests[0]!.reject(new Error("Expired inline import failure"));
+                    }
+                }
+
+                await Promise.all([saving, staleDispatch]);
+                await flush();
+                assert.deepEqual(completed, []);
+                assert.deepEqual(created, []);
+                assert.deepEqual(fixture.notified, []);
+                assert.deepEqual(fixture.closed, []);
+                assert.deepEqual(fixture.navigated, []);
+                assert.doesNotMatch(textOf(panel.tree), /Expired inline import failure/);
+            });
+        }
+    }
+});
+
+// Mount children from the actual ImportPanel tree so SavedSessions' own deferred reads and
+// folder callbacks run through production code, while the shared fixture supplies only hooks/API.
+function mountImportChild(parent: Mount, predicate: (props: Props) => boolean): Mount {
+    return mount(() => {
+        const node = find(
+            parent,
+            (node) => typeof node.type === "function" && predicate(node.props),
+        );
+
+        return (node.type as (props: Props) => unknown)(node.props);
+    });
+}
+
+async function prepareImportSource(source: string, t: { after: (fn: () => void) => void }) {
+    reset();
+    fixture.store.state.sheet = null;
+    fixture.store.state.homeSource = "import";
+    const requests = holdApi();
+    const host = { current: true };
+    const completed: number[] = [];
+    const busy: boolean[] = [];
+    const props: Props = {
+        visible: true,
+        isCurrentOpening: () => host.current,
+        isActive: () => fixture.store.state.homeSource === "import",
+        onComplete: (id: number) => completed.push(id),
+        onBusyChange: (value: boolean) => busy.push(value),
+    };
+    const panel = mount(() => ImportPanel(props));
+
+    t.after(() => dispose(panel));
+    await flush();
+    assert.equal(requests[0]!.path, "pi-sessions/active");
+    requests[0]!.resolve({
+        sessions: [
+            {
+                id: "live-source",
+                title: "A live Pi",
+                cwd: "/local",
+                location: "local",
+                state: "idle",
+            },
+        ],
+        warnings: [],
+    });
+    await flush();
+    let picker = panel;
+
+    if (source !== "live") {
+        button(panel, "History").props.onClick();
+        await flush();
+        picker = mountImportChild(panel, (props) => typeof props.onManual === "function");
+        t.after(() => dispose(picker));
+        await flush();
+        assert.equal(requests[1]!.path, "pi-sessions/history");
+        requests[1]!.resolve({
+            sessions: [
+                { path: "/history/session.jsonl", title: "A saved Pi", cwd: "/local", messages: 1 },
+            ],
+            warnings: [],
+        });
+        await flush();
+    }
+
+    let read: () => Promise<unknown>;
+
+    if (source === "manual") {
+        button(picker, "Choose a file or branch").props.onClick();
+        await flush();
+        field(panel, "import-path").props.onInput({
+            currentTarget: { value: " /history/manual.jsonl " },
+        });
+        field(panel, "import-leaf").props.onInput({ currentTarget: { value: " branch-entry " } });
+        await flush();
+        read = () => submit(panel);
+    } else {
+        const folders = mountImportChild(picker, (props) => Array.isArray(props.sessions));
+
+        t.after(() => dispose(folders));
+
+        read = () => {
+            render(picker);
+            render(folders);
+
+            return find(folders, (node) => node.type === "button").props.onClick();
+        };
+    }
+
+    return { panel, picker, requests, props, host, completed, busy, read };
+}
+
+test("Live, History and Advanced import use one guarded preview and recoverable confirmation", async (t) => {
+    for (const source of ["live", "saved", "manual"]) {
+        await t.test(source, async (t) => {
+            const { panel, requests, completed, busy, read } = await prepareImportSource(source, t);
+            const first = read();
+
+            assert.deepEqual(
+                busy,
+                [false, true],
+                "every source closes Home's pending gate synchronously",
+            );
+            const repeated = read();
+            const request = requests.at(-1)!;
+
+            assert.equal(
+                requests.length,
+                source === "live" ? 2 : 3,
+                "one preview admission even through retained callbacks",
+            );
+            assert.equal(
+                request.path,
+                source === "live" ? "pi-sessions/active/preview" : "pi-sessions/preview",
+            );
+            assert.deepEqual(
+                request.body,
+                source === "live"
+                    ? { id: "live-source" }
+                    : source === "saved"
+                      ? { path: "/history/session.jsonl" }
+                      : { path: "/history/manual.jsonl", leafId: "branch-entry" },
+            );
+            request.resolve(importPreview(source === "live" ? { activeId: "live-source" } : {}));
+            await Promise.all([first, repeated]);
+            await flush();
+            assert.match(textOf(panel.tree), /Saved conversation/);
+            assert.equal(field(panel, "import-model").props.value, "provider/one");
+            assert.equal(field(panel, "import-thinking").props.value, "low");
+            await changeField(panel, "import-consent", true);
+            const copying = submit(panel);
+
+            requests.at(-1)!.reject(new Error("Temporary copy failure"));
+            await copying;
+            await flush();
+            assert.match(textOf(panel.tree), /Temporary copy failure/);
+            assert.equal(field(panel, "import-consent").props.checked, true);
+            assert.equal(Boolean(button(panel, "Move").props.disabled), false);
+            const retry = submit(panel);
+
+            requests.at(-1)!.resolve({ id: 50 });
+            await retry;
+            await flush();
+            assert.deepEqual(completed, [50]);
+            assert.deepEqual(fixture.closed, []);
+            assert.deepEqual(fixture.navigated, []);
+        });
+    }
+});
+
+test("all import source previews fence late successes and errors from hidden, retired or changed-access hosts", async (t) => {
+    for (const source of ["live", "saved", "manual"]) {
+        for (const change of ["hidden", "retired", "account", "access", "source"]) {
+            for (const failure of [false, true]) {
+                await t.test(
+                    `${source}, ${change}, ${failure ? "error" : "preview"}`,
+                    async (t) => {
+                        const { panel, picker, requests, props, host, read } =
+                            await prepareImportSource(source, t);
+                        const reading = read();
+                        const request = requests.at(-1)!;
+
+                        if (change === "hidden") {
+                            props.visible = false;
+                            render(panel);
+                        } else if (change === "retired") {
+                            host.current = false;
+                        } else if (change === "account") {
+                            fixture.store.state.me.id = "other-owner";
+                        } else if (change === "access") {
+                            fixture.store.state.me.role = "viewer";
+                        } else {
+                            fixture.store.state.homeSource = "new";
+                        }
+
+                        if (failure) {
+                            request.reject(new Error("Abandoned preview error"));
+                        } else {
+                            request.resolve(importPreview({ title: "Abandoned preview" }));
+                        }
+
+                        await reading;
+                        await flush();
+                        assert.doesNotMatch(textOf(panel.tree), /Abandoned preview/);
+                        assert.doesNotMatch(textOf(picker.tree), /Abandoned preview/);
+                        assert.equal(
+                            nodes(panel.tree).some((node) => node.props.id === "import-preview"),
+                            false,
+                        );
+                        assert.deepEqual(fixture.notified, []);
+                    },
+                );
+            }
+        }
+    }
+});
+
+test("late Live and History catalogues cannot populate a hidden, replaced or changed-account host", async (t) => {
+    for (const source of ["live", "saved"]) {
+        for (const change of ["hidden", "retired", "account", "access"]) {
+            for (const failure of [false, true]) {
+                await t.test(
+                    `${source}, ${change}, ${failure ? "error" : "listing"}`,
+                    async (t) => {
+                        reset();
+                        fixture.store.state.sheet = null;
+                        const requests = holdApi();
+                        const host = { current: true };
+                        const props: Props = {
+                            visible: true,
+                            isCurrentOpening: () => host.current,
+                        };
+                        const panel = mount(() => ImportPanel(props));
+
+                        t.after(() => dispose(panel));
+                        await flush();
+                        let picker = panel;
+
+                        if (source === "saved") {
+                            requests[0]!.resolve({ sessions: [], warnings: [] });
+                            await flush();
+                            button(panel, "History").props.onClick();
+                            await flush();
+                            picker = mountImportChild(
+                                panel,
+                                (props) => typeof props.onManual === "function",
+                            );
+                            t.after(() => dispose(picker));
+                            await flush();
+                        }
+
+                        const request = requests.at(-1)!;
+                        const refresh = find(
+                            picker,
+                            (node) => node.type === "button" && /Refresh/.test(textOf(node)),
+                        ).props.onClick;
+
+                        if (change === "hidden") {
+                            props.visible = false;
+                            render(panel);
+                        } else if (change === "retired") {
+                            host.current = false;
+                        } else if (change === "account") {
+                            fixture.store.state.me.id = "other-owner";
+                        } else {
+                            fixture.store.state.me.role = "viewer";
+                        }
+
+                        if (failure) {
+                            request.reject(new Error("Abandoned catalogue error"));
+                        } else {
+                            request.resolve({
+                                sessions: [
+                                    {
+                                        id: "abandoned",
+                                        path: "/abandoned",
+                                        cwd: "/abandoned",
+                                        title: "Abandoned catalogue",
+                                    },
+                                ],
+                                warnings: [],
+                            });
+                        }
+
+                        await flush();
+                        assert.equal(
+                            nodes(picker.tree).some((node) => node.props.sessions?.length > 0),
+                            false,
+                        );
+                        assert.doesNotMatch(textOf(picker.tree), /Abandoned catalogue/);
+                        const count = requests.length;
+
+                        refresh();
+                        await flush();
+                        assert.equal(
+                            requests.length,
+                            count,
+                            "a retained refresh cannot read for an abandoned host",
+                        );
+                    },
+                );
+            }
+        }
+    }
+});
+
+test("import conflicts preserve retry inputs but require a fresh reviewed source and consent", async (t) => {
+    for (const source of ["saved", "manual", "private-pane"]) {
+        await t.test(source, async (t) => {
+            let panel: Mount;
+            let requests: ReturnType<typeof holdApi>;
+            let read: (() => Promise<unknown>) | undefined;
+
+            if (source === "private-pane") {
+                reset();
+                fixture.store.state.sheet = { type: "import" };
+                requests = holdApi();
+                const preview = importPreview();
+
+                panel = mount(() => ImportPanel({ initialPreview: preview, fromPrivate: true }));
+                t.after(() => dispose(panel));
+                await flush();
+            } else {
+                ({ panel, requests, read } = await prepareImportSource(source, t));
+                const reading = read!();
+
+                requests.at(-1)!.resolve(importPreview());
+                await reading;
+                await flush();
+            }
+
+            await changeField(panel, "import-consent", true);
+            const oldSubmit = find(panel, (node) => node.type === "form").props.onSubmit;
+            const copying = submit(panel);
+
+            requests
+                .at(-1)!
+                .reject(Object.assign(new Error("Source changed: preview again"), { status: 409 }));
+            await copying;
+            await flush();
+            assert.match(textOf(panel.tree), /Source changed: preview again/);
+            const count = requests.length;
+            const stale = oldSubmit({ preventDefault() {} });
+
+            assert.equal(
+                requests.length,
+                count,
+                "conflicted consent is invalid even through an old form",
+            );
+            await stale;
+
+            if (source === "private-pane") {
+                assert.match(textOf(panel.tree), /Saved conversation/);
+                assert.equal(field(panel, "import-consent").props.checked, false);
+            } else {
+                assert.equal(
+                    nodes(panel.tree).some((node) => node.props.id === "import-preview"),
+                    false,
+                );
+
+                if (source === "manual") {
+                    assert.equal(
+                        field(panel, "import-path").props.value,
+                        " /history/manual.jsonl ",
+                    );
+                    assert.equal(field(panel, "import-leaf").props.value, " branch-entry ");
+                }
+
+                const rereading = read!();
+
+                requests
+                    .at(-1)!
+                    .resolve(importPreview({ sha256: "c".repeat(64), title: "Fresh source" }));
+                await rereading;
+                await flush();
+                assert.match(textOf(panel.tree), /Fresh source/);
+                assert.equal(field(panel, "import-consent").props.checked, false);
+                await changeField(panel, "import-consent", true);
+                const retry = submit(panel);
+
+                assert.equal(requests.at(-1)!.body.sha256, "c".repeat(64));
+                requests.at(-1)!.resolve({ id: 51 });
+                await retry;
+            }
+        });
+    }
+});
 
 test("saved and live import confirmations send the reviewed source and destination only once", async (t) => {
     for (const active of [false, true]) {
@@ -1285,6 +1898,130 @@ test("collaborators create only inside granted project defaults while owner disc
     fixture.store.state.me.role = "viewer";
     render(ownerPanel);
     assert.equal(button(ownerPanel, "Start Worker").props.disabled, true);
+});
+
+// Older hosts acknowledge unknown project fields without saving them. The owner form must
+// not offer a false-success default edit; the HTTP association test owns durable persistence.
+test("project defaults require the advertised link capability and explicit clears remain explicit", async () => {
+    const previous = fixture.actions.updateProject;
+
+    try {
+        for (const capable of [false, true]) {
+            reset();
+            fixture.store.state.server.privateAgents = 4;
+            fixture.store.state.server.projectAgentLinks = capable ? 1 : undefined;
+            fixture.store.state.namedAgents = [{ agentId: "nora", name: "Nora" }];
+            const project = { ...projects[0], defaultAgentId: "nora" };
+            const saved: Props[] = [];
+
+            fixture.actions.updateProject = async (_id: string, body: Props) => saved.push(body);
+            const form = mount(() => ProjectForm({ project }));
+            const picker = nodes(form.tree).find(
+                (node) => node.props["aria-label"] === "Default named agent",
+            );
+
+            if (capable) {
+                assert.ok(picker);
+                assert.equal(picker.props.value, "nora");
+                picker.props.onChange({ currentTarget: { value: "" } });
+                await flush();
+            } else {
+                assert.equal(picker, undefined);
+                assert.match(textOf(form.tree), /cannot save project-agent defaults yet/);
+            }
+
+            await submit(form);
+            await flush();
+            assert.equal(saved.length, 1);
+            assert.equal(Object.hasOwn(saved[0]!, "defaultAgentId"), capable);
+            assert.equal(saved[0]!.defaultAgentId, capable ? null : undefined);
+            assert.equal(
+                project.defaultAgentId,
+                "nora",
+                "the form does not mutate the existing default locally",
+            );
+            dispose(form);
+        }
+    } finally {
+        fixture.actions.updateProject = previous;
+    }
+});
+
+// Home keeps this real native panel mounted while disclosure visibility changes. Prop changes
+// must update placement without retaining a local folder/worktree on an SSH destination.
+test("embedded native work settings survive hiding and follow project changes without local overrides", async () => {
+    reset();
+    fixture.store.state.server.agentProfiles.push({
+        id: "researcher",
+        name: "Researcher",
+        starter: true,
+    });
+    const created: unknown[][] = [];
+
+    fixture.actions.createSession = async (...args: unknown[]) => {
+        created.push(args);
+
+        return { id: 45 };
+    };
+
+    const props: Props = {
+        projectId: "local",
+        cwd: "/explicit-local",
+        embedded: true,
+        visible: true,
+    };
+    const panel = mount(() => ProjectSessionPanel(props));
+    const type = () => find(panel, (node) => node.props["aria-label"] === "Thread type");
+    const worktree = () =>
+        find(panel, (node) => node.type === "input" && node.props.type === "checkbox");
+
+    assert.equal(child(panel, WorkspaceField).props.cwd, "/explicit-local");
+    type().props.onChange({ currentTarget: { value: "researcher" } });
+    child(panel, WorkspaceField).props.onChange(null, "/edited-local");
+    worktree().props.onChange({ currentTarget: { checked: true } });
+    await flush();
+    props.visible = false;
+    render(panel);
+    props.visible = true;
+    render(panel);
+    assert.equal(child(panel, WorkspaceField).props.cwd, "/edited-local");
+    assert.equal(type().props.value, "researcher");
+    assert.equal(worktree().props.checked, true);
+    assert.deepEqual(created, [], "viewing and hiding options never starts work");
+    props.projectId = "a";
+    render(panel);
+    assert.equal(
+        button(panel, "Start Researcher").props.disabled,
+        true,
+        "old placement cannot start during a controlled project transition",
+    );
+    await button(panel, "Start Researcher").props.onClick();
+    assert.deepEqual(created, []);
+    await flush();
+    assert.equal(child(panel, WorkspaceField).props.cwd, "/a");
+    assert.deepEqual(child(panel, WorkspaceField).props.location, {
+        kind: "ssh",
+        host: "machine-a",
+    });
+    assert.equal(type().props.value, "researcher");
+    assert.equal(worktree().props.checked, false);
+    await button(panel, "Start Researcher").props.onClick();
+    await flush();
+    assert.equal(created[0]![0], "/a");
+    assert.deepEqual(created[0]![1], {
+        location: { kind: "ssh", host: "machine-a" },
+        threadType: "researcher",
+        projectId: "a",
+        worktree: false,
+        requestId: "request",
+    });
+    const remote = mount(() => ProjectSessionPanel({ ...props, cwd: "/must-not-cross-machines" }));
+
+    assert.equal(
+        child(remote, WorkspaceField).props.cwd,
+        "/a",
+        "an embedded remote initial destination also ignores a local cwd hint",
+    );
 });
 
 test("owner People editor saves explicit access and nonowners cannot invite or edit grants", async () => {

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { SessionsDoc, SubagentsDoc } from "../src/server/docs.ts";
 import { AgentIdentitiesDoc } from "../src/server/agent-identity-docs.ts";
+import { privateAgentRequest } from "./private-agent-http.ts";
 import {
     cleanUp,
     context,
@@ -90,12 +91,18 @@ test("task-directed native contact auto-associates the controller and reports to
             agentCalls++;
 
             if (last.role === "user") {
+                const passive = last.text.includes("PASSIVE_FOLLOW");
+
                 return fauxAssistantMessage(
                     [
                         fauxToolCall("agent_work", {
-                            action: "send",
+                            action: passive ? "follow" : "send",
                             session: Number(controller),
-                            text: "Observe the existing investigation; do not resend it.",
+                            ...(passive
+                                ? { report: false }
+                                : {
+                                      text: "Observe the existing investigation; do not resend it.",
+                                  }),
                         }),
                     ],
                     { stopReason: "toolUse" },
@@ -138,6 +145,7 @@ test("task-directed native contact auto-associates the controller and reports to
         await app.close();
     });
     const source = await newSession(app, app.defaultCwd, "worker");
+
     await app.commands.submit(source, owner(app), {
         text: "Investigate only; no implementation or publication.",
         requestId: "original-execution",
@@ -155,6 +163,17 @@ test("task-directed native contact auto-associates the controller and reports to
     const opened = await app.pip.orchestration.control(source, owner(app), { action: "open" });
 
     controller = opened.orchestration!.conversationId as ConversationId;
+
+    const navigation = async (token?: string) => {
+        const response = await privateAgentRequest(app, "sessions", undefined, token);
+
+        assert.equal(response.status, 200);
+
+        return (await response.json()).find((row: { id: number }) => row.id === Number(source))
+            ?.supervisor;
+    };
+
+    assert.equal((await navigation()).parentChatId, undefined, "opening has no accepted parent");
     assert.equal(app.workItems.itemFor(source)!.supervisor!.status, "reclaimed");
     assert.equal(controllerCalls, 0, "opening the exact controller does not activate it");
     assert.deepEqual(
@@ -197,6 +216,57 @@ test("task-directed native contact auto-associates the controller and reports to
         1,
         "delegation does not resend execution work",
     );
+    const current = await navigation();
+
+    assert.equal(current.parentChatId, Number(chat));
+    assert.equal(current.agentId, created.agentId);
+    const grant = structuredClone(app.workItems.itemFor(source)!.supervisor!);
+    const readsBefore = { agentCalls, controllerCalls };
+    const guest = app.config.addUser("Shared work reader", "guest");
+    const otherOwner = app.config.addUser("Other owner", "owner");
+
+    for (const person of [guest, otherOwner]) {
+        assert.equal(await navigation(person.token), undefined, "parentage remains owner-private");
+    }
+
+    await navigation();
+    assert.deepEqual(app.workItems.itemFor(source)!.supervisor, grant);
+    assert.deepEqual(
+        { agentCalls, controllerCalls },
+        readsBefore,
+        "navigation never activates work",
+    );
+
+    for (const flag of ["pipEnabled", "workItemsEnabled"] as const) {
+        app.config[flag] = false;
+
+        try {
+            assert.equal((await navigation()).parentChatId, undefined, `${flag}: no live parent`);
+        } finally {
+            app.config[flag] = true;
+        }
+    }
+
+    await say(app, inbox, "PASSIVE_FOLLOW: inspect without acquiring management.");
+    assert.equal(controllerCalls, 1, "passive contact does not activate the controller");
+    assert.equal(
+        (await navigation()).parentChatId,
+        Number(chat),
+        "passive contact cannot retarget parentage",
+    );
+
+    for (const archived of [true, false]) {
+        const response = await privateAgentRequest(app, `sessions/${chat}`, { archived });
+
+        assert.equal(response.status, 200);
+        assert.equal(
+            (await navigation()).parentChatId,
+            undefined,
+            "closing and restoring the exact source cannot renew its accepted parent authority",
+        );
+        assert.equal(app.workItems.itemFor(source)!.supervisor!.status, "running");
+    }
+
     const delivered = (await app.pip.agents.supervision.status(chat, owner(app))).reports!;
 
     assert.equal(delivered.length, 1);
@@ -207,6 +277,12 @@ test("task-directed native contact auto-associates the controller and reports to
     const epoch = app.pip.agents.identity(chat)!.epoch;
 
     await app.commands.abort(chat, owner(app));
+    assert.equal(
+        (await navigation()).parentChatId,
+        undefined,
+        "reclaimed work has no current parent",
+    );
+    assert.equal((await navigation()).agentId, undefined);
     assert.equal(app.isBusy(source), true, "agent Stop leaves execution alive");
     assert.ok(
         app.pip.agents.identity(chat)!.epoch > epoch,
@@ -220,6 +296,11 @@ test("task-directed native contact auto-associates the controller and reports to
     await until(() => !app.isBusy(source), "execution finishes without supervisor control");
     await app.close();
     app = await openApp(model, directory);
+    assert.equal(
+        (await navigation()).parentChatId,
+        undefined,
+        "recovery cannot renew a stopped parent",
+    );
     assert.equal(agentCalls, calls, "recovery and reports do not activate paid agent runs");
     assert.equal(controllerCalls, 1, "stopped controller does not restart from a work outcome");
     assert.equal(
@@ -614,6 +695,13 @@ test("delayed native replies retain their accepted source chat/request after a d
         app.workItems.itemFor(source)!.supervisor!.conversationId,
         Number(controller),
         "both contacts reuse the exact native controller",
+    );
+    assert.equal(app.pip.agents.supervision.manages(a), true);
+    assert.equal(app.pip.agents.supervision.manages(b), true);
+    assert.equal(
+        app.sessions(owner(app)).find((row) => row.id === Number(source))!.supervisor?.parentChatId,
+        undefined,
+        "multiple current accepted sources cannot be collapsed to a guessed latest parent",
     );
     await app.pip.agents.supervision.open();
     const reports = async (chat: ConversationId) =>

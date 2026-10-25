@@ -387,6 +387,8 @@ test(
     browserOptions,
     async (t) => {
         await withAppearance(async ({ app, page }) => {
+            // Opening the native Import sheet must not discover the owner's real Herdr sessions.
+            app.piSessions.active.local.sockets = async () => [];
             const worker = await newSession(app, work, "worker");
 
             await app.projects.create(owner(app), {
@@ -413,9 +415,18 @@ test(
             for (const viewport of ["desktop", "mobile"] as const) {
                 await t.test(viewport, async () => {
                     await page.setViewport(VIEWPORTS[viewport]);
-                    const scope = viewport === "desktop" ? ".sidebar" : ".home-list";
+                    const scope = viewport === "desktop" ? ".sidebar" : ".drawer";
+                    const creation = '[data-part="home"]';
 
-                    await present(page, `${scope} .project-group-head`);
+                    const showSidebar = async () => {
+                        if (viewport === "mobile") {
+                            await page.click({ selector: '.topbar [aria-label="Open sessions"]' });
+                        }
+
+                        await present(page, `${scope} .project-group-head`);
+                    };
+
+                    await showSidebar();
 
                     if (viewport === "desktop") {
                         await page.hover({ selector: `${scope} .project-group-head .group-head` });
@@ -511,13 +522,13 @@ test(
                     );
                     assert.equal(footer.role, "5px", "the account badge has Lantern tag corners");
                     await page.click({ selector: `${scope} .new-button` });
-                    const sheet = '[role="dialog"][aria-label="New Session"]';
-
-                    await present(page, `${sheet} .project-choice-row`);
-                    await page.click({ selector: `${sheet} .project-choice-row` });
-                    await present(page, `${sheet} .session-destination`);
+                    await present(page, ".drawer", false);
+                    await present(page, `${creation} .home-project-choice`);
+                    await page.click({ selector: `${creation} .home-project-choice` });
+                    await page.evaluate(`[...document.querySelectorAll('${creation} button')]
+                        .find(button => button.textContent.trim() === 'Start a Work Item instead').click()`);
+                    await present(page, `${creation} .session-destination`);
                     const controls = await inPage<{
-                        tabsFill: boolean;
                         selectRadius: string;
                         buttonRadius: string;
                         iconColor: string;
@@ -525,16 +536,11 @@ test(
                     }>(
                         page,
                         `
-                    const sheet = document.querySelector('${sheet}');
-                    const tabs = sheet.querySelector('.new-session-tabs');
-                    const track = tabs.getBoundingClientRect();
-                    const buttons = [...tabs.querySelectorAll('button')].map(button => button.getBoundingClientRect());
-                    const select = sheet.querySelector('select[aria-label="Thread type"]');
-                    const start = sheet.querySelector('.session-destination .button.primary');
+                    const home = document.querySelector('${creation}');
+                    const select = home.querySelector('select[aria-label="Thread type"]');
+                    const start = home.querySelector('.session-destination .button.primary');
 
                     return JSON.stringify({
-                        tabsFill: Math.abs(buttons[0].width - buttons[1].width) < 1
-                            && Math.abs(track.right - buttons[1].right - parseFloat(getComputedStyle(tabs).paddingRight)) < 1,
                         selectRadius: getComputedStyle(select).borderRadius,
                         buttonRadius: getComputedStyle(start).borderRadius,
                         iconColor: getComputedStyle(start.querySelector('.thread-type')).color,
@@ -543,11 +549,6 @@ test(
                 `,
                     );
 
-                    assert.equal(
-                        controls.tabsFill,
-                        true,
-                        "Start new and Import fill the entire track equally",
-                    );
                     assert.equal(
                         controls.selectRadius,
                         controls.buttonRadius,
@@ -558,7 +559,7 @@ test(
                         controls.buttonColor,
                         "the Start icon uses its button's monochrome ink",
                     );
-                    const checkbox = `${sheet} .session-destination .check input[type="checkbox"]`;
+                    const checkbox = `${creation} .session-destination .check input[type="checkbox"]`;
 
                     await present(page, checkbox);
                     const unchecked = await inPage<{
@@ -659,6 +660,7 @@ test(
                             ),
                         "Pocket restores the shared checkbox's original size",
                     );
+                    await showSidebar();
                     const pocket = await inPage<{
                         corners: string[];
                         checked: boolean;
@@ -691,6 +693,12 @@ test(
                         "theme switching preserves the native state",
                     );
                     assert.equal(pocket.mark, "1", "the checked mark survives theme switching");
+
+                    if (viewport === "mobile") {
+                        await page.press("Escape");
+                        await present(page, ".drawer", false);
+                    }
+
                     await page.evaluate(`(await import('/theme.js')).chooseLook('lantern')`);
                     await until(
                         () =>
@@ -704,10 +712,44 @@ test(
                             ),
                         "Lantern restores its checkbox size and corners in the open form",
                     );
+                    await page.evaluate(`[...document.querySelectorAll('${creation} button')]
+                        .find(button => button.textContent.trim() === 'Hide Work Item options').focus()`);
+                    await page.press("Enter");
+                    await present(page, `${creation} .session-destination`, false);
+                    assert.equal(
+                        await inPage<boolean>(
+                            page,
+                            `return JSON.stringify(!document.querySelector('[role="dialog"]'))`,
+                        ),
+                        true,
+                        "Work Item options belong to Home rather than a New Session modal",
+                    );
+                    await page.evaluate(`[...document.querySelectorAll('${creation} button')]
+                        .find(button => button.textContent.trim() === 'Import from Pi…').click()`);
+                    const sheet = '[role="dialog"][aria-label="New Session"]';
+
+                    await present(page, `${sheet} .new-session-tabs`);
+                    assert.equal(
+                        await inPage<boolean>(
+                            page,
+                            `
+                            const tabs = document.querySelector('${sheet} .new-session-tabs');
+                            const track = tabs.getBoundingClientRect();
+                            const buttons = [...tabs.querySelectorAll('button')].map(button => button.getBoundingClientRect());
+
+                            return JSON.stringify(Math.abs(buttons[0].width - buttons[1].width) < 1
+                                && Math.abs(track.right - buttons[1].right - parseFloat(getComputedStyle(tabs).paddingRight)) < 1
+                                && document.querySelector('#session-tab-import').getAttribute('aria-selected') === 'true');
+                        `,
+                        ),
+                        true,
+                        "the native Import sheet retains equally sized Start new / Import tab controls",
+                    );
                     await page.press("Escape");
                     await present(page, sheet, false);
 
                     // Exercise the real sidebar entry point, not an injected switch fixture.
+                    await showSidebar();
                     await page.click({ selector: `${scope} .foot-tile:last-child` });
                     const toggle = `${settings} [role="switch"][aria-label="Show thinking"]`;
 

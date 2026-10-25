@@ -7,12 +7,16 @@ import { after, test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { awaitWithContext, withAbortSignal } from "@earendil-works/chord/context";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { protectWorkflowEnv } from "../src/server/workflow-policy.ts";
 import { SessionsDoc } from "../src/server/docs.ts";
 import { AgentIdentitiesDoc } from "../src/server/agent-identity-docs.ts";
+import { HandoffsDoc } from "../src/server/workflow-docs.ts";
 import { privateAgentRequest as request } from "./private-agent-http.ts";
 import {
     cleanUp,
     context,
+    executeHandoff,
     lastText,
     newSession,
     openApp,
@@ -27,6 +31,11 @@ after(cleanUp);
 
 const tool = (name: string, args: Parameters<typeof fauxToolCall>[1]) =>
     fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
+
+const closeOwned = (app: Awaited<ReturnType<typeof openApp>>, chat: ConversationId) =>
+    request(app, `pip/agents/${app.pip.agents.scope(chat)!.agentId}/close-chat-v1`, {
+        chatId: Number(chat),
+    });
 
 test("only a current owner's bound saved Chat accepts native archive/restore and retains its history", async () => {
     const data = join(root, "chat-close-history");
@@ -433,11 +442,12 @@ test("closing idle Chat A preserves sibling B's real borrowed writer and coding 
     afterWrite.resolve();
 });
 
-test("Close revokes registered parent continuation but independent child work finishes and restore never wakes the old task", async (t) => {
+test("Close archives and joins its currently managed whole Work Item; restores retain history without resuming", async (t) => {
     const child = Promise.withResolvers<void>();
     let childStarted = false;
     let parentCalls = 0;
-    let phase = "send";
+    let phase = "own";
+    let source!: ConversationId;
     let controller!: ConversationId;
     const app = await openApp(
         scriptedModel(async (input, options) => {
@@ -448,6 +458,23 @@ test("Close revokes registered parent continuation but independent child work fi
 
             if (system.includes("the owner's persistent private agent")) {
                 parentCalls++;
+
+                if (phase === "own") {
+                    phase = "owned";
+
+                    return tool("handoff", {
+                        action: "start",
+                        targetType: "researcher",
+                        relationship: "new-work",
+                        summary: "Create a bounded native child and retain the evidence.",
+                    });
+                }
+
+                if (phase === "owned") {
+                    phase = "send";
+
+                    return fauxAssistantMessage("Ownership recorded; wait for fresh input.");
+                }
 
                 if (phase === "send") {
                     phase = "wait";
@@ -504,15 +531,22 @@ test("Close revokes registered parent continuation but independent child work fi
         child.resolve();
         await app.close();
     });
-    const source = await newSession(app, app.defaultCwd, "researcher");
-
-    controller = (await app.pip.orchestration.control(source, owner(app), { action: "open" }))
-        .orchestration!.conversationId as ConversationId;
+    app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
     const created = await app.pip.agents.create(owner(app), {
         name: "Parent Chat",
         requestId: "close-parent",
     });
     const chat = created.id as ConversationId;
+
+    await say(app, chat, "Create a new bounded Researcher child and wait before running it.");
+    source = app.sessions(owner(app)).find((row) => row.threadType === "researcher")!
+        .id as ConversationId;
+    controller = app.workItems.itemFor(source)!.supervisor!.conversationId as ConversationId;
+    assert.equal(
+        app.pip.agents.supervision.groupingParent(app.workItems.itemFor(source)!, owner(app))
+            ?.groupingParentChatId,
+        Number(chat),
+    );
     const execution = await app.commands.submit(source, owner(app), {
         text: "Investigate independently and retain evidence.",
         requestId: "independent-child",
@@ -531,24 +565,147 @@ test("Close revokes registered parent continuation but independent child work fi
         "native registered parent wait",
     );
     const parentBeforeClose = parentCalls;
-    const grant = { ...app.workItems.itemFor(source)!.supervisor! };
-    const closed = await request(app, `sessions/${chat}`, { archived: true });
+    const rejected = await request(app, `pip/agents/${created.agentId}/close-chat-v1`, {
+        chatId: Number(chat),
+        archived: true,
+    });
+
+    assert.equal(
+        rejected.status,
+        400,
+        "versioned Close rejects unknown payload keys without effects",
+    );
+    assert.notEqual(app.sessionMeta(chat)?.archived, true);
+    assert.equal((await request(app, `sessions/${chat}`, { archived: true })).status, 200);
+    assert.equal(
+        app.isBusy(source),
+        true,
+        "an older frontend's Chat-only contract must not escalate to child cancellation",
+    );
+    assert.notEqual(app.sessionMeta(source)?.archived, true);
+    await t.test(
+        "legacy Chat-only archive cannot receive a false owned Close acknowledgement",
+        async () => {
+            const unchanged = await closeOwned(app, chat);
+            const body = await unchanged.json();
+
+            assert.equal(unchanged.status, 409, JSON.stringify(body));
+            assert.equal(
+                body.scope,
+                undefined,
+                "an already-closed no-op cannot certify an owned join",
+            );
+            assert.equal(body.ok, undefined);
+            assert.match(body.error, /already closed/i);
+            assert.match(body.error, /no additional child/i);
+            assert.match(body.error, /restore.*fresh close/i);
+            assert.equal(app.sessionMeta(chat)?.archived, true);
+            assert.notEqual(app.workItems.itemFor(source)!.archived, true);
+            assert.equal(
+                app.isBusy(source),
+                true,
+                "the refused stale-UI request leaves child execution untouched",
+            );
+
+            for (const member of app.workItems.members(source)) {
+                assert.notEqual(app.sessionMeta(member)?.archived, true);
+            }
+        },
+    );
+    assert.equal((await request(app, `sessions/${chat}`, { archived: false })).status, 200);
+    const exact = app.pip.agents
+        .list(owner(app))
+        .find((row) => row.agentId === created.agentId)!
+        .chats.find((row) => row.id === Number(chat))!;
+
+    assert.equal(exact.busy, false);
+    assert.equal(exact.managing, false);
+    assert.equal(
+        exact.runningChildren,
+        true,
+        "trusted exact child projection survives a stopped source task",
+    );
+    const members = app.workItems.members(source);
+    const entries = (await (await app.conversation(source)).context(context)).entries;
+    const closed = await closeOwned(app, chat);
 
     assert.equal(closed.status, 200, await closed.text());
-    assert.equal(app.isBusy(source), true, "independent Work Item execution continues");
-    assert.deepEqual(app.workItems.itemFor(source)!.supervisor, grant);
+    assert.equal(app.isBusy(source), false, "the currently controlled child is natively joined");
+    assert.equal(app.isBusy(controller), false);
+    assert.equal(app.workItems.itemFor(source)!.archived, true);
+    assert.equal(app.workItems.itemFor(source)!.supervisor!.status, "reclaimed");
+    const file = join(root, "archived-work-item-fence.txt");
+    const env = protectWorkflowEnv(
+        app,
+        source,
+        new NodeExecutionEnv({ cwd: app.cwdOf(source) }),
+        async () => {
+            throw new Error("This file-only fixture must never launch a shell.");
+        },
+        owner(app),
+    );
+    const refusedWrite = await env.writeFile(file, "Must not write while archived", context);
+
+    assert.equal(
+        refusedWrite.ok,
+        false,
+        "the native environment rejects fresh effects after the archive fence",
+    );
+    assert.match(!refusedWrite.ok ? refusedWrite.error.message : "", /Restore the Work Item/);
+    assert.equal(existsSync(file), false);
+
+    for (const member of members) {
+        assert.equal(app.sessionMeta(member)?.archived, true);
+        assert.equal(
+            app.sessions(owner(app)).find((row) => row.id === member)?.groupingParentChatId,
+            Number(chat),
+        );
+    }
+
     assert.equal(
         (await app.pip.agents.supervision.parentContext(chat, owner(app)))[0]?.status,
         "revoked",
     );
     assert.equal((await request(app, `sessions/${chat}`, { archived: false })).status, 200);
-    assert.equal(app.isBusy(chat), false, "restore remains idle while independent work continues");
+    assert.equal(
+        app.isBusy(chat),
+        false,
+        "Chat restore remains idle and does not restore children",
+    );
+    assert.equal(app.workItems.itemFor(source)!.archived, true);
+    assert.deepEqual((await (await app.conversation(source)).context(context)).entries, entries);
     child.resolve();
     const completed = await (await app.harness.submission(execution.submissionId, context))!.wait(
         context,
     );
 
-    assert.equal(completed.status, "done");
+    assert.equal(completed.status, "unanswered");
+
+    if (completed.status === "unanswered") {
+        assert.equal(completed.reason, "aborted");
+    }
+
+    assert.equal((await request(app, `sessions/${source}`, { archived: false })).status, 200);
+    assert.equal(app.workItems.itemFor(source)!.archived, false);
+    assert.equal(app.isBusy(source), false, "explicit whole-item restore cannot resume execution");
+    const freshWrite = await env.writeFile(
+        file,
+        "Fresh explicit owner effect after restore",
+        context,
+    );
+
+    assert.equal(
+        freshWrite.ok,
+        true,
+        "an explicit restore reopens new owner effects, not old tasks",
+    );
+    assert.equal(readFileSync(file, "utf8"), "Fresh explicit owner effect after restore");
+    await env.cleanup(context);
+    assert.equal(
+        app.sessions(owner(app)).find((row) => row.id === source)?.groupingParentChatId,
+        Number(chat),
+        "inert Restore retains passive ownership, never live control",
+    );
     await until(() => !app.isBusy(controller), "child controller settled");
     await app.pip.agents.supervision.open();
     await until(() => !app.isBusy(chat), "restored history idle");
@@ -559,6 +716,598 @@ test("Close revokes registered parent continuation but independent child work fi
     );
     await say(app, chat, "A fresh task after restore");
     assert.equal(parentCalls, parentBeforeClose + 1);
+});
+
+test("whole Work Item Restore waits for its owning Chat's native join and revalidates current access", async (t) => {
+    for (const mode of [
+        "session",
+        "work item",
+        "other owner",
+        "visibility changed",
+        "driver changed",
+    ]) {
+        await t.test(mode, async (t) => {
+            const provider = Promise.withResolvers<void>();
+            const joined = Promise.withResolvers<void>();
+            const finishJoin = Promise.withResolvers<void>();
+            let childStarted = false;
+            let calls = 0;
+            const wouldWrite = join(root, `old-restored-tool-${mode}.txt`);
+            const app = await openApp(
+                scriptedModel(async (input, options) => {
+                    calls++;
+                    const system = JSON.stringify(
+                        input.messages.filter((message) => message.role === "system"),
+                    );
+                    const last = lastText(input);
+
+                    if (
+                        system.includes("the owner's persistent private agent") &&
+                        last.role === "user"
+                    ) {
+                        return tool("handoff", {
+                            action: "start",
+                            targetType: "researcher",
+                            relationship: "new-work",
+                            summary: "Create one bounded native child for lifecycle ordering.",
+                        });
+                    }
+
+                    if (system.includes("the private supervisor for Work Item")) {
+                        return tool("work_supervise", {
+                            action: "wait",
+                            text: "Wait for native events.",
+                        });
+                    }
+
+                    if (system.includes("You are the Researcher agent")) {
+                        childStarted = true;
+                        await awaitWithContext(
+                            provider.promise,
+                            options?.signal ? withAbortSignal(options.signal, context) : context,
+                        );
+
+                        return tool("write", {
+                            path: wouldWrite,
+                            content: "Old work must never resume.",
+                        });
+                    }
+
+                    return fauxAssistantMessage("Fixture task retained.");
+                }),
+                join(root, `chat-close-restore-join-${mode}`),
+            );
+            const conversation = app.conversation.bind(app);
+            let closing: Promise<Response> | undefined;
+            let restoring: Promise<Response> | undefined;
+            let repeated: Promise<Response> | undefined;
+
+            t.after(async () => {
+                finishJoin.resolve();
+                provider.resolve();
+                await Promise.allSettled([closing, restoring, repeated]);
+                app.conversation = conversation;
+                await app.close();
+            });
+            app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
+            const user = owner(app);
+            const other = app.config.addUser(
+                "Other authorized person",
+                mode === "visibility changed" ? "guest" : "owner",
+            );
+            const created = await app.pip.agents.create(user, {
+                name: "Join owner",
+                requestId: "join-owner",
+            });
+            const chat = created.id as ConversationId;
+
+            await say(app, chat, "Create a new bounded Researcher child and wait.");
+            const source = app.sessions(user).find((row) => row.threadType === "researcher")!
+                .id as ConversationId;
+            const controller = app.workItems.itemFor(source)!.supervisor!
+                .conversationId as ConversationId;
+
+            app.conversation = async (id) => {
+                const handle = await conversation(id);
+
+                return id !== source
+                    ? handle
+                    : new Proxy(handle, {
+                          get(target, property) {
+                              if (property === "abort") {
+                                  return async (...args: Parameters<typeof handle.abort>) => {
+                                      await target.abort(...args);
+                                      joined.resolve();
+                                      await finishJoin.promise;
+                                  };
+                              }
+
+                              const value = Reflect.get(target, property, target);
+
+                              return typeof value === "function" ? value.bind(target) : value;
+                          },
+                      });
+            };
+
+            const execution = await app.commands.submit(source, user, {
+                requestId: "hold-child",
+                text: "Hold this child until stopped.",
+            });
+
+            await until(() => childStarted, "the real native child starts");
+            closing = closeOwned(app, chat);
+            await joined.promise;
+            await until(() => !app.isBusy(controller), "the native controller is stopped");
+            const beforeCalls = calls;
+            const restoredByOther = mode === "other owner" || mode === "visibility changed";
+            const token = restoredByOther ? other.token : app.config.ownerToken;
+            const path =
+                mode === "session" ? `sessions/${source}` : `c/${source}/x/work-items/work-item`;
+            let restoreFinished = false;
+
+            restoring = request(app, path, { archived: false }, token).then((response) => {
+                restoreFinished = true;
+
+                return response;
+            });
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            assert.equal(
+                restoreFinished,
+                false,
+                "Restore must wait outside native locks, not publish during Close's held join",
+            );
+            assert.equal(app.sessionMeta(source)?.archived, true);
+            const file = join(root, `pending-restore-writer-${mode}.txt`);
+            const env = protectWorkflowEnv(
+                app,
+                source,
+                new NodeExecutionEnv({ cwd: app.cwdOf(source) }),
+                async () => {
+                    throw new Error("This file-only fixture cannot launch a shell.");
+                },
+                user,
+            );
+            const refused = await env.writeFile(file, "Too early", context);
+
+            assert.equal(refused.ok, false, "the native writer stays fenced until join finishes");
+            assert.equal(existsSync(file), false);
+
+            if (mode === "other owner") {
+                assert.equal(
+                    app.workItems.projection(source, other.user).groupingParentChatId,
+                    undefined,
+                    "the wait uses private stored ownership, not owner-projected grouping",
+                );
+                const moved = await request(app, `sessions/${source}`, { projectId: null });
+
+                assert.equal(
+                    moved.status,
+                    409,
+                    "Move cannot clear the private join relationship during Close",
+                );
+                assert.equal(app.workItems.itemFor(source)!.parentChat?.chatId, Number(chat));
+            }
+
+            if (mode === "visibility changed") {
+                app.config.updateUser(other.user.id, { sessions: ["999999"] });
+            }
+
+            if (mode === "driver changed") {
+                await app.collab.turns(source, other.user, { action: "on" });
+            }
+
+            if (mode === "session") {
+                let duplicateFinished = false;
+
+                repeated = closeOwned(app, chat).then((response) => {
+                    duplicateFinished = true;
+
+                    return response;
+                });
+                await new Promise<void>((resolve) => setImmediate(resolve));
+                assert.equal(
+                    duplicateFinished,
+                    false,
+                    "a repeated Close still joins the first Close",
+                );
+            }
+
+            finishJoin.resolve();
+            assert.equal((await closing).status, 200);
+            const restored = await restoring;
+            const blocked = mode === "visibility changed" || mode === "driver changed";
+
+            assert.equal(
+                restored.status,
+                mode === "visibility changed" ? 404 : mode === "driver changed" ? 409 : 200,
+                await restored.text(),
+            );
+            assert.equal(app.sessionMeta(source)?.archived, blocked);
+            assert.equal(app.workItems.itemFor(source)!.supervisor!.status, "reclaimed");
+            assert.equal(app.workItems.itemFor(source)!.supervisor!.agentId, undefined);
+            assert.equal(app.isBusy(chat), false);
+            assert.equal(app.isBusy(source), false);
+            assert.equal(calls, beforeCalls, "restore cannot wake model or tool work");
+            assert.equal(existsSync(wouldWrite), false);
+            const settled = await (await app.harness.submission(
+                execution.submissionId,
+                context,
+            ))!.wait(context);
+
+            assert.equal(settled.status, "unanswered");
+
+            if (!blocked) {
+                const fresh = await env.writeFile(
+                    file,
+                    "Fresh owner effect after settled restore",
+                    context,
+                );
+
+                assert.equal(fresh.ok, true);
+            }
+
+            await env.cleanup(context);
+
+            if (mode === "session") {
+                const duplicate = await repeated!;
+
+                assert.equal(
+                    duplicate.status,
+                    409,
+                    "duplicate HTTP refusal cannot reject the internal lifecycle wait used by Restore",
+                );
+                assert.equal((await duplicate.json()).scope, undefined);
+                assert.equal(
+                    (await closeOwned(app, chat)).status,
+                    409,
+                    "a lost-ACK retry against an already closed Chat is refused without new child changes",
+                );
+                assert.equal(
+                    app.sessionMeta(source)?.archived,
+                    false,
+                    "stale Close cannot undo later explicit child Restore",
+                );
+                assert.equal(
+                    (await request(app, `sessions/${chat}`, { archived: false })).status,
+                    200,
+                );
+                assert.equal((await closeOwned(app, chat)).status, 200);
+                assert.equal(
+                    app.sessionMeta(source)?.archived,
+                    true,
+                    "a fresh Close after explicit Chat Restore has a fresh owned scope",
+                );
+            }
+        });
+    }
+});
+
+test("Close refuses legacy creation ownership after a pre-field project move without partially archiving the Chat", async (t) => {
+    const app = await openApp(
+        scriptedModel((input) => {
+            const system = JSON.stringify(
+                input.messages.filter((message) => message.role === "system"),
+            );
+            const last = lastText(input);
+
+            if (system.includes("the owner's persistent private agent") && last.role === "user") {
+                return tool("handoff", {
+                    action: "start",
+                    targetType: "researcher",
+                    relationship: "new-work",
+                    summary: "Create bounded work in this exact Chat's current project.",
+                });
+            }
+
+            if (system.includes("the private supervisor for Work Item")) {
+                return tool("work_supervise", { action: "wait", text: "Wait for native events." });
+            }
+
+            return fauxAssistantMessage("Accepted native creation.");
+        }),
+        join(root, "chat-close-old-moved-child"),
+    );
+
+    t.after(() => app.close());
+    app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
+    const user = owner(app);
+    const created = await app.pip.agents.create(user, {
+        name: "Old child origin",
+        requestId: "old-child",
+    });
+    const chat = created.id as ConversationId;
+
+    await say(app, chat, "Create a new bounded Researcher child and wait.");
+    const source = app.sessions(user).find((row) => row.threadType === "researcher")!
+        .id as ConversationId;
+    const project = await app.projects.create(user, {
+        name: "Explicitly moved destination",
+        cwd: app.defaultCwd,
+        requestId: "moved-destination",
+    });
+
+    await app.projects.assign(user, source, { projectId: project.id });
+    await app.harness.commit(async (tx) => {
+        // Retain genuine creation/move history and immutable creation proof. Omit only the new
+        // detach field to represent native data moved before this additive field existed.
+        delete (await tx.doc(HandoffsDoc)).workItems[app.workItems.itemFor(source)!.id]!.parentChat;
+    }, context);
+    assert.equal(
+        app.pip.agents.supervision.groupingParent(app.workItems.itemFor(source)!, user)
+            ?.groupingParentChatId,
+        Number(chat),
+        "the immutable native origin remains provable, not necessarily current ownership",
+    );
+    const closed = await closeOwned(app, chat);
+
+    assert.equal(closed.status, 409, "origin cannot authorize cross-project destructive Close");
+    assert.notEqual(app.sessionMeta(chat)?.archived, true);
+    assert.notEqual(app.sessionMeta(source)?.archived, true);
+    assert.equal(app.sessionMeta(source)?.projectId, project.id);
+    assert.equal(
+        app.workItems.itemFor(source)!.parentChat,
+        undefined,
+        "refusal cannot silently establish ownership from old origin",
+    );
+});
+
+test("Close uses exclusive current exact-Chat ownership, refuses shared control, and persists whole-item display provenance", async () => {
+    const data = join(root, "chat-close-exclusive");
+    const model = scriptedModel((input) => {
+        const system = JSON.stringify(
+            input.messages.filter((message) => message.role === "system"),
+        );
+        const last = lastText(input);
+
+        if (system.includes("the owner's persistent private agent") && last.role === "user") {
+            if (last.text === "CREATE") {
+                return tool("handoff", {
+                    action: "start",
+                    targetType: "worker",
+                    relationship: "new-work",
+                    summary: "Create a bounded native Work Item child.",
+                });
+            }
+
+            const controller = /CONTROL_(\d+)/.exec(last.text);
+
+            assert.ok(controller, last.text);
+
+            return tool("agent_work", {
+                action: "send",
+                session: Number(controller[1]),
+                text: "Observe this exact Work Item and wait.",
+                report: false,
+            });
+        }
+
+        if (system.includes("the private supervisor for Work Item")) {
+            return tool("work_supervise", {
+                action: last.text === "FINISH" ? "finish" : "wait",
+                text: "Wait without new work.",
+            });
+        }
+
+        return fauxAssistantMessage("Fixture evidence retained.");
+    });
+    let app = await openApp(model, data);
+
+    try {
+        app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
+        const user = owner(app);
+        const created = await app.pip.agents.create(user, {
+            name: "Exact owners",
+            requestId: "exclusive",
+        });
+        const a = created.id as ConversationId;
+        const b = (await app.pip.agents.newChat(a, user, { requestId: "second" }))
+            .id as ConversationId;
+
+        const create = async (chat: ConversationId) => {
+            const before = new Set(app.sessions(user).map((row) => row.id));
+
+            await say(app, chat, "CREATE");
+            const row = app
+                .sessions(user)
+                .find((row) => !before.has(row.id) && row.workItemId !== undefined);
+
+            assert.ok(row, "the registered native handoff created a real Work Item");
+
+            return row.id as ConversationId;
+        };
+
+        const ownA = await create(a);
+
+        await app.close();
+        app = await openApp(model, data);
+        const successor = (await executeHandoff(app, ownA, "researcher")).id as ConversationId;
+        const ownB = await create(b);
+        const shared = await create(a);
+        const moved = await create(a);
+
+        await app.projects.assign(user, moved, { projectId: null });
+        const historical = await newSession(app, app.defaultCwd, "worker");
+        const unrelated = await newSession(app, app.defaultCwd, "worker");
+        const controllers = new Map<ConversationId, ConversationId>();
+
+        for (const source of [ownA, ownB, shared, historical]) {
+            controllers.set(
+                source,
+                (await app.pip.orchestration.control(source, user, { action: "open" }))
+                    .orchestration!.conversationId as ConversationId,
+            );
+        }
+
+        const contact = async (chat: ConversationId, work: ConversationId) => {
+            const controller = controllers.get(work)!;
+
+            await say(app, chat, `CONTROL_${controller}`);
+            await until(() => !app.isBusy(controller), "native controller wait settles");
+        };
+
+        await contact(a, ownA);
+        await say(app, controllers.get(ownA)!, "FINISH");
+        assert.notEqual(app.workItems.itemFor(ownA)!.supervisor!.status, "running");
+        // Represent an older stored native creation: retain its real accepted receipt and ledger,
+        // omitting only the newly additive field. No fabricated ownership or acceptance is supplied.
+        await app.harness.commit(async (tx) => {
+            delete (await tx.doc(HandoffsDoc)).workItems[app.workItems.itemFor(ownA)!.id]!
+                .parentChat;
+        }, context);
+        assert.equal(
+            app.pip.agents.supervision.groupingParent(app.workItems.itemFor(ownA)!, user)
+                ?.groupingParentChatId,
+            Number(a),
+            "validated legacy creation survives semantic completion",
+        );
+        await contact(b, ownB);
+        await contact(a, historical);
+        await app.pip.orchestration.stopped(historical, user);
+        await contact(a, shared);
+        await contact(b, shared);
+        assert.equal(
+            app.pip.agents.supervision.groupingParent(app.workItems.itemFor(shared)!, user)
+                ?.groupingParentChatId,
+            Number(a),
+        );
+        assert.equal(
+            app.pip.agents.supervision.parentChat(app.workItems.itemFor(shared)!, user),
+            undefined,
+            "several current sources cannot become one guessed live parent",
+        );
+        const refused = await closeOwned(app, a);
+
+        assert.equal(
+            refused.status,
+            409,
+            "several accepted current sources are not guessed into exclusive ownership",
+        );
+        assert.notEqual(
+            app.sessionMeta(a)?.archived,
+            true,
+            "ambiguous Close is atomic and has no lifecycle effects",
+        );
+        assert.notEqual(app.workItems.itemFor(ownA)!.archived, true);
+        assert.equal(app.workItems.itemFor(shared)!.supervisor!.status, "running");
+        await app.pip.orchestration.stopped(shared, user);
+        const closed = await closeOwned(app, a);
+
+        assert.equal(closed.status, 200, await closed.text());
+        assert.equal(app.sessionMeta(a)?.archived, true);
+        assert.notEqual(app.sessionMeta(b)?.archived, true);
+        assert.equal(app.workItems.itemFor(ownA)!.archived, true);
+        assert.equal(
+            app.sessionMeta(successor)?.archived,
+            true,
+            "all native handoff members archive together",
+        );
+        assert.equal(
+            app.sessionMeta(shared)?.archived,
+            true,
+            "stopped owned children remain in the Close scope",
+        );
+        assert.equal(app.workItems.members(ownA).length, 2);
+        const summary = app.pip.agents
+            .list(user)
+            .find((agent) => agent.agentId === created.agentId)!;
+
+        assert.ok(
+            summary.chats.some((entry) => entry.id === Number(a) && entry.archived),
+            "owner catalogue/SSE retains archived saved Chats",
+        );
+        assert.ok(!summary.chatIds.includes(Number(a)), "native re-entry remains open-only");
+        assert.equal(summary.id, Number(b));
+
+        for (const source of [ownB, historical, unrelated, moved]) {
+            assert.notEqual(
+                app.sessionMeta(source)?.archived,
+                true,
+                "sibling, historical and unrelated work stay open",
+            );
+            assert.equal(
+                app.sessions(owner(app)).find((row) => row.id === source)?.groupingParentChatId,
+                source === ownB ? Number(b) : undefined,
+            );
+        }
+
+        const guest = app.config.addUser("Catalogue guest", "guest");
+        const otherOwner = app.config.addUser("Other owner", "owner");
+
+        for (const person of [guest.user, otherOwner.user]) {
+            assert.equal(
+                app.sessions(person).find((row) => row.id === ownA)?.groupingParentChatId,
+                undefined,
+                "private grouping requires matching exact owner, not role alone",
+            );
+            const detail = app.workItems.context(ownA, person).workItem;
+
+            assert.ok(detail, "the public native Work Item is still visible");
+            assert.equal("parentChat" in detail, false);
+            assert.equal("groupingParentChatId" in detail, false);
+            assert.equal(JSON.stringify(detail).includes(created.agentId), false);
+            const response = await request(
+                app,
+                `c/${ownA}/x/work-items/handoffs`,
+                undefined,
+                person.id === guest.user.id ? guest.token : otherOwner.token,
+            );
+
+            assert.equal(response.status, 200, await response.clone().text());
+            const body = await response.json();
+
+            assert.equal(
+                "parentChat" in body.workItem,
+                false,
+                "HTTP detail cannot spread private stored ownership",
+            );
+            assert.equal(JSON.stringify(body).includes(created.agentId), false);
+        }
+
+        assert.equal(
+            app.sessions().find((row) => row.id === ownA)?.groupingParentChatId,
+            undefined,
+            "unscoped reads cannot disclose private origin",
+        );
+        await app.close();
+        app = await openApp(model, data);
+        const archived = app.sessions(owner(app));
+
+        for (const member of [ownA, successor]) {
+            assert.equal(app.sessionMeta(member)?.archived, true);
+            assert.equal(
+                archived.find((row) => row.id === member)?.groupingParentChatId,
+                Number(a),
+            );
+            assert.equal(
+                archived.find((row) => row.id === member)?.supervisor?.parentChatId,
+                undefined,
+                "archive display provenance never regrants live control",
+            );
+            assert.equal(app.isBusy(member), false);
+        }
+
+        assert.equal((await request(app, `sessions/${a}`, { archived: false })).status, 200);
+        assert.equal(
+            app.sessionMeta(ownA)?.archived,
+            true,
+            "Chat Restore does not implicitly restore children",
+        );
+        assert.equal(
+            (await request(app, `sessions/${successor}`, { archived: false })).status,
+            200,
+        );
+
+        for (const member of [ownA, successor]) {
+            assert.equal(app.sessionMeta(member)?.archived, false);
+            assert.equal(
+                app.sessions(owner(app)).find((row) => row.id === member)?.groupingParentChatId,
+                Number(a),
+            );
+            assert.equal(app.isBusy(member), false);
+        }
+    } finally {
+        await app.close();
+    }
 });
 
 test("an input paused after authority admission cannot run after Close and restore", async (t) => {

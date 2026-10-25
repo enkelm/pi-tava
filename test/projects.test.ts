@@ -27,6 +27,7 @@ import { HttpError } from "../src/server/errors.ts";
 import { createHandler } from "../src/server/http.ts";
 import { HandoffsDoc } from "../src/server/workflow-docs.ts";
 import { importFixture } from "./import-fixtures.ts";
+import { privateAgentRequest } from "./private-agent-http.ts";
 
 let app: App;
 const data = join(root, "projects-data");
@@ -127,6 +128,120 @@ test("projects have opaque identity, direct thread membership and independent ty
         "brain",
         "Researcher advertises its brain icon to every UI surface",
     );
+});
+
+test("project default agents persist through HTTP create/update/restart and remain owner-private", async () => {
+    const directory = join(root, "project-default-agent");
+    let isolated = await openApp(scriptedModel(), directory);
+
+    try {
+        const agent = await isolated.pip.agents.createIdentity(owner(isolated), {
+            requestId: "default-agent",
+            name: "Home agent",
+        });
+        const input = {
+            requestId: "project-with-agent",
+            name: "Home project",
+            cwd: work,
+            defaultAgentId: agent.agentId,
+        };
+        const response = await privateAgentRequest(isolated, "projects", input);
+
+        assert.equal(response.status, 200);
+        const { id } = await response.json();
+        const listed = async (token?: string) =>
+            (
+                await (await privateAgentRequest(isolated, "projects", undefined, token)).json()
+            ).projects.find((item: { id: string }) => item.id === id);
+
+        assert.equal((await listed()).defaultAgentId, agent.agentId);
+        assert.equal(
+            (await privateAgentRequest(isolated, "projects", { ...input, defaultAgentId: null }))
+                .status,
+            409,
+            "the default agent participates in project creation retry identity",
+        );
+
+        for (const defaultAgentId of ["missing-agent", 42]) {
+            for (const [path, body] of [
+                [`projects/${id}`, { defaultAgentId }],
+                ["projects", { ...input, requestId: `invalid-${defaultAgentId}`, defaultAgentId }],
+            ] as const) {
+                assert.equal(
+                    (await privateAgentRequest(isolated, path, body)).status,
+                    defaultAgentId === 42 ? 400 : 404,
+                );
+            }
+        }
+
+        const guest = isolated.config.addUser("Project collaborator", "guest");
+        const otherOwner = isolated.config.addUser("Other owner", "owner");
+        const thread = await isolated.commands.createSession(owner(isolated), {
+            projectId: id,
+            threadType: "chat",
+        });
+        const scoped = isolated.config.addUser("One thread", "viewer", [String(thread.id)]);
+
+        for (const person of [guest, otherOwner, scoped]) {
+            assert.equal((await listed(person.token)).defaultAgentId, undefined);
+            assert.equal(isolated.canSee(person.user, thread.id), true);
+        }
+
+        assert.equal(
+            (
+                await privateAgentRequest(
+                    isolated,
+                    `projects/${id}`,
+                    { defaultAgentId: agent.agentId },
+                    otherOwner.token,
+                )
+            ).status,
+            404,
+            "another owner cannot configure a private identity they do not own",
+        );
+        assert.equal(
+            (
+                await privateAgentRequest(
+                    isolated,
+                    `projects/${id}`,
+                    { defaultAgentId: null },
+                    guest.token,
+                )
+            ).status,
+            403,
+        );
+        await isolated.close();
+        isolated = await openApp(scriptedModel(), directory);
+        assert.equal((await listed()).defaultAgentId, agent.agentId);
+        assert.equal(
+            (await privateAgentRequest(isolated, `projects/${id}`, { name: "Renamed" })).status,
+            200,
+        );
+        assert.equal(
+            (await listed()).defaultAgentId,
+            agent.agentId,
+            "omission retains the default",
+        );
+
+        for (const cleared of [null, ""]) {
+            assert.equal(
+                (await privateAgentRequest(isolated, `projects/${id}`, { defaultAgentId: cleared }))
+                    .status,
+                200,
+            );
+            assert.equal((await listed()).defaultAgentId, undefined);
+            assert.equal(
+                (
+                    await privateAgentRequest(isolated, `projects/${id}`, {
+                        defaultAgentId: agent.agentId,
+                    })
+                ).status,
+                200,
+            );
+        }
+    } finally {
+        await isolated.close();
+    }
 });
 
 // Remote preparation may wait on an unreachable SSH host. It must not own Durable's global
@@ -361,6 +476,10 @@ test("HTTP project routes require auth and CSRF and expose project-only creation
         cwd: work,
         requestId: "http-project",
     });
+    const landing = await privateAgentRequest(app, `/projects/${encodeURIComponent(created.id)}`);
+
+    assert.equal(landing.status, 200, "a direct project URL must survive refresh");
+    assert.match(await landing.text(), /<script type="module" src="\/app\.js"><\/script>/);
     const started = await post("/sessions", {
         projectId: created.id,
         requestId: "http-worker",

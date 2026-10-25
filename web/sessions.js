@@ -9,7 +9,7 @@ import { PeeksRailButton } from "./peeks.js";
 import { PipRailButton } from "./pip.js";
 import { sessionForest } from "./session-tree.js";
 import { PrivateList, PrivateTabs } from "./private.js";
-import { NamedAgents } from "./named-agents.js";
+import { NamedAgentAvatar } from "./named-agent-avatar.js";
 import { projectGroups, rowsInGroups, sessionMatches } from "./project-groups.js";
 import { useSessionHold } from "./session-hold.js";
 import { canMoveSessions, useSessionDrag } from "./session-moves.js";
@@ -176,26 +176,50 @@ function optionsAt(event) {
     };
 }
 
-/** Disclosure and actions are siblings: there are no buttons inside buttons. */
+/** Project navigation, disclosure and creation are separate native controls. */
 function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart, trouble }) {
     const ref = useRef(null);
     const options = (at) => openSidebarOptions("project", group.project.id, at);
 
     useSidebarContext(ref, options, { longPress: canStart, enabled: canStart });
-    const count = group.rows.length;
 
     return html`<div class="project-group-head" ref=${ref}>
         <button
-            class="group-head"
-            data-part="session-group-head"
-            title=${group.label}
+            class="icon-button project-disclosure"
+            title=${`${closed ? "Expand" : "Collapse"} ${group.label}`}
+            aria-label=${`${closed ? "Expand" : "Collapse"} ${group.label}`}
             onClick=${onToggle}
             aria-expanded=${!closed}
         >
             <${Icon} class="group-disclosure" name="down" size=${14} />
-            <span class="group-count" data-part="session-group-count">${count}</span>
+        </button>
+        <button
+            class="group-head project-open"
+            data-part="session-group-head"
+            title=${group.label}
+            aria-label=${`Open project ${group.label}`}
+            aria-description=${
+                store.state.me?.role === "owner"
+                    ? `${group.project.defaultAgentId ? `Default PiP: ${group.agent?.name ?? "Unavailable named agent"}` : "No default PiP"}` +
+                      (group.relatedAgents.length
+                          ? `. Related PiPs: ${group.relatedAgents.map((agent) => agent.name).join(", ")}`
+                          : "")
+                    : undefined
+            }
+            aria-current=${store.state.projectId === group.project.id ? "page" : undefined}
+            onClick=${() => navigate(null, { projectId: group.project.id })}
+        >
+            ${group.agent && html`<${NamedAgentAvatar} agentId=${group.agent.agentId} size=${24} />`}
+            <span class="group-name" data-part="session-group-name">
+                ${
+                    group.agent &&
+                    html`<span class="project-agent-name">${group.agent.name}</span><span
+                        class="project-name-separator"
+                        aria-hidden="true"
+                    > · </span>`
+                }<span class="project-title"><${Highlight} text=${group.label} needle=${needle} /></span>
+            </span>
             <${RemoteProjectIcon} location=${group.project.location} />
-            <span class="group-name" data-part="session-group-name"><${Highlight} text=${group.label} needle=${needle} /></span>
             ${
                 trouble &&
                 html`<span
@@ -209,28 +233,12 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
         <div class="project-group-actions">
             ${
                 canStart &&
-                store.state.me?.role === "owner" &&
-                html`<button
-                    class="icon-button small project-hover-action"
-                    title="Edit project"
-                    aria-label=${`Edit ${group.project.name}`}
-                    onClick=${() => openSheet({ type: "project", projectId: group.project.id })}
-                >
-                    <${Icon} name="pencil" size=${14} />
-                </button>`
-            }
-            ${
-                canStart &&
                 !archived &&
                 html`<button
-                    class="icon-button small project-hover-action"
+                    class="icon-button small project-create"
                     title=${`New Session in ${group.project.name}`}
                     aria-label=${`New Session in ${group.project.name}`}
-                    onClick=${() =>
-                        openSheet({
-                            type: "new-session",
-                            projectId: group.project.id,
-                        })}
+                    onClick=${() => openSheet({ type: "new-session", projectId: group.project.id })}
                 >
                     <${Icon} name="plus" size=${15} />
                 </button>`
@@ -251,6 +259,81 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
             }
         </div>
     </div>`;
+}
+
+/** One saved named Chat owns its own face, activity and exact controlled Work Items. */
+function ProjectChatRow({ chat, closed, onToggle, children }) {
+    const { me, conversationId } = store.state;
+    const { agent } = chat;
+    const working = Boolean(chat.busy || chat.managing);
+    const activity = chat.managing ? "Managing work" : chat.busy ? "Working" : "";
+    const hasItems = chat.rows.length > 0;
+    const avatar = html`<${NamedAgentAvatar}
+        agentId=${agent.agentId}
+        size=${20}
+        animated=${working}
+        thinking=${working}
+    />`;
+
+    return html`<section
+        class=${`project-chat ${hasItems ? "has-items" : ""} ${closed ? "closed" : ""}`}
+        data-chat-id=${chat.id}
+        data-agent-id=${agent.agentId}
+        aria-label=${`Chat ${chat.title}${chat.contextLabel ? ` · ${chat.contextLabel}` : ""}`}
+    >
+        <div class="project-chat-head">
+            ${
+                hasItems &&
+                html`<button
+                    class="icon-button project-chat-disclosure"
+                    type="button"
+                    aria-label=${`${closed ? "Expand" : "Collapse"} work for ${chat.title}`}
+                    aria-expanded=${!closed}
+                    onClick=${onToggle}
+                >
+                    ${avatar}
+                    <${Icon} name=${closed ? "chevron" : "down"} size=${12} />
+                </button>`
+            }
+            <button
+                class="project-chat-open"
+                type="button"
+                data-part="session-button"
+                data-id=${chat.id}
+                title=${`${agent.name} · ${chat.title}${chat.contextLabel ? ` · ${chat.contextLabel}` : ""}${activity ? ` · ${activity}` : ""}`}
+                aria-description=${activity || undefined}
+                aria-current=${conversationId === chat.id ? "page" : undefined}
+                onClick=${() => {
+                    const current = store.state;
+                    const identity = current.namedAgents?.find(
+                        (each) => each.agentId === agent.agentId,
+                    );
+                    const source = identity?.chats?.find((each) => each.id === chat.id);
+
+                    if (
+                        current.me?.role === "owner" &&
+                        current.me.id === me?.id &&
+                        current.server?.privateAgents >= 4 &&
+                        source
+                    ) {
+                        navigate(chat.id);
+                    }
+                }}
+            >
+                ${!hasItems && avatar}
+                <span class="project-chat-title">
+                    <span class="project-chat-name">${chat.title}</span>
+                    ${chat.contextLabel && html`<span class="project-chat-context">${chat.contextLabel}</span>`}
+                </span>
+            </button>
+        </div>
+        ${
+            hasItems &&
+            html`<div class="group-body" inert=${closed}>
+                <div class="project-chat-items">${children}</div>
+            </div>`
+        }
+    </section>`;
 }
 
 /**
@@ -859,9 +942,12 @@ function groupsOf(shown, { tab, needle, home, pinned }) {
     }
 
     const groups = [];
-    const rowPinned = (session) =>
-        pinned.includes(session.id) ||
-        session.members?.some((member) => pinned.includes(member.id));
+    const rowPinned = (entry) =>
+        (entry.chat?.rows ?? [entry]).some(
+            (session) =>
+                pinned.includes(session.id) ||
+                session.members?.some((member) => pinned.includes(member.id)),
+        );
     const pins = shown.filter(rowPinned);
 
     if (pins.length > 0) {
@@ -1047,36 +1133,110 @@ function AllSessions({ compact = false, home = false }) {
                 .filter((id) => id !== undefined),
         ),
     ];
-    const forest = sessionForest(matching, { pinned: rowPins, folders: tab === "folders" });
+    const namedAgents =
+        me?.role === "owner" && server?.privateAgents >= 4 ? store.state.namedAgents : [];
+    const catalogueGroups = projectGroups(sidebarRows, organized ? projects : [], {
+        archived,
+        needle,
+        pinned,
+        home: server?.home,
+        namedAgents,
+    });
+    const recentChats =
+        !hierarchical && (tab === "recent" || archived)
+            ? catalogueGroups.flatMap((group) => group.chats)
+            : [];
+    const nested = new Set(recentChats.flatMap((chat) => chat.rows.map((row) => row.id)));
+    const recentRows =
+        recentChats.length > 0
+            ? catalogueGroups.flatMap((group) => group.rows).filter((row) => !nested.has(row.id))
+            : matching;
+    const forest = sessionForest(recentRows, { pinned: rowPins, folders: tab === "folders" });
+    // Chat entries participate in chronology, never in session selection/moves or organization IDs.
+    // A waiting manager's real visible work can be newer than the Chat's last own message.
+    const entries = [
+        ...forest.roots,
+        ...recentChats.map((chat) => ({
+            chat,
+            updatedAt: Math.max(chat.updatedAt ?? 0, ...chat.rows.map((row) => row.updatedAt ?? 0)),
+        })),
+    ].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
     const rawGroups = hierarchical
-        ? projectGroups(sidebarRows, projects, {
-              archived,
-              needle,
-              pinned,
-              home: server?.home,
-          })
-        : groupsOf(forest.roots, { tab, needle, home: server?.home, pinned });
+        ? catalogueGroups
+        : groupsOf(entries, { tab, needle, home: server?.home, pinned }).map((group) => ({
+              ...group,
+              rows: group.rows.filter((entry) => !entry.chat),
+              chats: group.rows.filter((entry) => entry.chat).map((entry) => entry.chat),
+              entries: group.rows,
+          }));
 
     // Linked sessions remain independent placements: only nest families inside the same project.
     // Keep raw session rows for project counts/moves, alongside their branch guides for rendering.
     const linkGroup = (group) => {
-        const linked = hierarchical ? sessionForest(group.rows, { pinned: rowPins }) : forest;
-        let roots = hierarchical ? linked.roots : group.rows;
+        const flat = hierarchical && group.key === "flat";
 
-        if (hierarchical && group.key === "flat") {
-            const pins = rowPins
-                .map((id) => roots.find((session) => session.id === id))
-                .filter(Boolean);
+        const ordered = (roots) => {
+            if (!flat) {
+                return roots;
+            }
 
-            roots = [...pins, ...roots.filter((session) => !pins.includes(session))];
+            const pins = rowPins.map((id) => roots.find((row) => row.id === id)).filter(Boolean);
+
+            return [...pins, ...roots.filter((row) => !pins.includes(row))];
+        };
+
+        const chats = (group.chats ?? []).map((chat) => {
+            const linked = sessionForest(chat.rows, { pinned: rowPins });
+            const linkedRows = ordered(linked.roots).flatMap((row) => linked.rows.get(row.id));
+
+            return { ...chat, rows: linkedRows.map((row) => row.session), linkedRows };
+        });
+
+        if (flat) {
+            const rank = (chat) => {
+                const index = rowPins.findIndex((id) => chat.rows.some((row) => row.id === id));
+
+                return index === -1 ? Infinity : index;
+            };
+
+            chats.sort((a, b) => rank(a) - rank(b) || 0);
         }
 
-        const linkedRows = roots.flatMap((session) => linked.rows.get(session.id));
+        const nested = new Set(chats.flatMap((chat) => chat.rows.map((row) => row.id)));
+        const standalone = group.rows.filter((row) => !nested.has(row.id));
+        const linked = hierarchical ? sessionForest(standalone, { pinned: rowPins }) : forest;
+        const roots = ordered(hierarchical ? linked.roots : group.rows);
+        const leadingRows = flat
+            ? roots
+                  .filter((row) => rowPins.includes(row.id))
+                  .flatMap((row) => linked.rows.get(row.id))
+            : [];
+        const leading = new Set(leadingRows.map((row) => row.session.id));
+        const linkedRows = roots
+            .flatMap((row) => linked.rows.get(row.id))
+            .filter((row) => !leading.has(row.session.id));
+
+        const entries = group.entries?.map((entry) =>
+            entry.chat
+                ? { chat: chats.find((chat) => chat.id === entry.chat.id) }
+                : { linkedRows: linked.rows.get(entry.id) },
+        );
 
         return {
             ...group,
-            rows: linkedRows.map((row) => row.session),
+            rows: entries
+                ? entries.flatMap((entry) =>
+                      entry.chat ? entry.chat.rows : entry.linkedRows.map((row) => row.session),
+                  )
+                : [
+                      ...leadingRows.map((row) => row.session),
+                      ...chats.flatMap((chat) => chat.rows),
+                      ...linkedRows.map((row) => row.session),
+                  ],
+            leadingRows,
             linkedRows,
+            chats,
+            entries,
         };
     };
 
@@ -1373,6 +1533,33 @@ function AllSessions({ compact = false, home = false }) {
     const tabBar = useSlide(tabs, "button.on", "x");
     let index = 0;
 
+    const renderRow = ({ session, branches }) => html`<${session.members ? WorkItemRow : SessionRow}
+        key=${session.workItemId ?? session.id}
+        session=${session}
+        closed=${groupClosed({ key: `work:${session.workItemId}` })}
+        onToggle=${() => toggleGroup(`work:${session.workItemId}`)}
+        branches=${branches}
+        folders=${tab === "folders" && needle === ""}
+        index=${index++}
+        number=${numbers.get(session.id)}
+        needle=${needle}
+        selected=${selected.has(session.id)}
+        onPick=${pick}
+        onSelect=${select}
+        onOptions=${openThreadOptions}
+        dnd=${dnd}
+        chosen=${chosen}
+    />`;
+
+    const renderChat = (chat) => html`<${ProjectChatRow}
+        key=${chat.key}
+        chat=${chat}
+        closed=${groupClosed({ key: chat.key })}
+        onToggle=${() => toggleGroup(chat.key)}
+    >
+        ${chat.linkedRows.map(renderRow)}
+    </${ProjectChatRow}>`;
+
     const renderGroup = (group) => {
         const isClosed = groupClosed(group);
         const trouble = isClosed
@@ -1447,35 +1634,44 @@ function AllSessions({ compact = false, home = false }) {
                         title=${trouble === "waiting" ? "A session here needs you" : "A session here failed"}
                     ></span>`
                     }
-                    <span class="group-count" data-part="session-group-count">${group.rows.length}</span>
+                    <span class="group-count" data-part="session-group-count">${group.entries?.length ?? group.rows.length}</span>
                     ${group.key !== "flat" && html`<${Icon} name="down" size=${12} />`}
                 </button>`
             }
             <div class="group-body" inert=${isClosed}>
                 <div>
-                    ${group.linkedRows.map(
-                        ({
-                            session,
-                            branches,
-                        }) => html`<${session.members ? WorkItemRow : SessionRow}
-                        key=${session.workItemId ?? session.id}
-                        session=${session}
-                        closed=${groupClosed({ key: `work:${session.workItemId}` })}
-                        onToggle=${() => toggleGroup(`work:${session.workItemId}`)}
-                        branches=${branches}
-                        folders=${tab === "folders" && needle === ""}
-                        index=${index++}
-                        number=${numbers.get(session.id)}
-                        needle=${needle}
-                        selected=${selected.has(session.id)}
-                        onPick=${pick}
-                        onSelect=${select}
-                        onOptions=${openThreadOptions}
-                        dnd=${dnd}
-                        chosen=${chosen}
-                    />`,
-                    )}
-                    ${group.project && group.rows.length === 0 && html`<div class="project-empty muted small">No threads yet.</div>`}
+                    ${
+                        group.relatedAgents?.some(
+                            (agent) => agent.agentId !== group.project?.defaultAgentId,
+                        ) &&
+                        html`<div class="project-related-agents" aria-label=${`Related PiPs for ${group.label}`}>
+                            <span class="small muted">Related PiPs${!group.project.defaultAgentId ? " · no default selected" : !group.agent ? " · default unavailable" : ""}</span>
+                            ${group.relatedAgents
+                                .filter((agent) => agent.agentId !== group.project.defaultAgentId)
+                                .map(
+                                    (
+                                        agent,
+                                    ) => html`<span class="project-related-agent" title=${agent.name}>
+                                    <${NamedAgentAvatar} agentId=${agent.agentId} size=${20} />
+                                    <span>${agent.name}</span>
+                                </span>`,
+                                )}
+                        </div>`
+                    }
+                    ${
+                        group.entries
+                            ? group.entries.map((entry) =>
+                                  entry.chat
+                                      ? renderChat(entry.chat)
+                                      : entry.linkedRows.map(renderRow),
+                              )
+                            : [
+                                  group.leadingRows.map(renderRow),
+                                  group.chats.map(renderChat),
+                                  group.linkedRows.map(renderRow),
+                              ]
+                    }
+                    ${group.project && group.rows.length === 0 && group.chats.length === 0 && html`<div class="project-empty muted small">No threads yet.</div>`}
                 </div>
             </div>
         </section>`;
@@ -1504,7 +1700,6 @@ function AllSessions({ compact = false, home = false }) {
                 </button>`
             }
         </div>
-        <${NamedAgents} />
         <${PrivateTabs} />
         ${
             privateTab
@@ -1560,16 +1755,31 @@ function AllSessions({ compact = false, home = false }) {
                                         </button>`
                           }
                       </label>
-                      ${
-                          canStart &&
-                          html`<button
-                              class="button primary wide new-button"
-                              aria-label="New session"
-                              onClick=${() => openSheet({ type: "new-session" })}
-                          >
-                              <${Icon} name="plus" size=${16} /> New Session
-                          </button>`
-                      }
+                      <div class="session-entry">
+                          ${
+                              canStart &&
+                              html`<button
+                                  class="button primary wide new-button"
+                                  aria-label="New session"
+                                  onClick=${() => openSheet({ type: "new-session" })}
+                              >
+                                  <${Icon} name="plus" size=${16} /> New Session
+                              </button>`
+                          }
+                          ${
+                              me?.role === "owner" &&
+                              server?.privateAgents >= 4 &&
+                              html`<button
+                                  class="button session-agents"
+                                  type="button"
+                                  aria-label="Named agents (PiPs)"
+                                  title="PiPs · Named agents"
+                                  onClick=${() => openSheet({ type: "named-agents" })}
+                              >
+                                  <${Icon} name="users" size=${18} />
+                              </button>`
+                          }
+                      </div>
                       <div class="session-tabs" data-part="session-tabs" role="tablist" ref=${tabs}>
                           ${tabChoices.map(
                               ([key, label]) =>
@@ -1600,7 +1810,7 @@ function AllSessions({ compact = false, home = false }) {
                               sessionsLoaded &&
                               (!hierarchical || projectsLoaded) &&
                               shown.length === 0 &&
-                              !groups.some((group) => group.project) &&
+                              !groups.some((group) => group.project || group.chats.length > 0) &&
                               html`<div class="sessions-empty">
                                   ${archived ? "No archived sessions." : needle ? "No matches." : "No sessions yet. Start one with New Session."}
                               </div>`

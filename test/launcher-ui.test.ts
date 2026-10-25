@@ -1,5 +1,5 @@
 // Focus regressions include #62, reported by @arunsathiya: reopening must focus the native search input, and an
-// action's new sheet must keep its focus when the old launcher finishes leaving.
+// action's destination must keep its focus when the old launcher finishes leaving.
 import {
     type App,
     cleanUp,
@@ -66,7 +66,7 @@ async function home(viewport: Viewport = VIEWPORTS.desktop, session = false): Pr
 
         return JSON.stringify(store.state.sessions.length === ${TITLES.length} &&
             ( ${session} ? document.querySelector(".composer textarea") !== null :
-                document.querySelector(".home-list") !== null));
+                document.querySelector('[data-part="home"]') !== null));
     `,
         "the isolated session list",
     );
@@ -200,7 +200,7 @@ test("open resets query and focus", real, async () => {
 });
 
 test(
-    "New session opens the folder sheet and its final focus is not stolen by launcher cleanup",
+    "New session routes to Home without launcher cleanup stealing destination focus",
     real,
     async () => {
         await home(VIEWPORTS.desktop, true);
@@ -209,22 +209,41 @@ test(
         await search("> new session");
         await page.press("Enter");
         await see(
-            `return JSON.stringify((await import('/store.js')).store.state.sheet?.type === 'cwd' && document.querySelector('.sheet-host:not(.leaving) .sheet') !== null)`,
-            "the New session folder sheet",
+            `return JSON.stringify(location.pathname === '/' &&
+                document.querySelector('[data-part="home"] .home-one-time[aria-expanded]') !== null &&
+                !(await import('/store.js')).store.state.sheet)`,
+            "New session reaches Home, not a creation modal",
         );
+        // Home does not promise modal autofocus. Focus its actual creation disclosure while the
+        // old launcher leaves; cleanup must neither restore the old composer nor keep Home inert.
+        const destination = '[data-part="home"] .home-one-time[aria-expanded]';
+
+        await page.evaluate(`document.querySelector(${JSON.stringify(destination)}).focus()`);
         await closed();
         await settle();
         assert.equal(
             await inPage<boolean>(`
-        const sheet = document.querySelector('.sheet-host:not(.leaving) .sheet');
+                const control = document.querySelector(${JSON.stringify(destination)});
 
-        return JSON.stringify(sheet === document.activeElement || sheet.contains(document.activeElement));
-    `),
+                return JSON.stringify(control === document.activeElement && control.checkVisibility()
+                    && !control.closest('[inert], [aria-hidden="true"]')
+                    && !document.querySelector('[role="dialog"][aria-label="New Session"]'));
+            `),
             true,
-            "the folder sheet retains focus after the leaving launcher unmounts",
+            "Home keeps destination focus and accessibility after the leaving launcher unmounts",
         );
-        await page.evaluate(`(await import('/store.js')).closeSheet()`);
-        await settle();
+        await page.evaluate(`[...document.querySelectorAll('.pane > .topbar button')]
+            .find(button => button.textContent.trim() === 'Cancel').click()`);
+        await see(
+            `return JSON.stringify(location.pathname === '/s/${sessions[0]}' &&
+                document.querySelector('.composer textarea') !== null)`,
+            "Cancel returns to the original thread",
+        );
+        assert.equal(
+            app.sessions().length,
+            TITLES.length,
+            "opening and cancelling Home creates no session",
+        );
     },
 );
 

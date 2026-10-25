@@ -822,7 +822,8 @@ code {
     display: none;
 }
 
-@media (min-width: 960px) {
+/* Roomy tablets use the desktop navigation, regardless of touch input or OS. */
+@media (min-width: 768px) {
     .sidebar {
         display: flex;
     }
@@ -839,7 +840,16 @@ code {
     :root[data-rail="on"] .sidebar {
         width: 64px;
     }
+}
 
+/* Leave a usable content pane even when an iPad inherits a wide desktop sidebar preference. */
+@media (min-width: 768px) and (max-width: 959px) {
+    .sidebar {
+        width: clamp(260px, var(--sidebar-w, 300px), 40vw);
+    }
+}
+
+@media (min-width: 960px) {
     :root[data-tiling="on"] .layout {
         padding: var(--gap-out) calc(var(--gap-out) + var(--safe-right)) var(--gap-out)
             calc(var(--gap-out) + var(--safe-left));
@@ -4360,7 +4370,7 @@ button.chip:active:not(:disabled):not(.on) {
     min-height: 40px;
 }
 
-@media (max-width: 959px) {
+@media (max-width: 767px) {
     /* The list fills the screen here, so there is no sidebar to fold. */
     .sidebar-fold {
         display: none !important;
@@ -14436,7 +14446,7 @@ textarea.notes {
  * Phones: a session opened slides in from the right, and going back brings the list (or the session before) in from
  * the left, so where back goes is where things came from. `data-route` is set while it slides (back.js).
  */
-@media (max-width: 959px) {
+@media (max-width: 767px) {
     /* Held inside the window: a scroller sliding in from the right (a route, a swipe's lean) would make the page wider
      * than the screen, and a phone's browser widen and pan its view to fit. */
     .pane {

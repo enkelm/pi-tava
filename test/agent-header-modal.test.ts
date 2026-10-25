@@ -29,7 +29,8 @@ const fixtures: Record<string, string> = {
     "extension-ui.js": inert(
         "ExtensionPage ExtensionSessionControls ExtensionSheet onExtensionsGone",
     ),
-    "home.js": inert("Splash"),
+    "home.js": inert("HomeCreationPage HomeCreationSheet"),
+    "project-view.js": inert("ProjectView"),
     "launcher.js": inert("Launcher"),
     "notify.js": inert("registerWorker updateBadge"),
     "peeks.js": `export const PEEK_WIDE={matches:false}; ${inert("PeekHost PeekStrip peekContext peekTiles peeksOn peeksWanted setManagedPeeks togglePeeks PeeksButton")}`,
@@ -53,7 +54,7 @@ const fixtures: Record<string, string> = {
     "named-agents.js": `import {openSheet,store} from './store.js';
         export const namedAgentsAvailable=()=>store.state.me?.role==='owner';
         export const openAgentSettings=(id,agentId,section)=>openSheet({type:'named-agent',id,agentId,section});
-        ${inert("AgentModelPicker NamedAgentSheet")}`,
+        ${inert("AgentModelPicker NamedAgentSheet NamedAgentsSheet")}`,
     "sheets/branch.js": inert("BranchPicker branchAvailable headLabel"),
     "sheets/file.js": inert("FileSheet"),
     "sheets/gallery.js": inert(

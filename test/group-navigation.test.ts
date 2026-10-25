@@ -44,6 +44,10 @@ const hooks = {
     useMemo(make: () => unknown) {
         return make();
     },
+    useCallback(callback: (...args: any[]) => unknown) {
+        return callback;
+    },
+    useId: () => "unrelated-field-id",
     useEffect(run: () => (() => void) | undefined, deps: unknown[]) {
         const slot = (current.slots[current.cursor++] ??= {});
 
@@ -57,10 +61,13 @@ const hooks = {
     },
 };
 const fixture = {
+    app: null as Node | null,
     hooks,
     html: htm.bind(h),
     icon: (props: Props) => h("native-icon", props),
     spinner: () => h("native-spinner", {}),
+    projectView: (props: Props) => h("native-project-view", props),
+    topbar: (props: Props) => h("native-topbar", props),
     threadTypeTag: (props: Props) => h("native-thread-type", props),
     projectsAvailable: false,
     store: {
@@ -70,10 +77,11 @@ const fixture = {
         },
         subscribe: () => () => {},
     },
-    navigated: [] as number[],
+    navigated: [] as (number | null)[],
     opening: [] as number[],
     mutations: [] as Props[],
     opened: [] as Props[],
+    agentDrafts: [] as Props[],
     // Order is supplied by the existing grouping projection; routing/selection is never mocked.
     workspaceOrder: () =>
         workItemRows(fixture.store.state.sessions).filter((row: Props) => !row.archived),
@@ -116,15 +124,15 @@ after(() => {
 });
 
 const sources: Record<string, string> = {
-    preact: "export const render=()=>{};",
-    "preact/hooks": `export const {useState,useRef,useEffect,useMemo}=globalThis.groupNavigationFixture.hooks;
+    preact: "export const render=tree=>{globalThis.groupNavigationFixture.app=tree;};",
+    "preact/hooks": `export const {useState,useRef,useEffect,useMemo,useCallback,useId}=globalThis.groupNavigationFixture.hooks;
         export const useLayoutEffect=()=>{};`,
     "store.js": `const f=globalThis.groupNavigationFixture;
         export const {store,workspaceOrder}=f;
         export const navigate=id=>f.navigated.push(id);
         export const actions={openWorkPip:async id=>f.mutations.push({id,action:"openPiP"}),controlWorkPip:async(id,action)=>f.mutations.push({id,action}),abort:async()=>f.mutations.push({id:store.state.conversationId,action:"abort"}),updateWorkItem:async(id,patch)=>f.mutations.push({id,...patch}),updateSession:async()=>{}};
         export const drafts={get:()=>"",set:()=>{}},typing=()=>{};
-        export const attempt=fn=>fn(),notify=()=>{},openSheet=sheet=>f.opened.push(sheet),dismiss=()=>{},holdNotice=()=>{},uid=()=>"row-opening";
+        export const attempt=fn=>fn(),notify=()=>{},openSheet=sheet=>f.opened.push(sheet),closeSheet=()=>{},dismiss=()=>{},holdNotice=()=>{},uid=()=>"row-opening";
         export const canSteer=()=>true,collab=()=>false,scoped=()=>false,handoffsAvailable=()=>true,projectsAvailable=()=>f.projectsAvailable;
         export const isUnread=()=>false,sessionUnread=()=>false,setUnread=()=>{},stillMoving=moving=>moving;
         export const signOut=()=>{},start=()=>{},filesShown=()=>false,panelsBeside=()=>false,peopleDocked=()=>false;`,
@@ -132,6 +140,7 @@ const sources: Record<string, string> = {
         export const apartFromViews=component=>component;
         export const Icon=globalThis.groupNavigationFixture.icon;
         export const Spinner=globalThis.groupNavigationFixture.spinner;
+        export const Loader=()=>null,Sheet=props=>props.children;
         export const APPLE=false,BOTTOM_SHEETS={matches:false},Boot=()=>null,Keys=()=>null,Marked=()=>null,Slide=()=>null;
         export const shortPath=value=>value,timeAgo=()=>"now",railState=()=>"",scrimPress=()=>()=>{},copyText=()=>{};
         export const contextLevel=()=>"",formatBytes=String,formatTokens=String,modelLabel=()=>"Model";
@@ -145,15 +154,26 @@ const sources: Record<string, string> = {
     "extension-ui.js":
         "export const ExtensionRailButtons=()=>null,ExtensionPage=()=>null,ExtensionSessionControls=()=>null,extensionLauncherItems=()=>[],extensionInputSuggestions=async()=>[];",
     "peeks.js":
-        "export const PeeksRailButton=()=>null,PeekHost=()=>null,PeeksButton=()=>null,PeekStrip=()=>null,PEEK_WIDE={},peekTiles=()=>[],peeksWanted=()=>false,togglePeeks=()=>{};",
+        "export const PeeksRailButton=()=>null,PeekHost=()=>null,PeeksButton=()=>null,PeekStrip=()=>null,PEEK_WIDE={},peekContext=()=>null,peekTiles=()=>[],peeksWanted=()=>false,togglePeeks=()=>{};",
     "pip.js":
         "export const PipRailButton=()=>null,PipHost=()=>null,openPip=()=>{},closePip=()=>{},pipAvailable=()=>false,togglePip=()=>{};",
     "private.js": "export const PrivateList=()=>null,PrivateTabs=()=>null,PrivatePane=()=>null;",
-    "named-agents.js": "export const NamedAgents=()=>null;",
+    "named-agents.js": `const f=globalThis.groupNavigationFixture;
+        export const namedAgentsAvailable=()=>f.store.state.me?.role==='owner' && f.store.state.server?.privateAgents>=4;
+        export const openAgentSettings=(id,agentId,section,options)=>f.opened.push({type:'named-agent',...options});
+        export const NamedAgents=()=>null;`,
+    "named-agent-avatar.js": "export const NamedAgentAvatar=()=>null;",
+    "project-view.js": "export const ProjectView=globalThis.groupNavigationFixture.projectView;",
+    "project.js":
+        "export const ProjectForm=props=>globalThis.groupNavigationFixture.html`<native-project-form ...${props} />`;",
+    "session-projects.js":
+        "export const ProjectSessionPanel=props=>globalThis.groupNavigationFixture.html`<native-session-panel ...${props} />`;",
+    "project-access.js":
+        "export const ProjectFilters=props=>globalThis.groupNavigationFixture.html`<native-project-filters ...${props} />`; export const projectsMatchingFilter=(projects,filter)=>projects.filter(p=>filter==='local'?p.location?.kind!=='ssh':filter.startsWith('ssh:')?p.location?.host===filter.slice(4):true);",
     "agent-tabs.js": "export const AgentTabs=()=>null;",
     "agent-draft-pane.js": "export const AgentDraftPane=()=>null;",
-    "agent-drafts.js":
-        "export const sendAgentDraft=()=>{},updateAgentDraft=()=>{},updateAgentDraftFiles=()=>{},updateAgentDraftPastes=()=>{};",
+    "agent-drafts.js": `export const sendAgentDraft=()=>{},updateAgentDraft=()=>{},updateAgentDraftFiles=()=>{},updateAgentDraftPastes=()=>{};
+        export const openAgentDraft=(agentId,options)=>{const draft={agentId,...options};globalThis.groupNavigationFixture.agentDrafts.push(draft);return draft;};`,
     "session-hold.js": "export const useSessionHold=()=>({hold:null,consumeClick:()=>false});",
     "session-moves.js":
         "export const canMoveSessions=()=>false,useSessionDrag=()=>({busy:false,consumeClick:()=>false});",
@@ -172,7 +192,7 @@ const sources: Record<string, string> = {
     "branch.js": "export const branchAvailable=()=>false,headLabel=()=>'';",
     "folder.js": "export const recentLabels=()=>[];",
     "gallery.js": "export const galleryAvailable=()=>false;",
-    "pi-sessions.js": "export const piSessionsAvailable=()=>false;",
+    "pi-sessions.js": "export const piSessionsAvailable=()=>false,ImportPanel=()=>null;",
     "browser-panel.js": "export const BrowserButton=()=>null,BrowserPanel=()=>null;",
     "chat.js":
         "export const PeopleButton=()=>null,PeoplePanel=()=>null,TypingLine=()=>null,chatUnread=()=>0;",
@@ -194,8 +214,9 @@ const sources: Record<string, string> = {
     "subagents.js": "export const openSubagents=()=>{},SubagentsBar=()=>null;",
     "subagents-board.js": "export const SubagentsBoard=()=>null;",
     "transcript.js": "export const Transcript=()=>null;",
-    "topbar.js": "export const Topbar=()=>null;",
-    "workspace-location.js": "export const conversationLocation=()=>null;",
+    "topbar.js": "export const Topbar=globalThis.groupNavigationFixture.topbar;",
+    "workspace-location.js":
+        "export const conversationLocation=()=>null,LocationPicker=()=>null,recentSshFolders=()=>[],rememberSshFolder=()=>{};",
     "terminal-renderer-assets.js": "export const startTerminalRendererPrefetch=()=>{};",
     "voice.js":
         "export const toggleDictation=()=>{},MicButton=()=>null,useDictation=()=>({stop(){}});",
@@ -217,11 +238,13 @@ registerHooks({
     },
 });
 
-const { SessionList, Rail, RailNav } = await import(
+const { SessionList, Rail, RailNav, toSessions } = await import(
     new URL("../web/sessions.js", import.meta.url).href
 );
 const { Launcher } = await import(new URL("../web/launcher.js", import.meta.url).href);
-const { Splash } = await import(new URL("../web/home.js", import.meta.url).href);
+const { HomeCreation, HomeCreationPage } = await import(
+    new URL("../web/home.js", import.meta.url).href
+);
 const { Composer } = await import(new URL("../web/composer.js", import.meta.url).href);
 
 await import(new URL("../web/app.js", import.meta.url).href);
@@ -346,6 +369,7 @@ function setup(
     fixture.opening = [];
     fixture.mutations = [];
     fixture.opened = [];
+    fixture.agentDrafts = [];
 }
 
 function key(key: string, code: string, altKey = false) {
@@ -360,13 +384,308 @@ function key(key: string, code: string, altKey = false) {
 const click = { preventDefault() {}, stopPropagation() {}, detail: 1 };
 const classHas = (node: Node, name: string) => String(node.props.class).split(" ").includes(name);
 
+// Home owns selection/disclosure and the native-draft handoff; draft-client and HTTP tests
+// independently own receipt recovery and stored placement. No chat/creation model is mocked here.
+// The real App shell owns mount placement, which Home's own lifecycle cannot see. A phone
+// setup widened onto Home must not acquire a second blank creation page under its dialog.
+test("App mounts one creation model and retains only a real unfinished page beneath child sheets", () => {
+    const previous = fixture.store.state;
+    const App = fixture.app!.type as (props: Props) => unknown;
+
+    try {
+        fixture.store.state = {
+            me: { id: "layout-owner", role: "owner" },
+            server: { projects: 1, privateAgents: 4 },
+            conversationId: null,
+            projectId: null,
+            privateId: null,
+            agentDraft: null,
+            homeCreation: null,
+            board: false,
+            page: null,
+            view: { conversation: null },
+            sheet: null,
+        };
+
+        for (const sheet of [
+            null,
+            { type: "home-creation", id: "setup" },
+            { type: "named-agent", creationParent: { type: "home-creation", id: "setup" } },
+        ]) {
+            fixture.store.state.sheet = sheet;
+            current = { slots: [], cursor: 0 };
+            const tree = nodes(App({}));
+
+            assert.equal(
+                tree.filter((node) => node.type === HomeCreationPage).length,
+                sheet ? 0 : 1,
+                "a native creation opening owns the sole form instead of duplicating blank Home",
+            );
+            assert.ok(tree.some((node) => node.props.class === "home-list"));
+            effects = [];
+        }
+
+        fixture.store.state.homeCreation = { id: "home" };
+        current = { slots: [], cursor: 0 };
+        assert.equal(
+            nodes(App({})).filter((node) => node.type === HomeCreationPage).length,
+            1,
+            "a genuine unfinished page stays mounted beneath its own child sheet",
+        );
+    } finally {
+        effects = [];
+        fixture.store.state = previous;
+    }
+});
+
+// App owns route chrome: ProjectView's own heading cannot detect a second shell header.
+// The same native toSessions callback must be delivered, while Chat keeps its conversation Topbar.
+test("App gives the project content Back navigation without a redundant route header or menu", () => {
+    const previous = fixture.store.state;
+    const previousNavigation = fixture.navigated;
+    const App = fixture.app!.type as (props: Props) => unknown;
+
+    try {
+        fixture.store.state = {
+            me: { id: "project-owner", role: "owner" },
+            server: { projects: 1, privateAgents: 4 },
+            conversationId: null,
+            projectId: "build",
+            privateId: null,
+            agentDraft: null,
+            homeCreation: null,
+            board: false,
+            page: null,
+            view: { conversation: null },
+            sheet: null,
+        };
+        fixture.navigated = [];
+        current = { slots: [], cursor: 0 };
+        const pane = nodes(App({})).find((node) => node.props["data-part"] === "pane")!;
+        const content = nodes(pane);
+        const project = content.find((node) => node.type === fixture.projectView)!;
+
+        assert.ok(project, "the real project route still mounts ProjectView");
+        assert.equal(project.props.projectId, "build");
+        assert.equal(
+            content.some(
+                (node) =>
+                    node.type === "header" ||
+                    node.type === fixture.topbar ||
+                    classHas(node, "topbar") ||
+                    node.props["aria-label"] === "Menu" ||
+                    node.props["aria-label"] === "Open sessions",
+            ),
+            false,
+            "ProjectView needs neither a Projects/ellipsis bar nor a replacement shell header",
+        );
+        assert.equal(project.props.onBack, toSessions, "Back uses the existing landing-list path");
+        project.props.onBack();
+        assert.deepEqual(fixture.navigated, [null]);
+        assert.equal(fixture.store.state.drawer, undefined, "Back does not open a sessions drawer");
+
+        fixture.store.state.conversationId = 21;
+        fixture.store.state.projectId = null;
+        current = { slots: [], cursor: 0 };
+        const conversation = nodes(App({}));
+
+        assert.equal(conversation.filter((node) => node.type === fixture.topbar).length, 1);
+        assert.equal(
+            conversation.some((node) => node.type === fixture.projectView),
+            false,
+        );
+    } finally {
+        effects = [];
+        fixture.store.state = previous;
+        fixture.navigated = previousNavigation;
+    }
+});
+
+test("Home keeps named-agent creation local, returns to unfinished setup, and pins the chosen project's draft", () => {
+    setup("running", null);
+    Object.assign(fixture.store.state, {
+        server: { privateAgents: 4, projects: 1 },
+        homeCreation: { projectId: "app" },
+        projects: [
+            { id: "app", name: "Application", cwd: "/app", defaultAgentId: "ada" },
+            {
+                id: "remote",
+                name: "Remote",
+                cwd: "/remote",
+                location: { kind: "ssh", host: "box" },
+            },
+        ],
+        namedAgents: [{ agentId: "ada", name: "Ada", chats: [] }],
+    });
+    const home = mount(HomeCreation);
+    const button = (label: RegExp) =>
+        nodes(home.render()).find((node) => node.type === "button" && label.test(textOf(node)))!;
+
+    try {
+        assert.equal(
+            nodes(home.render()).some(
+                (node) => node.type === "native-session-panel" && node.props.visible,
+            ),
+            false,
+        );
+        assert.ok(button(/Chat with Ada/));
+        fixture.store.state.namedAgents[0].projectId = "app";
+        fixture.store.state.namedAgents.push({
+            agentId: "max",
+            name: "Max",
+            projectId: "app",
+            chats: [],
+        });
+
+        for (const defaultAgentId of [null, "unavailable"]) {
+            fixture.store.state.projects[0].defaultAgentId = defaultAgentId;
+            const tree = home.render();
+            const picker = nodes(tree).find((node) => node.props["aria-label"] === "Named agent")!;
+
+            assert.equal(
+                picker.props.value,
+                defaultAgentId ?? "",
+                "related identities never replace an explicit clear or unavailable default",
+            );
+            assert.equal(button(/Chat with a named agent/).props.disabled, true);
+
+            if (defaultAgentId === null) {
+                assert.match(textOf(tree), /No default agent selected\. Related PiPs: Ada, Max/);
+            }
+        }
+
+        fixture.store.state.projects[0].defaultAgentId = "ada";
+        fixture.store.state.namedAgents.pop();
+        button(/Other ways to start/).props.onClick();
+        button(/New Work Item/).props.onClick();
+        const work = nodes(home.render()).find(
+            (node) => node.type === "native-session-panel" && node.props.visible,
+        )!;
+
+        assert.equal(work.props.projectId, "app");
+        assert.equal(work.props.embedded, true);
+        assert.deepEqual(fixture.agentDrafts, []);
+        assert.ok(
+            button(/Chat with Ada/),
+            "disclosing work keeps the primary Chat action available",
+        );
+        button(/Other ways to start/).props.onClick();
+        const picker = nodes(home.render()).find(
+            (node) => node.props["aria-label"] === "Named agent",
+        )!;
+
+        picker.props.onChange({ currentTarget: { value: "__create" } });
+        assert.equal(fixture.opened.at(-1)?.type, "named-agent");
+        assert.deepEqual(fixture.agentDrafts, [], "creating an identity does not start a chat");
+        fixture.store.state.namedAgents.push({ agentId: "bea", name: "Bea", chats: [] });
+        fixture.opened.at(-1)!.onCreated({ agentId: "bea", name: "Bea" });
+        button(/Other ways to start/).props.onClick();
+        button(/New Work Item/).props.onClick();
+        button(/Chat with Bea/).props.onClick();
+        assert.deepEqual(fixture.agentDrafts, [{ agentId: "bea", projectId: "app" }]);
+        assert.equal(
+            fixture.store.state.projects[0].defaultAgentId,
+            "ada",
+            "a one-off selection does not rewrite defaults",
+        );
+    } finally {
+        home.dispose();
+    }
+});
+
+test("an explicit New Session folder reveals native work settings after Home project selection", () => {
+    setup("running", null);
+    Object.assign(fixture.store.state, {
+        server: { privateAgents: 4, projects: 1 },
+        homeCreation: { cwd: "/chosen-folder" },
+        projects: [{ id: "app", name: "Application", cwd: "/app" }],
+        namedAgents: [],
+    });
+    const home = mount(HomeCreation);
+
+    try {
+        nodes(home.render())
+            .find((node) => node.type === "button" && textOf(node) === "Application")!
+            .props.onClick();
+        const work = nodes(home.render()).find(
+            (node) => node.type === "native-session-panel" && node.props.visible,
+        )!;
+
+        assert.equal(work.props.cwd, "/chosen-folder");
+        assert.equal(work.props.projectId, "app");
+        assert.deepEqual(fixture.agentDrafts, []);
+        assert.deepEqual(fixture.mutations, []);
+    } finally {
+        home.dispose();
+    }
+});
+
+test("Home machine filters clear mismatched creation context and one-time Chat stays a separate native path", () => {
+    setup("running", null);
+    Object.assign(fixture.store.state, {
+        server: { privateAgents: 4, projects: 1 },
+        homeCreation: { projectId: "app" },
+        projects: [
+            { id: "app", name: "Application", cwd: "/app" },
+            {
+                id: "remote",
+                name: "Remote",
+                cwd: "/remote",
+                location: { kind: "ssh", host: "box" },
+            },
+        ],
+        namedAgents: [],
+    });
+    const home = mount(HomeCreation);
+    const button = (label: RegExp) =>
+        nodes(home.render()).find((node) => node.type === "button" && label.test(textOf(node)))!;
+
+    try {
+        button(/Other ways to start/).props.onClick();
+        button(/New Work Item/).props.onClick();
+        nodes(home.render())
+            .find((node) => node.type === "native-project-filters")!
+            .props.onChange("ssh:box");
+        assert.equal(
+            nodes(home.render()).some(
+                (node) => node.type === "native-session-panel" && node.props.visible,
+            ),
+            false,
+        );
+        assert.equal(
+            nodes(home.render()).some((node) => node.props["aria-label"] === "Named agent"),
+            false,
+        );
+        button(/^Remote$/).props.onClick();
+        button(/New Work Item/).props.onClick();
+        assert.equal(
+            nodes(home.render()).find(
+                (node) => node.type === "native-session-panel" && node.props.visible,
+            )!.props.projectId,
+            "remote",
+        );
+        button(/One-time Chat/).props.onClick();
+        const panels = nodes(home.render()).filter(
+            (node) => node.type === "native-session-panel" && node.props.visible,
+        );
+
+        assert.equal(panels.length, 1, "only the selected creation mode is visible");
+        assert.equal(panels[0]!.props.oneTime, true);
+        assert.equal(panels[0]!.props.projectId, undefined);
+        assert.deepEqual(fixture.agentDrafts, []);
+        assert.deepEqual(fixture.mutations, []);
+    } finally {
+        home.dispose();
+    }
+});
+
 for (const status of ["running", "paused", "reclaimed", "collaborator"] as const) {
     const destination = status === "collaborator" ? 2 : 99;
 
     test(`launcher and home open the ${status} group's destination, not its mutation ID`, () => {
         setup(status);
         const launcher = mount(Launcher);
-        const home = mount(Splash);
+        const home = mount(HomeCreation);
 
         try {
             const option = nodes(launcher.render()).find(

@@ -67,11 +67,13 @@ const fieldsOf = (value) => ({
     name: value?.name ?? "",
     instructions: value?.instructions ?? "",
     focus: value?.focus ?? "",
+    projectId: value?.projectId ?? value?.project?.id ?? "",
 });
 
-export function openAgentSettings(id = null, agentId = null, section = null) {
+export function openAgentSettings(id = null, agentId = null, section = null, options = {}) {
     if (namedAgentsAvailable()) {
         openSheet({
+            ...options,
             type: "named-agent",
             id,
             agentId,
@@ -84,15 +86,41 @@ export function openAgentSettings(id = null, agentId = null, section = null) {
 
 const openSettings = openAgentSettings;
 
+function registerIdentity(agent) {
+    if (!namedAgentsAvailable() || typeof agent.agentId !== "string") {
+        return;
+    }
+
+    const agents = store.state.namedAgents ?? [];
+    const previous = agents.find((item) => item.agentId === agent.agentId);
+
+    if (!previous) {
+        store.set({ namedAgents: [...agents, { ...agent, busy: false }] });
+    } else if (!(previous.updatedAt > agent.updatedAt)) {
+        // A settings reply updates identity metadata immediately, but is not a new live
+        // Chat catalogue. Never replace exact Chat placement, activity or model projection.
+        const next = {
+            ...previous,
+            name: agent.name,
+            ...(agent.updatedAt === undefined ? {} : { updatedAt: agent.updatedAt }),
+        };
+
+        if (agent.projectId === undefined) {
+            delete next.projectId;
+        } else {
+            next.projectId = agent.projectId;
+        }
+
+        store.set({ namedAgents: agents.map((item) => (item === previous ? next : item)) });
+    }
+}
+
 function openIdentity(agent) {
     if (!namedAgentsAvailable()) {
         return;
     }
 
-    if (!(store.state.namedAgents ?? []).some((item) => item.agentId === agent.agentId)) {
-        store.set({ namedAgents: [...(store.state.namedAgents ?? []), { ...agent, busy: false }] });
-    }
-
+    registerIdentity(agent);
     store.set({ sidebarTab: "sessions", drawer: false });
 
     const chats = (agent.chats ?? (agent.chatIds ?? []).map((id) => ({ id }))).filter(
@@ -125,7 +153,7 @@ const agentIsOpen = (agent) =>
     (Number.isSafeInteger(store.state.conversationId) &&
         (agent.chatIds ?? []).includes(store.state.conversationId));
 
-function NamedAgentRow({ agent }) {
+function NamedAgentRow({ agent, beforeOpen = () => true, animated = false }) {
     const ref = useRef(null);
     const userId = store.state.me?.id;
 
@@ -157,72 +185,99 @@ function NamedAgentRow({ agent }) {
 
             const current = store.state.namedAgents?.find((item) => item.agentId === agent.agentId);
 
-            if (current) {
+            if (current && beforeOpen() !== false) {
                 openIdentity(current);
             }
         }}
         title=${agent.name}
     >
-        <${NamedAgentAvatar} agentId=${agent.agentId} />
+        <${NamedAgentAvatar}
+            agentId=${agent.agentId}
+            animated=${animated}
+            thinking=${animated && (agent.busy || agent.managing)}
+        />
         <span class="named-agent-name">${agent.name}</span>
         <span class="named-agent-status small muted">
-            ${agent.busy ? html`<${Spinner} />` : agent.updatedAt ? timeAgo(agent.updatedAt) : "Ready"}
+            ${
+                agent.busy || agent.managing
+                    ? html`<${Spinner} />`
+                    : agent.updatedAt
+                      ? timeAgo(agent.updatedAt)
+                      : "Ready"
+            }
         </span>
     </button>`;
 }
 
-export function NamedAgents() {
-    const [expanded, setExpanded] = useState(true);
-    const [listId] = useState(() => `named-pips-${uid()}`);
-
+export function NamedAgents({ beforeOpen, onCreate } = {}) {
     if (!namedAgentsAvailable()) {
         return null;
     }
 
     const agents = store.state.namedAgents ?? [];
 
-    return html`<section class="named-agents" aria-label="PiPs">
+    return html`<section class="named-agents named-agent-library" aria-label="PiPs">
         ${styles()}
-        <div
-            class=${`project-group-head named-agents-head${agents.some(agentIsOpen) ? " on" : ""}`}
-            role="group"
-            aria-label="PiPs controls"
-        >
+        <p class="small muted">Named agents are private to you. Each identity keeps its own chats, instructions and memory across projects.</p>
+        <div class="named-agents-list" role="group" aria-label="Named agents">
+            ${agents.map(
+                (agent) => html`<${NamedAgentRow}
+                    key=${agent.agentId}
+                    agent=${agent}
+                    animated=${true}
+                    beforeOpen=${beforeOpen}
+                />`,
+            )}
+            ${agents.length === 0 && html`<p class="small muted">No named agents yet.</p>`}
             <button
-                class="group-head named-agents-toggle"
-                data-part="session-group-head"
+                class="button named-agent-library-create"
                 type="button"
-                aria-label=${expanded ? "Collapse PiPs" : "Expand PiPs"}
-                aria-expanded=${expanded}
-                aria-controls=${listId}
-                onClick=${() => setExpanded((value) => !value)}
+                onClick=${
+                    onCreate ??
+                    (() =>
+                        openSettings(null, null, null, {
+                            onCreated: () => openSheet({ type: "named-agents" }),
+                        }))
+                }
             >
-                <${Icon} name="pip" size=${18} />
-                <span class="named-agents-label">PiPs</span>
+                <${Icon} name="plus" size=${16} /> Create named agent
             </button>
-            <button
-                class="named-agents-create"
-                type="button"
-                aria-label="New PiP"
-                title="New PiP"
-                onClick=${(event) => {
-                    event.stopPropagation();
-                    openSettings();
-                }}
-            >
-                <${Icon} name="plus" size=${14} />
-                ${agents.length === 0 && html`<span>New PiP</span>`}
-            </button>
-        </div>
-        <div class="named-agents-list" id=${listId} hidden=${!expanded}>
-            ${
-                expanded &&
-                agents.map(
-                    (agent) => html`<${NamedAgentRow} key=${agent.agentId} agent=${agent} />`,
-                )
-            }
         </div>
     </section>`;
+}
+
+export function NamedAgentsSheet() {
+    const sheet = store.state.sheet;
+    const userId = store.state.me?.id;
+    const live = () =>
+        namedAgentsAvailable() && store.state.me.id === userId && store.state.sheet === sheet;
+
+    const close = () => {
+        if (!live()) {
+            return false;
+        }
+
+        closeSheet();
+
+        return true;
+    };
+
+    if (!namedAgentsAvailable()) {
+        return null;
+    }
+
+    return html`<${Sheet} title="PiPs" onClose=${close}>
+        <${NamedAgents}
+            beforeOpen=${close}
+            onCreate=${() => {
+                if (live()) {
+                    openSettings(null, null, null, {
+                        onCreated: () => openSheet({ type: "named-agents" }),
+                    });
+                }
+            }}
+        />
+    <//>`;
 }
 
 function History({ data, disabled, restore }) {
@@ -321,6 +376,7 @@ function ControllerAccess({ data, disabled, refresh, close }) {
 function AgentForm({ sheet, id, userId, close }) {
     const key = `${userId}:${sheet.agentId ?? id ?? "new"}`;
     const editing = id !== null || sheet.agentId != null;
+    const pickingIdentity = !editing && typeof sheet.onCreated === "function";
     const [creation, setCreation] = useState(() => (editing ? null : savedCreation(userId)));
     const [draft, setDraft] = useState(() =>
         editing
@@ -350,6 +406,17 @@ function AgentForm({ sheet, id, userId, close }) {
         store.state.sheet === sheet &&
         store.state.conversationId === viewId.current;
 
+    const acceptCreation = (result) => {
+        registerIdentity(result);
+        close();
+
+        if (typeof sheet.onCreated === "function") {
+            sheet.onCreated(result);
+        } else {
+            openIdentity(result);
+        }
+    };
+
     useEffect(() => {
         mounted.current = true;
         let cancelled = false;
@@ -366,8 +433,7 @@ function AgentForm({ sheet, id, userId, close }) {
             }
 
             if (!editing && accepted?.id !== undefined) {
-                close();
-                openIdentity(accepted);
+                acceptCreation(accepted);
 
                 return;
             }
@@ -394,6 +460,11 @@ function AgentForm({ sheet, id, userId, close }) {
                 const changed = cached && cached.revision !== result.revision;
 
                 setData(result);
+
+                if (editing) {
+                    registerIdentity(result);
+                }
+
                 setDraft((previous) =>
                     editing && replaceDraft.current && !cached ? fieldsOf(result) : previous,
                 );
@@ -432,11 +503,20 @@ function AgentForm({ sheet, id, userId, close }) {
 
         const body = editing
             ? revision === null
-                ? { ...draft, name: draft.name.trim(), expectedRevision: data.revision }
+                ? {
+                      name: draft.name.trim(),
+                      instructions: draft.instructions,
+                      focus: draft.focus,
+                      expectedRevision: data.revision,
+                      ...(store.state.server?.projectAgentLinks >= 1 &&
+                      draft.projectId !== (data.projectId ?? data.project?.id ?? "")
+                          ? { projectId: draft.projectId || null }
+                          : {}),
+                  }
                 : { action: "undo", expectedRevision: data.revision, revision }
             : (creations.get(userId) ?? {
                   name: draft.name.trim(),
-                  projectId: draft.projectId || null,
+                  projectId: pickingIdentity ? null : draft.projectId || null,
                   requestId: uid(),
               });
 
@@ -469,9 +549,9 @@ function AgentForm({ sheet, id, userId, close }) {
             }
 
             if (!editing) {
-                close();
-                openIdentity(result);
+                acceptCreation(result);
             } else {
+                registerIdentity(result);
                 setBlocked(true);
                 replaceDraft.current = true;
                 setStatus(revision === null ? "Settings saved." : `Restored revision ${revision}.`);
@@ -680,31 +760,33 @@ function AgentForm({ sheet, id, userId, close }) {
                     />
                 </label>
                 ${
-                    !editing &&
+                    (editing
+                        ? store.state.server?.projectAgentLinks >= 1
+                        : !pickingIdentity || creation?.projectId) &&
                     html`
                         <label class="field">
                             <span class="label">Project (optional)</span>
                             <select
                                 aria-label="PiP project"
                                 value=${draft.projectId}
-                                disabled=${locked}
+                                disabled=${locked || (editing && !store.state.projectsLoaded)}
                                 onChange=${change("projectId")}
                             >
                                 <option value="">No project</option>
                                 ${
                                     draft.projectId &&
-                                    !(data.projects ?? []).some(
+                                    !(editing ? store.state.projects : (data.projects ?? [])).some(
                                         (project) => project.id === draft.projectId,
                                     ) &&
                                     html`<option value=${draft.projectId} disabled>Unavailable project</option>`
                                 }
-                                ${(data.projects ?? []).map(
+                                ${(editing ? store.state.projects : (data.projects ?? [])).map(
                                     (project) => html`
                                     <option key=${project.id} value=${project.id}>${project.name}</option>
                                 `,
                                 )}
                             </select>
-                            <span class="muted small">A remit only. Does not change access or working directory.</span>
+                            <span class="muted small">Links this identity to the project and supplies context for new Chats. Does not set the project's default agent, move existing Chats, or change access or working directories.${editing ? " Undo restores charter text only; project links stay as saved." : ""}</span>
                         </label>
                 `
                 }
@@ -720,6 +802,7 @@ function AgentForm({ sheet, id, userId, close }) {
                                     : "No project"
                             }
                         </p>
+                        ${!(store.state.server?.projectAgentLinks >= 1) && html`<p class="muted small">Changing project links requires a server update/restart. The saved link is kept.</p>`}
                         <label class="field">
                             <span class="label">Instructions</span>
                             <textarea

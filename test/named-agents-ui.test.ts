@@ -391,6 +391,12 @@ function fixture(t: TestContext, components = { NamedAgents, NamedAgentSheet, op
             components.openAgentSettings(agent.id, agent.agentId);
             render();
         },
+        beginCreation() {
+            // Retained native creation intents/uncertain receipts remain compatible;
+            // the global library's callback creation is covered by project-view.test.ts.
+            components.openAgentSettings();
+            render();
+        },
         find,
         label,
         settle,
@@ -469,30 +475,12 @@ test("settings keeps exact retained chats available without creating or cancelli
     );
 });
 
-test("only a capable owner sees agents, with route-based selection, disclosure, navigation and public settings", async (t) => {
+test("only a capable owner sees the agent library, with route-based selection, navigation and public settings", async (t) => {
     const f = fixture(t);
 
     assert.equal(f.requests.length, 0, "listing uses the realtime catalogue, not polling");
     assert.match(f.text(), /Long-lived reviewer/);
-    const toggle = f.label("Collapse PiPs");
-    const listId = toggle.props["aria-controls"];
-
-    assert.ok(listId, "disclosure identifies its controlled list");
-    assert.equal(toggle.props["aria-expanded"], true);
-    const groupIsSelected = () => /(?:^|\s)on(?:\s|$)/.test(f.label("PiPs controls").props.class);
-
-    assert.equal(groupIsSelected(), false, "expansion alone does not select PiPs");
-    f.click(toggle);
-    assert.equal(f.label("Expand PiPs").props["aria-expanded"], false);
-    assert.equal(groupIsSelected(), false);
-    assert.equal(
-        nodes(f.label("PiPs")).find((node) => node.props.id === listId)?.props.hidden,
-        true,
-    );
-    assert.doesNotMatch(f.text(), /Long-lived reviewer/);
     f.patch({ conversationId: 7 });
-    assert.equal(groupIsSelected(), true, "a saved PiP chat selects the folded group");
-    f.click(f.label("Expand PiPs"));
     assert.equal(f.find("button", "Long-lived reviewer").props["aria-current"], "page");
     f.click(f.find("button", "Long-lived reviewer"));
     assert.deepEqual(f.navigated, [7]);
@@ -518,7 +506,6 @@ test("only a capable owner sees agents, with route-based selection, disclosure, 
         [{ conversationId: null }, false, "leaving every saved chat and draft clears selection"],
     ] as const) {
         f.patch(patch);
-        assert.equal(groupIsSelected(), selected, reason);
         assert.equal(
             f.find("button", "Long-lived reviewer").props["aria-current"],
             selected ? "page" : undefined,
@@ -646,93 +633,38 @@ test("named-agent rows open exact anchored options through right-click and keybo
     assert.equal(f.state.sheet, null);
 });
 
-test("the PiPs entry has a leading PiP icon, no count or chevron, and a semantic sibling creation control", (t) => {
-    const f = fixture(t);
-    const entry = f.label("PiPs controls");
-    const toggle = f.label("Collapse PiPs");
-    const create = f.label("New PiP");
-    const buttons = nodes(entry).filter((node) => node.type === "button");
-
-    assert.equal(entry.props.role, "group");
-    assert.deepEqual(buttons, [toggle, create], "both native controls share the same entry");
-    assert.deepEqual(
-        nodes(f.label("PiPs")).filter((node) => node.type === "button"),
-        [toggle, create, f.find("button", "Long-lived reviewer")],
-        "the sidebar has navigation but no per-agent edit control",
-    );
-    assert.equal(entry.props.onClick, undefined, "the shared entry is not a competing toggle");
-    assert.equal(textOf(toggle), "PiPs", "no numeric count or empty-count label");
-    assert.equal(toggle.props["aria-describedby"], undefined, "no obsolete count reference");
-    assert.ok(nodes(entry).every((node) => !String(node.props.id ?? "").endsWith("-count")));
-    assert.deepEqual(
-        nodes(toggle)
-            .filter((node) => node.type === "test-icon")
-            .map((node) => node.props.name),
-        ["pip"],
-        "the PiP icon is the sole leading icon; no disclosure chevron",
-    );
-    assert.equal(nodes(toggle)[1]?.type, "test-icon");
-    assert.equal(nodes(toggle)[1]?.props.size, 18, "same leading icon size as the source tabs");
-    assert.deepEqual(
-        nodes(create)
-            .filter((node) => node.type === "test-icon")
-            .map((node) => node.props.name),
-        ["plus"],
-    );
-
-    for (const button of buttons) {
-        assert.equal(button.props.type, "button");
-        assert.equal(button.props.disabled, undefined);
-        assert.equal(button.props.tabIndex, undefined, "native keyboard tab order is retained");
-        assert.equal(
-            nodes(button)
-                .slice(1)
-                .some((node) => node.type === "button" || node.type === "a"),
-            false,
-            "interactive controls are siblings, never nested",
-        );
-    }
-
-    let stopped = 0;
-
-    create.props.onClick({ stopPropagation: () => stopped++ });
-    assert.equal(stopped, 1, "creation cannot bubble into entry disclosure");
-    assert.equal(f.label("Collapse PiPs").props["aria-expanded"], true);
-    assert.equal(f.state.sheet.type, "named-agent");
-    assert.equal(f.state.sheet.id, null);
-    f.patch({ sheet: null });
-    f.click(f.label("Collapse PiPs"));
-    assert.equal(f.label("Expand PiPs").props["aria-expanded"], false);
-    f.click(f.label("New PiP"));
-    assert.equal(
-        f.label("Expand PiPs").props["aria-expanded"],
-        false,
-        "creation does not expand a folded entry",
-    );
-    assert.equal(f.state.sheet.id, null);
-    f.patch({ sheet: null, me: { id: "guest", role: "guest" } });
-    create.props.onClick({ stopPropagation() {} });
-    assert.equal(f.state.sheet, null, "a stale create control cannot bypass private access loss");
-});
-
-test("an empty PiPs group offers an inline named create action without a helper paragraph", (t) => {
+// Sidebar entry placement belongs to sidebar-navigation.test.ts. The obsolete collapsible
+// global heading is gone; the library owns empty-state creation and retained owner fencing.
+test("an empty PiPs library keeps global creation available and stale controls cannot bypass private access loss", (t) => {
     const f = fixture(t);
 
     f.patch({ namedAgents: [] });
-    assert.equal(textOf(f.label("New PiP")), "New PiP");
-    assert.equal(textOf(f.label("Collapse PiPs")), "PiPs");
-    assert.doesNotMatch(f.text(), /Create a PiP to work with privately/);
-    f.click(f.label("Collapse PiPs"));
-    assert.equal(f.label("Expand PiPs").props["aria-expanded"], false);
-    assert.equal(textOf(f.label("New PiP")), "New PiP", "create remains available while folded");
-    f.click(f.label("New PiP"));
+    assert.match(f.text(), /No named agents yet/);
+    const create = f.find("button", "Create named agent");
+
+    f.click(create);
     assert.equal(f.state.sheet.type, "named-agent");
     assert.equal(f.state.sheet.id, null);
+    assert.equal(typeof f.state.sheet.onCreated, "function");
+    f.patch({ sheet: null, me: { id: "guest", role: "guest" } });
+    create.props.onClick();
+    assert.equal(f.state.sheet, null, "a stale create control cannot bypass private access loss");
 });
 
 test("genuine Blobatar images keep their identity through rename and remount and fail quietly", async (t) => {
     await import("blobatar/react");
-    const f = fixture(t);
+    const { NamedAgentAvatar } = await import(
+        new URL("../web/named-agent-avatar.js", import.meta.url).href
+    );
+    // Home uses a still identity preview; the PiPs library now uses animated identities.
+    const mountAvatar = () =>
+        fixture(t, {
+            NamedAgentSheet,
+            openAgentSettings,
+            NamedAgents: () =>
+                h(NamedAgentAvatar, { agentId: active.state.namedAgents[0].agentId }),
+        });
+    const f = mountAvatar();
 
     await f.settle();
     const avatar = f.find("img");
@@ -756,7 +688,7 @@ test("genuine Blobatar images keep their identity through rename and remount and
     });
     await f.settle();
     assert.equal(f.find("img").props.src, source);
-    const remounted = fixture(t);
+    const remounted = mountAvatar();
 
     await remounted.settle();
     assert.equal(remounted.find("img").props.src, source);
@@ -770,12 +702,11 @@ test("genuine Blobatar images keep their identity through rename and remount and
         "identity comes from stable agentId, not display name or chat id",
     );
     remounted.find("img").props.onError();
-    assert.equal(
-        nodes(remounted.label("PiPs")).some((node) => node.type === "img"),
-        false,
+    assert.throws(
+        () => remounted.find("img"),
+        /not found/,
+        "a failed decorative image leaves only its quiet reserved space",
     );
-    remounted.click(remounted.find("button", "Long-lived reviewerReady"));
-    assert.deepEqual(remounted.navigated, [8], "a failed image cannot disable its PiP");
 });
 
 test("animated identity uses genuine inline Blobatar thinking and returns to its idle face", async (t) => {
@@ -892,10 +823,10 @@ test("an identity without saved Chats opens a local draft and edits approved sha
     assert.deepEqual(f.navigated, []);
 });
 
-test("creation asks only for name and optional project and explicitly retries the same uncertain request", async (t) => {
+test("legacy native creation preserves its optional context and explicitly retries the same uncertain request", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("New PiP"));
+    f.beginCreation();
     await f.settle();
     assert.equal(f.request(0).path, "projects");
     f.request(0).resolve({
@@ -923,7 +854,7 @@ test("creation asks only for name and optional project and explicitly retries th
     assert.match(f.text(), /Creation may have succeeded/);
     assert.equal(f.label("Agent name").props.disabled, true);
     f.click(f.find("button", "Close"));
-    f.click(f.label("New PiP"));
+    f.beginCreation();
     await f.settle();
     f.request(2).resolve({ projects: [] });
     await f.settle();
@@ -947,7 +878,7 @@ test("creation asks only for name and optional project and explicitly retries th
 test("tab reload recovers an uncertain creation without automatically repeating it", async (t) => {
     const first = fixture(t);
 
-    first.click(first.label("New PiP"));
+    first.beginCreation();
     await first.settle();
     first.request(0).resolve({ projects: [] });
     await first.settle();
@@ -962,7 +893,7 @@ test("tab reload recovers an uncertain creation without automatically repeating 
     const resumed = fixture(t, reloaded);
 
     resumed.patch({ me: { ...first.state.me } });
-    resumed.click(resumed.label("New PiP"));
+    resumed.beginCreation();
     await resumed.settle();
     resumed.request(0).resolve({ projects: [] });
     await resumed.settle();
@@ -980,17 +911,17 @@ test("tab reload recovers an uncertain creation without automatically repeating 
     assert.equal(storage.get(`pocket.pipCreation.${first.state.me.id}`), undefined);
 });
 
-test("a reopened creation joins the original acknowledgement and opens that exact PiP", async (t) => {
+test("a reopened legacy creation joins the original acknowledgement and opens that exact PiP", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("New PiP"));
+    f.beginCreation();
     await f.settle();
     f.request(0).resolve({ projects: [] });
     await f.settle();
     f.input("Agent name", "Still creating");
     f.submit();
     f.click(f.find("button", "Close"));
-    f.click(f.label("New PiP"));
+    f.beginCreation();
     await f.settle();
     assert.equal(f.requests.length, 2, "the new opening joins the in-flight request");
     f.request(1).resolve({ id: null, agentId: "joined-pip", name: "Still creating", chats: [] });
@@ -1001,10 +932,10 @@ test("a reopened creation joins the original acknowledgement and opens that exac
     assert.equal(f.requests.length, 2);
 });
 
-test("a rejected project stays correctable and No project creates without the open project's remit", async (t) => {
+test("a legacy rejected context stays correctable and No project creates without the open project's remit", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("New PiP"));
+    f.beginCreation();
     await f.settle();
     f.request(0).resolve({ projects: [{ id: "removed-project", name: "Soon removed" }] });
     await f.settle();
@@ -1118,7 +1049,78 @@ test("a definite validation rejection keeps the draft editable for a corrected r
     assert.equal(f.label("Agent focus").props.value, "Corrected remit");
 });
 
-test("advanced settings report project remit availability without a project editing field", async (t) => {
+// The HTTP tests own persistence/privacy. This boundary independently owns the settings draft,
+// explicit clear/omission semantics and immediate catalogue metadata without waiting for SSE.
+test("agent settings save and clear a project link without retargeting Chats or project defaults", async (t) => {
+    const f = fixture(t);
+    const original = f.state.namedAgents[0];
+
+    f.patch({
+        server: { ...f.state.server, projectAgentLinks: 1 },
+        projectsLoaded: true,
+        projects: [
+            { id: "current-project", name: "Build", defaultAgentId: "another-agent" },
+            { id: "other-project", name: "Research", defaultAgentId: null },
+        ],
+        namedAgents: [
+            {
+                ...original,
+                projectId: "current-project",
+                chats: [{ id: 7, projectId: "current-project", busy: true }],
+            },
+        ],
+    });
+    f.openSettings();
+    await f.settle();
+    f.request(0).resolve({ ...settings(), projectId: "current-project", updatedAt: 10 });
+    await f.settle();
+    assert.equal(f.label("PiP project").props.value, "current-project");
+    f.input("PiP project", "other-project");
+    f.submit();
+    assert.equal(f.request(1).body?.projectId, "other-project");
+    assert.equal(f.request(1).body?.expectedRevision, 3);
+    f.request(1).resolve({ ...settings(4), projectId: "other-project", updatedAt: 20 });
+    await f.settle();
+    assert.equal(
+        f.state.namedAgents[0].projectId,
+        "other-project",
+        "save updates navigation before a catalogue event",
+    );
+    assert.equal(
+        f.state.namedAgents[0].busy,
+        true,
+        "settings never replace live aggregate activity",
+    );
+    assert.equal(f.state.namedAgents[0].chats[0].projectId, "current-project");
+    assert.equal(f.state.projects[0].defaultAgentId, "another-agent");
+    assert.equal(f.state.projects[1].defaultAgentId, null);
+    f.request(2).resolve({ ...settings(4), projectId: "other-project", updatedAt: 20 });
+    await f.settle();
+    f.input("PiP project", "");
+    f.submit();
+    assert.equal(f.request(3).body?.projectId, null, "only the explicit clear sends null");
+    f.request(3).resolve({ ...settings(5), updatedAt: 30 });
+    await f.settle();
+    assert.equal(f.state.namedAgents[0].projectId, undefined);
+    f.request(4).resolve({ ...settings(5), updatedAt: 30 });
+    await f.settle();
+    f.input("Agent focus", "Only a charter edit");
+    f.submit();
+    assert.equal(
+        Object.hasOwn(f.request(5).body!, "projectId"),
+        false,
+        "an unchanged link is omitted",
+    );
+    f.request(5).resolve({ ...settings(6), updatedAt: 40 });
+    await f.settle();
+    f.request(6).resolve({ ...settings(6), updatedAt: 40 });
+    await f.settle();
+    assert.deepEqual(f.navigated, []);
+    assert.deepEqual(f.openedDrafts, []);
+    assert.ok(f.requests.every((request) => request.path === "c/7/private-agent"));
+});
+
+test("older servers report project remit without offering an unsupported editing field", async (t) => {
     for (const [project, label] of [
         [{ id: "chosen", available: true, name: "Current project name" }, "Current project name"],
         [{ id: "gone", available: false, name: "Stale name" }, "Unavailable project"],
@@ -1291,7 +1293,7 @@ test("Work Item quick access reports server states and links exact native orches
 test("a dismissed opening cannot overwrite a new draft or navigate when its mutation finishes", async (t) => {
     const f = fixture(t);
 
-    f.click(f.label("New PiP"));
+    f.beginCreation();
     await f.settle();
     f.request(0).resolve({ projects: [] });
     await f.settle();

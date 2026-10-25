@@ -113,9 +113,22 @@ async function fresh(mobile = false) {
             ),
         "synthetic session list",
     );
-    // Browser history entries require a trusted first interaction. Enter through the real session list.
+
+    // Browser history entries require trusted input. Home owns creation; on phones its
+    // native sessions button opens the real drawer before the row starts a route.
+    if (mobile) {
+        await click('.topbar [aria-label="Open sessions"]');
+        await until(
+            () =>
+                value<boolean>(
+                    `return JSON.stringify(!!document.querySelector('.drawer:not([data-state="closing"]) .session-row[data-id="${first}"]'))`,
+                ),
+            "the phone session drawer",
+        );
+    }
+
     await page.click({
-        selector: `${mobile ? ".home-list" : ".sidebar"} .session-row[data-id="${first}"] .session`,
+        selector: `${mobile ? ".drawer" : ".sidebar"} .session-row[data-id="${first}"] .session`,
     });
     await go(first);
 }

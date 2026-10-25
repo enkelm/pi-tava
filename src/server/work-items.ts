@@ -403,7 +403,7 @@ export class WorkItems {
     }
 
     /**
-     * Native writer intervention, not an ordinary Stop: the caller must already have fenced this
+     * Native writer intervention or whole-item Close: the caller must already have fenced this
      * Work Item. Capture its complete membership/helper graph, cancel background work too, and JOIN
      * before returning. Never hold withControl while joining tools which may need that same lock.
      */
@@ -413,8 +413,11 @@ export class WorkItems {
             const current =
                 item === undefined ? undefined : (await tx.doc(HandoffsDoc)).workItems[item.id];
 
-            if (current?.intervention === undefined) {
-                throw new HttpError(409, "Fence the native writer before interrupting execution.");
+            if (current?.intervention === undefined && current?.archived !== true) {
+                throw new HttpError(
+                    409,
+                    "Fence or archive the native writer before interrupting execution.",
+                );
             }
 
             const pending = this.members(id).slice();
@@ -752,6 +755,10 @@ export class WorkItems {
     requireWritable(id: ConversationId): void {
         this.#app.pip.agents.execution.requireNativeWrite(id);
 
+        if (this.itemFor(id)?.archived === true) {
+            throw new HttpError(409, "Restore the Work Item before starting fresh execution effects.");
+        }
+
         if (
             !this.#app.pip.agents.execution.isWriter(id) &&
             this.itemFor(id)?.intervention !== undefined
@@ -807,6 +814,9 @@ export class WorkItems {
                 ? {}
                 : {
                       workItemId: item.id,
+                      ...(user === undefined
+                          ? {}
+                          : this.#app.pip.agents.supervision.groupingParent(item, user)),
                       workItemTitle:
                           user === undefined ||
                           this.#app.canSee(user, item.originThreadId as ConversationId)
@@ -980,6 +990,53 @@ export class WorkItems {
         }
     }
 
+    #pendingParentLifecycle(item: Readonly<WorkItem> | undefined): Promise<void> | undefined {
+        return item?.parentChat == null
+            ? undefined
+            : this.#app.commands.namedChatLifecycle(item.parentChat.chatId as ConversationId);
+    }
+
+    /** Restore waits on private stored ownership, not the caller's owner-only display projection. */
+    async waitForRestore(id: ConversationId, supplied: User): Promise<User> {
+        const expected = this.itemFor(id)?.id;
+
+        for (;;) {
+            let user = this.#human(id, supplied);
+            const item = this.itemFor(id);
+
+            if (item?.id !== expected) {
+                throw new HttpError(409, "The Work Item changed while Restore was waiting.");
+            }
+
+            if (item !== undefined) {
+                this.#requireMembers(item, user);
+            }
+
+            const pending = this.#pendingParentLifecycle(item);
+
+            if (pending !== undefined) {
+                await pending;
+                continue;
+            }
+
+            await this.#app.requireDriver(id, user);
+            user = this.#human(id, supplied);
+            const current = this.itemFor(id);
+
+            if (current?.id !== expected) {
+                throw new HttpError(409, "The Work Item changed while Restore was waiting.");
+            }
+
+            if (current !== undefined) {
+                this.#requireMembers(current, user);
+            }
+
+            if (this.#pendingParentLifecycle(current) === undefined) {
+                return user;
+            }
+        }
+    }
+
     async updateWorkItem(id: ConversationId, supplied: User, patch: UpdateWorkItem): Promise<void> {
         this.#human(id, supplied);
 
@@ -987,7 +1044,12 @@ export class WorkItems {
             throw new HttpError(400, "archived must be a boolean");
         }
 
-        await this.#app.requireDriver(id, supplied);
+        const user =
+            patch.archived === false
+                ? await this.waitForRestore(id, supplied)
+                : this.#human(id, supplied);
+
+        await this.#app.requireDriver(id, user);
         await this.#app.harness.commit(async (tx) => {
             if (patch.projectId !== undefined) {
                 await this.#app.projects.assignTx(tx, supplied, id, patch);
@@ -1012,6 +1074,21 @@ export class WorkItems {
         }
 
         this.#requireMembers(item, user);
+
+        if (!archived) {
+            if (this.#pendingParentLifecycle(item) !== undefined) {
+                throw new HttpError(
+                    409,
+                    "The Work Item lifecycle is still settling. Restore it after the current operation finishes.",
+                );
+            }
+
+            const turns = await tx.doc(TurnsDoc, this.#app.rootOf(id));
+
+            if (turns.on && turns.driver !== user.id) {
+                throw new HttpError(409, "Take the wheel before restoring this Work Item.");
+            }
+        }
 
         if (archived && item.supervisor !== undefined) {
             await this.#app.pip.agents.supervision.fenceParents(
@@ -1082,7 +1159,19 @@ export class WorkItems {
             return;
         }
 
+        if (this.#pendingParentLifecycle(item) !== undefined) {
+            throw new HttpError(
+                409,
+                "The Work Item lifecycle is still settling. Move it after the current operation finishes.",
+            );
+        }
+
         await this.#app.pip.agents.supervision.fenceParents(tx, id);
+
+        if (item !== undefined) {
+            // An explicit move detaches ownership, including validated legacy creation fallback.
+            item.parentChat = null;
+        }
 
         if (item?.supervisor !== undefined) {
             await this.#app.pip.agents.supervision.fenceParents(
@@ -1113,13 +1202,20 @@ export class WorkItems {
         id: ConversationId,
         supplied: User,
         patch: { title?: string; archived?: boolean },
-    ): Promise<void> {
+        options: { archiveOwned?: true } = {},
+    ): Promise<ConversationId[] | undefined> {
         const user = this.#human(id, supplied);
         const sessions = await tx.doc(SessionsDoc);
         const meta = sessions.items[String(id)];
 
         if (meta === undefined) {
             throw new HttpError(404, "Not a session");
+        }
+
+        let children: ConversationId[] = [];
+
+        if (options.archiveOwned && (meta.pipAgent !== true || patch.archived !== true)) {
+            throw new HttpError(409, "Owned Close requires a saved named Chat.");
         }
 
         if (meta.pip !== undefined || meta.pipAgent === true || meta.pipWorkItemId !== undefined) {
@@ -1158,7 +1254,47 @@ export class WorkItems {
                 );
             }
 
+            // Re-evaluate after the exact Chat's serialized lifecycle wait. A lost-ACK retry
+            // cannot recapture children explicitly restored since this Chat was closed.
+            if (options.archiveOwned && meta.archived === true) {
+                return;
+            }
+
             if (patch.archived) {
+                if (options.archiveOwned) {
+                    children = await this.#app.pip.agents.supervision.closeChildren(tx, id, user);
+
+                    for (const child of children) {
+                        const item = (await tx.doc(HandoffsDoc)).workItems[
+                            this.#app.sessionMeta(child)!.workItemId!
+                        ]!;
+                        const controller = item.supervisor?.conversationId as
+                            ConversationId | undefined;
+
+                        await this.#archive(tx, child, user, true);
+
+                        for (const member of item.threadIds) {
+                            await this.#app.pip.agents.contacts.fenceTarget(
+                                tx,
+                                member as ConversationId,
+                            );
+                        }
+
+                        if (controller !== undefined) {
+                            await this.#app.pip.agents.contacts.fenceTarget(tx, controller);
+                            await this.#app.pip.agents.supervision.human(tx, controller);
+                            item.supervisor!.status = "reclaimed";
+                            item.supervisor!.epoch++;
+                            const state = await tx.doc(PipWorkDoc, controller);
+
+                            delete state.humanPending;
+                            delete state.contactPending;
+                            state.reason =
+                                "The owning Chat was closed. Work Item archived; restore history explicitly without resuming work.";
+                        }
+                    }
+                }
+
                 await this.#app.pip.agents.contacts.fenceTarget(tx, id);
                 const subagents = await tx.doc(SubagentsDoc, id);
 
@@ -1191,6 +1327,8 @@ export class WorkItems {
         }
 
         await this.#organization(tx);
+
+        return children;
     }
 
     /** Synchronize durable group organization in the same transaction as source metadata changes. */

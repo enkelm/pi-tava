@@ -3,6 +3,7 @@ import {
     cleanUp,
     newSession,
     openApp,
+    owner,
     root,
     say,
     scriptedModel,
@@ -47,6 +48,7 @@ type Where = {
     path: string;
     layers: number;
     sheet: string | null;
+    drawer: boolean;
     files: boolean;
     file: string | null;
 };
@@ -60,6 +62,7 @@ const where = () =>
             path: location.pathname,
             layers: history.state?.pocket?.layers ?? 0,
             sheet: store.state.sheet?.type ?? null,
+            drawer: store.state.drawer === true,
             files: document.querySelector(".files-tile:not(.leaving)") !== null,
             file: document.querySelector(".ft-view:not(.leaving) .ft-view-name")?.textContent ?? null,
         });
@@ -86,6 +89,10 @@ async function reach(expected: Partial<Where>, what: string): Promise<void> {
 const back = () => page.evaluate(`history.back()`);
 
 const tap = async (selector: string) => {
+    if (selector.startsWith(".home-list ")) {
+        await openSessions();
+    }
+
     await until(
         async () =>
             (await inPage<boolean>(
@@ -97,6 +104,35 @@ const tap = async (selector: string) => {
 };
 
 const row = (id: ConversationId) => `.home-list .session-row[data-id="${id}"] .session`;
+const creation = '.home-creation-sheet[data-sheet="home-creation"]';
+const setup = `${creation} [data-part="home"]`;
+
+/** Return to the full-width phone landing list through the same Back control as a person. */
+async function openSessions(): Promise<void> {
+    if (
+        !(await inPage<boolean>(
+            `return JSON.stringify(!!document.querySelector('.home-list > .sessions'))`,
+        ))
+    ) {
+        await page.click({ selector: '.topbar [aria-label="Back to sessions"]' });
+    }
+
+    await until(
+        () =>
+            inPage<boolean>(
+                `return JSON.stringify(!!document.querySelector('.home-list > .sessions .session-items'))`,
+            ),
+        "the phone landing session list, without opening a drawer",
+    );
+    await rested();
+}
+
+/** Wait for finite entrance/exit motion without waiting for busy indicators. */
+async function rested(): Promise<void> {
+    await page.evaluate(`await Promise.all(document.getAnimations()
+        .filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime))
+        .map(animation => animation.finished.catch(() => {})))`);
+}
 
 /** Open the Files tile from the menu's tiles, where the top bar keeps it while it is closed. */
 async function openFiles(): Promise<void> {
@@ -105,7 +141,7 @@ async function openFiles(): Promise<void> {
     await tap('.place[data-place="files"]');
 }
 
-/** The session list, freshly loaded at phone size with no panel open: each test starts from here. */
+/** Home, freshly loaded at phone size with no panel or drawer layer: each test starts here. */
 async function fresh(): Promise<void> {
     await page.setViewport(VIEWPORTS.mobile);
     await page.evaluate(`
@@ -119,11 +155,12 @@ async function fresh(): Promise<void> {
     await until(
         async () =>
             (await inPage<boolean>(
-                `return JSON.stringify(document.querySelector(${JSON.stringify(row(first))}) !== null)`,
+                `return JSON.stringify(!!document.querySelector(${JSON.stringify(row(first))}))`,
             )) === true,
-        "the session list",
+        "the phone landing list and session catalogue",
         20_000,
     );
+    await reach({ layers: 0, sheet: null, drawer: false }, "Home has no covering Back layers");
 }
 
 /** Go to a session from inside the app, as a peek tile or a subagent's link does. */
@@ -189,9 +226,9 @@ before(async () => {
     await until(
         async () =>
             (await inPage<boolean>(
-                `return JSON.stringify(document.querySelector(${JSON.stringify(row(first))}) !== null)`,
+                `return JSON.stringify(!!document.querySelector(${JSON.stringify(row(first))}))`,
             )) === true,
-        "the session list",
+        "the phone landing list and session catalogue",
         20_000,
     );
 });
@@ -275,6 +312,7 @@ test(
     real,
     async () => {
         await fresh();
+        await openSessions();
         const result = await inPage<{ quiet: number; listed: number; invalidated: number }>(`
         const { options } = await import("preact");
         const { store } = await import("/store.js");
@@ -639,6 +677,11 @@ test(
             );
 
         await record(["html", "body", ".home-list .session-items"]);
+        await page.click({ selector: '.home-list [aria-label="New session"]' });
+        await reach({ sheet: "home-creation", layers: 1, path: "/" }, "creation over the list");
+        await record([`${creation} > .sheet-body`]);
+        await back();
+        await reach({ sheet: null, drawer: false, layers: 0 }, "Back returns to the landing list");
         await goTo(long);
         await slid();
         await record([".pane > .scroller"]);
@@ -684,7 +727,7 @@ test(
     async (t) => {
         for (const [width, height] of [
             [390, 844],
-            [844, 390],
+            [740, 390],
             [320, 700],
         ] as const) {
             await t.test(`${width}x${height}`, async () => {
@@ -722,6 +765,12 @@ test(
 
                 try {
                     await measure([".home-list .search input", ".home-list .new-button"]);
+                    await page.click({ selector: '.home-list [aria-label="New session"]' });
+                    await reach({ sheet: "home-creation", path: "/" }, "creation above the list");
+                    await rested();
+                    await measure([`${creation} .sheet-head [aria-label="Close"]`]);
+                    await page.press("Escape");
+                    await reach({ sheet: null, layers: 0 }, "creation dismissed");
                     await tap(row(first));
                     await slid();
                     await measure([
@@ -747,7 +796,7 @@ test(
                     await back();
                     await reach({ sheet: null }, "model popup dismissed");
 
-                    if (width === 844) {
+                    if (width === 740) {
                         // There is room for an ordinary anchored popup in landscape: safe tokens should
                         // clamp its exterior, not consume its interior with another layer of padding.
                         await until(
@@ -885,13 +934,459 @@ test(
     },
 );
 
-test("a session opened from the list: back goes back to the list", real, async () => {
+test("a session opened from the landing list: Back returns to that list", real, async () => {
     await fresh();
-    await tap(row(first));
-    await reach({ path: `/s/${first}`, layers: 0 }, "the session");
+    await page.click({ selector: row(first) });
+    await reach({ path: `/s/${first}`, layers: 0, drawer: false }, "the session");
     await back();
-    await reach({ path: "/" }, "the list");
+    await reach({ path: "/", layers: 0, drawer: false }, "the landing list, not a drawer layer");
+    await openSessions();
+    assert.equal(
+        await inPage<boolean>(`
+            const list = document.querySelector('.home-list > .sessions');
+            const bounds = list.getBoundingClientRect();
+
+            return JSON.stringify(bounds.width >= innerWidth - 2
+                && !!list.querySelector('.session-row[data-id="${first}"]')
+                && !document.querySelector('.drawer, .drawer-overlay, ${creation}'));
+        `),
+        true,
+        "the catalogue is the full-width main screen without another navigation gesture",
+    );
 });
+
+// The rendered boundary owns landing geometry, native modal focus and return targets. Store tests
+// cannot prove these; this fixture is not a rendered red/green result until run with Chromium.
+test(
+    "phone New Session is a dismissible native bottom sheet over the landing list",
+    real,
+    async (t) => {
+        const before = app.sessions().length;
+
+        for (const [width, height, dismiss] of [
+            [320, 640, "Escape"],
+            [390, 844, "Close"],
+            [540, 900, "Back"],
+            [767, 600, "Escape"],
+        ] as const) {
+            await t.test(`${width}x${height}: ${dismiss}`, async () => {
+                await fresh();
+                await page.setViewport({
+                    ...(width >= 540 ? VIEWPORTS.tablet : VIEWPORTS.mobile),
+                    width,
+                    height,
+                });
+                const opener = '.home-list [aria-label="New session"]';
+
+                await page.evaluate(`document.querySelector('${opener}').focus()`);
+                await page.click({ selector: opener });
+                await reach(
+                    { path: "/", sheet: "home-creation", drawer: false, layers: 1 },
+                    "creation opens over the existing list without a route change",
+                );
+                await rested();
+                const modal = await inPage<{
+                    contained: boolean;
+                    bottom: boolean;
+                    focused: boolean;
+                    list: boolean;
+                    setups: number;
+                }>(`
+                const sheet = document.querySelector('${creation}');
+                const bounds = sheet.getBoundingClientRect();
+                const body = sheet.querySelector(':scope > .sheet-body');
+                const view = visualViewport;
+
+                return JSON.stringify({
+                    contained: bounds.width > 0 && bounds.height > 0
+                        && bounds.left >= 0 && bounds.right <= innerWidth + 1
+                        && bounds.top >= (view?.offsetTop ?? 0)
+                        && bounds.bottom <= (view?.offsetTop ?? 0) + (view?.height ?? innerHeight) + 1
+                        && body.scrollWidth <= body.clientWidth + 1,
+                    bottom: Math.abs(bounds.bottom - innerHeight) < 2,
+                    focused: sheet.getAttribute('role') === 'dialog'
+                        && sheet.getAttribute('aria-modal') === 'true'
+                        && sheet.contains(document.activeElement)
+                        && !document.activeElement.matches('input, textarea, select'),
+                    list: !!document.querySelector('.home-list > .sessions')
+                        && !document.querySelector('.drawer, .drawer-overlay'),
+                    setups: document.querySelectorAll('[data-part="home"]').length,
+                });
+            `);
+
+                assert.deepEqual(modal, {
+                    contained: true,
+                    bottom: true,
+                    focused: true,
+                    list: true,
+                    setups: 1,
+                });
+                await page.press("Tab");
+                assert.equal(
+                    await inPage<boolean>(
+                        `return JSON.stringify(document.querySelector('${creation}').contains(document.activeElement))`,
+                    ),
+                    true,
+                    "Tab stays in the active native sheet",
+                );
+
+                if (dismiss === "Close") {
+                    await page.click({ selector: `${creation} .sheet-head [aria-label="Close"]` });
+                } else if (dismiss === "Back") {
+                    await back();
+                } else {
+                    await page.press("Escape");
+                }
+
+                await reach(
+                    { path: "/", sheet: null, drawer: false, layers: 0 },
+                    "back to the list",
+                );
+                await until(
+                    () =>
+                        inPage<boolean>(
+                            `return JSON.stringify(document.activeElement === document.querySelector('${opener}'))`,
+                        ),
+                    "dismiss restores focus to New Session",
+                );
+                assert.equal(
+                    app.sessions().length,
+                    before,
+                    "opening and cancelling creates no session",
+                );
+            });
+        }
+    },
+);
+
+test(
+    "phone-opened setup keeps chat and nested drafts while switching between bottom sheet and tablet dialog",
+    real,
+    async () => {
+        const user = owner(app);
+        const identity = await app.pip.agents.createIdentity(user, {
+            name: "Mobile fixture agent",
+            requestId: "mobile-fixture-agent",
+        });
+        const projectName = "Mobile fixture project";
+
+        await app.projects.create(user, {
+            name: projectName,
+            cwd: work,
+            defaultAgentId: identity.agentId,
+            requestId: "mobile-fixture-project",
+        });
+
+        await fresh();
+        await page.click({ selector: row(first) });
+        await slid();
+        await tap(".composer textarea");
+        const originalDraft = await inPage<string>(
+            `return JSON.stringify(document.querySelector('.composer textarea').value)`,
+        );
+        const before = app.sessions().length;
+        const draftPath = join(work, "unfinished-mobile-setup");
+        const field = `${setup} .home-work-options input[aria-label="Working directory"]`;
+        const setupState = () =>
+            inPage(`
+        const home = document.querySelector('${setup}');
+
+        return JSON.stringify({
+            same: document.querySelector('${creation}') === window.mobileSetupSheet,
+            setups: document.querySelectorAll('[data-part="home"]').length,
+            project: home.querySelector('.home-project-choice[aria-pressed=true] .home-project-name')?.textContent.trim(),
+            agent: home.querySelector('select[aria-label="Named agent"]').value,
+            cwd: home.querySelector('input[aria-label="Working directory"]').value,
+            worktree: home.querySelector('.home-work-options .session-destination .check input').checked,
+            type: home.querySelector('.home-work-options select[aria-label="Thread type"]').value,
+        });
+    `);
+        const expected = {
+            same: true,
+            setups: 1,
+            project: projectName,
+            agent: identity.agentId,
+            cwd: draftPath,
+            worktree: true,
+            type: "researcher",
+        };
+
+        const returned = async () => {
+            await reach(
+                { path: `/s/${first}`, sheet: "home-creation", drawer: false },
+                "return to setup over the same chat",
+            );
+            await rested();
+            assert.deepEqual(
+                await setupState(),
+                expected,
+                "nested return preserves the exact selection and work draft",
+            );
+        };
+
+        const covered = async () => {
+            await rested();
+            assert.equal(
+                await inPage<boolean>(`
+            const home = document.querySelector('${creation}');
+            const dialogs = [...document.querySelectorAll('[aria-modal="true"]')]
+                .filter(element => element.checkVisibility() && !element.closest('[inert]'));
+
+            return JSON.stringify(home === window.mobileSetupSheet
+                && !!home.closest('[hidden]') && !!home.closest('[inert]')
+                && document.querySelectorAll('[data-part="home"]').length === 1
+                && dialogs.length === 1 && !home.contains(document.activeElement));
+        `),
+                true,
+                "the retained parent is hidden/inert, not a competing modal",
+            );
+            await page.press("Tab");
+            assert.equal(
+                await inPage<boolean>(`
+            const active = [...document.querySelectorAll('[aria-modal="true"]')]
+                .find(element => element.checkVisibility() && !element.closest('[inert]'));
+
+            return JSON.stringify(active.contains(document.activeElement));
+        `),
+                true,
+                "only the child sheet participates in Tab navigation",
+            );
+        };
+
+        try {
+            await page.type({ selector: ".composer textarea" }, "Unsent chat stays below setup");
+            await page.evaluate(`document.querySelector('.topbar [aria-label="Menu"]').focus()`);
+            await page.press("Alt+N");
+            await reach(
+                { path: `/s/${first}`, sheet: "home-creation", drawer: false },
+                "Alt+N opens over the chat",
+            );
+            await until(
+                () =>
+                    inPage<boolean>(`
+            return JSON.stringify([...document.querySelectorAll('${setup} .home-project-choice')]
+                .some(button => button.textContent.includes(${JSON.stringify(projectName)})));
+        `),
+                "the project catalogue reaches setup",
+            );
+            await page.evaluate(`
+            window.mobileSetupSheet = document.querySelector('${creation}');
+            [...document.querySelectorAll('${setup} .home-project-choice')]
+                .find(button => button.querySelector('.home-project-name').textContent.trim() === ${JSON.stringify(projectName)}).click();
+        `);
+            await page.click({ label: "Other ways to start" });
+            await page.click({ label: "New Work Item" });
+            await page.click({ selector: `${setup} .home-work-options .session-path .button` });
+            await until(
+                () =>
+                    inPage<boolean>(`return JSON.stringify(!!document.querySelector('${field}'))`),
+                "workspace override field",
+            );
+            await page.type({ selector: field }, draftPath);
+            await page.click({
+                selector: `${setup} .home-work-options .session-destination .check input`,
+            });
+            await page.evaluate(`
+            const type = document.querySelector('${setup} .home-work-options select[aria-label="Thread type"]');
+
+            type.value = 'researcher';
+            type.dispatchEvent(new Event('change', { bubbles: true }));
+        `);
+            assert.deepEqual(await setupState(), expected);
+
+            await page.evaluate(`
+            const agents = document.querySelector('${setup} select[aria-label="Named agent"]');
+
+            agents.value = '__create';
+            agents.dispatchEvent(new Event('change', { bubbles: true }));
+        `);
+            await reach(
+                { sheet: "named-agent", path: `/s/${first}` },
+                "Create named agent is a child sheet",
+            );
+            await covered();
+            await back();
+            await returned();
+
+            // Legacy settings launchers use this public entry point; no mobile-only test seam is added.
+            await page.evaluate(`(await import('/store.js')).openSheet({ type: 'settings' })`);
+            await reach({ sheet: "settings" }, "settings opened over setup");
+            await covered();
+            await page.press("Escape");
+            await returned();
+            await page.click({ label: "Import from Pi" });
+            await reach(
+                { sheet: "home-creation", path: `/s/${first}` },
+                "inline import keeps the native setup and underlying chat",
+            );
+            await page.click({
+                selector: `${setup} .home-import-options [id$="import-tab-history"]`,
+            });
+            await page.type(
+                { selector: `${setup} .home-import-options [id$="import-history-search"]` },
+                "Unfinished import search",
+            );
+            await page.evaluate(
+                `window.mobileImportSearch = document.querySelector('${setup} .home-import-options [id$="import-history-search"]')`,
+            );
+            assert.equal(
+                await inPage<boolean>(`
+                    const home = document.querySelector('${setup}');
+                    const primary = [...home.querySelectorAll('button')]
+                        .find(button => button.textContent.trim() === 'Chat with Mobile fixture agent');
+
+                    return JSON.stringify(primary.checkVisibility()
+                        && home.querySelector('.home-import-options').checkVisibility()
+                        && document.querySelector('${creation}') === window.mobileSetupSheet);
+                `),
+                true,
+                "native import is secondary to the still-visible named-agent Chat",
+            );
+            await back();
+            await returned();
+            await page.click({ label: "Import from Pi" });
+            assert.equal(
+                await inPage<boolean>(`
+                    const search = document.querySelector('${setup} .home-import-options [id$="import-history-search"]');
+
+                    return JSON.stringify(search === window.mobileImportSearch
+                        && search.value === 'Unfinished import search'
+                        && document.querySelector('${setup} .home-import-options [id$="import-tab-history"]').getAttribute('aria-selected') === 'true');
+                `),
+                true,
+                "Back and reopening the alternative retain the mounted native import draft",
+            );
+            await page.click({ label: "New Work Item" });
+            await returned();
+
+            for (const viewport of [
+                { ...VIEWPORTS.tablet, width: 767, height: 700 },
+                { ...VIEWPORTS.tablet, width: 768, height: 1024 },
+                VIEWPORTS.tablet,
+                { ...VIEWPORTS.tablet, width: 1180, height: 820 },
+                VIEWPORTS.desktop,
+                { ...VIEWPORTS.tablet, width: 540, height: 900 },
+                VIEWPORTS.mobile,
+            ]) {
+                await page.setViewport(viewport);
+                await returned();
+                const compact = viewport.width < 768;
+                const geometry = await inPage<{
+                    contained: boolean;
+                    bottom: boolean;
+                    centered: boolean;
+                    composed: boolean;
+                    coarse: boolean;
+                }>(`
+                const sheet = document.querySelector('${creation}');
+                const bounds = sheet.getBoundingClientRect();
+                const home = sheet.querySelector('[data-part="home"]');
+                const projects = home.querySelector('.home-project-list').getBoundingClientRect();
+                const actions = home.querySelector('.home-detail').getBoundingClientRect();
+                const stacked = ${compact} || home.getBoundingClientRect().width < 720;
+
+                return JSON.stringify({
+                    contained: sheet.getAttribute('role') === 'dialog'
+                        && sheet.getAttribute('aria-modal') === 'true'
+                        && bounds.width > 0 && bounds.height > 0
+                        && bounds.top >= 0 && bounds.left >= 0
+                        && bounds.right <= innerWidth + 1 && bounds.bottom <= innerHeight + 1,
+                    bottom: Math.abs(bounds.bottom - innerHeight) < 2,
+                    centered: Math.abs((bounds.left + bounds.right) / 2 - innerWidth / 2) < 2
+                        && Math.abs((bounds.top + bounds.bottom) / 2 - innerHeight / 2) < 2
+                        && bounds.width >= Math.min(innerWidth - 48, 720),
+                    composed: stacked
+                        ? actions.top >= projects.bottom + 16 && Math.abs(actions.left - projects.left) < 2
+                        : actions.left >= projects.right + 24 && Math.abs(actions.top - projects.top) < 2,
+                    coarse: matchMedia('(pointer: coarse)').matches,
+                });
+            `);
+
+                assert.equal(
+                    geometry.contained,
+                    true,
+                    `${viewport.width}px: the same native modal fits`,
+                );
+                assert.equal(
+                    geometry.bottom,
+                    compact,
+                    "only phone and split widths anchor to the bottom",
+                );
+                assert.equal(
+                    geometry.composed,
+                    true,
+                    "modal columns follow actual container space while preserving the same setup",
+                );
+                assert.equal(
+                    geometry.coarse,
+                    viewport.mobile,
+                    "tablet layouts keep coarse touch even when wide",
+                );
+
+                if (!compact) {
+                    assert.equal(
+                        geometry.centered,
+                        true,
+                        "768px and wider uses a centered wide dialog without losing setup state",
+                    );
+                }
+            }
+
+            await page.click({ selector: `${creation} .sheet-head [aria-label="Close"]` });
+            await reach(
+                { sheet: null, path: `/s/${first}`, layers: 0 },
+                "dismiss reveals the original chat",
+            );
+            assert.equal(
+                await inPage<string>(
+                    `return JSON.stringify(document.querySelector('.composer textarea').value)`,
+                ),
+                "Unsent chat stays below setup",
+            );
+            assert.equal(
+                app.sessions().length,
+                before,
+                "draft and nested-sheet operations create no conversation",
+            );
+        } finally {
+            await page.setViewport(VIEWPORTS.mobile);
+            await page.navigate(`${base}/s/${first}`);
+            await tap(".composer textarea");
+            await page.type({ selector: ".composer textarea" }, originalDraft);
+        }
+
+        await fresh();
+        await page.click({ selector: '.home-list [aria-label="Named agents (PiPs)"]' });
+        await reach({ sheet: "named-agents", layers: 1 }, "PiPs library over the landing list");
+        await page.press("Alt+N");
+        await reach(
+            { sheet: "home-creation", path: "/", layers: 2 },
+            "New Session from PiPs keeps the list route",
+        );
+        await page.evaluate(`(await import('/store.js')).openSheet({ type: 'settings' })`);
+        await reach({ sheet: "settings", layers: 3 }, "a creation child over the landing route");
+        assert.equal(
+            await inPage<number>(
+                `return JSON.stringify(document.querySelectorAll('[data-part="home"]').length)`,
+            ),
+            1,
+            "a child retains its parent setup without mounting an unused blank Home model",
+        );
+        await back();
+        await reach(
+            { sheet: "home-creation", path: "/", layers: 2 },
+            "Back restores setup above PiPs",
+        );
+        await back();
+        await reach(
+            { sheet: "named-agents", path: "/", layers: 1 },
+            "Back returns to PiPs, not a duplicate Home form",
+        );
+        await back();
+        await reach({ sheet: null, path: "/", layers: 0 }, "Back returns to the main list");
+        assert.equal(app.sessions().length, before);
+    },
+);
 
 test("back closes the open file, then the Files tile, then leaves the session", real, async () => {
     await fresh();
@@ -907,7 +1402,16 @@ test("back closes the open file, then the Files tile, then leaves the session", 
     await back();
     await reach({ files: false, layers: 0, path: `/s/${first}` }, "back to the conversation");
     await back();
-    await reach({ path: "/" }, "back to the list");
+    await reach(
+        { path: "/", drawer: false, layers: 0 },
+        "back to Home after the file and panel layers",
+    );
+    assert.equal(
+        await inPage<boolean>(
+            `return JSON.stringify(!!document.querySelector('.home-list > .sessions'))`,
+        ),
+        true,
+    );
 });
 
 test(
