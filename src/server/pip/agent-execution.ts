@@ -338,6 +338,11 @@ export class AgentExecution {
         }),
     ];
 
+    /** Scheduler continuations inherit their producer's async context, never its filesystem authority. */
+    taskScope<T>(run: () => T): T {
+        return this.#current.exit(run);
+    }
+
     /** Real Durable coding-tool wrappers; nested codemode calls and actual helpers cross the same seam. */
     readonly wraps = [
         wrapTool(createReadTool(), (tool) => ({

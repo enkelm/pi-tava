@@ -6,6 +6,7 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test, type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import type { JsonObject } from "@earendil-works/pi-ai";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { awaitWithContext, BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AgentSupervisionDoc } from "../src/server/pip/agent-supervision.ts";
@@ -137,11 +138,16 @@ async function namedHandoff(t: TestContext, isolated: boolean): Promise<void> {
     );
     writeFileSync(join(folder, "task.txt"), "current task\n");
     let step = 0;
+    let controllerStep = 0;
+    let workerStep = 0;
+    let worker!: ConversationId;
     const app = await openApp(
         scriptedModel((request) => {
             const system = JSON.stringify(
                 request.messages.filter((message) => message.role === "system"),
             );
+            const tool = (name: string, args: JsonObject) =>
+                fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
 
             if (system.includes("the owner's persistent private agent")) {
                 switch (step++) {
@@ -174,7 +180,7 @@ async function namedHandoff(t: TestContext, isolated: boolean): Promise<void> {
                                     folder,
                                     worktree: isolated,
                                     summary:
-                                        "Coordinate this newly created native Work Item; observation only.",
+                                        "Inspect this newly created native Work Item and write its bounded result in its own workspace.",
                                 }),
                             ],
                             { stopReason: "toolUse" },
@@ -213,7 +219,41 @@ async function namedHandoff(t: TestContext, isolated: boolean): Promise<void> {
                 }
             }
 
-            return fauxAssistantMessage("Native task acknowledged.");
+            if (system.includes("the private supervisor for Work Item")) {
+                if (controllerStep++ === 0) {
+                    const target = Object.entries(app.sessionCatalogue()).find(
+                        ([, meta]) => meta.title === "Native delegated task",
+                    );
+
+                    assert.ok(target);
+                    worker = Number(target[0]) as ConversationId;
+
+                    return tool("session_read", { session: Number(worker) });
+                }
+
+                if (controllerStep === 2) {
+                    return tool("session_send", {
+                        session: Number(worker),
+                        message:
+                            "Inspect and write the bounded native result in your own workspace.",
+                        report: false,
+                    });
+                }
+
+                return tool("work_supervise", {
+                    action: "wait",
+                    text: "Wait for the native Worker outcome.",
+                });
+            }
+
+            const steps = [
+                () => tool("bash", { command: "git status --short" }),
+                () => tool("read", { path: "task.txt" }),
+                () =>
+                    tool("write", { path: "worker-result.txt", content: "native worker result\n" }),
+            ];
+
+            return steps[workerStep++]?.() ?? fauxAssistantMessage("Native task acknowledged.");
         }),
         join(root, `native-handoff-${isolated}`, "data"),
     );
@@ -238,7 +278,7 @@ async function namedHandoff(t: TestContext, isolated: boolean): Promise<void> {
         thinkingLevel: "off",
     });
     const direction =
-        "SOURCE_PRIVATE_SENTINEL is unrelated private context; do not export it. Hand a new observation-only Work Item to a Worker; retain this private Chat and wait on the exact assignment. No publication.";
+        "SOURCE_PRIVATE_SENTINEL is unrelated private context; do not export it. Hand a new bounded inspection/result-file task to a Worker in its own workspace; retain this private Chat and wait on the exact assignment. No publication.";
 
     const original = await app.commands.submit(chat, owner(app), {
         text: direction,
@@ -294,7 +334,11 @@ async function namedHandoff(t: TestContext, isolated: boolean): Promise<void> {
         brief.includes(`/s/${chat}`),
         "the saved brief retains exact native source Chat provenance",
     );
-    assert.ok(brief.includes("Coordinate this newly created native Work Item; observation only."));
+    assert.ok(
+        brief.includes(
+            "Inspect this newly created native Work Item and write its bounded result in its own workspace.",
+        ),
+    );
     assert.equal(receipt.sourceChatId, Number(chat));
     assert.equal(app.sessionMeta(chat)?.threadType, "chat");
     assert.equal(
@@ -390,12 +434,45 @@ async function namedHandoff(t: TestContext, isolated: boolean): Promise<void> {
         messages[0]!.text.includes(`/s/${chat}`),
         "accepted provenance names its exact source chat",
     );
-    assert.equal(
-        (await app.transcripts.allEntries(source, true)).filter((entry) => entry.kind === "user")
-            .length,
-        0,
-        "handoff uses native controller assignment without also sending execution input",
+    assert.equal(worker, source, "the controller sends its exact native execution thread");
+    await until(
+        async () =>
+            !app.isBusy(source) &&
+            (await app.transcripts.allEntries(source, true)).filter(
+                (entry) => entry.kind === "toolResult",
+            ).length > 0,
+        "controller-delivered native Worker coding settles",
     );
+    const workerEntries = await app.transcripts.allEntries(source, true);
+    const workerResults = workerEntries.filter((entry) => entry.kind === "toolResult");
+    const shell = workerResults.find((entry) => entry.name === "bash");
+
+    assert.ok(shell, "the Worker's first real bash task must execute authorization");
+    assert.equal(workerResults.length, 3);
+    assert.doesNotMatch(shell.text, /The private invocation's filesystem destination changed/);
+    assert.deepEqual(
+        workerResults.filter((entry) => entry.isError && entry.name !== "bash"),
+        [],
+    );
+    assert.equal(
+        await readFile(join(app.cwdOf(source), "worker-result.txt"), "utf8"),
+        "native worker result\n",
+    );
+    assert.match(workerResults.find((entry) => entry.name === "read")!.text, /current task/);
+    assert.equal(workerEntries.filter((entry) => entry.kind === "user").length, 1);
+    await t.test("the Worker's first native confined shell inspects its checkout", (check) => {
+        if (
+            shell.isError &&
+            shell.text.includes("sandbox-exec: sandbox_apply: Operation not permitted")
+        ) {
+            check.skip("Host denies nested sandbox-exec; no unrestricted fallback permitted.");
+
+            return;
+        }
+
+        assert.equal(shell.isError, false, shell.text);
+        assert.match(shell.text, /task.txt/);
+    });
     assert.equal(
         app.parentOf(controller),
         undefined,
@@ -432,7 +509,7 @@ async function namedHandoff(t: TestContext, isolated: boolean): Promise<void> {
 }
 
 for (const isolated of [false, true]) {
-    test(`named handoff retains its Chat and returns one native controller assignment usable by continuation (${isolated ? "worktree" : "folder"})`, (t) =>
+    test(`named handoff retains its Chat and returns one native assignment for continuation and Worker coding (${isolated ? "worktree" : "folder"})`, (t) =>
         namedHandoff(t, isolated));
 }
 

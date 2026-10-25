@@ -45,6 +45,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Alerts } from "./alerts.ts";
 import { Diagnostics } from "./diagnostics.ts";
+import { scopeTaskRegistry } from "./task-scope.ts";
 import {
     committedDiagnostics,
     observeEnvironment,
@@ -671,7 +672,13 @@ export class PocketApp {
             storage,
             {
                 models: this.models,
-                registry: observeRegistry(registry, this.diagnostics.recorder),
+                registry: scopeTaskRegistry(
+                    observeRegistry(registry, this.diagnostics.recorder),
+                    (run) =>
+                        this.pip.agents.execution.taskScope(() =>
+                            this.pip.agents.contacts.taskScope(run),
+                        ),
+                ),
                 settings: this.#harnessSettings(),
                 now: this.now,
                 env: ({ conversationId, cwd }) =>

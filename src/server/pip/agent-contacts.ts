@@ -314,10 +314,15 @@ export class AgentContacts {
     }
 
     /** Passive send admission shared by unified handoff status and fresh exact contacts. */
-    async requireSendRecipient(api: ToolExecutionApi, session: number, ctx: Context): Promise<void> {
+    async requireSendRecipient(
+        api: ToolExecutionApi,
+        session: number,
+        ctx: Context,
+    ): Promise<void> {
         const target = idOf(session);
         const identity = this.#app.pip.agents.identity(this.#app.rootOf(api.conversationId));
-        const user = identity === undefined ? undefined : this.#app.config.userById(identity.ownerId);
+        const user =
+            identity === undefined ? undefined : this.#app.config.userById(identity.ownerId);
 
         if (identity === undefined || user?.role !== "owner") {
             throw new HttpError(403, "Use this persistent agent's current native invocation.");
@@ -331,7 +336,10 @@ export class AgentContacts {
         const resolved = await recipient.agent(ctx);
 
         if (!resolved.extensions.some((extension) => extension.name === "pocket-core")) {
-            throw new HttpError(409, "This recipient disabled pocket-core's native activation/effect fences. Restore its native lifecycle extension before private input; no tools or access were added.");
+            throw new HttpError(
+                409,
+                "This recipient disabled pocket-core's native activation/effect fences. Restore its native lifecycle extension before private input; no tools or access were added.",
+            );
         }
 
         this.#lifecycle(target, true, identity.agentId);
@@ -401,17 +409,24 @@ export class AgentContacts {
         }
 
         const entries = await this.#app.transcripts.allEntries(target, true);
-
-        if (args.action === "send") {
-            await this.requireSendRecipient(api, Number(target), ctx);
-            await this.#app.pip.agents.execution.release(sourceChat);
-        }
-
+        const destination = this.#destination(target);
         const observedEpoch = await api.memo(
             `private-contact-target-${api.callId}`,
             this.#doc.epochs[String(target)] ?? 1,
             ctx,
         );
+
+        if (args.action === "send") {
+            await api.commit(
+                (tx) => this.#app.pip.agents.supervision.requireInvocation(tx, api),
+                ctx,
+            );
+            // Return only this Chat's loan before testing native recipient write admission.
+            // The awaited return joins private effects; neither that wait nor a former tool's
+            // ambient pin can grant this send authority. Recheck the real source/recipient after it.
+            await this.#app.pip.agents.execution.release(sourceChat, { exactChat: true });
+            await this.requireSendRecipient(api, Number(target), ctx);
+        }
 
         return this.#lane(Number(target), () =>
             this.#app.workItems.withControl(root, async () => {
@@ -434,6 +449,13 @@ export class AgentContacts {
                         throw new HttpError(
                             409,
                             "The exact target was stopped or reclaimed while this command waited. It was not admitted.",
+                        );
+                    }
+
+                    if (this.#destination(target) !== destination) {
+                        throw new HttpError(
+                            409,
+                            "The exact target's filesystem destination changed while this command waited. It was not admitted.",
                         );
                     }
 
@@ -938,6 +960,11 @@ export class AgentContacts {
         } finally {
             this.#running.delete(effect);
         }
+    }
+
+    /** New native tasks rederive contact pins from their own durable ancestry, not a producer's ambient effect. */
+    taskScope<T>(run: () => T): T {
+        return this.#effects.exit(run);
     }
 
     assertEffects(id: ConversationId): void {

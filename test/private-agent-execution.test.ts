@@ -100,6 +100,11 @@ test("Stop and direct correction return one native writer for execution or contr
                                 true,
                                 "intervention also joined its relevant native helper",
                             );
+                            assert.equal(
+                                app.workItems.itemFor(source)!.intervention?.chatId,
+                                Number(chat),
+                                "the correcting Chat still owns the native writer before delegation",
+                            );
                             corrected = true;
                         }
 
@@ -146,6 +151,11 @@ test("Stop and direct correction return one native writer for execution or contr
                     }
 
                     if (last.text.includes("Continue after correction")) {
+                        assert.equal(
+                            app.workItems.itemFor(source)!.intervention,
+                            undefined,
+                            "the borrowed writer is returned before native continuation activates",
+                        );
                         continuationStarted = true;
                         resumed = true;
 
