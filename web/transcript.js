@@ -1656,13 +1656,7 @@ function History({ firstId, results, keepPlace, conversationId }) {
         return html`<div class="divider">
             <button
                 class="link"
-                onClick=${() =>
-                    attempt(async () => {
-                        const earlier = await actions.history(firstId);
-
-                        keepPlace();
-                        store.set({ history: earlier });
-                    })}
+                onClick=${() => attempt(() => actions.history(conversationId, firstId, keepPlace))}
             >
                 Show earlier messages
             </button>
@@ -1671,7 +1665,11 @@ function History({ firstId, results, keepPlace, conversationId }) {
 
     return html`<div class="history">
         <${Items}
-            items=${itemsOf(history.filter(isRow), null, { prefix: "h", talk: collab() })}
+            items=${itemsOf(
+                history.filter((entry) => isRow(entry) && !store.state.view.entries.has(entry.id)),
+                null,
+                { prefix: "h", talk: collab() },
+            )}
             results=${results}
             slots=${NO_SLOTS}
             approvals=${NO_APPROVALS}
@@ -2831,7 +2829,10 @@ export function Transcript() {
 
     const results = new Map();
 
-    for (const entry of [...(history ?? []), ...entries]) {
+    for (const entry of [
+        ...(history ?? []).filter((each) => !view.entries.has(each.id)),
+        ...entries,
+    ]) {
         if (entry.kind === "toolResult") {
             results.set(entry.callId, entry);
         }

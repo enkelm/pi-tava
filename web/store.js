@@ -68,6 +68,9 @@ const emptyView = () => ({
     pipQuestion: null,
 });
 
+/** In-flight retained history belongs to one uninterrupted user, route and active-context boundary. */
+let historyEpoch = 0;
+
 export const store = {
     state: {
         me: undefined, // undefined: unknown, null: signed out
@@ -152,6 +155,18 @@ export const store = {
         const change = typeof patch === "function" ? patch(before) : patch;
 
         this.state = { ...this.state, ...change };
+
+        if (
+            before.me !== this.state.me ||
+            before.conversationId !== this.state.conversationId ||
+            before.privateId !== this.state.privateId ||
+            before.view.conversation?.id !== this.state.view.conversation?.id ||
+            before.view.order[0] !== this.state.view.order[0] ||
+            before.missing !== this.state.missing
+        ) {
+            historyEpoch++;
+            this.state.history = null;
+        }
 
         if (
             this.state.conversationId !== null &&
@@ -1885,7 +1900,34 @@ export const actions = {
             file,
         ),
     fullEntry: (entryId) => api(`c/${current()}/entry/${entryId}`),
-    history: (before) => api(`c/${current()}/history?before=${before}`),
+    history: async (conversationId, before, keepPlace) => {
+        const state = store.state;
+
+        // A retained outgoing click must not read the newly selected room.
+        if (
+            state.me == null ||
+            state.privateId !== null ||
+            state.missing ||
+            state.conversationId !== conversationId ||
+            state.view.conversation?.id !== conversationId ||
+            state.view.order[0] !== before
+        ) {
+            return;
+        }
+
+        const epoch = historyEpoch;
+        const earlier = await api(`c/${conversationId}/history?before=${before}`);
+
+        // Also reject leave-and-return, user/access changes, reset and compaction during the read.
+        if (epoch !== historyEpoch) {
+            return;
+        }
+
+        keepPlace();
+        store.set({
+            history: earlier.filter((entry) => !store.state.view.entries.has(entry.id)),
+        });
+    },
 };
 
 /** Entries that show as transcript rows. Tool results show inside their call's card instead. */

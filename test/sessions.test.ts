@@ -17,12 +17,22 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import {
+    fauxAssistantMessage,
+    fauxProvider,
+    fauxText,
+    fauxToolCall,
+} from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId, EntryRecord } from "@earendil-works/pi-durable";
 import { SessionsDoc } from "../src/server/docs.ts";
 
 /** What each model request saw: the model, the system prompt's sections, and the newest message. */
-const requests: { model: string; sections: Record<string, string>; text: string }[] = [];
+const requests: {
+    provider: string;
+    model: string;
+    sections: Record<string, string>;
+    text: string;
+}[] = [];
 
 const route: FauxResponseStep = (request, _options, _state, model) => {
     const { role, text } = lastText(request as never);
@@ -46,12 +56,15 @@ const route: FauxResponseStep = (request, _options, _state, model) => {
         }
     }
 
-    requests.push({ model: model.id, sections, text });
+    requests.push({ provider: model.provider, model: model.id, sections, text });
 
-    if (role === "user" && text.endsWith("list the files")) {
-        return fauxAssistantMessage([fauxToolCall("bash", { command: "ls" })], {
-            stopReason: "toolUse",
-        });
+    if (role === "user" && text.endsWith("read the fork fixture")) {
+        return fauxAssistantMessage(
+            [fauxToolCall("read", { path: join(app.defaultCwd, "fork-fixture.txt") })],
+            {
+                stopReason: "toolUse",
+            },
+        );
     }
 
     return fauxAssistantMessage([fauxText(`echo: ${text}`)]);
@@ -61,6 +74,14 @@ let app: App;
 
 before(async () => {
     app = await openApp(scriptedModel(route));
+    const current = fauxProvider({
+        provider: "resend-choice",
+        api: "resend-choice-faux",
+        models: [{ id: "faux-1", reasoning: true, input: ["text"] }],
+    });
+
+    current.setResponses(Array.from({ length: 100 }, () => route));
+    app.models.registerNativeProvider(current.provider);
 });
 
 after(async () => {
@@ -287,13 +308,119 @@ test("sending a message again to another model forks before it and switches the 
     );
 });
 
+// Authoring gate: a historical resend must run on the current exact provider/model/thinking pair,
+// not the fork cutoff's configuration. Existing tests own restart dedup, fork access and placement.
+// Native commands, model requests and stored messages here cover edits, attribution and nonimage conversion.
+test("resends and edits use the current selected provider/model/thinking unless explicitly overridden", async () => {
+    const id = await newSession(app);
+
+    await say(app, id, "before the original");
+    await app.commands.configure(id, owner(app), {
+        model: { provider: "faux", modelId: "faux-vision" },
+    });
+    const path = join(app.workspace.uploadDirectory(id), "synthetic.png");
+    const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+        "base64",
+    );
+
+    writeFileSync(path, png);
+    await say(app, id, "original question", [
+        { path, name: "synthetic.png", mime: "image/png", size: png.length },
+    ]);
+    const original = (await ofKind(id, "pi.user")).at(-1)!;
+
+    assert.match(JSON.stringify(original.model), /"type":"image"/);
+    const chosen = { provider: "resend-choice", modelId: "faux-1" };
+
+    await app.commands.configure(id, owner(app), { model: chosen, thinkingLevel: "high" });
+    const sender = guest("Resender");
+
+    for (const text of [undefined, "  original question  ", "edited question"]) {
+        const before = requests.length;
+        const { id: fork } = await app.commands.resend(id, sender, {
+            entryId: Number(original.id),
+            ...(text === undefined ? {} : { text }),
+        });
+        const agent = await app.agentState(fork);
+
+        assert.deepEqual(agent?.model, chosen);
+        assert.equal(agent?.thinkingLevel, "high");
+        await until(
+            async () => (await ofKind(fork, "pi.assistant")).length === 2 && !app.isBusy(fork),
+            "the resend to finish",
+        );
+        const sent = (await ofKind(fork, "pi.user")).at(-1)!;
+        const body = JSON.stringify(sent.model);
+
+        assert.match(body, /\[from: Resender\]/);
+        assert.ok(body.includes(path), "the original attachment list stays intact");
+        assert.doesNotMatch(
+            body,
+            /"type":"image"/,
+            "the current text-only model receives no image parts",
+        );
+        assert.ok(
+            requests
+                .slice(before)
+                .some(
+                    (each) =>
+                        each.provider === chosen.provider &&
+                        each.model === chosen.modelId &&
+                        each.text.includes(text?.trim() ?? "original question"),
+                ),
+            "the selected provider actually answered",
+        );
+        assert.equal(
+            (await ofKind(fork, "pi.assistant")).length,
+            2,
+            "one inherited and one new answer, without duplicate resend delivery",
+        );
+    }
+
+    const override = { provider: "faux", modelId: "faux-2" };
+    const { id: fork } = await app.commands.resend(id, sender, {
+        entryId: Number(original.id),
+        model: override,
+    });
+    const agent = await app.agentState(fork);
+
+    assert.deepEqual(agent?.model, override);
+    assert.equal(
+        agent?.thinkingLevel,
+        "off",
+        "current high thinking is clamped for the explicit non-reasoning model",
+    );
+    await until(
+        async () => (await ofKind(fork, "pi.assistant")).length === 2 && !app.isBusy(fork),
+        "the overridden resend to finish",
+    );
+    assert.deepEqual(
+        (await app.agentState(id))?.model,
+        chosen,
+        "resending leaves the source selection unchanged",
+    );
+    assert.equal((await app.agentState(id))?.thinkingLevel, "high");
+    assert.equal((await ofKind(id, "pi.user")).length, 2, "the original history is untouched");
+});
+
 test("forks need a steering person with access to every session, and an existing message", async () => {
     const id = await newSession(app);
 
     await say(app, id, "something to fork");
     const [answer] = await ofKind(id, "pi.assistant");
+    const [message] = await ofKind(id, "pi.user");
     const viewer = app.config.addUser("Vera", "viewer").user;
 
+    await assert.rejects(app.commands.resend(id, viewer, { entryId: Number(message!.id) }), {
+        status: 403,
+    });
+    await assert.rejects(
+        app.commands.resend(id, guest("Resend scoped", [String(id)]), {
+            entryId: Number(message!.id),
+        }),
+        { status: 403 },
+    );
     await assert.rejects(app.commands.fork(id, viewer, { entryId: Number(answer!.id) }), {
         status: 403,
     });
@@ -301,7 +428,8 @@ test("forks need a steering person with access to every session, and an existing
         app.commands.fork(id, guest("Scoped", [String(id)]), { entryId: Number(answer!.id) }),
         { status: 403 },
     );
-    await say(app, id, "list the files");
+    writeFileSync(join(app.defaultCwd, "fork-fixture.txt"), "native fork fixture\n");
+    await say(app, id, "read the fork fixture");
     const calling = (await ofKind(id, "pi.assistant")).find((entry) =>
         JSON.stringify(entry.model).includes('"toolUse"'),
     )!;

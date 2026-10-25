@@ -9,9 +9,17 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 const WRITTEN = /(?:[\p{L}\p{N}]|(?<=\p{N})\.(?=\p{N}))+/gu;
 
 /**
- * A text's lowercased words, split at anything not a letter or digit and where letters and digits meet ("GPT-5.1" is
- * gpt 5 1), and how each joins the word before it: "" inside one written word ("4o", "k3"), "." between the digits of
- * a version ("2.5"), and " " for anything else (a space, a dash).
+ * Han, Kana and Hangul can touch Latin model names without spaces ("用gpt-6.1-sol吧"). Other scripts that need
+ * dictionary segmentation stay whole; this only recognizes the boundary between these scripts and model tokens.
+ */
+const UNSPACED = "\\p{scx=Han}\\p{scx=Hiragana}\\p{scx=Katakana}\\p{scx=Hangul}";
+const PART = new RegExp(`[${UNSPACED}]+|[\\p{L}--[${UNSPACED}]]+|\\p{N}+|\\.`, "gv");
+const UNSPACED_PART = new RegExp(`^[${UNSPACED}]+$`, "u");
+
+/**
+ * A text's lowercased words, split at nonletters/nondigits, letter/digit boundaries ("GPT-5.1" is gpt 5 1), and edges
+ * of scripts written without spaces ("用gpt" is 用 gpt). Joins are "" inside a written word ("4o", "k3"), "." between
+ * version digits ("2.5"), and " " otherwise (a space, dash or script edge).
  */
 function split(text: string): { words: string[]; joins: string[] } {
     const words: string[] = [];
@@ -19,13 +27,17 @@ function split(text: string): { words: string[]; joins: string[] } {
 
     for (const written of text.toLowerCase().match(WRITTEN) ?? []) {
         let join = " ";
+        let unspacedBefore = false;
 
-        for (const part of written.match(/\p{L}+|\p{N}+|\./gu) ?? []) {
+        for (const part of written.match(PART) ?? []) {
             if (part === ".") {
                 join = ".";
             } else {
+                const unspaced = UNSPACED_PART.test(part);
+
                 words.push(part);
-                joins.push(join);
+                joins.push(unspaced || unspacedBefore ? " " : join);
+                unspacedBefore = unspaced;
                 join = "";
             }
         }
