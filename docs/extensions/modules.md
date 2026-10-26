@@ -11,6 +11,16 @@ A module is one file that Pi Pocket loads. This page tells what the file must be
 
 Files that start with `_`, or end in `.test.ts`, are not modules. Use them for helpers and tests. Pi Pocket does not load a helper again when it changes, even when it loads the module that imports it again: a change to a helper needs a restart. Keep the code that you change often in the module itself.
 
+## Tool-result compatibility
+
+For the pending Pi Durable 1.4 cutover, a drop-in with tools, tool wrappers or `afterTool` hooks must
+export `const durableToolApi = 2` and use the `output` result ABI. This is separate from
+`pocketApi = 1` for the app's host/web/browser API. The loader refuses missing/unsupported tool-ABI
+declarations before installation; a rejected edit keeps the previous version. No result conversion
+is performed. Web-only modules and `beforeTool`-only guards do not need this declaration. See
+[the migration notes](reference/api-versions.md#pi-durable-14-cutover-unreleased) before updating a
+module. Do not hot-reload the new tool ABI into an old runtime.
+
 ## Turning it on and off
 
 - A drop-in shows in Menu → Extensions when its file is there. It is off.

@@ -23,10 +23,11 @@ const clock = `/** A clock tool, for the gallery's tests. */
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 
+export const durableToolApi = 2;
 export default () => defineExtension({
     name: "test-clock",
     tools: [defineTool({ name: "test_clock", description: "Now", parameters: Type.Object({}),
-        execute: async () => ({ content: [{ type: "text", text: "now" }] }) })],
+        execute: async () => ({ output: [{ type: "text", text: "now" }] }) })],
 });
 `;
 

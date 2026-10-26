@@ -244,6 +244,7 @@ test("existing uncheckpointed data upgrades on a write and forks retain current/
             history: "latest",
             fork: "current",
             initial: () => ({ text: "", rev: 0 }),
+            checkpointWhen: () => false,
         });
         const { id, at } = await f.session.commit(async (tx) => {
             const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });

@@ -446,7 +446,7 @@ async function fetchRemote(
             await importHostFetch(backend.at(cwd), stage, remote, context);
 
             return {
-                content: [
+                output: [
                     {
                         type: "text" as const,
                         text: `Fetched ${remote} on the Coop host and imported refs/remotes/${remote}/* into SSH · ${location!.host}. HEAD and working files were not integrated. Tags and pruning are not supported.`,
@@ -525,7 +525,7 @@ async function fetchRemote(
         );
 
         return {
-            content: [
+            output: [
                 {
                     type: "text" as const,
                     text: `Fetched ${remote} into refs/remotes/${remote}/*. HEAD and working files were not integrated; use offline bash for an explicit local rebase. Tags and pruning are not supported.`,

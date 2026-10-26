@@ -16,11 +16,13 @@ let controller!: ConversationId;
 let step = 0;
 let parentInvocations = 0;
 let captured: Record<string, unknown> | undefined;
+
 const stop = (extra: Record<string, unknown> = {}) => {
     writeFileSync(marker, JSON.stringify({ ...captured, ...extra, parentInvocations }));
     // Deliberately no close: native delivery has not acknowledged, or the provider is in flight.
     process.exit(0);
 };
+
 const model = scriptedModel(async (request) => {
     const system = JSON.stringify(request.messages.filter((message) => message.role === "system"));
     const last = lastText(request);

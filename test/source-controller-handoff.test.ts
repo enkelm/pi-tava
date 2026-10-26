@@ -145,7 +145,8 @@ test("public controller handoff transfers the exact active execution, retains it
                         action: "start",
                         session: Number(source),
                         targetType: "reviewer",
-                        summary: "Inspect this settled fixture; no landing or publication authorized.",
+                        summary:
+                            "Inspect this settled fixture; no landing or publication authorized.",
                         instructions,
                     }),
                 () =>
@@ -213,7 +214,8 @@ test("public controller handoff transfers the exact active execution, retains it
         return (
             !app.isBusy(target) &&
             Object.values(doc!.handoffs).some(
-                (record) => record.targetThreadId === Number(target) && record.delivery === "delivered",
+                (record) =>
+                    record.targetThreadId === Number(target) && record.delivery === "delivered",
             )
         );
     }, "the actual successor courier settles");
@@ -284,14 +286,19 @@ test("public controller handoff transfers the exact active execution, retains it
     assert.equal(app.workItems.isReadOnly(target), false);
     assert.equal(app.workItems.isReadOnly(controller), false);
     assert.equal(app.workItems.itemFor(other), undefined);
-    assert.equal(Object.keys((await app.harness.snapshot(HandoffsDoc, context))!.handoffs).length, 1);
+    assert.equal(
+        Object.keys((await app.harness.snapshot(HandoffsDoc, context))!.handoffs).length,
+        1,
+    );
 });
 
 test("public controller status and start refuse a real busy helper without stopping it or retiring its source", async (t) => {
     let source!: ConversationId;
     let helperEntered = false;
     let step = 0;
+
     let release = () => {};
+
     const held = new Promise<void>((resolve) => {
         release = resolve;
     });
@@ -309,7 +316,8 @@ test("public controller status and start refuse a real busy helper without stopp
                         action: "start",
                         session: Number(source),
                         targetType: "researcher",
-                        summary: "Do not retire execution while its literal helper is still running.",
+                        summary:
+                            "Do not retire execution while its literal helper is still running.",
                     }),
                 () =>
                     tool("work_supervise", {
@@ -339,11 +347,14 @@ test("public controller status and start refuse a real busy helper without stopp
             return tool("subagent", {
                 action: "spawn",
                 name: "writer",
-                message: "BLOCKED_CONTROLLER_HELPER: wait until the fixture releases this actual run.",
+                message:
+                    "BLOCKED_CONTROLLER_HELPER: wait until the fixture releases this actual run.",
             });
         }
 
-        return text("Main execution yielded; its helper remains responsible for its assigned work.");
+        return text(
+            "Main execution yielded; its helper remains responsible for its assigned work.",
+        );
     });
     const app = await openApp(model, join(root, "public-controller-busy-helper"));
 
@@ -381,14 +392,22 @@ test("public controller status and start refuse a real busy helper without stopp
     assert.ok(status.options.length > 0);
     assert.ok(status.options.every((option) => !option.enabled));
     assert.ok(
-        status.options.every((option) => /delegated helpers|background tasks/.test(option.reason ?? "")),
+        status.options.every((option) =>
+            /delegated helpers|background tasks/.test(option.reason ?? ""),
+        ),
     );
     assert.equal(results[1]!.isError, true, results[1]!.text);
     assert.match(results[1]!.text, /delegated helpers|background tasks/);
     assert.equal(app.isBusy(child), true, "handoff refusal must not abort the helper");
     assert.equal(app.workItems.itemFor(source)!.activeThreadId, Number(source));
-    assert.equal((await app.harness.snapshot(WorkflowDoc, source, context))?.readOnly ?? false, false);
-    assert.equal(Object.keys((await app.harness.snapshot(HandoffsDoc, context))!.handoffs).length, 0);
+    assert.equal(
+        (await app.harness.snapshot(WorkflowDoc, source, context))?.readOnly ?? false,
+        false,
+    );
+    assert.equal(
+        Object.keys((await app.harness.snapshot(HandoffsDoc, context))!.handoffs).length,
+        0,
+    );
 });
 
 test("public controller status leaves its final action available for the exact transfer", async (t) => {
@@ -396,33 +415,36 @@ test("public controller status leaves its final action available for the exact t
     let controller!: ConversationId;
     let step = 0;
     let actionsAfterStatus: number | undefined;
-    const app = await openApp(scriptedModel((request) => {
-        const scoped = JSON.stringify(
-            request.messages.filter((message) => message.role === "system"),
-        ).includes("the private supervisor for Work Item");
+    const app = await openApp(
+        scriptedModel((request) => {
+            const scoped = JSON.stringify(
+                request.messages.filter((message) => message.role === "system"),
+            ).includes("the private supervisor for Work Item");
 
-        if (!scoped) {
-            return text("Execution fixture settled.");
-        }
+            if (!scoped) {
+                return text("Execution fixture settled.");
+            }
 
-        switch (step++) {
-            case 0:
-                return tool("work_context", { session: Number(source), action: "thread" });
-            case 1:
-                return tool("handoff", { action: "status", session: Number(source) });
-            case 2:
-                actionsAfterStatus = app.workItems.itemFor(source)?.supervisor?.actions;
+            switch (step++) {
+                case 0:
+                    return tool("work_context", { session: Number(source), action: "thread" });
+                case 1:
+                    return tool("handoff", { action: "status", session: Number(source) });
+                case 2:
+                    actionsAfterStatus = app.workItems.itemFor(source)?.supervisor?.actions;
 
-                return tool("handoff", {
-                    action: "start",
-                    session: Number(source),
-                    targetType: "researcher",
-                    summary: "Continue this exact investigation; no publication.",
-                });
-            default:
-                return text("The one authorized transfer action is complete.");
-        }
-    }), join(root, "public-controller-passive-status"));
+                    return tool("handoff", {
+                        action: "start",
+                        session: Number(source),
+                        targetType: "researcher",
+                        summary: "Continue this exact investigation; no publication.",
+                    });
+                default:
+                    return text("The one authorized transfer action is complete.");
+            }
+        }),
+        join(root, "public-controller-passive-status"),
+    );
 
     t.after(() => app.close());
     source = await newSession(app, app.defaultCwd, "worker");
@@ -432,18 +454,25 @@ test("public controller status leaves its final action available for the exact t
     });
 
     controller = opened.orchestration!.conversationId as ConversationId;
-    await until(async () => (await app.transcripts.allEntries(controller, true)).filter(
-        (entry) => entry.kind === "toolResult" && entry.name === "handoff",
-    ).length === 2, "passive status and the final available transfer action settle");
-    const results = (await app.transcripts.allEntries(controller, true)).filter(
-        (entry) => entry.kind === "toolResult" && entry.name === "handoff",
+    await until(
+        async () =>
+            (await app.transcripts.allEntries(controller, true)).filter(
+                (entry) => entry.kind === "toolResult" && entry.name === "handoff",
+            ).length === 2,
+        "passive status and the final available transfer action settle",
     );
+    const results = (await app.transcripts.allEntries(controller, true))
+        .filter((entry) => entry.kind === "toolResult")
+        .filter((entry) => entry.name === "handoff");
 
     assert.equal(actionsAfterStatus, 0, "availability must not consume a native action");
     assert.equal(results[0]!.isError, false, results[0]!.text);
-    assert.ok(JSON.parse(results[0]!.text).options.some(
-        (option: Status["options"][number]) => option.targetType === "researcher" && option.enabled,
-    ));
+    assert.ok(
+        JSON.parse(results[0]!.text).options.some(
+            (option: Status["options"][number]) =>
+                option.targetType === "researcher" && option.enabled,
+        ),
+    );
     assert.equal(results[1]!.isError, false, results[1]!.text);
     assert.equal(JSON.parse(results[1]!.text).id, app.workItems.itemFor(source)!.activeThreadId);
     assert.equal(app.workItems.isReadOnly(source), true);

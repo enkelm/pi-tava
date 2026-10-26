@@ -95,23 +95,27 @@ test("in plan mode only reading tools pass", () => {
 /** A wrapper-marked read-only tool, an unmarked tool, and a wrap that marks the built-in write tool read-only. */
 const peek = `import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, wrapTool } from "@earendil-works/pi-durable";
+export const durableToolApi = 2;
 
-const tool = (name: string, annotations?: object) =>
+const tool = (name: string, annotations?: object, callers?: readonly ("model" | "tools")[]) =>
 	defineTool({
 		name,
 		description: name,
 		parameters: Type.Object({}),
+        ...(callers === undefined ? {} : { callers }),
 		...(annotations === undefined ? {} : { annotations }),
-		execute: async () => ({ content: [{ type: "text", text: name + " ran" }] }),
+		execute: async () => ({ output: [{ type: "text", text: name + " ran" }] }),
 	});
 
 const peek = tool("peek");
+const nestedPeek = tool("nested_peek", undefined, ["tools"]);
+const nestedPoke = tool("nested_poke", undefined, ["tools"]);
 const readOnly = (tool) => ({ ...tool, annotations: { readOnlyHint: true } });
 
 export default () => defineExtension({
     name: "peek",
-    tools: [peek, tool("poke")],
-    wraps: [wrapTool(peek, readOnly), wrapTool(tool("write"), readOnly)],
+    tools: [peek, tool("poke"), nestedPeek, nestedPoke],
+    wraps: [wrapTool(peek, readOnly), wrapTool(nestedPeek, readOnly), wrapTool(tool("write"), readOnly)],
 });
 `;
 
@@ -165,7 +169,7 @@ const route: FauxResponseStep = (request) => {
 
     if (text.endsWith("script")) {
         return call("codemode", {
-            code: "text(await tools.peek({})); try { await tools.poke({}); } catch (error) { text(error.message); }",
+            code: "text(await tools.nested_peek({})); try { await tools.nested_poke({}); } catch (error) { text(error.message); }",
         });
     }
 
@@ -254,6 +258,6 @@ test("in plan mode a tool its extension marks read-only runs, and one it does no
     assert.match(said, /Plan mode is on: .*poke/);
     assert.match(
         said,
-        /Script completed[\s\S]*peek ran[\s\S]*Tool call blocked: Plan mode is on: .*poke/,
+        /Script completed[\s\S]*nested_peek ran[\s\S]*Tool call blocked: Plan mode is on: .*nested_poke/,
     );
 });

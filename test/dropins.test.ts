@@ -31,6 +31,7 @@ const shout = (suffix: string) => `/** Shout offers a tool that shouts${suffix}.
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, hook, ToolTask } from "@earendil-works/pi-durable";
 
+export const durableToolApi = 2;
 export default () =>
 	defineExtension({
 		name: "shout",
@@ -39,7 +40,7 @@ export default () =>
 				name: "shout",
 				description: "Shout",
 				parameters: Type.Object({ text: Type.String() }),
-				execute: async (args) => ({ content: [{ type: "text", text: args.text.toUpperCase() + "${suffix}" }] }),
+				execute: async (args) => ({ output: [{ type: "text", text: args.text.toUpperCase() + "${suffix}" }] }),
 			}),
 		],
 		hooks: [hook(ToolTask, { beforeTool: (call) => (call.name === "bash" ? { block: "no shell while shouting" } : undefined) })],
@@ -232,13 +233,14 @@ const named = (extension: string, tool?: string) => `/** ${extension}, for the n
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 
+export const durableToolApi = 2;
 export default () =>
 	defineExtension({
 		name: "${extension}",
 		tools: [${
             tool === undefined
                 ? ""
-                : `defineTool({ name: "${tool}", description: "x", parameters: Type.Object({}), execute: async () => ({ content: [{ type: "text", text: "${extension}" }] }) })`
+                : `defineTool({ name: "${tool}", description: "x", parameters: Type.Object({}), execute: async () => ({ output: [{ type: "text", text: "${extension}" }] }) })`
         }],
 	});
 `;
@@ -327,7 +329,8 @@ test("the built-in tool names a drop-in may not take are every tool the built-in
             .flatMap((extension) => (extension.tools ?? []).map((tool) => tool.name));
 
         assert.ok(installed.length >= 9, "the built-ins are on");
-        assert.deepEqual([...installed].sort(), [...BUILT_IN_TOOLS].sort());
+        // The core and private selection share handoff's descriptor; reserved names form a set.
+        assert.deepEqual([...new Set(installed)].sort(), [...BUILT_IN_TOOLS].sort());
     } finally {
         for (const each of disabled) {
             await app.setExtensionEnabled(owner(app), each.file, false);

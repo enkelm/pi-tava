@@ -463,7 +463,12 @@ async function working(tx: Tx, task: number | undefined): Promise<boolean> {
     const status = (await tx.task(task as never))?.state.status;
 
     // One completing has taken its last reports already.
-    return status === "pending" || status === "running" || status === "waiting";
+    return (
+        status === "pending" ||
+        status === "running" ||
+        status === "sleeping" ||
+        status === "waiting"
+    );
 }
 
 /** Wait until the submission `id` has left `conversationId`'s queue: placed, withdrawn, or aborted. */
@@ -932,7 +937,7 @@ export default function createSubagents(host: PocketHost) {
         execute: async (args, api, context) => {
             const { action, name, message, followUp } = args;
             const reply = (text: string, conversationId?: ConversationId) => ({
-                content: [{ type: "text" as const, text }],
+                output: [{ type: "text" as const, text }],
                 ...(conversationId === undefined || name === undefined
                     ? {}
                     : {

@@ -7,7 +7,6 @@
  * `alerts.ts`, provider sign-ins in `providers.ts`, and each conversation's shared live view in `room.ts`.
  */
 import { randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -374,6 +373,13 @@ export class PocketApp {
     #unsubscribeApprovals: (() => void) | undefined;
     #unsubscribeBrowsers: (() => void) | undefined;
     #lockFile: string;
+    #releaseLock: (() => void) | undefined;
+    /** Owned here until Harness.open succeeds, including a failed partial open. */
+    #openingStorage: Storage | undefined;
+    /** If the library rejects before returning storage, it may also have failed to close its partial connection. */
+    #storageOpening = false;
+    /** A failed Harness.open may own native work even if it did not return a handle. */
+    #harnessOpening = false;
     #closing: Promise<void> | undefined;
     readonly #log: (line: string) => void;
     readonly #configureModels: ((models: ModelRuntime) => void) | undefined;
@@ -508,13 +514,29 @@ export class PocketApp {
     static async open(options: OpenOptions): Promise<PocketApp> {
         const app = new PocketApp(options);
 
-        await app.#open();
+        try {
+            await app.#open();
+        } catch (error) {
+            // A refused lock grants no right to clean up that holder's files or services.
+            if (app.#releaseLock !== undefined) {
+                try {
+                    await app.close();
+                } catch (cleanup) {
+                    throw new AggregateError(
+                        [error, cleanup],
+                        "Pi Coop startup and cleanup failed.",
+                    );
+                }
+            }
+
+            throw error;
+        }
 
         return app;
     }
 
     async #open(): Promise<void> {
-        takeLock(this.#lockFile);
+        this.#releaseLock = takeLock(this.#lockFile);
 
         try {
             this.pushStore = new PushStore(this.dataDir);
@@ -666,8 +688,12 @@ export class PocketApp {
         this.workItems.installWeb();
         await this.loader.loadAll();
 
+        this.#storageOpening = true;
         const storage = await openNodeSqliteStorage(join(this.dataDir, "pocket.sqlite"));
 
+        this.#openingStorage = storage;
+        this.#storageOpening = false;
+        this.#harnessOpening = true;
         this.harness = await Harness.open(
             storage,
             {
@@ -700,6 +726,8 @@ export class PocketApp {
             context,
         );
 
+        this.#harnessOpening = false;
+        this.#openingStorage = undefined;
         await this.pip.open();
         const conversations = await this.#recover(storage);
 
@@ -1112,6 +1140,8 @@ export class PocketApp {
         const stream = () => this.streamSettings();
 
         return {
+            // Park five consecutive cutoffs without progress; never spin an unbounded crash-recovery loop.
+            restartLimit: 5,
             // Every installed extension, in install order, but PiP's: its tools and prompt are for its conversation only,
             // which selects it by name (`pip.ts`).
             get extensions() {
@@ -3481,77 +3511,120 @@ export class PocketApp {
 
     close(): Promise<void> {
         this.#closing ??= (async () => {
-            const headsClosed = this.#destinationHeads.close();
-            const sshClosed = this.sshSessions.close();
-            const agentsClosed = this.pip.agents.close();
+            const failures: unknown[] = [];
+
+            const attempt = async (name: string, close: () => unknown): Promise<boolean> => {
+                try {
+                    await close();
+
+                    return true;
+                } catch (error) {
+                    failures.push(new Error(`Pi Coop could not close ${name}.`, { cause: error }));
+
+                    return false;
+                }
+            };
+
+            const headsClosed = attempt("destination reads", () => this.#destinationHeads.close());
+            const sshClosed = attempt("SSH sessions", () => this.sshSessions.close());
+            const agentsClosed = attempt("private agents", () => this.pip.agents.close());
+            const privateClosed = attempt("private sessions", () => this.privateSessions.close());
+            const alertsClosed = attempt("alerts", () => this.alerts.close());
+            const pipClosed = attempt("PiP", () => this.pip.close());
 
             clearTimeout(this.#sessionsTimer);
-            const privateClosed = this.privateSessions.close();
-            const alertsClosed = this.alerts.close();
+            await attempt("themes", () => this.themes.close());
+            await attempt("spend", () => this.spend.close());
+            await attempt("commit subscription", () => this.#unsubscribeCommits?.());
+            await attempt("approval subscription", () => this.#unsubscribeApprovals?.());
+            await attempt("browser subscription", () => this.#unsubscribeBrowsers?.());
 
-            this.themes.close();
-            const pipClosed = this.pip.close();
+            // Attach rejection handling immediately, including when a partial startup never made a loader.
+            const cleaned = attempt("extensions", () => this.loader?.close());
 
-            this.spend.close();
-            this.#unsubscribeCommits?.();
-            this.#unsubscribeApprovals?.();
-            this.#unsubscribeBrowsers?.();
-
-            // Modules' cleanups may wait (closing a connection), but not for long: the rest must close too.
-            const cleaned = this.loader?.close();
-
-            // After the loader: its last changes could set it again.
             clearTimeout(this.#websTimer);
 
             for (const client of this.#clients) {
-                client.send("closing", {});
+                await attempt("client", () => client.send("closing", {}));
             }
 
             for (const pending of this.#rooms.values()) {
-                void pending.then(
-                    (room) => room.close(),
-                    () => {},
-                );
+                await attempt("room", async () => (await pending).close());
             }
 
-            this.providers.close();
-            this.languages.close();
-            await headsClosed;
-            await agentsClosed;
-            await pipClosed;
+            await attempt("provider sign-ins", () => this.providers.close());
+            await attempt("language services", () => this.languages.close());
+            await Promise.all([headsClosed, agentsClosed, pipClosed, sshClosed]);
+            await attempt("private terminals", () => this.privateTerminals.close());
+            await Promise.all([privateClosed, alertsClosed]);
 
-            await sshClosed;
-            await this.privateTerminals.close();
-            await privateClosed;
-            await alertsClosed;
-
-            // A timer that holds the process: with nothing else to do, Node would end it here, before the rest closed.
+            // Preserve the bounded extension cleanup policy, without letting a rejection skip storage close.
             let limit: NodeJS.Timeout | undefined;
 
-            await Promise.race([
-                cleaned,
-                new Promise<void>((resolve) => {
-                    limit = setTimeout(resolve, CLEANUP_LIMIT_MS);
-                }),
-            ]);
-            clearTimeout(limit);
-
             try {
-                // Close writes no outcome: running work resumes when the next process opens the storage.
-                try {
-                    await this.diagnostics.close();
-                    await this.harness?.close(context);
-                } finally {
-                    await this.providerExtensions?.close();
+                await Promise.race([
+                    cleaned,
+                    new Promise<void>((resolve) => {
+                        limit = setTimeout(resolve, CLEANUP_LIMIT_MS);
+                    }),
+                ]);
+            } finally {
+                clearTimeout(limit);
+            }
+
+            await attempt("diagnostics", () => this.diagnostics.close());
+            // Database closure and native-work settlement are separate facts. SQLite can reject before
+            // any Harness exists: retain its lock, but still dispose providers and other unused resources.
+            let nativeWorkStopped = this.harness === undefined && !this.#harnessOpening;
+            const storageClosed = await attempt("storage", async () => {
+                if (this.harness !== undefined) {
+                    await this.harness.close(context);
+                    nativeWorkStopped = true;
+
+                    return;
                 }
+
+                if (this.#harnessOpening) {
+                    throw new Error(
+                        "Harness startup did not return a handle; native work and storage closure are unconfirmed.",
+                    );
+                }
+
+                if (this.#openingStorage !== undefined) {
+                    await this.#openingStorage.close(context);
+
+                    return;
+                }
+
+                if (this.#storageOpening) {
+                    throw new Error(
+                        "SQLite startup did not confirm closure; retaining the data-directory lock.",
+                    );
+                }
+            });
+
+            if (storageClosed) {
+                this.#openingStorage = undefined;
+            }
+
+            if (nativeWorkStopped) {
+                // Never unregister providers or tear down execution resources beneath native work.
+                await attempt("provider extensions", () => this.providerExtensions?.close());
 
                 for (const env of this.#envs.values()) {
-                    await env.cleanup(context);
+                    await attempt("execution environment", () => env.cleanup(context));
                 }
-            } finally {
-                // After the harness: a browser call cut off by the stop resumes as interrupted, not as failed.
-                await this.browsers.closeAll({ final: true }).catch(() => {});
-                rmSync(this.#lockFile, { force: true });
+
+                // A cut-off browser call is interrupted before its browser resources disappear.
+                await attempt("browsers", () => this.browsers.closeAll({ final: true }));
+            }
+
+            if (storageClosed) {
+                await attempt("data-directory lock", () => this.#releaseLock?.());
+            }
+
+            if (failures.length > 0) {
+                throw new AggregateError(failures, "Pi Coop shutdown was incomplete.");
             }
         })();
 

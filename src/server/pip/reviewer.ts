@@ -12,6 +12,7 @@ import {
     type EntryId,
     type HookApi,
     type ToolExecutionApi,
+    type ToolTaskInput,
     type Tx,
 } from "@earendil-works/pi-durable";
 import type { PocketApp } from "../app.ts";
@@ -277,7 +278,7 @@ export class PipReviewer {
                     : { pipDiffComment: result };
 
             return {
-                content: [{ type: "text", text: JSON.stringify(result) }],
+                output: [{ type: "text", text: JSON.stringify(result) }],
                 details,
             };
         },
@@ -538,7 +539,43 @@ export class PipReviewer {
             throw new HttpError(403, "A review comment requires its current main tool invocation");
         }
 
-        let current = task;
+        const invoked = task.input as ToolTaskInput;
+        let modelTask = task;
+        let nested = false;
+
+        if (invoked.kind === "nested") {
+            const parent = await tx.task(invoked.parent);
+
+            if (
+                task.owner !== invoked.parent ||
+                invoked.call.id !== api.callId ||
+                invoked.call.name !== "review_comment" ||
+                parent?.kind !== ToolTask.definition.name ||
+                parent.conversationId !== id ||
+                parent.state.status !== "running" ||
+                parent.abortRequested ||
+                !live.nestedTools?.some(
+                    (slot) =>
+                        slot.taskId === task.id &&
+                        slot.callId === invoked.call.id &&
+                        slot.parentTaskId === parent.id &&
+                        slot.parentCallId === invoked.parentCallId,
+                )
+            ) {
+                throw new HttpError(403, "The finding has no native nested Reviewer provenance");
+            }
+
+            const parentInput = parent.input as ToolTaskInput;
+
+            if (parentInput.kind !== "model" || parentInput.callId !== invoked.parentCallId) {
+                throw new HttpError(403, "Only the Reviewer's main codemode may call this tool");
+            }
+
+            modelTask = parent;
+            nested = true;
+        }
+
+        let current = modelTask;
         const seen = new Set<number>();
 
         while (current.id !== live.run.taskId) {
@@ -565,13 +602,14 @@ export class PipReviewer {
             current = owner;
         }
 
-        const input = task.input as { assistant?: unknown; callId?: unknown };
+        const input = modelTask.input as ToolTaskInput;
 
         if (
             current.kind !== GenerationTask.definition.name ||
-            typeof input.assistant !== "number" ||
-            typeof input.callId !== "string" ||
-            !live.tools?.some((slot) => slot.taskId === task.id && slot.callId === input.callId)
+            input.kind !== "model" ||
+            !live.tools?.some(
+                (slot) => slot.taskId === modelTask.id && slot.callId === input.callId,
+            )
         ) {
             throw new HttpError(403, "The finding has no current Reviewer generation provenance");
         }
@@ -584,15 +622,11 @@ export class PipReviewer {
                       (part) => part.type === "toolCall" && part.id === input.callId,
                   )
                 : undefined;
-        const direct =
-            api.callId === input.callId &&
+        const actualCall =
             call?.type === "toolCall" &&
-            call.name === "review_comment";
-        const nested =
-            call?.type === "toolCall" &&
-            call.name === "codemode" &&
-            api.callId.startsWith(`${input.callId}/`) &&
-            /^[1-9]\d*$/.test(api.callId.slice(input.callId.length + 1));
+            (nested
+                ? call.name === "codemode"
+                : api.callId === input.callId && call.name === "review_comment");
 
         if (
             entry?.kind !== "pi.assistant" ||
@@ -601,7 +635,7 @@ export class PipReviewer {
             message?.role !== "assistant" ||
             typeof message.provider !== "string" ||
             typeof message.model !== "string" ||
-            (!direct && !nested)
+            !actualCall
         ) {
             throw new HttpError(403, "The finding must originate in the actual Reviewer tool call");
         }

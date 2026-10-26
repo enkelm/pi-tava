@@ -16,6 +16,7 @@ import {
     type AssistantMessageEvent,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { PiProviderHost, type PiProviderHostOptions } from "../src/server/pi-provider-host.ts";
 
 const fixtureRoot = fileURLToPath(new URL("./fixtures/pi-provider-host", import.meta.url));
@@ -263,6 +264,8 @@ test(
             const seenCallbacks: string[] = [];
             const stream = models.stream(model, context("expensive slow"), {
                 sessionId: "conversation-a",
+                // Durable 1.4 supplies this native no-op span even without a telemetry adapter.
+                telemetry: BACKGROUND_CONTEXT.telemetry,
                 maxRetries: 0,
                 headers: { "x-caller": "kept" },
                 transformHeaders: (headers) => ({ ...headers, "x-parent-transform": "kept" }),
@@ -289,11 +292,18 @@ test(
             })();
             const cheap = models.completeSimple(model, context("cheap"), {
                 sessionId: "conversation-b",
+                telemetry: BACKGROUND_CONTEXT.telemetry,
                 maxRetries: 0,
             });
             const [a, b] = await Promise.all([stream.result(), cheap]);
 
             await collect;
+            assert.equal(a.stopReason, "stop", a.errorMessage ?? "the main lane must complete");
+            assert.equal(
+                b.stopReason,
+                "stop",
+                b.errorMessage ?? "the auxiliary lane must complete",
+            );
             assert.equal(a.usage.cost.total, 9);
             assert.equal(b.usage.cost.total, 2);
             assert.deepEqual(a.content, [
@@ -348,6 +358,7 @@ test(
             const unsupportedFetch = await host
                 .getProviders()[0]!
                 .streamSimple(model, normalizeContext(context("not-sent")), {
+                    telemetry: BACKGROUND_CONTEXT.telemetry,
                     fetch: globalThis.fetch,
                 })
                 .result();

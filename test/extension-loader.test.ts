@@ -209,6 +209,7 @@ test("a new version with other tools tells the tabs, though its browser module s
     let told = 0;
     const { dropIn, loader } = setUp(undefined, () => told++);
     const module = (tool: string) => `/** Tooled. */
+export const durableToolApi = 2;
 export default (_host, web) => {
 	web.client("tooled.js", { access: "view" });
 	return { name: "t-tooled", tools: [{ name: "${tool}", description: "", parameters: { type: "object" }, execute: () => {} }] };

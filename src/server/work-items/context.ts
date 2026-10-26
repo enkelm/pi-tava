@@ -555,7 +555,7 @@ export class WorkContext {
             await this.#target(visibleActive);
             const live = await app.harness.snapshot(LiveDoc, target, this.#context);
 
-            execution = executionProjection(target, live?.run, live?.generation?.attempt);
+            execution = executionProjection(target, live?.run?.taskId, live?.generation?.attempt);
             await this.#target(visibleActive);
         }
 
@@ -722,7 +722,7 @@ export class WorkContext {
 
         if (changed.includes("outcomes")) {
             for (const outcome of outcomes) {
-                if (outcome.runtime?.answerEntryId !== undefined) {
+                if (outcome.runtime?.status === "done" && "answerEntryId" in outcome.runtime) {
                     outcome.claim = await this.#outcomeClaim(
                         outcome.threadId as ConversationId,
                         outcome.runtime.answerEntryId,
@@ -761,8 +761,9 @@ export class WorkContext {
             await this.#target(visibleActive);
 
             if (
-                revisionOf(executionProjection(target, live?.run, live?.generation?.attempt)) !==
-                revisionOf(execution)
+                revisionOf(
+                    executionProjection(target, live?.run?.taskId, live?.generation?.attempt),
+                ) !== revisionOf(execution)
             ) {
                 throw new HttpError(409, "The work changed during this snapshot; read it again");
             }

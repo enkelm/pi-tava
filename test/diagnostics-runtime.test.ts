@@ -98,7 +98,7 @@ async function invoke(
 
         return tx.createTask(
             ToolTask,
-            { assistant: assistant.id, callId },
+            { kind: "model", assistant: assistant.id, callId },
             { ownership: { kind: "conversation" } },
         );
     }, context);
@@ -174,7 +174,7 @@ test("real tool tasks distinguish pre-env, execution, validation and hook failur
                             }
 
                             return {
-                                content: [{ type: "text", text: SECRET }],
+                                output: [{ type: "text", text: SECRET }],
                                 isError: mode === "domain" || mode === "diagnostic",
                                 diagnostics:
                                     mode === "diagnostic"
@@ -376,7 +376,7 @@ test("resolved extension wraps and nested codemode caught failures retain hooks 
     const probe = tool(async () => {
         calls++;
 
-        return { isError: true, content: [{ type: "text", text: SECRET }] };
+        return { isError: true, output: [{ type: "text", text: SECRET }] };
     });
 
     registry.install({
@@ -407,10 +407,19 @@ test("resolved extension wraps and nested codemode caught failures retain hooks 
     });
     // This extension's factory does not use the host. Its actual sandbox, dispatcher and hooks run unchanged.
     registry.install(createCodemode({} as PocketHost));
-    const suite = await open(registry, log.recorder);
+    const storage = new MemoryStorage();
+    const suite = await open(registry, log.recorder, undefined, storage);
     const id = await invoke(suite, "codemode", {
         code: `try { await tools.probe({ value: '${SECRET}' }); } catch { text('caught'); }`,
     });
+
+    await suite.harness.waitForTask(id, context);
+    const tasks = await storage.scanTasks(
+        { conversationId: suite.conversation.id, kind: ToolTask.definition.name },
+        10,
+        undefined,
+        context,
+    );
     const { entries } = await finish(suite, id);
     const executions = log
         .ended()
@@ -428,24 +437,47 @@ test("resolved extension wraps and nested codemode caught failures retain hooks 
     assert.equal(nested.outcome, "domain");
     assert.equal(nested.operation, "probe");
     assert.equal(nested.cause, "result_error");
-    assert.equal(nested.parentId, outer.id);
-    assert.equal(nested.taskId, id);
+    assert.equal(outer.taskId, id);
+    assert.ok(nested.taskId !== undefined);
+    assert.notEqual(nested.taskId, id, "a native nested call owns its own tool task");
+    const child = tasks.items.find((task) => task.id === nested.taskId);
+
+    assert.ok(child);
+    assert.ok(
+        child.input !== null && typeof child.input === "object" && !Array.isArray(child.input),
+    );
+    assert.equal(child.input.kind, "nested");
+    assert.equal(child.input.parent, id, "Durable records the actual outer task as parent");
+    const phases = log
+        .ended()
+        .filter((record) => record.stage === "phase" && record.taskId === child.id);
+
+    assert.equal(phases.length, 1);
+    const phase = phases[0]!;
+
+    assert.equal(phase.nested, true);
+    assert.equal(nested.parentId, phase.id);
     assert.notEqual(nested.operationId, outer.operationId);
-    assert.equal(
-        log
-            .ended()
-            .filter((record) => record.nested && record.stage !== "execute")
-            .every((record) => record.parentId === outer.id),
-        true,
+    const hooks = log
+        .ended()
+        .filter(
+            (record) =>
+                record.taskId === child.id &&
+                (record.stage === "beforeTool" || record.stage === "afterTool"),
+        );
+
+    assert.deepEqual(
+        hooks.map((record) => record.stage),
+        ["beforeTool", "afterTool"],
     );
-    assert.equal(
-        log.ended().some((record) => record.nested && record.stage === "beforeTool"),
-        true,
-    );
-    assert.equal(
-        log.ended().some((record) => record.nested && record.stage === "afterTool"),
-        true,
-    );
+
+    for (const record of hooks) {
+        assert.equal(record.nested, true);
+        assert.equal(record.parentId, phase.id);
+        assert.equal(record.conversationId, suite.conversation.id);
+        assert.equal(record.operation, "probe");
+    }
+
     const result = entries.find((entry) => entry.kind === "pi.tool-result")!.model![0]!;
 
     assert.equal(result.role, "toolResult");
@@ -462,7 +494,7 @@ test("immutable old snapshots stay old, live replacements wake blocked tasks, an
         tool(async () => {
             effects++;
 
-            return { content: [] };
+            return { output: [] };
         }),
     );
     const task = defineTask({
@@ -576,7 +608,7 @@ test("safe recovery keeps the logical tool operation but creates a new observati
                             });
                         }
 
-                        return { content: [] };
+                        return { output: [] };
                     }, replay),
                 ],
             });
@@ -762,7 +794,7 @@ test("environment failures keep the enclosing tool and task context when the too
 
                 assert.equal(result.ok === false && result.error, failure);
 
-                return { content: [] };
+                return { output: [] };
             }),
         ],
     });

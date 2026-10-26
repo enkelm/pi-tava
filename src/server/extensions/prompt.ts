@@ -106,7 +106,7 @@ export default function createPrompt(host: PocketHost) {
             );
 
             return {
-                content: [
+                output: [
                     {
                         type: "text",
                         text: `Host-global skill resource (not a remote file):\n${text}`,

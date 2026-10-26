@@ -5,7 +5,7 @@ In this tutorial, you write a drop-in extension. It gives Pi a tool that counts 
 ## Before you start
 
 - You must be the owner of the Pi Pocket. Only the owner can turn on an extension.
-- You must have Pi Pocket 0.14.0 or later.
+- This tool example targets the pending Pi Durable 1.4 cutover. Do not load it into a 1.1 host; see [migration notes](reference/api-versions.md#pi-durable-14-cutover-unreleased).
 - You must be able to write a file on the machine where Pi Pocket runs. You can also ask Pi to write the file for you.
 
 Drop-ins go in the drop-in folder: `~/.pi-pocket/extensions/`, or `extensions/` in `PI_POCKET_DIR`. Menu → **Extensions** shows the path at the bottom of the sheet.
@@ -22,6 +22,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Web } from "./_pocket.d.ts";
 
+export const durableToolApi = 2;
+
 /** The number of words in a text: the parts between spaces, tabs, and line breaks. */
 function countWords(text: string): number {
     return text.split(/\s+/).filter((word) => word !== "").length;
@@ -33,7 +35,7 @@ const wordCount = defineTool({
     parameters: Type.Object({ text: Type.String({ description: "The text to count" }) }),
     replay: "safe",
     execute: async (args) => ({
-        content: [{ type: "text" as const, text: `${countWords(args.text)} words` }],
+        output: [{ type: "text" as const, text: `${countWords(args.text)} words` }],
     }),
 });
 
@@ -59,6 +61,7 @@ What each part does:
 
 - **The comment at the top** is the description of the module. The Extensions sheet shows its first sentence.
 - **`import type`** gives your editor the types of `web`. Node removes this line when the module runs, so the module works without it. See [Types for your editor](reference/types.md).
+- **`durableToolApi = 2`** declares the output-based Durable tool ABI, independently of the app's web/browser API version.
 - **`defineTool`** makes the tool. Pi gets its `name`, `description`, and `parameters` with each request, so keep them short.
 - **`replay: "safe"`** tells Pi Pocket that the tool can run again after a restart. A count does not change anything, so this is safe. See [Tools](tools.md).
 - **`execute`** gets the arguments that Pi gives, and returns the text that Pi reads.

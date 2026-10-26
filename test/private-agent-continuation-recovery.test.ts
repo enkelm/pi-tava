@@ -97,6 +97,7 @@ for (const phase of ["pre-submit", "accepted", "running"] as const) {
                     ?.status === "blocked",
             "recovered continuation asks its owner or holds the uncertain request",
         );
+
         const inspect = async () => {
             const state = (await app.harness.snapshot(AgentSupervisionDoc, context))!;
             const task = state.parentTasks![saved.key]!;
@@ -120,6 +121,7 @@ for (const phase of ["pre-submit", "accepted", "running"] as const) {
                 1,
                 "one derived admission, not a new owner input on recovery",
             );
+
             if (saved.nativeSubmission !== undefined) {
                 assert.equal(Number(native.id), saved.nativeSubmission);
             }

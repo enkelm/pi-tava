@@ -92,6 +92,13 @@ export interface Module {
      * @since 0.14.0
      */
     pocketApi?: number;
+    /**
+     * Declares Pi Durable's output-based tool-result ABI. Required for drop-ins with tools,
+     * tool wrappers or afterTool hooks; separate from pocketApi's web/browser contract.
+     * @since 0.15.0
+     * @experimental
+     */
+    durableToolApi?: 2;
 }
 
 /** Independent-session operations shared by workflow extensions.

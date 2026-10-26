@@ -67,13 +67,15 @@ A module is one `.ts` file with a default export: a function. Pi Pocket calls it
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 
+export const durableToolApi = 2;
+
 const clock = defineTool({
     name: "clock",
     description: "The date and time now, in a time zone such as Europe/Berlin.",
     parameters: Type.Object({ zone: Type.Optional(Type.String()) }),
     replay: "safe",
     execute: async (args) => ({
-        content: [
+        output: [
             {
                 type: "text" as const,
                 text: new Date().toLocaleString("en-US", { timeZone: args.zone }),

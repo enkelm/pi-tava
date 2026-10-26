@@ -420,4 +420,6 @@ export type ExtensionModule = {
     ) => Extension | readonly Extension[] | void | Promise<Extension | readonly Extension[] | void>;
     /** The version of the extension API the module needs, when it says: a newer one than the app's is not loaded. */
     pocketApi?: unknown;
+    /** Explicit opt-in to Pi Durable's output-based tool ABI, independent of the web/browser API. */
+    durableToolApi?: unknown;
 };

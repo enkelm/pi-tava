@@ -5,6 +5,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Web } from "../../types/pocket.d.ts";
 
+export const durableToolApi = 2;
+
 /** The number of words in a text: the parts between spaces, tabs, and line breaks. */
 function countWords(text: string): number {
     return text.split(/\s+/).filter((word) => word !== "").length;
@@ -16,7 +18,7 @@ const wordCount = defineTool({
     parameters: Type.Object({ text: Type.String({ description: "The text to count" }) }),
     replay: "safe",
     execute: async (args) => ({
-        content: [{ type: "text" as const, text: `${countWords(args.text)} words` }],
+        output: [{ type: "text" as const, text: `${countWords(args.text)} words` }],
     }),
 });
 

@@ -1529,7 +1529,7 @@ export class AgentExecution {
 
                 if (args.action === "status") {
                     return {
-                        content: [
+                        output: [
                             { type: "text", text: JSON.stringify(await this.#status(pin.root)) },
                         ],
                     };
@@ -1548,7 +1548,7 @@ export class AgentExecution {
                             await this.release(pin.root);
 
                             return {
-                                content: [
+                                output: [
                                     {
                                         type: "text" as const,
                                         text: JSON.stringify(await this.#status(pin.root)),
@@ -1577,7 +1577,7 @@ export class AgentExecution {
 
                 return this.#app.pip.agents.supervision.perform(pin.root, () =>
                     this.#track(pin.agentId, async () => ({
-                        content: [
+                        output: [
                             {
                                 type: "text" as const,
                                 text: JSON.stringify(

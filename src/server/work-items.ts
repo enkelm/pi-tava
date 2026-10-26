@@ -178,20 +178,29 @@ export class WorkItems {
             throw new HttpError(403, "This private Chat has no native workflow handoff authority.");
         }
 
-        if (request.session !== undefined || (request.action === "start" && (
-            request.folder !== undefined || request.repo !== undefined || request.title !== undefined ||
-            request.model !== undefined || request.report !== undefined || request.instructions !== undefined
-        ))) {
-            throw new HttpError(400, "Execution handoffs transfer this main thread, not a selected recipient or creation folder.");
+        if (
+            request.session !== undefined ||
+            (request.action === "start" &&
+                (request.folder !== undefined ||
+                    request.repo !== undefined ||
+                    request.title !== undefined ||
+                    request.model !== undefined ||
+                    request.report !== undefined ||
+                    request.instructions !== undefined))
+        ) {
+            throw new HttpError(
+                400,
+                "Execution handoffs transfer this main thread, not a selected recipient or creation folder.",
+            );
         }
 
         if (request.action === "start" && request.targetType === undefined) {
             throw new HttpError(400, "Choose the requested destination type.");
         }
 
-        return this.withControl(api.conversationId, () => this.#handoffs.invoke(
-            request as Parameters<Handoffs["invoke"]>[0], api, ctx,
-        ));
+        return this.withControl(api.conversationId, () =>
+            this.#handoffs.invoke(request as Parameters<Handoffs["invoke"]>[0], api, ctx),
+        );
     }
 
     controllerStart(...args: Parameters<Handoffs["controllerStart"]>) {
@@ -586,11 +595,21 @@ export class WorkItems {
                     action: Type.Literal("start"),
                     // A registered ID is at most 64 module + ':' + 64 local characters.
                     targetType: Type.Optional(Type.String({ minLength: 1, maxLength: 129 })),
-                    session: Type.Optional(Type.Integer({ description: "Exact native recipient for a named Chat; exact expected active execution source for a controller." })),
+                    session: Type.Optional(
+                        Type.Integer({
+                            description:
+                                "Exact native recipient for a named Chat; exact expected active execution source for a controller.",
+                        }),
+                    ),
                     folder: Type.Optional(Type.String()),
                     repo: Type.Optional(Type.String()),
                     title: Type.Optional(Type.String()),
-                    model: Type.Optional(Type.String({ description: "Only a model explicitly chosen by the owner; never a fallback." })),
+                    model: Type.Optional(
+                        Type.String({
+                            description:
+                                "Only a model explicitly chosen by the owner; never a fallback.",
+                        }),
+                    ),
                     report: Type.Optional(Type.Boolean()),
                     relationship: Type.Optional(
                         Type.Union([Type.Literal("same-work"), Type.Literal("new-work")]),
@@ -602,7 +621,12 @@ export class WorkItems {
                         }),
                     ),
                     summary: Type.String({ minLength: 1 }),
-                    instructions: Type.Optional(Type.String({ description: "Additional controller/named handoff notes, not new owner input." })),
+                    instructions: Type.Optional(
+                        Type.String({
+                            description:
+                                "Additional controller/named handoff notes, not new owner input.",
+                        }),
+                    ),
                 },
                 { additionalProperties: false },
             ),
@@ -611,9 +635,12 @@ export class WorkItems {
             const result = await this.invoke(request, api, ctx);
 
             return {
-                content: [{ type: "text", text: JSON.stringify(result) }],
-                ...(typeof result === "object" && result !== null && "status" in result &&
-                result.status !== "accepted" && request.action === "start"
+                output: [{ type: "text", text: JSON.stringify(result) }],
+                ...(typeof result === "object" &&
+                result !== null &&
+                "status" in result &&
+                result.status !== "accepted" &&
+                request.action === "start"
                     ? { isError: true }
                     : {}),
             };
@@ -756,7 +783,10 @@ export class WorkItems {
         this.#app.pip.agents.execution.requireNativeWrite(id);
 
         if (this.itemFor(id)?.archived === true) {
-            throw new HttpError(409, "Restore the Work Item before starting fresh execution effects.");
+            throw new HttpError(
+                409,
+                "Restore the Work Item before starting fresh execution effects.",
+            );
         }
 
         if (

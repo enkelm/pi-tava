@@ -606,7 +606,15 @@ export class PiProviderHost {
             throw new Error("Provider host unavailable or request aborted");
         }
 
-        const { signal, onPayload, onResponse, onProviderStreamEvent, ...wireOptions } = options;
+        // Telemetry spans contain adapter functions and stay parent-local, never in JSON IPC.
+        const {
+            signal,
+            telemetry: _telemetry,
+            onPayload,
+            onResponse,
+            onProviderStreamEvent,
+            ...wireOptions
+        } = options;
 
         assertSerializable({ model, context, options: wireOptions });
         const sessionId = options.sessionId ?? `auxiliary:${randomUUID()}`;

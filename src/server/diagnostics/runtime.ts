@@ -60,7 +60,7 @@ function decorate<T extends object>(target: T, overrides: Partial<T>): T {
 function nestedTool(recorder: DiagnosticRecorder): boolean {
     const parent = recorder.current();
 
-    return parent?.component === "tool" && parent.stage === "execute";
+    return parent?.nested === true || (parent?.component === "tool" && parent.stage === "execute");
 }
 
 function callIdentity(taskId: number, callId: string): string {
@@ -302,7 +302,10 @@ export function observeRegistry(
         let observed = agents.get(agent);
 
         if (observed === undefined) {
-            observed = decorate(agent, { tools: Object.freeze(agent.tools.map(observeTool)) });
+            observed = decorate(agent, {
+                tools: Object.freeze(agent.tools.map(observeTool)),
+                callable: Object.freeze(agent.callable.map(observeTool)),
+            });
             agents.set(agent, observed);
         }
 
@@ -415,6 +418,11 @@ export function observeRegistry(
                         component: taskComponent(definition.name),
                         stage: "phase",
                         operation: `${definition.name}/${phase === -1 ? "abort" : phase}`,
+                        // Native nested calls run as separate scheduled tasks, not in their
+                        // parent's synchronous observer context. Use Durable's tagged input.
+                        nested:
+                            definition.name === ToolTask.definition.name &&
+                            (record.input as { kind?: string } | null)?.kind === "nested",
                     },
                     () =>
                         handler.call(

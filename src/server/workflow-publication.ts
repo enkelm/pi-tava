@@ -702,7 +702,7 @@ async function publicationReceipts(app: PocketApp, api: ToolExecutionApi, contex
 }
 
 function result(text: string) {
-    return { content: [{ type: "text" as const, text }] };
+    return { output: [{ type: "text" as const, text }] };
 }
 
 /** Register in pocket-core, never in a disableable extension. */

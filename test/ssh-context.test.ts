@@ -277,6 +277,8 @@ test("remote memory isolates the same folder on different SSH hosts from local f
         const memory = new Memory({
             rootOf: (id: number) => id,
             sessionMeta: () => ({}),
+            // These namespace fixtures are ordinary conversations, not private named agents.
+            pip: { agents: { scope: () => undefined, isNamed: () => false } },
             cwdOf: () => f.root,
             locationOf: (id: number) => locations.get(id),
             now: () => Date.now(),

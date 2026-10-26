@@ -61,6 +61,7 @@ Each member has `@since`, and `@experimental` when it applies. [API versions](ap
 interface Module {
     default(host: Host, web: Web): Extension | readonly Extension[] | void | Promise<…>;
     pocketApi?: number;
+    durableToolApi?: 2;
 }
 ```
 
@@ -87,6 +88,19 @@ pocketApi?: number;
 Since 0.14.0 · Stable
 
 The version of the extension API that the module needs. A Pi Pocket with an older version does not set up the module. See [API versions](api-versions.md#pocketapi).
+
+### `durableToolApi`
+
+```ts
+durableToolApi?: 2;
+```
+
+Since 0.15.0 · Experimental
+
+Explicit opt-in to Pi Durable 1.4's output-based tool-result ABI. A drop-in with tools, tool wrappers,
+or `afterTool` hooks must export `const durableToolApi = 2`; otherwise loading fails before
+installation. This declaration is separate from the web/browser `pocketApi`, and does not convert
+legacy results. See [the migration notes](api-versions.md#pi-durable-14-cutover-unreleased).
 
 ## Shared types
 

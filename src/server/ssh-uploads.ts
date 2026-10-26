@@ -88,7 +88,7 @@ export function createStageUploadTool(app: PocketApp) {
             getOrThrow(await env.writeFile(destination, bytes, context));
 
             return {
-                content: [
+                output: [
                     {
                         type: "text",
                         text: `Staged on SSH · ${app.locationOf(id)!.host}: ${destination}\nThe original remains on the Coop host. The remote temporary file is not automatically removed.`,

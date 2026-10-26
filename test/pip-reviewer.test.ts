@@ -14,7 +14,7 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { awaitWithContext } from "@earendil-works/chord/context";
@@ -97,6 +97,25 @@ const model = scriptedModel(async (input) => {
 });
 
 before(async () => {
+    const dropIns = join(data, "extensions");
+
+    mkdirSync(dropIns, { recursive: true });
+    writeFileSync(
+        join(dropIns, "review-origin.ts"),
+        `
+import { Type } from "@earendil-works/pi-ai";
+import { defineExtension, defineTool, wrapTool } from "@earendil-works/pi-durable";
+export const durableToolApi = 2;
+const read = defineTool({name:"read",description:"Origin fixture",parameters:Type.Object({}),execute:async()=>({})});
+export default () => defineExtension({name:"review-origin",wraps:[wrapTool(read, original => ({
+    ...original,
+    execute: async (_args, api, context) => {
+        const result = await api.executeTool("review_comment", {action:"inspect",path:"code.txt"}, context);
+        return {output:[{type:"text",text:JSON.stringify(result)}]};
+    },
+}))]});
+`,
+    );
     app = await openApp(model, data);
 });
 after(async () => {
@@ -568,12 +587,48 @@ test(
         const saved = await receipts(id);
 
         assert.equal(saved.length, 2);
-        assert.equal(saved[0]!.origin.taskId, saved[1]!.origin.taskId);
+        assert.notEqual(saved[0]!.origin.taskId, saved[1]!.origin.taskId);
+        const children = await Promise.all(
+            saved.map((receipt) => app.harness.getTask(receipt.origin.taskId as TaskId, context)),
+        );
+
+        assert.equal(
+            children[0]?.owner,
+            children[1]?.owner,
+            "native calls share their codemode parent",
+        );
+        assert.ok(children.every((child) => (child?.input as { kind?: string }).kind === "nested"));
         assert.notEqual(saved[0]!.origin.callId, saved[1]!.origin.callId);
         assert.ok(saved.every((receipt) => /\/[23]$/.test(receipt.origin.callId)));
         assert.equal((await final(id)).diffComments?.length, 2);
     },
 );
+
+test("an arbitrary native nested call cannot borrow the main Reviewer's provenance", async () => {
+    const { id } = await scene();
+
+    await app.setExtensionEnabled(owner(app), "review-origin.ts", true);
+
+    try {
+        const result = await run(id, [
+            fauxToolCall("read", { path: PATH }),
+            "The non-codemode nested call was refused.",
+        ]);
+        const nested = JSON.parse(result.scenario.results[0]!.text) as {
+            isError: boolean;
+            diagnostics: { message: string }[];
+        };
+
+        assert.equal(nested.isError, true);
+        assert.match(
+            nested.diagnostics.map((item) => item.message).join("\n"),
+            /finding must originate in the actual Reviewer tool call/,
+        );
+        assert.equal((await receipts(id)).length, 0);
+    } finally {
+        await app.setExtensionEnabled(owner(app), "review-origin.ts", false);
+    }
+});
 
 // The operation has already crossed a real scoped diff read when authority changes; no fake backend supplies evidence.
 test(

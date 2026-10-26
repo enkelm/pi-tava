@@ -620,6 +620,16 @@ export class ExtensionLoader {
             );
         }
 
+        if (
+            module.source === "drop-in" &&
+            loaded.durableToolApi !== undefined &&
+            loaded.durableToolApi !== 2
+        ) {
+            throw new Error(
+                "the module declares an unsupported durableToolApi; migrate to Pi Durable 1.4's output-based tool results and export const durableToolApi = 2",
+            );
+        }
+
         // What it adds to the app counts only once it installed; a version that fails leaves the one before in place,
         // and what it set up (its cleanups) goes. The new version starts before the old one's cleanups run.
         const { part, web } = this.#webs.stage(
@@ -668,6 +678,19 @@ export class ExtensionLoader {
 
             if (module.source === "drop-in") {
                 this.#checkNames(file, extensions);
+
+                const usesToolResults = extensions.some(
+                    (extension) =>
+                        (extension.tools?.length ?? 0) > 0 ||
+                        extension.wraps?.some((wrap) => "tool" in wrap) ||
+                        extension.hooks?.some((hook) => "afterTool" in hook.handlers),
+                );
+
+                if (usesToolResults && loaded.durableToolApi !== 2) {
+                    throw new Error(
+                        "the module uses the tool-result ABI without declaring durableToolApi = 2; migrate tool results and afterTool/wrapTool handlers from content to output for Pi Durable 1.4, then export const durableToolApi = 2",
+                    );
+                }
             }
 
             this.#webs.check(part);

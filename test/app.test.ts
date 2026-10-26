@@ -15,7 +15,7 @@ import {
     work,
 } from "./helpers.ts";
 import assert from "node:assert/strict";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { after, before, mock, test } from "node:test";
@@ -962,7 +962,7 @@ test("requests with the wrong types are refused, and nothing odd is stored", asy
     assert.equal(app.sessions().find((each) => each.id === Number(id))?.archived, undefined);
 });
 
-test("a lock left by a process that is gone, or is not Node, is taken over; a running server's is not", async () => {
+test("a dead legacy holder permits takeover, but live holders are preserved regardless of argv0", async () => {
     const { spawn } = await import("node:child_process");
     const { once } = await import("node:events");
     const dataDir = join(root, "locks");
@@ -970,7 +970,7 @@ test("a lock left by a process that is gone, or is not Node, is taken over; a ru
     mkdirSync(dataDir, { recursive: true });
     const lock = join(dataDir, "harness.lock");
     const openHere = () => openApp(faux, dataDir);
-    // Something running that is not Node; only Linux (and Android) can tell, through /proc.
+    // A misleading executable name is not evidence that this live process generation is stale.
     const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
         argv0: "not-node",
     });
@@ -980,16 +980,16 @@ test("a lock left by a process that is gone, or is not Node, is taken over; a ru
         writeFileSync(lock, "999999999\n");
         await (await openHere()).close();
 
-        if (process.platform === "linux" || process.platform === "android") {
-            writeFileSync(lock, `${other.pid}\n`);
-            await (await openHere()).close();
-        }
+        for (const holder of [other, node]) {
+            const saved = `${holder.pid}\n`;
 
-        writeFileSync(lock, `${node.pid}\n`);
-        await assert.rejects(
-            openHere(),
-            new RegExp(`already running on this data directory \\(pid ${node.pid}\\)`),
-        );
+            writeFileSync(lock, saved);
+            await assert.rejects(
+                openHere(),
+                new RegExp(`already running on this data directory \\(pid ${holder.pid}\\)`),
+            );
+            assert.equal(readFileSync(lock, "utf8"), saved, "a refused open preserves the lock");
+        }
     } finally {
         other.kill();
         node.kill();

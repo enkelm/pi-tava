@@ -6,7 +6,8 @@ This page tells how Pi Pocket marks the age and the stability of each part of th
 
 `web.api` on the server and `pocket.version` in the browser give the version of the extension API. It is 1 now.
 
-The version goes up only when a change breaks something that modules use. Additions do not change it.
+The version goes up when the app's own public host/web/browser contract breaks. Additions do not
+change it. The pinned experimental Durable tool-result ABI has a separate declaration below.
 
 ## `pocketApi`
 
@@ -19,6 +20,41 @@ export const pocketApi = 1;
 A Pi Pocket with an older API version does not set up such a module. It says why in the Extensions sheet.
 
 The browser reads `pocketApi` after it imports the browser module. Thus keep the browser module's top level to declarations, and do its work in the default export.
+
+## Pi Durable 1.4 cutover (unreleased)
+
+This is a breaking source migration in the pending upgrade, not a deployed release. Pi Coop keeps
+`pocketApi`, `web.api` and `pocket.version` at **1**: no upstream API-2 browser features are implied.
+Existing absent/version-1 declarations still load compatible web-only modules. Raising `pocketApi`
+alone would not refuse old tools, because both loaders accept older declarations.
+
+A server drop-in providing tools, tool wrappers or `afterTool` hooks must now declare:
+
+```typescript
+export const durableToolApi = 2;
+```
+
+The number 2 versions Coop's loader declaration, not the persisted ToolTask format or upstream
+`pocketApi`. Only this value is supported. A missing declaration on a tool-result participant, or an unsupported
+declared value on any drop-in, produces an actionable load error. A failed edit leaves the old
+extension and web registrations installed. Web-only modules and `beforeTool`-only guards need no
+such export. Browser modules do not use it. It is not a gallery index field; gallery filtering still
+checks `pocketApi`/`minPocket`, and the server loader performs tool-ABI admission on enablement.
+
+Migration requires `{ output: [...] }` from Durable tools, updated result readers in wrappers/hooks,
+and matching `outputWindow`/`retainedOutput` when intercepting streams. Document definitions require
+an explicit `checkpointWhen`; preserve their stored contracts. Transcript/model messages, artifacts
+and agent-core tools still have their own `content`. Do not rename those fields. See [Tools](../tools.md).
+
+This explicitly narrows the former single-number package-compatibility policy (A2): the experimental
+Durable ABI is cut over without old-result aliases or its former deprecation guarantee. Stable app
+host/web/browser members retain their existing version/deprecation rules. Keep the previous code,
+dependencies and pre-upgrade data together for rollback; a package downgrade alone is not rollback.
+The [upgrade ledger](../../upstream-differences.md#pi-14-upgrade-source-work-in-progress) records
+isolated installed-runtime checks, disposable SQLite migration/paired rollback and native journal
+recovery evidence, with their limits. Full-suite and native HTTP/browser/Reviewer validation remain
+unavailable; a live cutover and coordinated owner-controlled restart are not authorized by those
+checks. Source edits and declarations alone do not establish compatibility.
 
 ## Since, Stable, Experimental, and Internal
 
@@ -57,6 +93,7 @@ Each member in the reference has its own Since line. These parts came together:
 | Scoped routes and static conversation browser access           | 0.15.0 |
 | Browser session metadata, controls, input hints and submission | 0.15.0 |
 | Logical-opening `SheetProps.isOpen`                            | 0.15.0 |
+| Experimental `durableToolApi` tool-result declaration          | 0.15.0 |
 
 ## 0.15.0 WorkItems consolidation notes (unreleased)
 

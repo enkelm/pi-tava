@@ -11,8 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonValue } from "@earendil-works/chord";
 import { withAbortSignal } from "@earendil-works/chord/context";
-import { type ToolCall, Type } from "@earendil-works/pi-ai";
-import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
+import { Type } from "@earendil-works/pi-ai";
 import {
     type CodemodeResult,
     CodemodeSandbox,
@@ -21,16 +20,11 @@ import {
 import {
     defineExtension,
     defineTool,
-    type Extension,
-    type HookApi,
     type JsonObject,
+    LiveDoc,
     section,
-    type ToolDiagnostic,
     type ToolExecutionApi,
-    type ToolExecutionResult,
-    type ToolHooks,
     type ToolRegistration,
-    ToolTask,
 } from "@earendil-works/pi-durable";
 import { CodemodeStoreDoc } from "../docs.ts";
 import { describe } from "../errors.ts";
@@ -45,7 +39,7 @@ const MAX_NESTED_CHARS = 1_000_000;
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
 
 const DESCRIPTION = `Run JavaScript that calls your other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
-- \`await tools.<name>({ ...args })\` takes the same arguments as calling the tool directly, resolves to its text output, and rejects with an Error when the call fails or is blocked. Calls still running when the script ends are cancelled.
+- \`await tools.<name>({ ...args })\` takes the same arguments as calling the tool directly, resolves to its structured output (text for ordinary tools), and rejects with an Error when the call fails or is blocked. Calls still running when the script ends are cancelled and joined before this call settles.
 - Each call is checked like a direct call: Lancet Guard may block it or wait for a person to approve it.
 - Optional first line: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\`
 Globals:
@@ -62,48 +56,6 @@ type CallRecord = {
     error?: string;
 };
 type CodemodeDetails = { calls: CallRecord[]; fullOutputPath?: string };
-
-type BeforeTool = ToolHooks["beforeTool"];
-type AfterTool = ToolHooks["afterTool"];
-
-/** The `beforeTool` and `afterTool` handlers of the selected extensions, in the order the Harness runs them. */
-function toolHooks(extensions: readonly Extension[]): { before: BeforeTool[]; after: AfterTool[] } {
-    const before: BeforeTool[] = [];
-    const after: AfterTool[] = [];
-
-    for (const extension of extensions) {
-        for (const registration of extension.hooks ?? []) {
-            if (registration.task !== ToolTask.definition.name) {
-                continue;
-            }
-
-            const handlers = registration.handlers as Partial<ToolHooks>;
-
-            if (handlers.beforeTool !== undefined) {
-                before.push(handlers.beforeTool.bind(handlers));
-            }
-
-            if (handlers.afterTool !== undefined) {
-                after.push(handlers.afterTool.bind(handlers));
-            }
-        }
-    }
-
-    return { before, after };
-}
-
-/** A result's text as the model would read it: text parts, then its diagnostics. */
-function resultText(result: ToolExecutionResult, diagnostics: readonly ToolDiagnostic[]): string {
-    const parts = (result.content ?? []).flatMap((part) =>
-        part.type === "text" ? [part.text] : [],
-    );
-
-    for (const diagnostic of [...diagnostics, ...(result.diagnostics ?? [])]) {
-        parts.push(diagnostic.message);
-    }
-
-    return parts.join("\n");
-}
 
 function bound(text: string, retain: "head" | "tail"): string {
     if (text.length <= MAX_NESTED_CHARS) {
@@ -186,142 +138,75 @@ export default function createCodemode(_host: PocketHost) {
         name: CODEMODE_TOOL,
         description: DESCRIPTION,
         parameters: Type.Object({ code: Type.String({ description: "Raw JavaScript source." }) }),
+        // Scripts cannot start other scripts, including through the native nested-call API.
+        callers: ["model"],
         // A script's nested calls (bash, writes) are not safe to run twice.
         replay: "unsafe",
         execute: async (args, api: ToolExecutionApi<CodemodeDetails>, context) => {
             const started = performance.now();
             const { code, options } = parseCodemodeSource(args.code);
             const agent = await api.agent(context);
-            const callable = agent.tools.filter(
+            const callable = agent.callable.filter(
                 (tool) => tool.name !== CODEMODE_TOOL,
             ) as ToolRegistration[];
-            const hooks = toolHooks(agent.extensions);
             const calls: CallRecord[] = [];
             const publish = () =>
                 void api
                     .details({ calls: calls.map((call) => ({ ...call })) }, context)
                     .catch(() => {});
-            let next = 0;
+            const pending = new Set<Promise<unknown>>();
+            const workerExits: Promise<void>[] = [];
+            let stopping = false;
 
-            /** One call from the script: the steps of a direct call, with its own memos and its own output. */
+            /** Native children own validation, hooks, memos, output limits and replay policy. */
             const nested = async (
                 tool: ToolRegistration,
                 input: unknown,
                 signal: AbortSignal,
-            ): Promise<string> => {
-                const n = ++next;
-                const call: ToolCall = {
-                    type: "toolCall",
-                    id: `${api.callId}/${n}`,
-                    name: tool.name,
-                    arguments: (input ?? {}) as JsonObject,
-                };
+            ): Promise<unknown> => {
                 const record: CallRecord = { name: tool.name, status: "running" };
 
                 calls.push(record);
                 publish();
                 const callStarted = performance.now();
                 const scope = withAbortSignal(signal, context);
-                // Memos are per task; a script makes many calls in one task, so each call gets its own names.
-                const memo = ((name: string, ...rest: unknown[]) =>
-                    (api.memo as (...all: unknown[]) => unknown)(
-                        `codemode/${n}/${name}`,
-                        ...rest,
-                    )) as ToolExecutionApi["memo"];
-                const hookApi: HookApi = { ...api, memo };
-                const check = (value: unknown): JsonObject =>
-                    validateToolArguments(tool, {
-                        ...call,
-                        arguments: value as JsonObject,
-                    }) as JsonObject;
 
                 try {
-                    let callArgs = check(
-                        tool.prepareArguments === undefined
-                            ? call.arguments
-                            : tool.prepareArguments(call.arguments),
+                    signal.throwIfAborted();
+                    const result = await api.executeTool(
+                        tool.name,
+                        (input ?? {}) as JsonObject,
+                        scope,
                     );
 
-                    for (const before of hooks.before) {
-                        let decision: Awaited<ReturnType<BeforeTool>>;
+                    signal.throwIfAborted();
+                    // Native input preserves the request; the slot retains the accepted arguments
+                    // after preparation and hooks until this parent settles.
+                    const live = await api.snapshot(LiveDoc, api.conversationId, scope);
+                    const path = live?.nestedTools?.find((slot) => slot.taskId === result.taskId)
+                        ?.arguments.path;
 
-                        try {
-                            decision = await before(
-                                { ...call, arguments: callArgs },
-                                hookApi,
-                                scope,
-                            );
-                        } catch (error) {
-                            if (scope.abortSignal?.aborted) {
-                                throw error;
-                            }
-
-                            throw new Error(`Tool call blocked: ${describe(error)}`);
-                        }
-
-                        if (decision?.block !== undefined) {
-                            throw new Error(`Tool call blocked: ${decision.block}`);
-                        }
-
-                        if (decision?.arguments !== undefined) {
-                            callArgs = decision.arguments;
-                        }
+                    if (typeof path === "string") {
+                        record.path = path;
                     }
 
-                    callArgs = check(callArgs);
+                    if (result.isError) {
+                        const diagnostics = result.diagnostics.map((item) => item.message);
+                        const value = result.structuredOutput;
 
-                    if (typeof callArgs.path === "string") {
-                        record.path = callArgs.path;
-                    }
-
-                    const decoder = new TextDecoder();
-                    const output: string[] = [];
-                    const diagnostics: ToolDiagnostic[] = [];
-                    const toolApi: ToolExecutionApi = {
-                        ...api,
-                        callId: call.id,
-                        memo,
-                        output: (chunk) =>
-                            void output.push(
-                                typeof chunk === "string"
-                                    ? chunk
-                                    : decoder.decode(chunk, { stream: true }),
-                            ),
-                        diagnostic: (diagnostic) => void diagnostics.push(diagnostic),
-                        // The script gets text; a nested call's details stay with it.
-                        details: async () => {},
-                    };
-                    let result = await tool.execute(callArgs, toolApi, scope);
-
-                    if (result.content === undefined) {
-                        result = {
-                            ...result,
-                            content: [{ type: "text", text: output.join("") + decoder.decode() }],
-                        };
-                    }
-
-                    for (const after of hooks.after) {
-                        result =
-                            (await after(
-                                { ...call, arguments: callArgs },
-                                result,
-                                hookApi,
-                                scope,
-                            )) ?? result;
-                    }
-
-                    const text = bound(
-                        resultText(result, diagnostics),
-                        tool.outputLimits?.retain ?? "head",
-                    );
-
-                    if (result.isError === true) {
-                        throw new Error(text || `Tool ${tool.name} failed`);
+                        throw new Error(
+                            [
+                                ...(value === undefined ? [] : [valueText(value)]),
+                                ...diagnostics,
+                            ].join("\n") || `Tool ${tool.name} failed`,
+                        );
                     }
 
                     record.status = "ok";
 
-                    return text;
+                    return typeof result.structuredOutput === "string"
+                        ? bound(result.structuredOutput, tool.outputLimits?.retain ?? "head")
+                        : result.structuredOutput;
                 } catch (error) {
                     record.status = signal.aborted ? "cancelled" : "error";
                     record.error = describe(error).slice(0, 500);
@@ -338,11 +223,32 @@ export default function createCodemode(_host: PocketHost) {
                     name: tool.name,
                     description: tool.description,
                     inputSchema: tool.parameters as Record<string, unknown>,
-                    outputSchema: { type: "string" },
-                    execute: (input, { signal }) => nested(tool, input, signal),
+                    outputSchema: tool.structuredOutputSchema as
+                        Record<string, unknown> | undefined,
+                    execute: (input, { signal }) => {
+                        const execution = nested(tool, input, signal);
+
+                        pending.add(execution);
+                        void execution.then(
+                            () => pending.delete(execution),
+                            () => pending.delete(execution),
+                        );
+
+                        return execution;
+                    },
                 })),
                 timeoutMs: options.timeoutMs ?? Number.POSITIVE_INFINITY,
                 memoryLimitBytes: MEMORY_LIMIT_BYTES,
+                // Wasm loading can outlast a result cancelled during startup. Do not admit a
+                // late worker after cleanup has already captured the workers it must join.
+                acquireWorker: () => {
+                    if (stopping) {
+                        throw new Error("Codemode execution is stopping");
+                    }
+
+                    return () => {};
+                },
+                onWorkerStarted: (exited) => workerExits.push(exited),
             });
             const stored =
                 (await api.snapshot(CodemodeStoreDoc, api.conversationId, context))?.values ?? {};
@@ -354,12 +260,15 @@ export default function createCodemode(_host: PocketHost) {
                     store: stored,
                 });
             } finally {
-                await sandbox.close();
-            }
+                stopping = true;
 
-            for (const call of calls) {
-                if (call.status === "running") {
-                    call.status = "cancelled";
+                try {
+                    await sandbox.close();
+                } finally {
+                    // Join the VM and native-call waiters here. Cancelling those waits does not
+                    // cancel their tasks: ToolTask settlement aborts and joins owned children
+                    // before this parent becomes terminal or releases its writer reservation.
+                    await Promise.allSettled([...workerExits, ...pending]);
                 }
             }
 
@@ -395,7 +304,7 @@ export default function createCodemode(_host: PocketHost) {
             const header = `${result.ok ? "Script completed" : "Script failed"}\nWall time ${((performance.now() - started) / 1000).toFixed(1)} seconds\nOutput:\n`;
 
             return {
-                content: [{ type: "text", text: header }, ...shown.items],
+                output: [{ type: "text", text: header }, ...shown.items],
                 details: {
                     calls,
                     ...(shown.fullOutputPath === undefined
@@ -412,7 +321,7 @@ export default function createCodemode(_host: PocketHost) {
         tools: [codemode],
         sections: [
             section("codemode", ({ agent }) => {
-                const names = agent.tools
+                const names = agent.callable
                     .map((tool) => tool.name)
                     .filter((name) => name !== CODEMODE_TOOL);
 

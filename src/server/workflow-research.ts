@@ -334,7 +334,7 @@ export function createResearchTool(app: PocketApp) {
                     await rm(directory, { force: true, recursive: true });
 
                     return {
-                        content: [
+                        output: [
                             {
                                 type: "text" as const,
                                 text: "Removed this thread's research downloads; checkout files are untouched.",
@@ -376,7 +376,7 @@ export function createResearchTool(app: PocketApp) {
                     await active();
                     retained = true;
 
-                    return { content: [{ type: "text" as const, text: result }] };
+                    return { output: [{ type: "text" as const, text: result }] };
                 } finally {
                     if (!retained) {
                         await rm(stage, { force: true, recursive: true });

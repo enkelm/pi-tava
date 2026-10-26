@@ -1512,7 +1512,7 @@ Your initial welcome is app-authored, free, not owner input or authority. New ch
                 };
             }, ctx);
 
-            return { content: [{ type: "text", text: JSON.stringify(await this.read(id, user)) }] };
+            return { output: [{ type: "text", text: JSON.stringify(await this.read(id, user)) }] };
         },
     });
 }

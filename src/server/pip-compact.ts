@@ -231,7 +231,10 @@ type Counts = {
     cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
 };
 
-/** What came since the context's newest compaction, estimated; none: no compaction, so everything did. */
+/**
+ * Conversational growth since the newest compaction, estimated; none: everything did. Reissued system prompts and
+ * tool loadouts are not new conversation, even when their entries were written after the compaction.
+ */
 export function tokensSinceCompaction(view: ContextView): number {
     if (view.head?.kind !== "pi.compaction") {
         return Number.POSITIVE_INFINITY;
@@ -242,7 +245,9 @@ export function tokensSinceCompaction(view: ContextView): number {
     view.entries.forEach((entry, index) => {
         if (entry.id > view.head!.id) {
             for (const message of view.contributions[index] ?? []) {
-                tokens += estimateMessageTokens(message);
+                if (message.role !== "system") {
+                    tokens += estimateMessageTokens(message);
+                }
             }
         }
     });

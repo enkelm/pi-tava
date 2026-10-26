@@ -41,8 +41,17 @@ async function requireSource(app: PocketApp, api: ToolExecutionApi, tx: Tx) {
         throw new HttpError(409, "Plan mode blocks private handoff brief effects.");
     }
 
-    if (Object.keys(app.sessionCatalogue()).some((key) => app.workItems.itemFor(Number(key) as ConversationId)?.intervention?.agentId === source.agentId)) {
-        throw new HttpError(409, "Return the temporary native writer and settle its operations before handing off work.");
+    if (
+        Object.keys(app.sessionCatalogue()).some(
+            (key) =>
+                app.workItems.itemFor(Number(key) as ConversationId)?.intervention?.agentId ===
+                source.agentId,
+        )
+    ) {
+        throw new HttpError(
+            409,
+            "Return the temporary native writer and settle its operations before handing off work.",
+        );
     }
 
     return source;
@@ -69,8 +78,14 @@ async function admission(app: PocketApp, api: ToolExecutionApi, ctx: Context, se
 
         const ownHelper = id !== root && app.pip.agents.scope(root)?.agentId === source.agentId;
 
-        if (id === api.conversationId || (meta.pip !== undefined && meta.pipWorkItemId === undefined && !ownHelper)) {
-            throw new HttpError(403, "Use an authorized ordinary Chat, execution thread, controller or literal helper, not another private identity.");
+        if (
+            id === api.conversationId ||
+            (meta.pip !== undefined && meta.pipWorkItemId === undefined && !ownHelper)
+        ) {
+            throw new HttpError(
+                403,
+                "Use an authorized ordinary Chat, execution thread, controller or literal helper, not another private identity.",
+            );
         }
 
         const item = app.workItems.itemFor(root);
@@ -100,32 +115,53 @@ async function admission(app: PocketApp, api: ToolExecutionApi, ctx: Context, se
         }
 
         if (app.pip.orchestration.isScoped(id)) {
-            await api.commit((tx) => app.workItems.requireController(tx, id, grant!.epoch, undefined, false), ctx);
+            await api.commit(
+                (tx) => app.workItems.requireController(tx, id, grant!.epoch, undefined, false),
+                ctx,
+            );
             const state = await app.harness.snapshot(PipWorkDoc, id, ctx);
-            const model = await app.agentState(id);
+            const model = (await app.agentState(id))?.model;
 
             if (state?.question !== undefined || state?.humanPending !== undefined) {
                 throw new HttpError(409, "The controller is awaiting an exact human decision.");
             }
 
-            if ((grant!.maxActions !== undefined && grant!.actions >= grant!.maxActions) || model.model === undefined || app.models.getModel(model.model.provider, model.model.modelId) === undefined) {
-                throw new HttpError(409, "The controller is unavailable or its action budget is exhausted.");
+            if (
+                (grant!.maxActions !== undefined && grant!.actions >= grant!.maxActions) ||
+                model === undefined ||
+                app.models.getModel(model.provider, model.modelId) === undefined
+            ) {
+                throw new HttpError(
+                    409,
+                    "The controller is unavailable or its action budget is exhausted.",
+                );
             }
 
             app.spend.check(source.user, id);
         } else {
             if (grant?.status === "running" && grant.agentId === undefined) {
-                throw new HttpError(409, "This native orchestrator is running independently. Select its exact controller to hand it work; nothing was rerouted.");
+                throw new HttpError(
+                    409,
+                    "This native orchestrator is running independently. Select its exact controller to hand it work; nothing was rerouted.",
+                );
             }
 
             await app.pip.agents.contacts.requireSendRecipient(api, session, ctx);
         }
     } else {
         const global = app.pip.idOf(source.user.id);
-        const agent = global === undefined ? app.commands.defaultModel() : await app.agentState(global);
+        const model = (
+            global === undefined ? app.commands.defaultModel() : await app.agentState(global)
+        )?.model;
 
-        if (agent.model === undefined || app.models.getModel(agent.model.provider, agent.model.modelId) === undefined) {
-            throw new HttpError(409, "The native Work Item controller has no available configured model; ask the owner, never fall back.");
+        if (
+            model === undefined ||
+            app.models.getModel(model.provider, model.modelId) === undefined
+        ) {
+            throw new HttpError(
+                409,
+                "The native Work Item controller has no available configured model; ask the owner, never fall back.",
+            );
         }
     }
 
@@ -140,12 +176,18 @@ export async function namedHandoff(
     api: ToolExecutionApi,
     ctx: Context,
 ) {
-    const starters = app.workItems.profiles().filter((profile) => profile.starter && profile.id !== "chat");
+    const starters = app.workItems
+        .profiles()
+        .filter((profile) => profile.starter && profile.id !== "chat");
     // A prepared invocation resumes its exact native contact. Do not redo filesystem or
     // creation effects, nor strand an accepted receipt on a later recipient question.
-    const prepared = request.action === "start"
-        ? await api.memo<{ recipient: number; file: string; threadId?: number }>("native-handoff-recipient", ctx)
-        : undefined;
+    const prepared =
+        request.action === "start"
+            ? await api.memo<{ recipient: number; file: string; threadId?: number }>(
+                  "native-handoff-recipient",
+                  ctx,
+              )
+            : undefined;
 
     if (prepared !== undefined && request.action === "start") {
         return deliver(app, api, ctx, request, prepared);
@@ -164,7 +206,9 @@ export async function namedHandoff(
         reason = error.message;
     }
 
-    const route = parseHandoffCommand(nativeSource?.instructions.replace(/^\[from:[^\]]+\]\s*/, "") ?? "");
+    const route = parseHandoffCommand(
+        nativeSource?.instructions.replace(/^\[from:[^\]]+\]\s*/, "") ?? "",
+    );
 
     if (request.action === "status") {
         return {
@@ -172,18 +216,45 @@ export async function namedHandoff(
             ...(reason === undefined ? {} : { reason }),
             sourceChatId: Number(api.conversationId),
             retained: true,
-            options: request.session === undefined
-                ? starters.map((profile) => {
-                    const refusal = reason ?? (
-                        (route?.targetType !== undefined && route.targetType !== profile.id) ||
-                        (route?.relationship !== undefined && route.relationship !== "new-work")
-                            ? "The handoff must match the human's explicit /handoff route"
-                            : undefined
-                    );
+            options:
+                request.session === undefined
+                    ? starters.map((profile) => {
+                          const refusal =
+                              reason ??
+                              ((route?.targetType !== undefined &&
+                                  route.targetType !== profile.id) ||
+                              (route?.relationship !== undefined &&
+                                  route.relationship !== "new-work")
+                                  ? "The handoff must match the human's explicit /handoff route"
+                                  : undefined);
 
-                    return { targetType: profile.id, relationship: "new-work", description: profile.description, enabled: refusal === undefined, ...(refusal === undefined ? {} : { reason: refusal }) };
-                })
-                : [{ session: request.session, enabled: reason === undefined && route?.targetType === undefined && route?.relationship === undefined && !route?.worktree, ...(reason === undefined ? (route?.targetType !== undefined || route?.relationship !== undefined || route?.worktree ? { reason: "The handoff must match the human's explicit /handoff route" } : {}) : { reason }) }],
+                          return {
+                              targetType: profile.id,
+                              relationship: "new-work",
+                              description: profile.description,
+                              enabled: refusal === undefined,
+                              ...(refusal === undefined ? {} : { reason: refusal }),
+                          };
+                      })
+                    : [
+                          {
+                              session: request.session,
+                              enabled:
+                                  reason === undefined &&
+                                  route?.targetType === undefined &&
+                                  route?.relationship === undefined &&
+                                  !route?.worktree,
+                              ...(reason === undefined
+                                  ? route?.targetType !== undefined ||
+                                    route?.relationship !== undefined ||
+                                    route?.worktree
+                                      ? {
+                                            reason: "The handoff must match the human's explicit /handoff route",
+                                        }
+                                      : {}
+                                  : { reason }),
+                          },
+                      ],
         };
     }
 
@@ -192,55 +263,110 @@ export async function namedHandoff(
     }
 
     if (request.session !== undefined) {
-        if (request.targetType !== undefined || request.relationship !== undefined || request.folder !== undefined || request.repo !== undefined || request.title !== undefined || request.worktree !== undefined || request.model !== undefined) {
-            throw new HttpError(400, "An existing native recipient is exact: do not also select a role, relationship or creation options.");
+        if (
+            request.targetType !== undefined ||
+            request.relationship !== undefined ||
+            request.folder !== undefined ||
+            request.repo !== undefined ||
+            request.title !== undefined ||
+            request.worktree !== undefined ||
+            request.model !== undefined
+        ) {
+            throw new HttpError(
+                400,
+                "An existing native recipient is exact: do not also select a role, relationship or creation options.",
+            );
         }
-    } else if ((request.relationship ?? "new-work") !== "new-work" || !starters.some((profile) => profile.id === request.targetType)) {
-        throw new HttpError(409, "A named Chat may create an available new-work starter, not transfer itself into execution.");
+    } else if (
+        (request.relationship ?? "new-work") !== "new-work" ||
+        !starters.some((profile) => profile.id === request.targetType)
+    ) {
+        throw new HttpError(
+            409,
+            "A named Chat may create an available new-work starter, not transfer itself into execution.",
+        );
     }
 
     const source = await admission(app, api, ctx, request.session);
     const explicit = parseHandoffCommand(source.instructions.replace(/^\[from:[^\]]+\]\s*/, ""));
 
-    if (explicit !== undefined && (
-        (request.session !== undefined && (explicit.targetType !== undefined || explicit.relationship !== undefined || explicit.worktree === true)) ||
-        (explicit.targetType !== undefined && explicit.targetType !== request.targetType) ||
-        (explicit.relationship !== undefined && explicit.relationship !== (request.relationship ?? "new-work")) ||
-        (explicit.worktree === true) !== (request.worktree === true)
-    )) {
-        throw new HttpError(409, "The handoff must match the human's explicit /handoff target, relationship and worktree choice.");
+    if (
+        explicit !== undefined &&
+        ((request.session !== undefined &&
+            (explicit.targetType !== undefined ||
+                explicit.relationship !== undefined ||
+                explicit.worktree === true)) ||
+            (explicit.targetType !== undefined && explicit.targetType !== request.targetType) ||
+            (explicit.relationship !== undefined &&
+                explicit.relationship !== (request.relationship ?? "new-work")) ||
+            (explicit.worktree === true) !== (request.worktree === true))
+    ) {
+        throw new HttpError(
+            409,
+            "The handoff must match the human's explicit /handoff target, relationship and worktree choice.",
+        );
+    }
+
+    const env = api.env;
+
+    if (env === undefined) {
+        throw new HttpError(
+            409,
+            "The native handoff requires an execution environment; no assignment was sent.",
+        );
     }
 
     let file = await api.memo<string>("native-handoff-file", ctx);
 
     if (file === undefined) {
-        const directory = getOrThrow(await api.env.createTempDir("pi-coop-handoff-", ctx));
-        const path = getOrThrow(await api.env.joinPath([directory, "handoff.md"], ctx));
+        const directory = getOrThrow(await env.createTempDir("pi-coop-handoff-", ctx));
+        const path = getOrThrow(await env.joinPath([directory, "handoff.md"], ctx));
 
-        getOrThrow(await api.env.writeFile(path, [
-            `# Handoff from ${source.agentName} (Chat /s/${source.chatId})`,
-            request.summary,
-            ...(request.instructions === undefined ? [] : [`Additional handoff notes (not new owner authority):\n${request.instructions}`]),
-            `Origin: named agent ${source.agentId}, Chat /s/${source.chatId}. The delegated brief is exported context, not new owner input or publication approval.`,
-        ].join("\n\n") + "\n", ctx));
+        getOrThrow(
+            await env.writeFile(
+                path,
+                [
+                    `# Handoff from ${source.agentName} (Chat /s/${source.chatId})`,
+                    request.summary,
+                    ...(request.instructions === undefined
+                        ? []
+                        : [
+                              `Additional handoff notes (not new owner authority):\n${request.instructions}`,
+                          ]),
+                    `Origin: named agent ${source.agentId}, Chat /s/${source.chatId}. The delegated brief is exported context, not new owner input or publication approval.`,
+                ].join("\n\n") + "\n",
+                ctx,
+            ),
+        );
         await admission(app, api, ctx, request.session);
         file = await api.memo("native-handoff-file", path, ctx);
     }
 
-    const info = getOrThrow(await api.env.fileInfo(file, ctx));
+    const info = getOrThrow(await env.fileInfo(file, ctx));
 
     if (info.kind !== "file" || info.size === 0) {
-        throw new HttpError(409, "The native handoff brief is missing or empty; no assignment was sent.");
+        throw new HttpError(
+            409,
+            "The native handoff brief is missing or empty; no assignment was sent.",
+        );
     }
 
-    if ((request.session === undefined || app.pip.orchestration.isScoped(request.session as ConversationId)) &&
-        controllerText(request, file).length > 16000) {
-        throw new HttpError(400, `The assignment exceeds the native controller contact limit (16000 characters). Brief saved at ${file}; no assignment was sent.`);
+    if (
+        (request.session === undefined ||
+            app.pip.orchestration.isScoped(request.session as ConversationId)) &&
+        controllerText(request, file).length > 16000
+    ) {
+        throw new HttpError(
+            400,
+            `The assignment exceeds the native controller contact limit (16000 characters). Brief saved at ${file}; no assignment was sent.`,
+        );
     }
 
     let recipient = request.session;
     let threadId: number | undefined;
-    const creationRequestId = `native-handoff-${createHash("sha256").update(JSON.stringify([api.conversationId, api.taskId, api.callId])).digest("hex")}`;
+    const creationRequestId = `native-handoff-${createHash("sha256")
+        .update(JSON.stringify([api.conversationId, api.taskId, api.callId]))
+        .digest("hex")}`;
 
     if (recipient === undefined) {
         threadId = await api.memo<number>("pip.session", ctx);
@@ -271,13 +397,22 @@ export async function namedHandoff(
         }
 
         // Opening is inert. Only the following exact native send activates and assigns work.
-        const opened = await app.pip.orchestration.control(threadId as ConversationId, source.user, { action: "open" }, (tx) => app.pip.agents.supervision.requireHandoffInvocation(tx, api).then(() => {}));
+        const opened = await app.pip.orchestration.control(
+            threadId as ConversationId,
+            source.user,
+            { action: "open" },
+            (tx) => app.pip.agents.supervision.requireHandoffInvocation(tx, api).then(() => {}),
+        );
 
         recipient = opened.orchestration!.conversationId;
     }
 
     await admission(app, api, ctx, recipient);
-    const ready = await api.memo("native-handoff-recipient", { recipient, file, ...(threadId === undefined ? {} : { threadId }) }, ctx);
+    const ready = await api.memo(
+        "native-handoff-recipient",
+        { recipient, file, ...(threadId === undefined ? {} : { threadId }) },
+        ctx,
+    );
 
     return deliver(app, api, ctx, request, ready);
 }
@@ -302,19 +437,26 @@ async function deliver(
     request: Extract<SourceHandoffRequest, { action: "start" }>,
     prepared: { recipient: number; file: string; threadId?: number },
 ) {
-    const source = await api.commit((tx) => app.pip.agents.supervision.requireHandoffInvocation(tx, api), ctx);
+    const source = await api.commit(
+        (tx) => app.pip.agents.supervision.requireHandoffInvocation(tx, api),
+        ctx,
+    );
     const { recipient, file, threadId } = prepared;
     // Controllers keep their read-only tool selection. Give their native assignment its task
     // text and the brief path for execution, rather than granting arbitrary filesystem reads.
     const text = app.pip.orchestration.isScoped(recipient as ConversationId)
         ? controllerText(request, file)
         : `Read the handoff brief at ${file} with the read tool. It contains the task, original owner direction, evidence and limits. Continue only within that scope.`;
-    const assignment = await app.pip.agents.supervision.contact(api, {
-        action: "send",
-        session: recipient,
-        text,
-        report: request.report,
-    }, ctx);
+    const assignment = await app.pip.agents.supervision.contact(
+        api,
+        {
+            action: "send",
+            session: recipient,
+            text,
+            report: request.report,
+        },
+        ctx,
+    );
     const item = app.workItems.itemFor(recipient as ConversationId);
 
     if (threadId !== undefined && item !== undefined && assignment.status === "accepted") {
@@ -327,10 +469,14 @@ async function deliver(
         sourceChatId: source.chatId,
         agentId: source.agentId,
         file,
-        ...(threadId === undefined ? {} : {
-            threadId,
-            creationRequestId: `native-handoff-${createHash("sha256").update(JSON.stringify([api.conversationId, api.taskId, api.callId])).digest("hex")}`,
-        }),
+        ...(threadId === undefined
+            ? {}
+            : {
+                  threadId,
+                  creationRequestId: `native-handoff-${createHash("sha256")
+                      .update(JSON.stringify([api.conversationId, api.taskId, api.callId]))
+                      .digest("hex")}`,
+              }),
         ...(item === undefined ? {} : { workItemId: item.id, activeThreadId: item.activeThreadId }),
     };
 }

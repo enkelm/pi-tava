@@ -458,7 +458,13 @@ export class Diagnostics {
         let taskScanLimited = false;
 
         for (const { session } of page.pages) {
-            for (const status of ["pending", "running", "waiting", "completing"] as const) {
+            for (const status of [
+                "pending",
+                "running",
+                "sleeping",
+                "waiting",
+                "completing",
+            ] as const) {
                 page.selection.check();
                 const rows = await this.#app.harness.commit(
                     (tx) => tx.scanTasks({ conversationId: session as ConversationId, status }, 24),
@@ -757,7 +763,7 @@ export class Diagnostics {
 
     /** The private registration supplies these tools; live service authorization requires global PiP. */
     tools() {
-        const reply = (text: string) => ({ content: [{ type: "text" as const, text }] });
+        const reply = (text: string) => ({ output: [{ type: "text" as const, text }] });
 
         return [
             defineTool({

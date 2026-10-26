@@ -1,11 +1,15 @@
 // The registered tools, native assignments, durable delivery and input receipts are real.
-// Only provider decisions and a post-acceptance acknowledgement failure are scripted.
+// Only provider decisions, wake scheduling and a post-acceptance acknowledgement loss are scripted.
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import {
+    fauxAssistantMessage,
+    fauxToolCall,
+    type FauxResponseStep,
+} from "@earendil-works/pi-ai/providers/faux";
 import { awaitWithContext, withAbortSignal } from "@earendil-works/chord/context";
-import type { ConversationId } from "@earendil-works/pi-durable";
+import type { ConversationId, SubmissionId } from "@earendil-works/pi-durable";
 import { PipWorkDoc } from "../src/server/docs.ts";
 import { AgentSupervisionDoc } from "../src/server/pip/agent-supervision.ts";
 import {
@@ -196,6 +200,7 @@ async function fixture(name: string, outcome: "finish" | "question" | "failure" 
     const chat = created.id as ConversationId;
     const sibling = (await app.pip.agents.newChat(chat, owner(app), { requestId: "sibling" }))
         .id as ConversationId;
+
     const start = async () => {
         // Admit independent execution before parent attachment: later direct execution input
         // correctly reclaims control, which is not the continuation behavior under test.
@@ -227,6 +232,7 @@ async function fixture(name: string, outcome: "finish" | "question" | "failure" 
         controllers,
         sources,
         unrelated,
+        model,
         start,
         get parentWakes() {
             return parentWakes;
@@ -392,6 +398,7 @@ test("registered serial A→B→C dispatches without owner input; waits and pass
 
         return result;
     };
+
     await f.start();
     assert.equal(
         f.parentWakes,
@@ -459,6 +466,7 @@ test("registered serial A→B→C dispatches without owner input; waits and pass
         3,
         "each semantic event has a distinct stable request identity",
     );
+
     for (const pin of derived) {
         const native = await f.app.harness.commit(
             (tx) => tx.submissionByRequest(f.chat, pin.requestId!),
@@ -477,6 +485,105 @@ test("registered serial A→B→C dispatches without owner input; waits and pass
         3,
         "completed-task receipts never backfill another invocation after restart",
     );
+});
+
+// A queued event must not acquire a replacement assignment just because its controller
+// epoch stayed current. Both assignments and the delayed wake use real native admission.
+test("an old native event wake cannot finish a replacement assignment at the same controller epoch", async (t) => {
+    const f = await fixture("parent-old-wake-new-assignment");
+    const releaseWake = Promise.withResolvers<void>();
+    const phases = f.app.pip.orchestration.task.definition.phases;
+    const original = phases.wake;
+    let wakeHeld = false;
+    let controllerCalls = 0;
+    const held = t.mock.method(phases, "wake", async (...args: Parameters<typeof original>) => {
+        if (!wakeHeld && args[1].conversationId === f.controllers[0]) {
+            wakeHeld = true;
+            await awaitWithContext(releaseWake.promise, args[2]);
+        }
+
+        return original(...args);
+    });
+
+    t.after(async () => {
+        releaseWake.resolve();
+        held.mock.restore();
+        await f.close();
+    });
+    await f.start();
+    const controller = f.controllers[0]!;
+    const before = (await f.app.harness.snapshot(PipWorkDoc, controller, context))!.assignment!;
+
+    const decide: FauxResponseStep = (request) => {
+        const system = JSON.stringify(
+            request.messages.filter((message) => message.role === "system"),
+        );
+
+        if (system.includes("the private supervisor for Work Item")) {
+            controllerCalls++;
+
+            return tool("work_supervise", {
+                action: controllerCalls === 1 ? "wait" : "finish",
+                text: controllerCalls === 1 ? "Replacement remains pending." : "Old event finish.",
+            });
+        }
+
+        if (lastText(request).role === "user") {
+            return tool("agent_work", {
+                action: "send",
+                session: Number(controller),
+                text: "Replace A with this separate bounded assignment; wait for its evidence.",
+            });
+        }
+
+        return fauxAssistantMessage("The replacement contact was accepted.");
+    };
+
+    f.model.setResponses(Array.from({ length: 20 }, () => decide));
+    f.release();
+    await until(() => wakeHeld, "old assignment's real wake task awaits admission");
+    const replacement = await f.app.commands.submit(f.sibling, owner(f.app), {
+        text: "Send the replacement assignment to the same native controller.",
+        requestId: "replace-native-assignment",
+    });
+
+    await (await f.app.harness.submission(replacement.submissionId, context))!.wait(context);
+    await until(
+        () => controllerCalls === 1 && !f.app.isBusy(controller),
+        "replacement assignment was actually read and waits without an outcome",
+    );
+    const replaced = (await f.app.harness.snapshot(PipWorkDoc, controller, context))!.assignment!;
+    const native = await f.app.harness.submission(replaced.submissionId as SubmissionId, context);
+    const accepted = await native!.status(context);
+
+    assert.ok(accepted.type === "input" && accepted.status === "done");
+    assert.notEqual(replaced.requestId, before.requestId);
+    assert.notEqual(replaced.submissionId, before.submissionId);
+    assert.equal(replaced.epoch, before.epoch, "a changed epoch cannot make this negative pass");
+    assert.equal(replaced.outcome, undefined);
+    releaseWake.resolve();
+    await until(
+        async () =>
+            controllerCalls === 2 &&
+            !f.app.isBusy(controller) &&
+            (await f.app.harness.snapshot(PipWorkDoc, controller, context))?.pending === undefined,
+        "old native event and its real finish tool settle",
+    );
+    const after = (await f.app.harness.snapshot(PipWorkDoc, controller, context))!.assignment!;
+    const entries = await f.app.transcripts.allEntries(controller, true);
+
+    assert.ok(
+        entries.some(
+            (entry) =>
+                entry.kind === "toolResult" &&
+                !entry.isError &&
+                entry.text.includes("Old event finish."),
+        ),
+        "the old response reached the real control tool, not an unrelated denial",
+    );
+    assert.equal(after.requestId, replaced.requestId);
+    assert.equal(after.submissionId, replaced.submissionId);
+    assert.equal(after.outcome, undefined, "old event provenance cannot settle the new assignment");
 });
 
 // Protects transfer at the real postTools boundary, which the sibling-Chat supersession
@@ -498,6 +605,7 @@ test("a same-Chat owner steer replaces stale continuation authority after its to
 
         return result;
     };
+
     t.after(async () => {
         releaseRead.resolve();
         await f.close();
@@ -567,6 +675,7 @@ for (const outcome of ["question", "failure"] as const) {
         const work = await f.app.harness.snapshot(PipWorkDoc, f.controllers[0]!, context);
 
         assert.equal(work?.assignment?.outcome?.kind, outcome);
+
         if (outcome === "question") {
             assert.equal(work!.assignment!.outcome!.questionId, work!.question!.id);
             assert.equal(
@@ -628,6 +737,13 @@ for (const fence of ["stop", "detach", "supersede"] as const) {
 
             await (await f.app.harness.submission(input.submissionId, context))!.wait(context);
         } else {
+            const projection = await f.app.pip.agents.supervision.status(f.chat, owner(f.app));
+
+            assert.doesNotThrow(
+                () => JSON.stringify(projection),
+                "native status must detach nested attachment cursors before its transaction settles",
+            );
+
             await f.app.pip.agents.supervision.control(f.chat, owner(f.app), {
                 action: fence === "stop" ? "stop_supervision" : "detach",
                 session: Number(f.sources[0]),

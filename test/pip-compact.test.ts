@@ -28,6 +28,7 @@ import { FollowsDoc, PipCompactionDoc } from "../src/server/docs.ts";
 import { PAYLOAD_CLOSE, PAYLOAD_OPEN } from "../src/server/hooks.ts";
 import { fenced } from "../src/server/pip.ts";
 import {
+    contextTokens,
     leaveOutside,
     PIP_COMPACT_DEFAULT,
     SUMMARY_SYSTEM,
@@ -394,11 +395,36 @@ test("PiP compacts itself once idle above its threshold; not below it, nor when 
     await until(async () => (await count()) === had + 1, "PiP to compact itself");
     await until(async () => !(await compacting(id)), "the compaction over");
     assert.deepEqual(ownSummaries, []);
+    const conversation = await app.conversation(id);
+    const compacted = await conversation.context(context);
+    const head = compacted.head;
+
+    assert.ok(head);
+    assert.equal(head.kind, "pi.compaction");
 
     // Little has come since: the next run's end leaves it be, even over the threshold (the kept messages are long).
     await say(app, id, "Thanks.");
     await new Promise((resolve) => setTimeout(resolve, 400));
     assert.equal(await count(), had + 1);
+    const afterThanks = await conversation.context(context);
+
+    assert.equal(afterThanks.head?.id, head.id, "the same compaction remains the boundary");
+    assert.ok(contextTokens(afterThanks) > app.config.pipCompactAt, "still over the threshold");
+    assert.ok(
+        afterThanks.entries.some(
+            (entry, index) =>
+                entry.id > head.id &&
+                afterThanks.contributions[index]?.some((message) => message.role === "system"),
+        ),
+        "the real provider prompt was reissued after compaction, but is not conversational growth",
+    );
+
+    // Actual conversational growth, unlike a reissued prompt, earns another compaction.
+    await say(app, id, long.repeat(2));
+    await until(async () => (await count()) === had + 2, "new conversation to earn a compaction");
+    await until(async () => !(await compacting(id)), "the new compaction over");
+    assert.equal(await count(), had + 2);
+    assert.deepEqual(ownSummaries, []);
     app.config.pipCompactAt = undefined;
 });
 

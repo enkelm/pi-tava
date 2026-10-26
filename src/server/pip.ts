@@ -1705,8 +1705,18 @@ export class Pip {
         let cloning = source === undefined ? this.#cloning.get(info.repo) : undefined;
 
         if (cloning === undefined) {
-            // Not the repository's checkout, or the loop above had taken it: never clone into it.
             if (existsSync(clone)) {
+                // A clone may finish while this caller scans the other folders, then leave #cloning.
+                // Recheck the actual origin before rejecting a newly published checkout.
+                const origin = await originRepo(clone, source?.context);
+
+                await check();
+
+                if (sameRepo(origin, info.repo)) {
+                    return clone;
+                }
+
+                // Never clone into an unrelated existing directory.
                 throw new Error(
                     `${clone} is there but is not a checkout of ${info.repo}: move it away, then ask again.`,
                 );
@@ -2344,14 +2354,14 @@ export class Pip {
 
         // Paused PiP keeps its follows: a report waits for native execution and its live owner's authority,
         // like its schedules, watches, and hooks. Recheck after opening the conversation, just before submission.
-        for (;;) {
-            const person = this.#app.config.userById(input.userId);
+        const person = this.#app.config.userById(input.userId);
 
-            if (person !== undefined && this.available(person)) {
-                break;
-            }
-
-            await runtime.sleep(runtime.now() + this.holdMs, context);
+        if (person === undefined || !this.available(person)) {
+            return runtime.sleepUntil(
+                runtime.now() + this.holdMs,
+                { phase: "report", text },
+                context,
+            );
         }
 
         const requestId = requestFor(input.userId, `pip-report-${String(runtime.taskId)}`);

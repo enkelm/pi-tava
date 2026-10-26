@@ -8,6 +8,7 @@ import {
     InboxDoc,
     LiveDoc,
     UsageDoc,
+    UserEntry,
     defineTask,
     hook,
     type CommitPublication,
@@ -34,7 +35,7 @@ import {
 } from "../docs.ts";
 import { settledAssistantText } from "./outcomes.ts";
 import { HttpError, describe } from "../errors.ts";
-import { PIP_QUESTION_ENTRY } from "../entry-format.ts";
+import { isWorkItemEvent, PIP_QUESTION_ENTRY } from "../entry-format.ts";
 import { createSessionRoot } from "../session-roots.ts";
 import { HandoffsDoc, type WorkItem } from "../workflow-docs.ts";
 import { fenced, PIP_EXTENSIONS, PIP_NAME } from "../pip.ts";
@@ -69,7 +70,23 @@ export const WORK_TOOLS = [
 ];
 
 type InterruptedWork = { run?: TaskId; wake?: TaskId; inputs: SubmissionId[] };
-type WorkGeneration = { epoch: number; inputs?: number[] };
+type WorkGeneration = {
+    epoch: number;
+    inputs?: number[];
+    requests?: { id: number; requestId: string }[];
+};
+type WorkWakeInput = {
+    controller: number;
+    /** Immutable assignment/event binding; absent on historical wake tasks. */
+    assignment?: {
+        requestId: string;
+        submissionId: number;
+        epoch: number;
+        sequence: number;
+        source: number;
+        fingerprint: string;
+    };
+};
 type ExecutionOutcome = {
     submission: number;
     entry: number;
@@ -93,8 +110,8 @@ export class PipSupervision {
         this.#app = app;
     }
 
-    readonly task: Task<{ controller: number }, { phase: "wake" }, null, object> = defineTask<
-        { controller: number },
+    readonly task: Task<WorkWakeInput, { phase: "wake" }, null, object> = defineTask<
+        WorkWakeInput,
         { phase: "wake" },
         null
     >({
@@ -1975,7 +1992,13 @@ export class PipSupervision {
                     this.#app.spend.check(user, api.conversationId);
                     const pin = await api.memo(
                         EPOCH,
-                        { epoch: grant.epoch, inputs: [...requests.keys()] },
+                        {
+                            epoch: grant.epoch,
+                            inputs: [...requests.keys()],
+                            requests: [...requests].flatMap(([id, requestId]) =>
+                                requestId === undefined ? [] : [{ id, requestId }],
+                            ),
+                        },
                         ctx,
                     );
 
@@ -2053,21 +2076,94 @@ export class PipSupervision {
         const assignment = (await tx.doc(PipWorkDoc, api.conversationId)).assignment;
         const pin = await this.#generation(tx, api);
 
-        if (
-            assignment?.epoch !== epoch ||
-            pin.epoch !== epoch ||
-            !pin.inputs?.includes(assignment.submissionId)
-        ) {
+        if (assignment?.epoch !== epoch || pin.epoch !== epoch) {
             return undefined;
         }
 
         const native = await tx.submissionByRequest(api.conversationId, assignment.requestId);
 
-        return native?.type === "input" &&
-            Number(native.id) === assignment.submissionId &&
-            native.entry !== undefined
-            ? assignment
-            : undefined;
+        if (
+            native?.type !== "input" ||
+            Number(native.id) !== assignment.submissionId ||
+            native.entry === undefined
+        ) {
+            return undefined;
+        }
+
+        if (pin.inputs?.includes(assignment.submissionId)) {
+            return assignment;
+        }
+
+        const item = (await tx.doc(HandoffsDoc)).workItems[
+            this.#app.sessionMeta(api.conversationId)!.pipWorkItemId!
+        ];
+
+        if (item?.supervisor?.conversationId !== Number(api.conversationId)) {
+            return undefined;
+        }
+
+        // A later event input must prove its exact wake task and the assignment that
+        // task observed. Never attach an old response to a merely current/latest contact.
+        for (const request of pin.requests ?? []) {
+            const match = /^p:[^:]+:work-wake-\d+-\d+-(\d+)$/.exec(request.requestId);
+            const taskId = Number(match?.[1]);
+
+            if (!pin.inputs?.includes(request.id) || !Number.isSafeInteger(taskId) || taskId <= 0) {
+                continue;
+            }
+
+            const task = await tx.task(taskId as TaskId);
+            const wake = task?.input as WorkWakeInput | undefined;
+            const bound = wake?.assignment;
+
+            if (
+                task?.kind !== this.task.definition.name ||
+                task.conversationId !== api.conversationId ||
+                wake?.controller !== Number(api.conversationId) ||
+                bound?.epoch !== epoch ||
+                bound.requestId !== assignment.requestId ||
+                bound.submissionId !== assignment.submissionId ||
+                request.requestId !==
+                    requestFor(
+                        item.supervisor.ownerId,
+                        clientKey(`work-wake-${epoch}-${bound.sequence}-${taskId}`),
+                    )
+            ) {
+                continue;
+            }
+
+            const input = await tx.submissionByRequest(api.conversationId, request.requestId);
+
+            if (
+                input?.type !== "input" ||
+                Number(input.id) !== request.id ||
+                input.entry === undefined ||
+                input.status === "unanswered"
+            ) {
+                continue;
+            }
+
+            const entry = await tx.entry(UserEntry, input.entry);
+            const message = entry?.model?.[0];
+            const part =
+                message?.role === "user" && Array.isArray(message.content)
+                    ? message.content[0]
+                    : undefined;
+            const event =
+                part?.type === "text" && "pocketAppEvent" in part ? part.pocketAppEvent : undefined;
+
+            if (
+                entry?.conversationId === api.conversationId &&
+                isWorkItemEvent(event) &&
+                event.source === bound.source &&
+                event.fingerprint === bound.fingerprint &&
+                item.threadIds.includes(event.source)
+            ) {
+                return assignment;
+            }
+        }
+
+        return undefined;
     }
 
     async perform<T>(
@@ -2822,16 +2918,34 @@ export class PipSupervision {
 
                         this.#app.spend.check(user, id);
                         current.sequence++;
-                        const requestId = `work-wake-${grant.epoch}-${current.sequence}`;
+                        const assignment = current.assignment;
                         const taskId = await tx.createTask(
                             this.task,
-                            { controller: Number(id) },
+                            {
+                                controller: Number(id),
+                                ...(assignment?.epoch === grant.epoch
+                                    ? {
+                                          assignment: {
+                                              requestId: assignment.requestId,
+                                              submissionId: assignment.submissionId,
+                                              epoch: assignment.epoch,
+                                              sequence: current.sequence,
+                                              source: observed.source,
+                                              fingerprint: observed.fingerprint,
+                                          },
+                                      }
+                                    : {}),
+                            },
                             {
                                 conversationId: id,
                                 ownership: { kind: "conversation" },
                                 background: true,
                             },
                         );
+
+                        // The protocol key names this recorded task, not message text or
+                        // a mutable delivery cursor. Replays retain the pending exact key.
+                        const requestId = `work-wake-${grant.epoch}-${current.sequence}-${Number(taskId)}`;
 
                         current.pending = {
                             ...observed,

@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import type {
-    ConversationId,
-    EntryId,
-    EntryRecord,
-    Seq,
-    Storage,
-    SubmissionQuery,
-    SubmissionRecord,
+import type { Context } from "@earendil-works/chord";
+import {
+    MemoryStorage,
+    type ConversationId,
+    type EntryId,
+    type EntryRecord,
+    type Seq,
+    type SubmissionQuery,
+    type SubmissionRecord,
 } from "@earendil-works/pi-durable";
 import { PipWorkDoc } from "../src/server/docs.ts";
 import { PipSupervision } from "../src/server/pip/supervision.ts";
@@ -44,7 +45,11 @@ test("native busy handoff stays passive; distinct equal-text outcomes wake once 
         if (system.includes("the private supervisor for Work Item")) {
             calls++;
 
-            return calls === 1
+            if (calls === 1) {
+                return tool("work_context", { session: Number(source), action: "thread" });
+            }
+
+            return calls === 2
                 ? tool("handoff", {
                       action: "start",
                       session: Number(source),
@@ -97,19 +102,19 @@ test("native busy handoff stays passive; distinct equal-text outcomes wake once 
     };
 
     await until(
-        () => researcherStarted && calls >= 2 && !app.isBusy(controller),
+        () => researcherStarted && calls >= 3 && !app.isBusy(controller),
         "busy research and controller wait",
     );
     await reconcile();
-    assert.equal(calls, 2, "a newly busy active member must not buy another model response");
+    assert.equal(calls, 3, "a newly busy active member must not buy another model response");
     const researcher = app.workItems.itemFor(source)!.activeThreadId as ConversationId;
 
     assert.notEqual(researcher, source);
     assert.equal(app.isBusy(researcher), true);
     held.resolve();
-    await until(() => calls >= 3 && !app.isBusy(controller), "one meaningful research outcome");
+    await until(() => calls >= 4 && !app.isBusy(controller), "one meaningful research outcome");
     await reconcile();
-    assert.equal(calls, 3);
+    assert.equal(calls, 4);
     const first = await app.pip.orchestration.contribution(researcher);
 
     assert.equal(first?.status, "done");
@@ -124,7 +129,7 @@ test("native busy handoff stays passive; distinct equal-text outcomes wake once 
     );
 
     await followUp.wait(context);
-    await until(() => calls >= 4 && !app.isBusy(controller), "the distinct equal-text outcome");
+    await until(() => calls >= 5 && !app.isBusy(controller), "the distinct equal-text outcome");
     await reconcile();
     const second = await app.pip.orchestration.contribution(researcher);
 
@@ -132,7 +137,7 @@ test("native busy handoff stays passive; distinct equal-text outcomes wake once 
     assert.notEqual(second?.submission, first?.submission);
     assert.ok(first?.status === "done" && second?.status === "done");
     assert.notEqual(second.answer, first.answer, "equal prose never becomes an outcome identity");
-    assert.equal(calls, 4);
+    assert.equal(calls, 5);
     const inspected = await app.pip.orchestration.inspect(source, owner(app));
 
     assert.equal(inspected.orchestration?.lastWake?.reason, "outcome");
@@ -148,7 +153,7 @@ test("native busy handoff stays passive; distinct equal-text outcomes wake once 
     await reconcile();
     assert.equal(
         calls,
-        4,
+        5,
         "native receipts recover both consumed outcomes without another model input",
     );
     assert.deepEqual(await app.pip.orchestration.contribution(researcher), second);
@@ -167,7 +172,7 @@ test("one failed native answer read does not poison other sources or later recov
     const source = await newSession(app);
     const other = await newSession(app);
     const records: (SubmissionRecord & { type: "input"; status: "done" })[] = [];
-    const entries = new Map<EntryId, EntryRecord | undefined>();
+    const entries = new Map<number, EntryRecord | undefined>();
 
     for (const id of [source, other]) {
         const conversation = await app.conversation(id);
@@ -186,22 +191,28 @@ test("one failed native answer read does not poison other sources or later recov
 
     let fail = true;
     const failure = new Error("Injected native entry read failure");
-    const storage = {
-        scanSubmissions: async (query: SubmissionQuery) => ({
-            items: records.filter((record) => record.conversationId === query.conversationId),
-        }),
-        entry: async (id: EntryId) => {
-            if (id === records[0]!.answer && fail) {
+    const storage = new MemoryStorage();
+
+    t.mock.method(storage, "scanSubmissions", async (query: SubmissionQuery) => ({
+        items: records.filter((record) => record.conversationId === query.conversationId),
+    }));
+    t.mock.method(
+        storage,
+        "entry",
+        async (id: EntryId | ConversationId, entryOrContext: EntryId | Context) => {
+            const entryId = typeof entryOrContext === "number" ? entryOrContext : id;
+
+            if (entryId === records[0]!.answer && fail) {
                 fail = false;
 
                 throw failure;
             }
 
-            const entry = entries.get(id);
+            const entry = entries.get(entryId);
 
             return entry === undefined ? undefined : { entry, commitSeq: 1 as Seq };
         },
-    } as Storage;
+    );
 
     await projection.recover(storage);
     await assert.rejects(projection.contribution(source), failure);

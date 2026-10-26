@@ -7,13 +7,15 @@ A tool is a function that Pi can call. Pi gets the name, the description, and th
 Use `defineTool` from `@earendil-works/pi-durable`, and give the tool to your extension:
 
 ```typescript
+export const durableToolApi = 2;
+
 const wordCount = defineTool({
     name: "my_word_count",
     description: "Count the words in a text.",
     parameters: Type.Object({ text: Type.String({ description: "The text to count" }) }),
     replay: "safe",
     execute: async (args) => ({
-        content: [{ type: "text" as const, text: `${countWords(args.text)} words` }],
+        output: [{ type: "text" as const, text: `${countWords(args.text)} words` }],
     }),
 });
 
@@ -27,11 +29,27 @@ export default function createMyWords() {
 - `parameters` is a TypeBox schema (`Type` from `@earendil-works/pi-ai`). Pi Durable checks the arguments against it before `execute` runs.
 - `execute(args, api, context)` does the work.
 
+## Declare the tool ABI
+
+A drop-in that provides tools, wraps a tool, or installs an `afterTool` hook must export
+`durableToolApi = 2`. This declares the output-based Pi Durable 1.4 ABI; it is not the app's
+web/browser `pocketApi`, which remains 1. Missing or unsupported declarations fail loading with a
+migration error before any returned extensions or staged web registrations install. A failed edit
+leaves the previous version installed. The declaration is an author's compatibility promise, not
+validation of the tool's code.
+
+When migrating, change tool execution results and result-reading wrappers/hooks from `content` to
+`output`, and review intercepted streaming output as described below. Do not rename transcript,
+artifact or agent-core `content`. Add explicit `checkpointWhen` policies to document definitions
+without changing their stored kind, version, scope, history or fork settings. There is no old-result
+conversion layer. See [API versions](reference/api-versions.md#pi-durable-14-cutover-unreleased).
+
 ## Return a result
 
-- Return `{ content: [{ type: "text", text }] }`. The model reads the text.
+- Return `{ output: [{ type: "text", text }] }`. The model reads the text. This is the Pi Durable 1.4 tool ABI, not the `content` field of transcript/model messages or agent-core tool results.
+- A declared `structuredOutputSchema` can additionally provide validated `structuredOutput` for programmatic callers. Without a schema, omit `structuredOutput`.
 - To give the model an error, throw an `Error`. The model gets its message as an error result.
-- `api.output(text)` streams output while the tool runs. When `execute` returns no `content`, this output becomes the result.
+- `api.output(text)` streams output while the tool runs. When `execute` returns no `output`, this output becomes the result. A wrapper that captures or transforms output must replace `outputWindow` with `undefined` and supply its own matching `retainedOutput()`.
 
 ## Restarts and replays
 

@@ -17,7 +17,7 @@ import {
 } from "./helpers.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
@@ -533,7 +533,12 @@ test("nothing is watched, nor worked on, in a repository gh cannot push to", asy
     await say(
         app,
         id,
-        JSON.stringify({ tool: "session_start", repo: "stranger/x", message: "hello" }),
+        JSON.stringify({
+            tool: "session_start",
+            threadType: "chat",
+            repo: "stranger/x",
+            message: "hello",
+        }),
     );
     assert.match(await answer(id), /cannot push to stranger\/x/);
     assert.deepEqual(await watches(), []);
@@ -563,10 +568,21 @@ test("PiP starts a session in a repository: its checkout here, or a clone made o
     writeFileSync(join(here, "README.md"), "here\n");
     await app.commands.createSession(owner(app), { cwd: here });
 
-    await say(app, id, JSON.stringify({ tool: "session_start", repo: "acme/here", title: "Here" }));
+    await say(
+        app,
+        id,
+        JSON.stringify({
+            tool: "session_start",
+            threadType: "chat",
+            repo: "acme/here",
+            title: "Here",
+        }),
+    );
     const used = app.sessions().find((session) => session.title === "Here");
 
-    assert.equal(app.cwdOf(used!.id as unknown as ConversationId), here);
+    assert.ok(used, await answer(id));
+    assert.equal(app.sessionMeta(used.id as ConversationId)?.threadType, "chat");
+    assert.equal(app.cwdOf(used.id as ConversationId), realpathSync(here));
     assert.ok(!github.calls.some((call) => call[0] === "repo"), "nothing cloned");
 
     // None here: cloned into the data folder, once, however often asked.
@@ -578,7 +594,19 @@ test("PiP starts a session in a repository: its checkout here, or a clone made o
     assert.equal(first, second);
     assert.equal(first, join(app.dataDir, "repos", "acme", "clone-me"));
     assert.equal(github.calls.filter((call) => call[0] === "repo").length, 1);
-    assert.equal(await app.pip.checkout(id, "acme/clone-me"), first, "found again, not cloned");
+    assert.equal(
+        await app.pip.checkout(id, "acme/clone-me"),
+        realpathSync(first),
+        "found again, not cloned",
+    );
+    assert.equal(github.calls.filter((call) => call[0] === "repo").length, 1);
+
+    // Rechecking a newly present clone must not trust an unrelated existing directory.
+    const occupied = join(app.dataDir, "repos", "acme", "occupied");
+
+    mkdirSync(occupied);
+    github.push.set("acme/occupied", true);
+    await assert.rejects(app.pip.checkout(id, "acme/occupied"), /is there but is not a checkout/);
     assert.equal(github.calls.filter((call) => call[0] === "repo").length, 1);
 });
 

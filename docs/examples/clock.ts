@@ -7,6 +7,8 @@ import { defineDoc, defineExtension, defineTool } from "@earendil-works/pi-durab
 // A type import is gone when the module runs. In the drop-in folder, import the types from "./_pocket.d.ts".
 import type { Web } from "../../types/pocket.d.ts";
 
+export const durableToolApi = 2;
+
 /** Each session's time zone, as /clock-zone set it. A document kind is stored data: named after the module. */
 const ClockSettings = defineDoc<{ zone?: string }>({
     kind: "x.clock.settings",
@@ -15,6 +17,8 @@ const ClockSettings = defineDoc<{ zone?: string }>({
     history: "latest",
     fork: "current",
     initial: () => ({}),
+    // An explicit policy is mandatory in Durable 1.4; this small example keeps every delta.
+    checkpointWhen: () => false,
 });
 
 const clock = defineTool({
@@ -46,7 +50,7 @@ const clock = defineTool({
             throw new Error(`There is no time zone ${zone}.`);
         }
 
-        return { content: [{ type: "text" as const, text: `${now} (${zone})` }] };
+        return { output: [{ type: "text" as const, text: `${now} (${zone})` }] };
     },
 });
 

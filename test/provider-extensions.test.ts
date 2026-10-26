@@ -27,10 +27,11 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { GenerationTask, LiveDoc, UsageDoc } from "@earendil-works/pi-durable";
+import { GenerationTask, Harness, LiveDoc, UsageDoc } from "@earendil-works/pi-durable";
 import { ConfigStore, type ProviderPackageRelease } from "../src/server/config.ts";
 import { createHandler } from "../src/server/http.ts";
 import { SessionsDoc } from "../src/server/docs.ts";
+import { ProviderExtensions } from "../src/server/provider-extensions.ts";
 
 after(cleanUp);
 
@@ -69,6 +70,16 @@ function retain(dataDir: string, version: string, broken = false): ProviderPacka
     }
 
     return { id, version, source: `npm:pi-provider-litellm@${version}` };
+}
+
+function enableHostedFixture(dataDir: string) {
+    const release = retain(dataDir, "4.2.0");
+    const config = new ConfigStore(dataDir);
+
+    config.setExtensionEnabled("pi-providers.ts", true);
+    config.providerPackages = {
+        packages: [{ name: "pi-provider-litellm", enabled: true, release }],
+    };
 }
 
 test("headless provider finalization reaches Durable usage, survives restart and falls back without repinning", async () => {
@@ -208,6 +219,135 @@ test("headless provider finalization reaches Durable usage, survives restart and
         3,
         "shutdown retains immutable rollback releases",
     );
+});
+
+test("SQLite startup failure disposes hosted providers without releasing an unconfirmed storage lock", async (t) => {
+    const dataDir = join(root, "sqlite-startup-failure");
+
+    enableHostedFixture(dataDir);
+    // A directory cannot be opened as a SQLite database. This fails after provider activation,
+    // before Harness.open, without manufacturing a storage receipt or touching live data.
+    mkdirSync(join(dataDir, "pocket.sqlite"));
+    const openProviders = ProviderExtensions.prototype.open;
+    let activated: ProviderExtensions | undefined;
+
+    // Capture the actual owner only for safe teardown if the regression fails: no app is returned.
+    t.mock.method(ProviderExtensions.prototype, "open", async function (this: ProviderExtensions) {
+        activated = this;
+        await openProviders.call(this);
+    });
+
+    try {
+        await assert.rejects(openApp(scriptedModel(), dataDir));
+        assert.deepEqual(
+            readdirSync(join(dataDir, "provider-packages", "hosts")),
+            [],
+            "failed database startup must still dispose the activated provider hosts",
+        );
+        assert.equal(readFileSync(join(dataDir, "harness.lock"), "utf8"), `${process.pid}\n`);
+    } finally {
+        await activated?.close();
+    }
+});
+
+test("a failed partial Harness opening retains dependent providers and the storage lock", async (t) => {
+    const dataDir = join(root, "partial-harness-opening");
+
+    enableHostedFixture(dataDir);
+    const openProviders = ProviderExtensions.prototype.open;
+    const openHarness = Harness.open.bind(Harness);
+    let activated: ProviderExtensions | undefined;
+    let partial: Harness | undefined;
+
+    t.mock.method(ProviderExtensions.prototype, "open", async function (this: ProviderExtensions) {
+        activated = this;
+        await openProviders.call(this);
+    });
+    t.mock.method(Harness, "open", async (...args: Parameters<typeof Harness.open>) => {
+        partial = await openHarness(...args);
+
+        throw new Error("fixture opening failed after acquiring native Harness ownership");
+    });
+
+    try {
+        await assert.rejects(openApp(scriptedModel(), dataDir));
+        assert.ok(partial, "the failure must occur after a real Harness owns storage");
+        assert.ok(readdirSync(join(dataDir, "provider-packages", "hosts")).length > 0);
+        assert.equal(readFileSync(join(dataDir, "harness.lock"), "utf8"), `${process.pid}\n`);
+    } finally {
+        // The app has no returned handle and cannot certify settlement. Only this fixture
+        // knows the partial owner, so join it before disposing the captured provider hosts.
+        await partial?.close(context);
+        await activated?.close();
+    }
+});
+
+test("unconfirmed Harness shutdown preserves providers, browsers and the storage lock", async (t) => {
+    const dataDir = join(root, "storage-close-failure");
+
+    enableHostedFixture(dataDir);
+    const app = await openApp(scriptedModel(), dataDir);
+    const provider = app.models.getProvider("litellm");
+    const closeHarness = app.harness.close.bind(app.harness);
+    const closeBrowsers = app.browsers.closeAll.bind(app.browsers);
+    const browserClose = t.mock.method(app.browsers, "closeAll", closeBrowsers);
+    const failedClose = t.mock.method(app.harness, "close", async () => {
+        throw new Error("fixture storage close failed before native-work settlement");
+    });
+
+    try {
+        assert.ok(provider);
+        await assert.rejects(app.close(), AggregateError);
+        assert.equal(app.models.getProvider("litellm"), provider);
+        assert.ok(readdirSync(join(dataDir, "provider-packages", "hosts")).length > 0);
+        assert.equal(browserClose.mock.callCount(), 0, "browser resources outlive unjoined work");
+        assert.equal(readFileSync(join(dataDir, "harness.lock"), "utf8"), `${process.pid}\n`);
+    } finally {
+        failedClose.mock.restore();
+        browserClose.mock.restore();
+        // This test owns the app. Settle its real Harness before disposing retained resources;
+        // app.close() deliberately retains its original failed outcome, not a cleanup retry.
+        await closeHarness(context);
+        await app.providerExtensions.close();
+        await closeBrowsers({ final: true });
+    }
+});
+
+test("SSH and private-session cleanup errors do not skip independent storage and provider cleanup", async (t) => {
+    const dataDir = join(root, "independent-cleanup-failure");
+
+    enableHostedFixture(dataDir);
+    const app = await openApp(scriptedModel(), dataDir);
+    const closeSsh = app.sshSessions.close.bind(app.sshSessions);
+    const closePrivate = app.privateSessions.close.bind(app.privateSessions);
+
+    t.mock.method(app.sshSessions, "close", async () => {
+        await closeSsh();
+
+        throw new Error("fixture SSH cleanup failure");
+    });
+    t.mock.method(app.privateSessions, "close", async () => {
+        await closePrivate();
+
+        throw new Error("fixture private-session cleanup failure");
+    });
+
+    try {
+        await assert.rejects(app.close(), AggregateError);
+        assert.equal(app.models.getProvider("litellm"), undefined);
+        assert.deepEqual(readdirSync(join(dataDir, "provider-packages", "hosts")), []);
+        assert.equal(existsSync(join(dataDir, "harness.lock")), false);
+        const reopened = await openApp(scriptedModel(), dataDir);
+
+        await reopened.close();
+    } finally {
+        // Also settle the real resources if the regression fails before app.close reaches them.
+        await closeSsh();
+        await closePrivate();
+        await app.harness.close(context);
+        await app.providerExtensions.close();
+        await app.browsers.closeAll({ final: true });
+    }
 });
 
 test("an invalid first activation keeps recovery controls available without installing another provider", async () => {

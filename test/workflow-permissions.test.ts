@@ -101,7 +101,8 @@ async function fixture(threadType: "worker" | "chat" = "worker") {
 import {writeFileSync} from 'node:fs';
 import {Type} from '@earendil-works/pi-ai';
 import {defineExtension, defineTool} from '@earendil-works/pi-durable';
-export default function(){return defineExtension({name:'workflow-test-extension',tools:[defineTool({name:'unclassified-network-tool',description:'Fixture',parameters:Type.Object({}),execute:async()=>{writeFileSync(${JSON.stringify(join(cwd, "extension-executed"))},'mutated');return {content:[{type:'text',text:'executed'}]}}})]})}
+export const durableToolApi = 2;
+export default function(){return defineExtension({name:'workflow-test-extension',tools:[defineTool({name:'unclassified-network-tool',description:'Fixture',parameters:Type.Object({}),execute:async()=>{writeFileSync(${JSON.stringify(join(cwd, "extension-executed"))},'mutated');return {output:[{type:'text',text:'executed'}]}}})]})}
 `,
     );
     const app = await openApp(model, dataDir);

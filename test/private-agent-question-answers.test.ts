@@ -1,8 +1,13 @@
-// Offline native registration/admission proof; only model decisions are scripted.
+// Offline app admission through native nested codemode; only model decisions are scripted.
 import assert from "node:assert/strict";
 import { after, test, type TestContext } from "node:test";
 import { join } from "node:path";
-import type { ConversationId } from "@earendil-works/pi-durable";
+import {
+    ToolTask,
+    type ConversationId,
+    type TaskId,
+    type ToolTaskInput,
+} from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { awaitWithContext, withAbortSignal } from "@earendil-works/chord/context";
 import {
@@ -48,18 +53,20 @@ async function questioning(
 
             if (system.includes("the owner's persistent private agent")) {
                 if (last.role === "user") {
+                    const args =
+                        reply === undefined
+                            ? {
+                                  action: "send",
+                                  session: Number(controller),
+                                  text: "Clarify the existing investigation scope.",
+                              }
+                            : { action: "answer", ...reply };
+
                     return fauxAssistantMessage(
                         [
-                            fauxToolCall(
-                                "agent_work",
-                                reply === undefined
-                                    ? {
-                                          action: "send",
-                                          session: Number(controller),
-                                          text: "Clarify the existing investigation scope.",
-                                      }
-                                    : { action: "answer", ...reply },
-                            ),
+                            fauxToolCall("codemode", {
+                                code: `return await tools.agent_work(${JSON.stringify(args)});`,
+                            }),
                         ],
                         { stopReason: "toolUse" },
                     );
@@ -139,12 +146,22 @@ async function questioning(
         );
         const entries = await app.transcripts.allEntries(chat, true);
         const result = entries.findLast(
-            (entry) => entry.kind === "toolResult" && entry.name === "agent_work",
+            (entry) => entry.kind === "toolResult" && entry.name === "codemode",
         );
 
         assert.ok(result?.kind === "toolResult");
 
-        return result;
+        if (result.isError) {
+            return result;
+        }
+
+        const marker = "Output:\n";
+        const output = result.text.indexOf(marker);
+
+        assert.notEqual(output, -1, result.text);
+
+        // Decode the actual nested tool's returned text, not a provider-supplied receipt.
+        return { ...result, text: result.text.slice(output + marker.length).trim() };
     };
 
     return { app, source, controller, chat, questionId, answer, received, executions };
@@ -152,7 +169,7 @@ async function questioning(
 
 // Existing coverage establishes that ordinary controller contact is blocked, but cannot express a
 // correlated, attributed private-agent answer or its request retry lifecycle.
-test("a private agent answers the exact native question without impersonating its owner, and retries only its accepted payload", async (t) => {
+test("a private agent answers the exact native question through nested codemode without impersonating its owner, and retries only its accepted payload", async (t) => {
     let target!: ConversationId;
     let turns = 0;
     const f = await questioning(t, "native-agent-question-answer", async () =>
@@ -239,9 +256,44 @@ test("a private agent answers the exact native question without impersonating it
         app.pip.agents.scope(chat)!.agentId,
         "answer retains rather than reclaims its current parent grant",
     );
-    const stored = Object.values(
+    const replies = Object.values(
         (await app.harness.snapshot(AgentSupervisionDoc, context))!.questionAnswers!,
-    )[0]!;
+    );
+
+    assert.equal(replies.length, 1, "one real nested invocation owns the answer receipt");
+    const stored = replies[0]!;
+    const sourceTask = await app.harness.getTask(stored.sourceTaskId as TaskId, context);
+
+    assert.ok(sourceTask);
+    assert.equal(sourceTask.kind, ToolTask.definition.name);
+    assert.equal(sourceTask.conversationId, chat);
+    const input = sourceTask.input as ToolTaskInput;
+
+    assert.ok(input.kind === "nested", "the answer did not bypass native codemode dispatch");
+    assert.equal(input.call.name, "agent_work");
+    assert.deepEqual(input.call.arguments, {
+        action: "answer",
+        session: Number(controller),
+        questionId,
+        text: "Clarity only; do not implement.",
+    });
+    assert.equal(sourceTask.owner, input.parent);
+    assert.equal(
+        stored.sourceCallId,
+        input.call.id,
+        "the durable answer binds the native nested call ID, not the outer codemode call ID",
+    );
+    const parentTask = await app.harness.getTask(input.parent, context);
+
+    assert.ok(parentTask);
+    const parentInput = parentTask.input as ToolTaskInput;
+
+    assert.ok(parentInput.kind === "model");
+    assert.equal(input.parentCallId, parentInput.callId);
+    assert.notEqual(stored.sourceCallId, parentInput.callId);
+    assert.equal(stored.status, "accepted");
+    assert.equal(stored.requestId, receipt.requestId);
+    assert.equal(stored.submissionId, receipt.submissionId);
     const { status: _status, submissionId: _submission, reason: _reason, ...intent } = stored;
     const retry = () =>
         app.pip.orchestration.answerFromAgent(controller, owner(app), intent, sender!);
@@ -628,51 +680,102 @@ test("a newer actually accepted owner input fences an admitted agent reply befor
     );
 });
 
-test("owner access loss between prepared agent reply and native admission cannot wake the controller", async (t) => {
-    const f = await questioning(t, "native-agent-answer-access-loss");
-    const { app, controller, chat, questionId } = f;
-    const original = app.pip.orchestration.answerFromAgent.bind(app.pip.orchestration);
-    let entered!: () => void;
-    let release!: () => void;
-    const atAdmission = new Promise<void>((resolve) => {
-        entered = resolve;
+for (const fence of ["owner-token", "source-stop", "controller-reclaim"] as const) {
+    test(`${fence} between prepared nested agent reply and native admission cannot wake the controller`, async (t) => {
+        const f = await questioning(t, `native-agent-answer-${fence}`);
+        const { app, source, controller, chat, questionId } = f;
+        const original = app.pip.orchestration.answerFromAgent.bind(app.pip.orchestration);
+        let prepared: AgentQuestionAnswerIntent | undefined;
+        let release!: () => void;
+        let stopping: Promise<void> | undefined;
+        const held = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+
+        // Delay, but do not replace, production acceptance. The real registered nested
+        // tool must save its own intent before any native authority is revoked.
+        app.pip.orchestration.answerFromAgent = async (...args) => {
+            prepared = args[2];
+            await held;
+
+            return original(...args);
+        };
+
+        const answering = f.answer();
+
+        // Keep a failed source invocation observable by the awaited promise without an
+        // unhandled rejection while we wait for its actual admission boundary.
+        void answering.catch(() => {});
+
+        try {
+            await until(
+                () => prepared !== undefined,
+                "real nested answer reaches native admission",
+            );
+            const pending = Object.values(
+                (await app.harness.snapshot(AgentSupervisionDoc, context))!.questionAnswers!,
+            ).find((receipt) => receipt.requestId === prepared!.requestId)!;
+
+            assert.ok(pending, "the provider did not fabricate an answer receipt");
+            assert.equal(pending.status, "pending");
+            assert.equal(pending.submissionId, undefined);
+            assert.equal(
+                (await app.harness.snapshot(PipWorkDoc, controller, context))!.question!.answer,
+                undefined,
+            );
+
+            if (fence === "owner-token") {
+                app.config.rotateOwnerToken();
+                assert.notEqual(app.config.userById(pending.ownerId)!.tokenHash, pending.tokenHash);
+            } else if (fence === "source-stop") {
+                // Stop updates the real source epoch before joining the held native tool.
+                // Release that tool only after the fence is visible, then await both tasks.
+                stopping = app.commands.abort(chat, owner(app));
+                void stopping.catch(() => {});
+                await until(
+                    () => app.pip.agents.identity(chat)!.epoch > pending.agentEpoch,
+                    "human Stop revokes the prepared source identity epoch",
+                );
+            } else {
+                await app.pip.orchestration.control(controller, owner(app), { action: "pause" });
+                const state = (await app.harness.snapshot(AgentSupervisionDoc, context))!;
+                const attachment = state.agents[pending.agentId]!.attachments[pending.workItemId]!;
+
+                assert.ok(
+                    app.workItems.itemFor(source)!.supervisor!.epoch > pending.controllerEpoch,
+                );
+                assert.ok(attachment.epoch > pending.attachmentEpoch);
+                assert.equal(
+                    attachment.active,
+                    false,
+                    "human reclaim revokes the actual attachment",
+                );
+            }
+
+            release();
+            await answering;
+            await stopping;
+            await until(() => !app.isBusy(chat), "revoked nested source settles");
+            assert.equal(f.received.length, 0);
+            assert.equal(
+                (await app.harness.snapshot(PipWorkDoc, controller, context))!.question!.id,
+                questionId,
+            );
+            const stored = Object.values(
+                (await app.harness.snapshot(AgentSupervisionDoc, context))!.questionAnswers!,
+            ).find((receipt) => receipt.requestId === pending.requestId)!;
+
+            assert.notEqual(stored.status, "accepted");
+            assert.equal(stored.submissionId, undefined);
+            const native = await app.harness.commit(
+                (tx) => tx.submissionByRequest(controller, stored.requestId),
+                context,
+            );
+
+            assert.equal(native, undefined, "no revoked native input was admitted");
+        } finally {
+            release();
+            await Promise.allSettled([answering, ...(stopping === undefined ? [] : [stopping])]);
+        }
     });
-    const held = new Promise<void>((resolve) => {
-        release = resolve;
-    });
-
-    // Delay, but do not replace, the actual production acceptance method. Authority is
-    // revoked after the registered tool saves its real intent and before native admission.
-    app.pip.orchestration.answerFromAgent = async (...args) => {
-        entered();
-        await held;
-
-        return original(...args);
-    };
-
-    t.after(release);
-    const answering = f.answer();
-
-    await atAdmission;
-    app.config.rotateOwnerToken();
-    release();
-    await answering;
-    await until(() => !app.isBusy(chat), "revoked source settles");
-    assert.equal(f.received.length, 0);
-    assert.equal(
-        (await app.harness.snapshot(PipWorkDoc, controller, context))!.question!.id,
-        questionId,
-    );
-    const stored = Object.values(
-        (await app.harness.snapshot(AgentSupervisionDoc, context))!.questionAnswers!,
-    )[0]!;
-
-    assert.notEqual(stored.status, "accepted");
-    assert.equal(stored.submissionId, undefined);
-    const native = await app.harness.commit(
-        (tx) => tx.submissionByRequest(controller, stored.requestId),
-        context,
-    );
-
-    assert.equal(native, undefined, "no revoked native input was admitted");
-});
+}

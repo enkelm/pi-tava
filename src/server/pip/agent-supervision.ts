@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import { awaitWithContext, BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Context } from "@earendil-works/chord";
+import { copyJson, type Context } from "@earendil-works/chord";
 import {
     AgentDoc,
     GenerationTask,
@@ -38,6 +38,32 @@ const AGENT_EPOCH = "private-supervisor-epoch";
 const PARENT_REQUEST = "private-parent-request-started";
 const idOf = (id: number) => id as ConversationId;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+/** Only actual v1 records may retain a completed, untagged model call. */
+function sourceCallId(task: { version: number; input: unknown }): string | undefined {
+    if (task.input === null || typeof task.input !== "object") {
+        return undefined;
+    }
+
+    const input = task.input as Record<string, unknown>;
+
+    if (input.kind === "nested") {
+        const call = input.call;
+
+        return call !== null &&
+            typeof call === "object" &&
+            "id" in call &&
+            typeof call.id === "string"
+            ? call.id
+            : undefined;
+    }
+
+    if (input.kind === "model" || (task.version === 1 && input.kind === undefined)) {
+        return typeof input.callId === "string" ? input.callId : undefined;
+    }
+
+    return undefined;
+}
 
 export type AgentAttachment = {
     workItemId: string;
@@ -253,6 +279,8 @@ export class AgentSupervision {
     readonly #app: PocketApp;
     readonly #lanes = new Map<string, Promise<void>>();
     readonly #deliveries = new Map<string, Promise<void>>();
+    /** Core and historical private profiles can select the same veto in one invocation. */
+    readonly #parentRequestInvocations = new WeakSet<AbortSignal>();
     #doc: SupervisionData = { agents: {}, requests: {}, controls: {} };
     #identities: Record<string, PrivateIdentity> = {};
     #creates: Record<string, { id: number; input: string }> = {};
@@ -394,13 +422,10 @@ export class AgentSupervision {
     #status(identity: PrivateIdentity, doc: SupervisionData): SupervisionStatus {
         return {
             agentId: identity.agentId,
+            // This projection can leave a transaction and be saved in a later control
+            // receipt. Detach every nested field while the document draft is still live.
             attachments: Object.values(doc.agents[identity.agentId]?.attachments ?? {}).map(
-                (attachment) => ({
-                    ...attachment,
-                    ...(attachment.chatIds === undefined
-                        ? {}
-                        : { chatIds: [...attachment.chatIds] }),
-                }),
+                (attachment) => copyJson(attachment) as AgentAttachment,
             ),
             reports: Object.values(doc.outbox ?? {})
                 .filter((report) => report.agentId === identity.agentId)
@@ -2141,7 +2166,11 @@ export class AgentSupervision {
                 await this.#app.harness.commit(async (tx) => {
                     const task = (await tx.doc(AgentSupervisionDoc)).parentTasks?.[pin.parentTask!];
 
-                    if (task?.wake?.id !== pin.wakeId) {
+                    if (
+                        task === undefined ||
+                        task.wake === undefined ||
+                        task.wake.id !== pin.wakeId
+                    ) {
                         return;
                     }
 
@@ -2351,7 +2380,13 @@ export class AgentSupervision {
                     }
 
                     if (pin.parentTask !== undefined) {
-                        if (await api.memo<boolean>(PARENT_REQUEST, ctx)) {
+                        const invocationSignal = ctx.abortSignal;
+
+                        if (
+                            (await api.memo<boolean>(PARENT_REQUEST, ctx)) &&
+                            (invocationSignal === undefined ||
+                                !this.#parentRequestInvocations.has(invocationSignal))
+                        ) {
                             const reason =
                                 "Parent provider request was interrupted or uncertain; inspect its native input. No automatic regeneration.";
 
@@ -2377,8 +2412,15 @@ export class AgentSupervision {
 
                         // Native request phases can replay after a crash. Commit uncertainty
                         // before calling the provider; a successor tool round has a new task.
+                        // A repeated selection in this invocation is not a replay. Its native
+                        // Context signal is not retained across invocations. An absent signal
+                        // cannot exempt a repeated request from the uncertainty guard.
                         // This may conservatively hold an unstarted request, not promise exactly once.
                         await api.memo(PARENT_REQUEST, true, ctx);
+
+                        if (invocationSignal !== undefined) {
+                            this.#parentRequestInvocations.add(invocationSignal);
+                        }
                     }
 
                     return undefined;
@@ -2486,7 +2528,7 @@ export class AgentSupervision {
                             ? await this.#answerQuestion(api, args, ctx)
                             : await this.contact(api, args, ctx);
 
-                return { content: [{ type: "text", text: JSON.stringify(result) }] };
+                return { output: [{ type: "text", text: JSON.stringify(result) }] };
             },
         }),
     ];
@@ -2771,7 +2813,7 @@ export class AgentSupervision {
         if (
             sourceTask?.kind !== ToolTask.definition.name ||
             sourceTask.conversationId !== idOf(intent.sourceConversationId) ||
-            (sourceTask.input as { callId?: string }).callId !== intent.sourceCallId
+            sourceCallId(sourceTask) !== intent.sourceCallId
         ) {
             throw new HttpError(409, "The exact question-answer invocation changed.");
         }
@@ -2966,7 +3008,7 @@ export class AgentSupervision {
         if (
             task?.kind !== ToolTask.definition.name ||
             task.conversationId !== idOf(intent.sourceConversationId) ||
-            (task.input as { callId?: string }).callId !== intent.sourceCallId ||
+            sourceCallId(task) !== intent.sourceCallId ||
             task.abortRequested ||
             (task.state.status === "terminal" && task.state.outcome.status !== "completed")
         ) {

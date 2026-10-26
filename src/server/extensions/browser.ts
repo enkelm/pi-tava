@@ -456,7 +456,7 @@ export default function createBrowser(host: PocketHost) {
             }
 
             return {
-                content,
+                output: content,
                 ...(failed ? { isError: true } : {}),
                 details: {
                     action,

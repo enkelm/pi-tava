@@ -11,6 +11,12 @@ Pi Durable owns the lasting state of conversations: conversations, entries, task
 
 Current-only app documents opt into `doc-checkpoint.ts`'s periodic bases. After 64 stored deltas, the next changing write stores a new base and Durable prunes earlier revisions. Existing long tails compact on their next change, not at startup. Document kinds, versions, scope, history and fork settings stay unchanged; this bounds replay work, not document size or family-member count.
 
+Pi Durable 1.4 owns the SQLite schema-1→2 migration, including the `sleeping` task status. The app
+supplies no migration SQL. Schedules and watches persist their next phase with `sleepUntil`; waking
+reruns that phase and its current access checks. Five consecutive cutoff restarts without committed
+progress park a task as `restart_limit`. A committed task-state change resets the streak, explicit
+retry clears parking, and graceful shutdown is not a cutoff.
+
 Some state lives in this process alone, and a restart forgets it. For example:
 
 - who is connected, typing, or away;
@@ -218,7 +224,7 @@ The owner-selected, restart-only compatibility module is a virtual Extensions ro
 
 Before Harness opening, `ProviderExtensions` opens public-loader/runner hosts in child processes with isolated Pi configuration and registers their native proxy providers into the existing `ModelRuntime`. Conversation lanes have independent extension state and serialize through final-message transformation; auxiliary requests get independent lanes. Required headers/payload/response/message events fail closed, and terminal event and result share the transformed message before Durable persists usage. This is a supported API-key chat profile, not general Pi-extension parity or an OS sandbox. While the module is enabled, parent and worker runtimes use `modelsPath: null`; `models.json` overlays could otherwise select the SDK's unhosted global-API fallback. The file remains untouched and ordinary model configuration returns after disabling the module and restarting.
 
-A failed candidate is disposed before last-applied releases activate in fresh workers. Requested pins remain untouched. Without a usable fallback, the harness stays paused and non-recovery mutations are blocked, because Durable progress calls can enable scheduling independently of `resume()`. Owner provider/auth/restart controls and read-only views remain available. Shutdown joins Harness work before closing hosts/unregistering providers and deleting temporary settings homes; immutable releases remain for rollback. See [provider-extensions.md](provider-extensions.md).
+A failed candidate is disposed before last-applied releases activate in fresh workers. Requested pins remain untouched. Without a usable fallback, the harness stays paused and non-recovery mutations are blocked, because Durable progress calls can enable scheduling independently of `resume()`. Owner provider/auth/restart controls and read-only views remain available. Shutdown joins Harness work before closing hosts/unregistering providers and deleting temporary settings homes; immutable releases remain for rollback. Native telemetry spans stay in the parent process: they contain adapter functions and are not serialized into provider-host IPC. Unsupported function-valued request options still fail serialization. See [provider-extensions.md](provider-extensions.md).
 
 ## Who owns what
 
@@ -369,6 +375,12 @@ Successful receipts are keyed by actual task/call, bounded without eviction and 
 
 PiP's header model chip opens the existing picker with its own conversation ID and live view, not the session behind it. Its `pipPanel` configure request uses `Commands.configure`, checks private PiP ownership, and checks `LiveDoc.run` and compactions in the same commit as the model/thinking write. It leaves `lastModel` alone. Ordinary configure requests, including **Open as a conversation**, retain their behavior.
 
+Private compaction (`pip-compact.ts`) counts the full context toward its idle threshold, but only
+new conversation toward the post-compaction regrowth guard. Reissued system prompts and tool
+loadouts are not new conversation; retained pre-summary messages are not regrowth either. A small
+reply cannot buy another summary merely because the prompt and kept tail remain large. Substantial
+new conversation can, and a failed summary leaves outside/private material unsummarized.
+
 ## Work from outside the app
 
 A PR watch (`watches.ts`) is a `WatchDoc` in its session and a durable task there, which sleeps until its next look, looks with `gh` (`watches.gh`, which tests replace), and puts what to tell Pi in its checkpoint before sending it: the send's request id is the watch's task and count, so a restart sends it once. Comment ids told, and the commits whose failures and conflicts were told, stay in the watch. Webhooks (`hooks.ts`) are app-wide (`HooksDoc`); `/hook/…` is outside `/api` and its sign-in, and lets a post in only by its hook's secret. Both send through `Commands.submit` as their person, with a `via` that marks the message (`[via PR watch]`, `[via webhook NAME]`), so that person's checks and spend limit apply, and what came from outside is fenced (`fence.ts`, as PiP's session text is): no closing tag survives inside, in any case or spacing. A hook's address and secret are checked before its body is read. A signed hook (`signed`, for GitHub) lets a post in only by GitHub's signature: its secret is never in its address, so the address GitHub shows a repository's admins cannot post. Pi's `watch_pr` names a PR by number, which `gh` finds in the session's own repository, or one elsewhere by address only where `gh`'s account can push (`requirePush` in `github.ts`); what follows `--` is never an option.
@@ -426,6 +438,15 @@ A pending startup stop is honored before opening the app; a stop during opening 
 
 Work resumes last, so that everything that follows commits is listening before the first one comes.
 
+Shutdown attempts independent cleanup even when another resource rejects. Provider, execution and
+browser resources outlive native Harness work. Confirmed database closure is a separate fact: only
+that confirmation releases the acquisition-bound data-directory lock. A SQLite opening failure can
+leave closure unconfirmed without ever starting Harness work; unused providers can then dispose,
+while the lock remains. A partial Harness opening with no returned handle cannot certify native
+settlement, so both its dependent resources and lock remain. The lock identifies its acquisition
+and process generation where supported; stale/damaged recovery is conservative, not a distributed
+filesystem atomicity guarantee.
+
 ## The commit coordinator
 
 Pi Durable publishes each commit's changes in no set order. `#committed` handles them in two passes:
@@ -465,6 +486,34 @@ Each message sent to a subagent has a background reporter task. Its request ID m
 Explicit Stop is silent: it sends no automatic failure report to the parent. A stranded-input withdrawal is different and reports that the message must be sent again, including after a restart.
 
 The upstream batched courier is installed. Reporters append to `SubagentsDoc.outbox`; one durable `pocket.subagent-courier` task gathers them into a single message at the parent's next pause, waiting briefly when the parent is idle. Reports arriving while that batch is queued are merged into it, so the queue holds at most one report batch. `sending`, `batches`, and request IDs preserve delivery across restarts, and `held` explains reports waiting for a spend limit to be raised. Existing anchor and reporter task names, versions, and checkpoints remain compatible; the courier also accepts its older send checkpoint.
+
+## Codemode and native tool calls
+
+The fork's `extensions/codemode.ts` retains its QuickJS script, output budget and conversation store.
+Its tool is model-only. Scripts see the resolved agent's `callable` tools, not just the subset offered
+to the model. Each call uses `api.executeTool`, giving it a genuine owned `ToolTask`, tagged nested
+input, native hooks, per-task memos, replay policy, bounded output and live nested slot. Scripts read
+`structuredOutput` (ordinary schema-less text tools still return strings); `output` remains the model
+channel and `details` the UI channel. Transcript, artifact and agent-core `content` are not aliases
+for the Durable result ABI.
+
+A terminal script aborts outstanding waits. Those waits alone do not settle the child tasks: native
+parent `ToolTask` settlement aborts and joins its remaining children before the parent becomes
+terminal. Codemode separately joins actual worker exit using `onWorkerStarted`, rather than treating
+`sandbox.close()` as an exit receipt. A synchronous admission fence prevents a delayed wasm load
+from starting a worker after cleanup captured the exit joins. Unsafe scripts never replay after a
+cutoff; native child replay/abandonment follows Durable's recorded ownership rules.
+
+Reviewer findings retain the actual native child task/call identity. Model provenance comes from
+the current main generation's assistant entry, corroborated by task ownership and live model/nested
+slots. Only that model call or its genuine codemode child may publish; arbitrary nested calls and
+provider-authored call-ID prefixes do not grant Reviewer authority. Private source receipts likewise
+read the tagged native call ID while retaining already-accepted, stored-version-1 legacy receipts;
+missing/unknown version-2 tags do not gain that fallback. Private attachment status detaches nested
+JSON while its transaction is live, rather than leaking a retired Chord draft to later commits.
+Continuation outcomes from a later native work-event generation must link its actual placed input
+and server event metadata to the exact recorded wake task, accepted assignment and controller epoch.
+They cannot infer an assignment from prose, current position or an old wake at the same epoch.
 
 ## A request
 

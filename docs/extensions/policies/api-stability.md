@@ -20,7 +20,7 @@ Each item below is public as the reference and the guides describe it: its names
 
 - A `.ts` file in the drop-in folder (`extensions/` in the data folder), with the `node_modules` link to Pi Pocket's packages.
 - The default export `(host, web)`. It can be `async`. It returns one extension, a list, or nothing. Pi Pocket installs all of it or none of it.
-- `export const pocketApi`.
+- `export const pocketApi`, and the separate experimental `export const durableToolApi` for Durable tool-result participants.
 - The first sentence of the module's `/** … */` comment, which is its description.
 - Files that start with `_` or end in `.test.ts` are not modules.
 - Loading, reloading, and errors ([Modules, loading, and errors](../modules.md)), with the times in [Limits](../reference/limits.md#loading).
@@ -121,8 +121,17 @@ Extensions import `@earendil-works/pi-durable`, `@earendil-works/pi-ai`, and the
 
 - **A1. The release notes name each update of a pinned package** in "For extension authors".\
   _Reason:_ an author can then find the cause when a module breaks after an update.
-- **A2. When an update breaks a use that the guides document** (`defineTool`, `section`, `hook`, `api.memo`, `api.snapshot`, `wrapTool`, and the others), the notes tell what changed and how to change a module, and `pocketApi` goes up (A7).\
-  _Reason:_ authors learn these uses from Pi Pocket's docs, and they check one number for all that a module uses.
+- **A2. When an update breaks a use that the guides document**, the notes tell what changed and how to change a module. Breaking changes to the app-owned stable host/web/browser contract raise `pocketApi` (A7). The experimental Durable tool-result ABI instead uses explicit `durableToolApi` admission.\
+  _Reason:_ the pinned runtime ABI must be checked separately from the app's stable presentation API; accepting an older `pocketApi` cannot establish tool compatibility.
+
+**Pending 1.4 cutover policy change:** this narrows the previous A2 single-number promise. A drop-in
+with tools, tool wrappers or `afterTool` hooks must declare `durableToolApi = 2` and migrate results
+from `content` to `output`; unmarked or unsupported tool modules fail loading rather than silently
+losing output. No old-result alias or Durable-ABI deprecation interval is provided for this cutover.
+`pocketApi`, `web.api` and `pocket.version` stay at 1, with their stable app-member guarantees intact.
+Web-only modules and `beforeTool`-only guards retain their existing admission. This is a breaking
+policy/source change scheduled for the next minor release, not a patch-level or deployed change.
+See [migration and loader semantics](../reference/api-versions.md#pi-durable-14-cutover-unreleased).
 
 ## Stability levels
 
@@ -154,14 +163,14 @@ See [Deprecation](#deprecation).
 
 ### `pocketApi`
 
-- `POCKET_API` is one number for the whole public API, on the server and in the browser. `web.api` and `pocket.version` give it. It is 1 from Pi Pocket 0.14.0.
+- `POCKET_API` versions the app-owned host/web/browser API on both sides. `web.api` and `pocket.version` give it. It is 1 from Pi Pocket 0.14.0. The separately declared experimental Durable tool-result ABI is not this number (A2).
 - **A7. `pocketApi` goes up by one in a release that has a breaking change to a stable member.** A release with many breaking changes adds one.\
   _Reason:_ one number tells if a module can work, with no need to compare release numbers.
 - **A8. Additions do not change `pocketApi`. Changes to experimental members do not change it.**\
   _Reason:_ a number that moves for each addition says nothing about breaks.
 - A module's `pocketApi` export is the API version that the module was written for. Pi Pocket does not load a module that needs a newer API. It says so in the Extensions sheet. A gallery entry's `pocketApi` is the same number. The gallery hides an entry that needs a newer API.
 - **A9. Pi Pocket loads modules that were written for the previous `pocketApi` for at least the deprecation period ([A17](#minimum-time)).** After that, it refuses them with an error that tells the owner to update the module. A module with no `pocketApi` export counts as version 1.\
-  _Reason:_ authors get the same time to update as for one deprecated member, and an old module fails with a clear message, not at its first use of a member that is gone.
+  _Reason:_ authors get the same time to update as for one deprecated app member, and an old module fails with a clear message, not at its first use of a member that is gone. This does not admit an incompatible experimental Durable ABI: A2's separate check still applies.
 
 ### `minPocket` and additions
 

@@ -24,6 +24,7 @@ const Runs = defineDoc<{ count: number }>({
     history: "latest",
     fork: "current",
     initial: () => ({ count: 0 }),
+    checkpointWhen: () => false,
 });
 
 const FILE = "counter.ts";
@@ -32,6 +33,7 @@ import { defineDoc } from "@earendil-works/pi-durable";
 const Runs = defineDoc({
     kind: "x.counter.runs", version: 1, scope: "conversation", history: "latest", fork: "current",
     initial: () => ({ count: 0 }),
+    checkpointWhen: () => false,
 });
 const count = (ctx) => ctx.commit(async (tx) => { (await tx.doc(Runs, ctx.conversationId)).count++; });
 export default (_host, web) => {

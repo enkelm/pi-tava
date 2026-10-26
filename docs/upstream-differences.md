@@ -2,7 +2,7 @@
 
 This is the canonical status ledger for selective upstream intake. [FORK.md](../FORK.md) preserves the original provenance and license notices. This page records what the fork uses, changes, removes or might adopt later. It is not a claim of compatibility with an entire upstream release.
 
-Historical intake checked: **2026-10-21**, against local Git objects, current source and the intake handoff from `/s/134424`. That handoff selected the MCP dependency guarantee and relevant performance backports, not PiP prompts/model names. The owner later selected the narrow item #2 correctness and item #3 PWA/navigation changes recorded below; their integration evidence was updated **2026-10-26**. No new upstream fetch or whole-release assessment is implied. A recommendation here is neither implementation authorization nor an owner-approved rejection.
+Item #1 Pi 1.4 review and local integration updated **2026-10-26**; integration is in progress, not yet a main fast-forward. Historical intake checked: **2026-10-21**, against local Git objects, current source and the intake handoff from `/s/134424`. That handoff selected the MCP dependency guarantee and relevant performance backports, not PiP prompts/model names. The owner later selected the narrow item #2 correctness and item #3 PWA/navigation changes recorded below; their integration evidence was updated **2026-10-26**. No new upstream fetch or whole-release assessment is implied. A recommendation here is neither implementation authorization nor an owner-approved rejection.
 
 The MCP/performance batch is **locally committed and independently reviewed, not published or deployed**. Implementation commit: `6d2482f114f027961f8dc962d8ccb769e5db229f` on `main`. The bounded review repaired one compression-negotiation finding; validation gaps remain below. No server restart has been requested or performed for it.
 
@@ -25,9 +25,9 @@ The MCP/performance batch is **locally committed and independently reviewed, not
 
 | Aspect and change                                        | Status                                                                                         | Current position, provenance and revisit condition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime: Durable execution and Pi packages               | Inherited/adapted                                                                              | Durable remains the app-managed runtime. The Pi family stays pinned to **1.1.0**, with fork dependencies such as `pi-agent-core` and `esbuild` retained. See [package.json](../package.json), [architecture](architecture.md) and the historical 0.12.2 fixes in `FORK.md`. No blanket version upgrade.                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Runtime: direct MCP dependency                           | Local batch                                                                                    | Upstream `e91d3de` (0.15 intake) makes `@earendil-works/pi-mcp` a supported direct import. Coop pins **1.1.0**, deduplicated with coding-agent's existing dependency. [Package/lockfile](../package-lock.json), [drop-in contract](extensions/modules.md) and [drop-in tests](../test/dropins.test.ts). This is a client-library guarantee, **not a native MCP server/connection or credential manager**. Provider-host MCP remains disabled; no OAuth, gateway or management UI was added.                                                                                                                                                                                                                               |
-| Runtime: Pi 1.3 and tool-result migration                | Deferred                                                                                       | Upstream `55467b4`, `c6b0e9a` and API change `e8e330d` are separate from MCP/performance. Revisit for a required SDK capability or compatibility need, with an inventory of custom tools, hooks, provider hosting and stored/replayed results. Do not replace `content` with `output` indiscriminately.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Runtime: Durable execution and Pi packages               | Inherited/adapted                                 | Durable remains the app-managed runtime. The reviewed upgrade pins the seven direct Earendil packages to **1.4.0**, with fork dependencies such as `pi-agent-core` and `esbuild` retained. See [package.json](../package.json), [architecture](architecture.md) and the historical 0.12.2 fixes in `FORK.md`. No blanket version upgrade.                                                                                                                                                                                                   |
+| Runtime: direct MCP dependency                           | Local batch                                       | Upstream `e91d3de` (0.15 intake) makes `@earendil-works/pi-mcp` a supported direct import. The original batch pinned **1.1.0**; the current candidate pins **1.4.0**, deduplicated with coding-agent's dependency. [Package/lockfile](../package-lock.json), [drop-in contract](extensions/modules.md) and [drop-in tests](../test/dropins.test.ts). This is a client-library guarantee, **not a native MCP server/connection or credential manager**. Provider-host MCP remains disabled; no OAuth, gateway or management UI was added.                         |
+| Runtime: Pi 1.4 and tool-result migration                | Independently reviewed; local integration in progress | Owner-authorized 1.1→1.4 upgrade targets `4a080252f06caf63a525d7873c5d94d3c23887e0`. Current source, exact-1.4 validation and disposable migration/rollback evidence are recorded [below](#pi-14-upgrade-source-work-in-progress). Reviewer `/s/220348` found no introduced production defect after bounded test/docs repairs; the baseline controller follow-up and validation limits remain below. Local integration is in progress, not deployment.                                                                                                                                                 |
 | Storage: periodic document bases                         | Local batch                                                                                    | Adapted `cfe0ddc` through [doc-checkpoint.ts](../src/server/doc-checkpoint.ts), core and workflow definitions. Current-only documents opt in; after 64 deltas the next changing write stores a base and prunes old revisions. Stored kind/version/scope/history/fork contracts stay unchanged. Existing tails compact on change, not at startup. [Replay tests](../test/docs.test.ts).                                                                                                                                                                                                                                                                                                                                    |
 | Transport: session-list suppression                      | Local batch                                                                                    | Adapted `4dc9a43` in [app.ts](../src/server/app.ts) and [room.ts](../src/server/room.ts). Each connection retains its own successfully sent, person-filtered projection. Initial attach and access refresh remain authoritative. No shared unfiltered catalogue cache. [App tests](../test/app.test.ts).                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Transport: live message deltas                           | Local batch                                                                                    | Adapted `f1fdb02` plus `0ae752c` in [projection.ts](../src/server/projection.ts), [room.ts](../src/server/room.ts), [live.js](../web/live.js) and [store.js](../web/store.js). Protocol 3 reconstructs append/replace/truncate changes, with old-client whole-message fallback, separate main/PiP bases and mismatch recovery. Reconnect/full views reset bases; recovery respects suspension. [Delta tests](../test/live-deltas.test.ts).                                                                                                                                                                                                                                                                                |
@@ -56,6 +56,276 @@ The MCP/performance batch is **locally committed and independently reviewed, not
 | Providers: package host versus upstream changes          | Divergence; newer upstream work deferred                                                       | Coop already has owner-managed exact provider releases, public Pi loader/runner hosting, restart-only activation, rollback and isolated lanes. [Provider contract](provider-extensions.md), [provider-packages.ts](../src/server/provider-packages.ts), [pi-provider-host.ts](../src/server/pi-provider-host.ts). This supersedes older library-only provider-packaging research. Upstream Providers UI and Anthropic subscription/request shaping (`068d234`, `f49af67`) are separate candidates needing provider-specific validation, not part of MCP support.                                                                                                                                                          |
 | Packaging, branding and themes                           | Divergence; removed upstream features                                                          | `pi-coop` branding/CLI, preserved MIT history/notices, archived [upstream README](../README.upstream.md), `~/.pi-durable-app`, `PI_POCKET_*` and internal `pocket.*` names remain. Desktop-theme/wallpaper synchronization and upstream public-site pages/publishing script were removed (`f2ec9ff`, initial fork history); archived `site/shots/` images remain. Bundled palettes and fork Appearance settings remain. No renaming of persisted identifiers or restoration of removed features is planned by this batch.                                                                                                                                                                                                 |
 | Packaging and remaining release surface                  | Not assessed for adoption                                                                      | `release/0.20.0` Docker/Podman work, newer Nix fixes, unrelated tooling upgrades and other unlisted upstream UI/correctness changes were not validated for this fork. Artifact-file publishing (`7033ca9`) was not selected. Revisit packaging on an actual distribution need, and other features through a bounded intake. Available source or an upstream test is not evidence of fork/device compatibility.                                                                                                                                                                                                                                                                                                            |
+
+## Pi 1.4 upgrade: source work in progress
+
+**Current candidate, 2026-10-26:** original owner-authorized item #1 pins the seven direct Earendil dependencies at **1.4.0**, targeting monorepo commit [`4a080252f06caf63a525d7873c5d94d3c23887e0`](https://github.com/earendil-works/pi/tree/4a080252f06caf63a525d7873c5d94d3c23887e0). Both source manifest and npm lockfile now contain the exact released pins. The reviewed source was recorded locally as `83febbf` against fork base `9081b1ab7d2bcab1c79f43619153624e66d8e605`, then entered rebase onto item #3 main `7589033`. Reviewer `/s/214829` requested changes to an earlier draft; independent Reviewer `/s/220348` subsequently inspected the expanded candidate and bounded test/docs repairs. Main integration is not yet complete; no restart or deployment occurred. The current implementation and evidence supersede the historical setup blockers below without asserting cryptographic archive provenance.
+
+### Selected compatibility work
+
+- Durable tool results use `output`, not `content`; transcript/model messages, artifact content and agent-core tool results retain their own `content`. The fork's custom QuickJS script/output/store behavior remains, but subtools now use native `api.executeTool()`, not a synthetic subtool API. Native child tasks own hooks, memos, replay, output limits and settlement; scripts consume `structuredOutput`. Worker exit and pending-call waits are joined separately from native parent/child task settlement. See pinned [tool types](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/durable/src/harness/types.ts) and [tool execution](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/durable/src/harness/tool.ts).
+- Schedules, watches, repository watches and unavailable-PiP report work now return `sleepUntil(timestamp, checkpoint, context)`. A durable sleep ends that handler invocation; the saved phase runs again on waking, including fresh availability/access checks. Diagnostics and report eligibility recognize `sleeping`; diagnostics decorate both model-visible `tools` and native nested-call `callable` with the existing tool identity cache. Pinned [scheduler](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/durable/src/harness/scheduler.ts).
+- Adopt **five consecutive cutoff restarts without committed progress**, then park as `restart_limit`. Explicit retry clears parking; committed progress resets the streak; graceful close does not increment it. `restartLimit: Infinity` is intentionally not adopted. The app states the five-cutoff policy explicitly.
+- Existing production document definitions already supply checkpoint policies. No kind, scope, version, history or fork contract is changed. The clock drop-in example now supplies its own explicit no-checkpoint policy. Exact-1.4 document replay/checkpoint cases have passed; see the current validation record below.
+- Startup retains the returned storage before `Harness.open()` can fail; shutdown attempts independent cleanup even after an earlier rejection, and only releases the acquisition-bound data lock after confirmed storage close. If SQLite startup throws before returning a handle, closure is unconfirmed and the lock is retained conservatively, but unused hosted providers and browser/environment resources still dispose because no Harness work began. A failed partial `Harness.open()` is now tracked separately: without a returned handle its work/storage closure is unconfirmed, so dependent resources and the lock are retained. Failed Harness shutdown likewise retains provider/browser/environment resources. The fork's HTTP-before-DB bind order in `main.ts` is unchanged. See [upgrade and lock safety](self-editing.md#runtime-upgrades-and-data-directory-ownership).
+- The repaired task-scope phase/abort boundary and registry composition, including AgentExecution and AgentContacts, remain unchanged. No provider recovery, model matching, history/resend or browser/navigation implementation is included. The eventual Land must use actual latest main and preserve the separately landed #2 resend initializer, #3 UI, `9081` binding repair, and inherited nine paths/index. This Worker does not integrate or land them.
+
+### Historical bounded post-review repairs — 2026-10-26
+
+This subsection records Follow-up `/s/215957` **before the owner settled target ownership**. Its
+then-unrun tests and setup blockers are historical; the current execution record follows it. Original
+review findings and evidence limitations are retained rather than rewritten as approval.
+
+Source: independent Reviewer `/s/214829`, **changes requested**, against the uncommitted draft at
+`9081b1ab7d2bcab1c79f43619153624e66d8e605`. Inline posting was unavailable, so the report's six
+findings remain authoritative evidence even though no discussion was posted. This is Follow-up
+repair, not Pull intake, independent rereview or approval. The earlier reservation error did not
+establish that any publication occurred; it was not retried or bypassed.
+
+- **Finding 2, source repair:** native-work settlement is separate from confirmed database closure.
+  SQLite-open rejection before Harness construction still disposes providers while retaining the
+  lock; unconfirmed Harness opening/closing retains dependent resources. Three focused app tests
+  cover SQLite-open failure, Harness-close failure and independent SSH/private cleanup exceptions.
+  These tests are authored but **not executed** without a verified 1.4 target; real SSH/private
+  children, provider disposal and partial native startup are not certified. The partial-Harness
+  conservative guard is new behavior since review and needs integration validation.
+- **Finding 3:** PIDs above Node's signed 32-bit range are damaged before liveness probing. Recent
+  locks remain protected by the grace period; stale invalid numeric locks recover. Four new cases
+  failed before this repair; all **16 lock tests passed** afterward. EPERM/unknown-live handling,
+  generation ownership and the best-effort/non-distributed limitations are unchanged.
+- **Finding 4, source/fixture repair:** actual Durable results use `output` in codemode, diagnostics,
+  drop-in, gallery, plan and workflow fixtures. Transcript/artifact/agent-core `content` is unchanged.
+  Legacy Notes and both command-counter definitions explicitly disable checkpoints, preserving
+  their intended delta history. The app lock test now refuses/preserves live legacy holders even
+  with `argv0 = not-node`, on every platform. These dependency-backed tests remain unexecuted.
+- **Finding 5, narrow compatibility change:** web/browser `POCKET_API` remains 1. A drop-in providing
+  tools, tool wrappers or `afterTool` hooks must explicitly export `durableToolApi = 2`; missing or
+  unsupported declarations fail loading before installation, with a migration error. Failed edits
+  retain the prior extension/web registrations. No legacy-result alias or upstream API-2 features
+  were added. The policy explicitly narrows its former single-number Durable compatibility promise;
+  public types, reference, module/tool guides, examples and fixtures describe this breaking pending
+  minor-release cutover. A dependency-free test exercises the real loader and web staging with a
+  permissive registry fixture: removing the two admission checks reproduced **Missing expected
+  rejection**, and restoring them passes. It does not validate Durable descriptors or runtime ABI.
+- **Finding 1 remains unresolved:** the saved pinned codemode entrypoint only verifies exports of
+  `CodemodeSandbox`, `CodemodeSandboxBase` and option types. It does not verify `onWorkerStarted`,
+  the `exited` value's type/settlement or close/cancel semantics. Exact release
+  `packages/codemode/src/types.ts`, `runtime/host.ts`, `runtime/execution.ts`, and Durable's resolved
+  tools/callable/plan contract are still needed before repairing worker/nested-call joining. No
+  refused source read was repeated, no alternate access path was used, and no ABI was guessed.
+- **Finding 6 remains a blocker:** manifests/lock still select 1.1. The only documented supported
+  offline preparer copies from a trusted, same-repository donor with byte-identical manifests/lock;
+  no current new isolated 1.4 target/donor or verified full artifact closure is supplied. No supported
+  offline archive installer is exposed here. No provisioning, cache/stage probes, original captured
+  input changes, donor borrowing or custom bootstrap was attempted. Owner/native provisioning must
+  supply that exact isolated environment; the migration/replay/recovery/rollback proofs below remain
+  outstanding.
+
+The focused dependency-free lock + loader command passed **17/17**. `node --check` passed for all
+**45 changed TypeScript files**, without executing imports, and `git diff --check` passed. One
+Follow-up self-review covered this repair delta and its immediate loader/staging, app startup/close,
+provider and HTTP-before-DB integration points; it is not independent review. Formatting,
+semantic/public-type/docs-reference checks, lint, application/codemode/extension integration tests
+and full migration/recovery validation remain blocked on the exact isolated dependency environment.
+New app tests have no red/green claim. No commit, Land, restart, publication, live-data access or
+successor work was performed.
+
+### Current Worker implementation and validation — 2026-10-26
+
+The owner resolved coordination: this Worker and its scoped helpers are sole writers of
+`/Users/enkelm/pi-coop-migration-mKGY1w`; Tava is not modifying it. No further linked-session
+lookup was attempted. The prepared target has no `.git`. Before transfer, all 845 checkpoint source
+files outside package inputs matched. Transfers then backed up replaced bytes and checked expected
+hashes. Source package inputs were backed up before copying the target's exact-1.4 manifest/lock;
+no installation, dependency symlink, custom installer or original-preparer/cache/process mutation
+was performed.
+
+Installed manifests and locks agree for all 303 package entries. Seven direct plus telemetry/TUI
+packages are 1.4.0. No required locked package is missing; 31 absent entries are optional platform
+packages. A relevant required-closure audit covered 122 packages with no missing versions or path
+escapes, and verified required built exports, declarations and referenced wasm/worker/native/assets
+exist. Runtime evidence actually loads QuickJS workers and SQLite. These checks are **not archive
+integrity, cryptographic provenance or every-platform native-load attestation**.
+
+Native codemode replaces the earlier manual dispatcher. The installed `onWorkerStarted` callback
+supplies the actual worker-exit `Promise<void>`; the synchronous admission fence and worker-exit
+joins remain. `api.executeTool()` now creates genuine tagged nested ToolTasks, validates inputs,
+applies hooks and per-child memos, enforces output/replay policy and returns structured values.
+Cancelling a native-call context stops its wait, not the child itself: native parent settlement
+aborts/joins remaining children before terminal state and writer release. Callable-only plan hints
+remain effective; codemode itself is model-only. Reviewer provenance now requires the current main
+model entry plus real ownership/live slots and, for children, the genuine codemode parent. Private
+source receipts read `input.call.id`, not synthetic slash-prefixed call IDs. Untagged call-ID
+compatibility is restricted to actual stored version-1 records; malformed/unknown version-2 inputs
+are refused. Diagnostics phase tags follow separately scheduled native child tasks.
+
+The continuation checks exposed a Chord transaction-draft escape: nested attachment observation
+state now detaches with public `copyJson()` while its transaction is live. Original Stop/Detach
+cases failed with `Cannot use a settled overlay` before this repair and pass afterward. Duplicate
+selection of the private request hook within one native invocation no longer falsely triggers the
+persisted interrupted-request guard; invocation identity comes from the actual Context abort signal.
+Later invocations still face the durable uncertainty memo.
+
+Two additional app defects exposed by the required fixtures were repaired, without claiming they
+were SDK regressions: concurrent checkout lookup now revalidates a clone that completed during the
+search; later native work-event generations now bind outcomes through the exact accepted assignment,
+submission, registered wake task, source metadata and controller epoch. A same-epoch replacement
+race proves an old wake cannot settle a new assignment. No prose/latest-assignment fallback was
+added. Historical in-flight event wakes without this exact new link may still need owner inspection;
+no automatic authority backfill or document/task kind/version change is claimed.
+
+A final compaction check exposed a regrowth-accounting defect: after a successful summary, the
+reissued system/tool prompt alone could earn another compaction after a tiny reply. Conversational
+regrowth now excludes system messages, while total-context accounting still includes them. The
+original threshold assertion remains, and substantial new conversation must earn another compaction.
+The failure-isolation and automatic-compaction cases pass **2/2**; copied/imported session context,
+compactions, unfinished tools, cutoff preservation and owner-only access pass separately **8/8**.
+Whether the compaction defect reproduces under 1.1 was not measured; it is not labelled an SDK regression.
+
+A real 1.4 provider-host incompatibility was repaired: telemetry spans contain functions and remain
+parent-local instead of entering JSON IPC. Serialization still rejects unsupported function-valued
+options. The listener-free hosted-provider test demonstrates native finalization, usage, restart
+and fallback. The narrow `durableToolApi = 2` cutover still leaves web/browser `POCKET_API = 1`.
+
+Focused passing evidence currently includes:
+
+- **12/12 native codemode cases**: real child/live-slot provenance, structured/text/error channels,
+  actual Bash `exit 7`/`exit_code`, hooks/memos, callable/plan policy, store commits, parallel approvals
+  return/timeout/abort cleanup, accepted-path attribution after native argument rewriting, and
+  unsafe parent/child journal recovery without reexecution. The path assertion failed against the
+  immutable-input implementation and passed after reading accepted native live-slot arguments.
+  The replay-safe registration control fails the recovery assertion; it is a control, not a claim
+  that production used safe replay. Restoring the pre-native dispatcher makes the native-child test
+  fail (`undefined` versus the actual expected child task ID); restoring the repair passes.
+- **5/5 headless provider/lifecycle cases**: native provider finalization and restart; SQLite-open
+  failure; a failed opening after a real Harness acquires storage; unconfirmed Harness close; and
+  independent SSH/private cleanup failures. Removing the partial-opening guard disposes providers
+  prematurely and fails; restoring it passes. Restoring the pre-telemetry provider host loses the
+  expected hosted response; restoring the fix passes. No receipt of native settlement is mocked.
+- **8/8 Durable runtime compatibility cases**: persisted sleep/reopen/cancel, injected clock/timers,
+  five cutoff recoveries/parking/retry, real-progress reset versus unchanged checkpoint, graceful
+  close, v1-input and legacy-completing fixture compatibility, poisoned Session after failed storage
+  commit, and display-only writes during held generation without model input or requester reorder.
+  The v1 smoke records are explicit compatibility fixtures, not a claim that 1.1 generated them.
+  Separate **genuine native 1.1→1.4 journal recovery** passed in
+  `evidence/sdk-v1-native-NbpR/`: actual old generation produced a safe-execute ToolTask and an
+  already-completing parent with live owned native work. New code migrated/recovered the child,
+  preserved the parent's exact untagged result without reexecution, consumed its historical
+  terminate control and settled both original submissions. No acceptance or outcome was fabricated.
+- **10/10 continuation and 13/13 native private-question answer cases**, including actual accepted nested-call identity,
+  queued placement, acknowledgment loss, exact-question/source binding, and token/source/controller
+  revocation between prepared intent and native admission. No fabricated input receipt is supplied.
+- **17 lock passes / 1 Linux-only skip**, **6/6 plan**, **1/1 tool-ABI loader admission**, plus targeted native diagnostics,
+  controller handoff/outcomes, work-context, private identity Memory/Chats, schedule and managed-SSH
+  cases. These are overlapping focused runs, not a fabricated all-suite total.
+
+Before the final isolated compaction repair, bounded application validation passed **104/104 runner
+tests**; the separate native-runtime batch passed **38 with 1 Linux-only skip**. The affected
+compaction cases and separate import checks above were then run on the repaired source. Three focused extension tests passed (actual MCP import,
+reserved tool names and passive-card attribution). After the meaningful continuation source repairs,
+all **3/3 disposable child-process recovery windows** passed: pre-submit, accepted and running.
+This was not an unchanged crash-suite retry. These are command-specific results, not a full-suite
+total. Type/public-type/docs-reference and full ESLint checks pass against installed 1.4.
+
+Final source/manifest/lock derivation, whole-source archive, hashes, exact commands, audit and
+limitations are recorded in
+`/Users/enkelm/pi-coop-migration-mKGY1w/evidence/worker-validation-oclQOE/FINAL-REPORT.md`.
+All changed files except the shared supervision file pass scoped Prettier. That file retains an
+identical pre-existing noncanonical recovery block; its authored delta is whitespace-clean and the
+before/after formatter payload audit is preserved. No broad formatting overwrite of inherited main
+edits is implied. A passed focused check does not certify unrun app/provider/SSH paths.
+
+### For extension authors: pending minor-release cutover
+
+This candidate upgrades the seven direct packages, including importable `pi-mcp`, to exact **1.4.0**
+and retains fork package/version/branding and unrelated dependencies. Durable tools return `output`,
+with `structuredOutput` for script-facing values and `details` for UI data. Transcript/artifact/core
+agent `content` is unchanged. Tool/wrapper/`afterTool` drop-ins must export `durableToolApi = 2`;
+web/browser `pocketApi` stays 1. Incompatible edits are rejected before installation and retain the
+previous good registrations. See [tool migration](extensions/tools.md), [module contract](extensions/modules.md)
+and [version policy](extensions/policies/api-stability.md). This is a breaking pending minor-release
+cutover, not a released broad upstream API-2 adoption. Do not hot-reload it into a 1.1 host.
+
+### Artifact evidence and limits
+
+Public npm metadata for the following nine packages reports 1.4.0 and Node **>=22.19.0**. Tarball URLs follow `https://registry.npmjs.org/@earendil-works/NAME/-/NAME-1.4.0.tgz`; the metadata links below contain the actual URLs. These are registry integrity values, **not a claim that tarballs were downloaded or verified locally**.
+
+| Package metadata                                                                                        | Registry integrity                                                                                |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| [`@earendil-works/chord`](https://registry.npmjs.org/@earendil-works%2fchord/1.4.0)                     | `sha512-dTbgyz4xgDS5KAUFx1bFENqj0Cr1N3tYxJJOYStc6g6HS78FSBZydyoCwLoddiQRF+VgRS0fpgAi+iKxjZ3BQA==` |
+| [`@earendil-works/pi-agent-core`](https://registry.npmjs.org/@earendil-works%2fpi-agent-core/1.4.0)     | `sha512-PoKY84SKUwnt7S5QBZaGUqfNO1kjP3KHpHUA9QpFTj4cOjaVWMYIcBPJ6FDRCdE8Zen9OSECQUd0uUfVgtSmgA==` |
+| [`@earendil-works/pi-ai`](https://registry.npmjs.org/@earendil-works%2fpi-ai/1.4.0)                     | `sha512-hQM/C4+1w8rHYACzDDf+0vQMnEnpzIop1tptIERVgR3ZeT/hHSzBNG8PaWPgxWQjqSeKCyBZSyp8uTT6eKK1pQ==` |
+| [`@earendil-works/pi-codemode`](https://registry.npmjs.org/@earendil-works%2fpi-codemode/1.4.0)         | `sha512-23CNAXpS9DuLzPMyYuvrXVVio46x4YhffCgCqaWmF7F5H8PooqjrQvX4ucF6M0BhUd+x2tV6r1J0dv8cCME4Cg==` |
+| [`@earendil-works/pi-coding-agent`](https://registry.npmjs.org/@earendil-works%2fpi-coding-agent/1.4.0) | `sha512-Z41LpZ3yYHSC/UUps6Mr39UMFPwH8elhJBG9DY1P7kuzsE5qSK/6eMj2EHzO5evJRQWLbKSqUMw+4nCNtIyiQg==` |
+| [`@earendil-works/pi-durable`](https://registry.npmjs.org/@earendil-works%2fpi-durable/1.4.0)           | `sha512-EtIyXH1MBSXdJSkodmy+CYXuwfve3gPrD4GNCZ0XmuRWLPupwRlNQ7fdaXjRcLoKb6SWkT/yEzK+sMmrqvYK+Q==` |
+| [`@earendil-works/pi-mcp`](https://registry.npmjs.org/@earendil-works%2fpi-mcp/1.4.0)                   | `sha512-92aZmmGsUpHHknYuKXZHRINQfahntw5hU9If0I0ZM49GojOaFHpkl5/GF3/aatqpt7v7GjZbBfpfSygGKW+pnw==` |
+| [`@earendil-works/pi-telemetry`](https://registry.npmjs.org/@earendil-works%2fpi-telemetry/1.4.0)       | `sha512-MLIfowwUYIY65jSjMX82paZOrX/NTvLk6D08h+3Jq42a99RzUOewzuCR0zOlPul3D6UBfddat76VT6LvsHEs1w==` |
+| [`@earendil-works/pi-tui`](https://registry.npmjs.org/@earendil-works%2fpi-tui/1.4.0)                   | `sha512-4obPOjgOD7g4mGSlngIvxyujC1UPdmyI9zdVthbr8GufacFEX+Ce0+scPgHg++k2xj5+QjESM2d5TxvIuzCVmg==` |
+
+The seven direct packages' npm SLSA provenance payloads name this exact release commit and `refs/tags/v1.4.0`, built by `.github/workflows/build-binaries.yml`; their subject SHA-512 digests match their registry integrity metadata. Example: [Durable attestation](https://registry.npmjs.org/-/npm/v1/attestations/@earendil-works%2fpi-durable@1.4.0). Payloads were decoded and compared, **not cryptographically signature/certificate/transparency verified**. The two additional packages' provenance was not checked. No tarball was fetched, unpacked, built or installed.
+
+The owner-supplied, sole-writer target now supplies the installed 1.4 environment described above,
+including built `dist/` exports and referenced assets. Source and prepared package inputs match;
+the original preparer's unknown stages/inputs/processes remain untouched. Nothing here verifies
+archive bytes or cryptographic attestations beyond the stated metadata comparisons, or borrows
+another checkout's dependencies.
+
+### Disposable migration, recovery and remaining limits
+
+The [pinned library migration](https://github.com/earendil-works/pi/blob/4a080252f06caf63a525d7873c5d94d3c23887e0/packages/durable/src/storage/sqlite/migrations.ts) owns schema 1→2: it rebuilds `tasks` to add `sleeping` to the status CHECK, copies every existing row/JSON value, and recreates five indexes. **The source lists seven task columns**, not the eight assumed in the intake: `id, conversation_id, kind, status, abort_requested, background, record`. Do not invent an eighth column or write application migration SQL. Compare the actual installed release artifact against this source when available.
+
+The actual disposable storage rehearsal **passed**, using the exact installed 1.1 and 1.4 libraries.
+Evidence: `/Users/enkelm/pi-coop-migration-mKGY1w/evidence/worker-migration-eMUhak/REPORT.md`.
+A genuine 1.1 Session/storage fixture contains 3 conversations, 6 tasks, 5 submissions, 17 documents
+and 19 revisions, including fork history, memos and inert handoff/private authority-shaped data.
+The fixture was closed and preserved before separate old-reopen, migration and rollback copies.
+Every original row/column and raw JSON string is unchanged after migration except the schema
+version. Seven task columns, five indexes, sleeping CHECK, integrity and cold-reopen/idempotence
+checks passed. This proves storage preservation, not authority issuance from inert fixture JSON.
+
+Exact 1.1 rejects the upgraded copy with `Durable SQLite schema version 2 is newer than supported
+version 1`. Restoring a separate preupgrade DATA copy **and matching old CODE/DEPS** permits new
+old-code writes and cold reopen. The immutable preupgrade DB SHA-256 is
+`06b30c70f5e46e24ff14d7720aac2d0f4756ebdb27378a9016d9e599db29b03a`.
+The first final checksum audit incorrectly assumed read-only SQLite inspection leaves no WAL/SHM;
+its failure is retained. A minimal probe showed empty WAL/SHM sidecars without changed database
+bytes; the corrected audit passed. Migration itself was not retried. No live data was copied/opened.
+
+Runtime proof is separate: the focused Harness tests above exercise native nesting, safe versus
+unsafe recovery, sleep, cutoff policy, document checkpoints, storage failure and display-only input
+ordering. They do not make the storage fixture a full app-recovery certificate. Real simultaneous
+lock contenders pass; the kernel-backed Linux generation test is skipped on this macOS host.
+No distributed lease, migration-under-crash, live cutover or every-platform recovery claim is made.
+
+Known unavailable checks remain unavailable:
+
+- The managed Git boundary calls `/usr/bin/sandbox-exec` with the app's offline/read-only profile
+  and fails with **`sandbox-exec: sandbox_apply: Operation not permitted`**. Reviewer integration
+  cases stop at their Changes fixture before reaching provenance assertions. The direct diagnostic
+  call was `safeWorkflowGit(process.cwd(), ["status", "--short"], BACKGROUND_CONTEXT)` in the
+  1.4 target. No unrestricted fallback, profile change, retry or bypass followed that refusal.
+- Listener-backed app/provider cases returned **`listen EPERM`**; reload-related cases encountered
+  **`EMFILE`** from file watching. The earlier mixed batch was not a suite pass; truncated verdicts
+  are not counted. No unchanged denied/full/crash suite was rerun as a completion gate. Headless
+  provider tests do not certify local-proxy, HTTP/WebSocket or browser behavior.
+- Full `npm test`, browser/device/tunnel checks and cross-platform SSH/native behavior are not
+  certified by the focused checks. Genuine implementation/fixture failures discovered in permitted
+  runs were repaired or remain explicitly recorded in the final checkpoint, never reclassified as
+  confinement success. Native continuation and the three disposable recovery windows now pass as
+  recorded above; this does not certify every historical unfinished wake or external effect.
+
+Independent Review `/s/220348` is complete; human-authorized local Land is in progress onto
+`7589033`, preserving #2/#3, `9081`, and inherited dirty work/index state. No #4 work has begun.
+Dependency, core source and extension cutover require a separately owner-approved restart;
+local source/evidence readiness does not authorize live migration, restart, deployment or publication.
+
+### Independent Review of the completed candidate — 2026-10-26
+
+Reviewer `/s/220348` independently inspected production, installed contracts and retained migration/recovery evidence. No introduced production defect remained identified. It corrected three documentation paths and added two native worker-lifetime cases, with sensitivity controls for cold-Wasm cancellation and worker-exit joining. Production source was unchanged by Review. Final complete patch SHA-256: `2c1da1c13475b6da13f8403e037fd12f0022ea7130ca2b81026bf465315d8517`. Exact commands and logs: `/Users/enkelm/pi-coop-migration-mKGY1w/evidence/reviewer-pnSuEK/REVIEW.md`.
+
+Independently reproduced overlapping batches passed 38 native cases with one Linux-only skip, 15 final codemode/lifetime/ABI cases, 7 provider/lifecycle/compaction cases, 77 application cases, 12 storage/context/recovery cases and 8 session import/context cases. Type/public-type/docs-reference, full lint, scoped formatting and whitespace checks passed. These are not a whole-suite total. Migration/paired rollback and genuine old-runtime journal evidence were inspected, not rerun. Full suite, native Reviewer/Git provenance integration, listener-backed transport/browser/device checks and the other limits above remain uncertified. The successful ordinary local Git commands in Land do not certify the refused managed test-helper boundary.
+
+The open discussion `c-341cedda636a8259c12fa4a8b0adaf07d198fa75cb1d7fd151fe45123cde40e7` deliberately remains a **baseline follow-up/coverage limit**: an old event wake can reclaim a replacement controller and overwrite its reason, although the new outcome-attribution guard preserves the replacement assignment's outcome. The finish branch is identical to baseline `9081`. The regression proves outcome protection, not complete stale-wake noninterference; no out-of-scope controller repair or resolution is claimed.
 
 ## Work item #2 implementation evidence (2026-10-25)
 

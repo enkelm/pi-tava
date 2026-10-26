@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { awaitWithContext } from "@earendil-works/chord/context";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { Type } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId, TaskId, ToolRegistration } from "@earendil-works/pi-durable";
 import { Pip } from "../src/server/pip.ts";
@@ -30,9 +31,7 @@ test("accepted legacy session_start without threadType replays as one Worker and
     let decisions = 0;
     let controllerCalls = 0;
     const model = scriptedModel((request) => {
-        const system = JSON.stringify(
-            request.messages.filter((entry) => entry.role === "system"),
-        );
+        const system = JSON.stringify(request.messages.filter((entry) => entry.role === "system"));
         const last = lastText(request);
 
         if (system.includes("the private supervisor for Work Item")) {
@@ -82,18 +81,23 @@ test("accepted legacy session_start without threadType replays as one Worker and
 
             // Recreate only the former schema, not authority, memo state or a task checkpoint.
             // The native hooks still bind the real owner input before Durable records intent.
-            tool.parameters.properties = Object.fromEntries(
-                Object.entries(tool.parameters.properties).filter(
-                    ([name]) => name !== "threadType",
+            const parameters = tool.parameters;
+
+            assert.ok(Type.IsObject(parameters));
+            tool.parameters = {
+                ...parameters,
+                properties: Object.fromEntries(
+                    Object.entries(parameters.properties).filter(([name]) => name !== "threadType"),
                 ),
-            );
-            tool.parameters.required = (tool.parameters.required ?? []).filter(
-                (name: string) => name !== "threadType",
-            );
+                required: (parameters.required ?? []).filter((name) => name !== "threadType"),
+            };
             const execute = tool.execute;
 
             t.mock.method(tool, "execute", async (...args: Parameters<typeof execute>) => {
-                assert.equal(args[0].threadType, undefined);
+                assert.ok(
+                    args[0] !== null && typeof args[0] === "object" && !Array.isArray(args[0]),
+                );
+                assert.equal(Reflect.get(args[0], "threadType"), undefined);
                 taskId = args[1].taskId;
                 await awaitWithContext(held, args[2]);
 
@@ -123,12 +127,16 @@ test("accepted legacy session_start without threadType replays as one Worker and
         model: { provider: "faux", modelId: "faux-1" },
         thinkingLevel: "off",
     });
-    const initial = app.sessions(owner(app)).map((session) => session.id).sort();
+    const initial = app
+        .sessions(owner(app))
+        .map((session) => session.id)
+        .sort();
 
     const accepted = await app.commands.submit(chat, owner(app), {
         text: direction,
         requestId: "legacy-start-owner-input",
     });
+
     await until(() => taskId !== undefined, "old arguments pass real validation and enter execute");
     assert.ok(taskId);
     const pending = await app.harness.commit((tx) => tx.task(taskId!), context);
@@ -138,7 +146,13 @@ test("accepted legacy session_start without threadType replays as one Worker and
         status: "running",
         checkpoint: { phase: "execute", arguments: legacyArgs, replay: "safe" },
     });
-    assert.deepEqual(app.sessions(owner(app)).map((session) => session.id).sort(), initial);
+    assert.deepEqual(
+        app
+            .sessions(owner(app))
+            .map((session) => session.id)
+            .sort(),
+        initial,
+    );
     await app.close();
     release();
     historical.mock.restore();
@@ -193,9 +207,15 @@ test("accepted legacy session_start without threadType replays as one Worker and
     assert.ok(inputs[0]!.text.includes(message));
     assert.equal(controllerCalls, 1);
     assert.equal(decisions, 1, "recovery executes the saved call instead of buying a replacement");
-    const sessions = app.sessions(owner(app)).map((session) => session.id).sort();
+    const sessions = app
+        .sessions(owner(app))
+        .map((session) => session.id)
+        .sort();
 
-    assert.deepEqual(sessions.filter((id) => !initial.includes(id)), [worker]);
+    assert.deepEqual(
+        sessions.filter((id) => !initial.includes(id)),
+        [worker],
+    );
     await say(app, chat, "Reject a fresh legacy call; new calls must specify threadType chat.");
     const refused = (await app.transcripts.allEntries(chat, true)).findLast(
         (entry) => entry.kind === "toolResult" && entry.name === "session_start",
@@ -204,7 +224,13 @@ test("accepted legacy session_start without threadType replays as one Worker and
     assert.ok(refused?.kind === "toolResult");
     assert.equal(refused.isError, true, refused.text);
     assert.match(refused.text, /threadType/);
-    assert.deepEqual(app.sessions(owner(app)).map((session) => session.id).sort(), sessions);
+    assert.deepEqual(
+        app
+            .sessions(owner(app))
+            .map((session) => session.id)
+            .sort(),
+        sessions,
+    );
     assert.equal(
         Object.values((await app.harness.snapshot(AgentSupervisionDoc, context))!.requests).length,
         1,
