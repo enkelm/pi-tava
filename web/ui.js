@@ -1091,7 +1091,7 @@ export function Loader({ label = "Loading" }) {
     </div>`;
 }
 
-/** The full-screen loader: π over a progress bar, and what is happening under it. */
+/** The full-screen loader: the Tava mark over a progress bar, and what is happening under it. */
 export function Boot({ caption = "starting", detail = "", inline = false }) {
     return html`<div
         class=${`boot ${inline ? "inline" : ""}`}
@@ -1099,7 +1099,9 @@ export function Boot({ caption = "starting", detail = "", inline = false }) {
         role="status"
         aria-live="polite"
     >
-        <div class="boot-mark" data-part="brand-mark" aria-hidden="true">π</div>
+        <div class="boot-mark" data-part="brand-mark" aria-hidden="true">
+            <span class="tava-mark"></span>
+        </div>
         <div class="boot-bar" aria-hidden="true"><span></span></div>
         <div class="boot-caption">${caption}</div>
         ${detail && html`<div class="boot-detail">${detail}</div>`}

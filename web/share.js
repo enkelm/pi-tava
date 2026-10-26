@@ -1,4 +1,4 @@
-// Things shared to Pi Pocket from another app: a link, some text, a screenshot. The service worker keeps them (see
+// Things shared to pi-tava from another app: a link, some text, a screenshot. The service worker keeps them (see
 // sw.js), and this sheet puts them into the message box of a session, to send from there.
 import {
     actions,

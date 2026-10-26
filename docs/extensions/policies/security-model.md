@@ -4,7 +4,7 @@ This page collects, for authors, what [SECURITY.md](../../../SECURITY.md) and th
 
 ## Who is who
 
-- **The owner** runs Pi Pocket. The server runs as the owner's user on the machine.
+- **The owner** runs pi-tava. The server runs as the owner's user on the machine.
 - **Guests** are people whom the owner invited with the role guest. A guest can steer, in every session or only in the sessions of the invite.
 - **Viewers** are people whom the owner invited with the role viewer. A viewer reads, reacts, and chats, in every session or only in the sessions of the invite. A viewer cannot make Pi do anything.
 - **Pi** is the model. It does what people ask. It can also do what text from outside asks, if that text gets into its context (prompt injection).
@@ -154,7 +154,7 @@ Rules:
 
 ## Report a problem
 
-- **A problem in Pi Pocket:** read [SECURITY.md](../../../SECURITY.md). Report it in private. Do not open a public issue.
+- **A problem in pi-tava:** read [SECURITY.md](../../../SECURITY.md). Report it in private. Do not open a public issue.
 - **A problem in a gallery extension:** report it in private in the index, [TannerMidd/pi-pocket-extensions](https://github.com/TannerMidd/pi-pocket-extensions): **Security → Report a vulnerability**. Tell its author too. Do not open a public issue. The maintainers then act as [gallery-review.md](gallery-review.md#revoke-withdraw-and-remove) says.
 
 ## Before you share a module

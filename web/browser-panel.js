@@ -871,7 +871,7 @@ export function BrowserPanel({ leaving = false }) {
         stage = html`<div class="browser-note">
             <${Icon} name="globe" size=${28} />
             <p>
-                No browser was found on the machine Pi Coop runs on. Install Chromium or Google Chrome there (or set <code>PI_POCKET_BROWSER</code> to a browser's path), then restart Pi Coop.
+                No browser was found on the machine pi-tava runs on. Install Chromium or Google Chrome there (or set <code>PI_POCKET_BROWSER</code> to a browser's path), then restart pi-tava.
             </p>
         </div>`;
     } else if (!open && why) {

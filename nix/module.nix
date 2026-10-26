@@ -24,20 +24,20 @@ let
 in
 {
   options.services.pi-pocket = {
-    enable = lib.mkEnableOption "Pi Pocket";
+    enable = lib.mkEnableOption "pi-tava";
 
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
-      description = "Pi Pocket package to run.";
+      description = "pi-tava package to run.";
     };
 
     user = lib.mkOption {
       type = lib.types.str;
       default = "pi-pocket";
       description = ''
-        User running Pi Pocket and its agents. The default user is created automatically.
+        User running pi-tava and its agents. The default user is created automatically.
         Set this to an existing user to reuse their Pi sign-ins and access their projects.
         Anyone with steering access can run commands as this user.
       '';
@@ -98,14 +98,14 @@ in
     browser = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "Browser executable. Null uses Pi Pocket's browser discovery.";
+      description = "Browser executable. Null uses pi-tava's browser discovery.";
     };
 
     browserArgs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "--disable-dev-shm-usage" ];
-      description = "Extra Chromium flags. Pi Pocket splits these on whitespace.";
+      description = "Extra Chromium flags. pi-tava splits these on whitespace.";
     };
 
     skills = lib.mkOption {
@@ -196,7 +196,7 @@ in
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
 
     systemd.services.pi-pocket = {
-      description = "Pi Pocket";
+      description = "pi-tava";
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
@@ -216,7 +216,7 @@ in
         fi
         ${lib.optionalString (cfg.skills != null) ''
           if [ -e "$skills_dir" ] || [ -L "$skills_dir" ]; then
-            echo "Pi Pocket will not overwrite unmanaged skills at $skills_dir; move them aside before setting services.pi-pocket.skills." >&2
+            echo "pi-tava will not overwrite unmanaged skills at $skills_dir; move them aside before setting services.pi-pocket.skills." >&2
             exit 1
           fi
           mkdir -p -- "$agent_dir"

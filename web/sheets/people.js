@@ -114,7 +114,7 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                 cancelInvite(answer);
                 setFailed(true);
 
-                throw new Error("Restart Pi Coop to sign in another device as the owner.");
+                throw new Error("Restart pi-tava to sign in another device as the owner.");
             }
 
             if (!asOwner && answer.grant?.continuePiSessions === true) {
@@ -133,7 +133,7 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                 setFailed(true);
 
                 throw new Error(
-                    "Restart Pi Coop to update project access before sharing an invite.",
+                    "Restart pi-tava to update project access before sharing an invite.",
                 );
             }
 
@@ -273,7 +273,7 @@ export function InviteSheet({ session = null, initialAsOwner = false }) {
                           invite.local &&
                           html`<div class="error-box">
                             This link only works on this device. To let other devices in, press
-                            <span class="mono">a</span> in the Pi Coop terminal (or start it with
+                            <span class="mono">a</span> in the pi-tava terminal (or start it with
                             <span class="mono">--access</span>) and pick Local network, Cloudflare
                             Tunnel, or Tailscale. Then make a new invite.
                         </div>`

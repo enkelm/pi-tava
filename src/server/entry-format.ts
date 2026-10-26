@@ -1,5 +1,5 @@
 /**
- * What Pi Pocket writes into stored conversations: the kinds of its own entries, and the markers it puts into message
+ * What pi-tava writes into stored conversations: the kinds of its own entries, and the markers it puts into message
  * text. Stored entries and the web app depend on these exact values: never change them.
  */
 
@@ -175,7 +175,7 @@ export function isAgentAnswer(value: unknown): value is AgentAnswer {
 export const IMPORT_NOTE_ENTRY = "pocket.import-note";
 export const IMPORT_META_ENTRY = "pocket.import-meta";
 
-/** The speaker prefix Pi Pocket adds to messages when several people share the server. */
+/** The speaker prefix pi-tava adds to messages when several people share the server. */
 export const FROM_PREFIX = /^\[from: ([^\]\n]{1,60})\] /;
 
 /** What separates a message from the list of files attached to it. The web app splits messages on it too. */

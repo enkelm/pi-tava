@@ -1,5 +1,5 @@
 {
-  description = "Pi Pocket";
+  description = "pi-tava";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -13,8 +13,9 @@
     inputs@{ flake-parts, nixpkgs-x86_64-darwin, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       flake.nixosModules = rec {
-        default = pi-pocket;
-        pi-pocket = import ./nix/module.nix;
+        default = pi-tava;
+        pi-tava = import ./nix/module.nix;
+        pi-pocket = pi-tava;
       };
 
       systems = [
@@ -27,7 +28,7 @@
       perSystem =
         { pkgs, system, ... }:
         let
-          pi-pocket = pkgs.callPackage ./nix/package.nix { };
+          pi-tava = pkgs.callPackage ./nix/package.nix { };
         in
         {
           _module.args.pkgs =
@@ -37,12 +38,13 @@
               import inputs.nixpkgs { inherit system; };
 
           packages = {
-            default = pi-pocket;
-            inherit pi-pocket;
+            default = pi-tava;
+            inherit pi-tava;
+            pi-pocket = pi-tava;
           };
 
           devShells.default = pkgs.mkShell {
-            inputsFrom = [ pi-pocket ];
+            inputsFrom = [ pi-tava ];
             packages =
               with pkgs;
               [
@@ -58,8 +60,8 @@
           };
 
           checks = {
-            default = pi-pocket;
-            extension-management = pkgs.runCommand "pi-pocket-extension-management" { } ''
+            default = pi-tava;
+            extension-management = pkgs.runCommand "pi-tava-extension-management" { } ''
               ${pkgs.bash}/bin/bash ${./nix/tests/extensions.sh} ${./nix/manage-extensions.sh}
               touch "$out"
             '';

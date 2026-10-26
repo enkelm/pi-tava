@@ -1,4 +1,4 @@
-// How other devices reach Pi Pocket: this device only, the local network, a Cloudflare quick tunnel, or Tailscale.
+// How other devices reach pi-tava: this device only, the local network, a Cloudflare quick tunnel, or Tailscale.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {

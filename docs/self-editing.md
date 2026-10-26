@@ -1,6 +1,6 @@
-# Changing Pi Coop's code while it runs
+# Changing pi-tava's code while it runs
 
-Pi Coop is often changed from inside itself: you may be running on the very server you edit, and so may everyone else using it. [AGENTS.md](../AGENTS.md) has the rules in short; this page is the whole of it.
+pi-tava is often changed from inside itself: you may be running on the very server you edit, and so may everyone else using it. [AGENTS.md](../AGENTS.md) has the rules in short; this page is the whole of it.
 
 Before you start, read [map.md](map.md) to find the code that you need, and the part of [architecture.md](architecture.md) about it. Say what you will change. Then wait for a yes, unless the person asked for exactly that change.
 
@@ -84,11 +84,11 @@ The copy listens on `127.0.0.2:8899`. Browsers keep cookies for each host, not f
 
 ## Restarting
 
-Server changes outside `extensions/` need a restart. Only the owner can, from Menu → **Restart server** (shown when Pi Coop runs under its launcher, as `pi-coop` does).
+Server changes outside `extensions/` need a restart. Only the owner can, from Menu → **Restart server** (shown when pi-tava runs under its launcher, as `pi-tava` does; `pi-coop` remains a compatibility alias).
 
 - **Never restart while your own tool call runs**, and never on your own. Finish the edit, run `npm run check` and `npm test`, and then ask the person to restart.
 - Work that runs continues after a restart. A tool call that the restart stopped, and that is not safe to repeat, comes back to the model as interrupted.
-- A server that does not start stops Pi Pocket for everyone, and you cannot correct it from the app. The launcher tries again and again, more slowly each time, and prints the error in its terminal. A correction of the file is enough: the next try uses it.
+- A server that does not start stops pi-tava for everyone, and you cannot correct it from the app. The launcher tries again and again, more slowly each time, and prints the error in its terminal. A correction of the file is enough: the next try uses it.
 
 ## Runtime upgrades and data-directory ownership
 
@@ -112,7 +112,7 @@ Work in small steps, and check each step. Then the step to undo is small.
 
 The full list is in [map.md](map.md#rules-that-are-easy-to-break). These cost the most:
 
-- **Stored data is forever.** Pi Pocket reads back the document kinds in `src/server/docs.ts`, the entry kinds and message markers in `src/server/entry-format.ts`, and the fields of `config.json` from what it stored. Never rename them, and never change what they mean: add new ones beside them. An older Pi Pocket can read a newer `config.json`, so a new field must be one that it can ignore.
+- **Stored data is forever.** pi-tava reads back the document kinds in `src/server/docs.ts`, the entry kinds and message markers in `src/server/entry-format.ts`, and the fields of `config.json` from what it stored. Never rename them, and never change what they mean: add new ones beside them. An older pi-tava can read a newer `config.json`, so a new field must be one that it can ignore.
 - **Only erasable TypeScript** in `src/`: no `enum`, no `namespace`, and no parameter properties. Imports end in `.ts`. Node runs the code as it is.
 - **The web app has no build.** It is plain ES modules with Preact and htm. Lay out the markup by hand ([AGENTS.md](../AGENTS.md) tells how). In htm, a line break is not a space.
 - **Phones first.** Controls must be big enough for a thumb (about 40 px), nothing can be wider than the screen, and back closes what opened last (`useBack`, [map.md](map.md#adding-things)). Check at 390 × 844.

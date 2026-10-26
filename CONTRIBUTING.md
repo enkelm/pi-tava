@@ -1,4 +1,4 @@
-# Contributing to Pi Pocket
+# Contributing to pi-tava
 
 Thank you for your help. This page tells how to send a change.
 

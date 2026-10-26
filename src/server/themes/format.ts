@@ -40,7 +40,7 @@ function parseColors(toml: string): Record<string, string> {
     return colors;
 }
 
-/** The version of the theme surface (tokens, parts, states) this Pi Pocket offers, from `web/theme-surface.js`. */
+/** The version of the theme surface (tokens, parts, states) this pi-tava offers, from `web/theme-surface.js`. */
 export { THEME_API };
 
 /** A theme's id: its folder's name. */
@@ -128,7 +128,7 @@ export function parseManifest(text: string, pocketVersion: string): Manifest {
     }
 
     if (api > THEME_API) {
-        throw new ThemeProblem(`it needs theme API ${api}: this Pi Pocket has ${THEME_API}`);
+        throw new ThemeProblem(`it needs theme API ${api}: this pi-tava has ${THEME_API}`);
     }
 
     const manifest: Manifest = { themeApi: api, name: plainLine(fields.name, "Its name", 60) };

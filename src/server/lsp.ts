@@ -717,7 +717,7 @@ export class LspPool {
             const result = object(
                 await server.connection.sendRequest("initialize", {
                     processId: process.pid,
-                    clientInfo: { name: "pi-coop", version: "1" },
+                    clientInfo: { name: "pi-tava", version: "1" },
                     rootUri: server.rootUri,
                     rootPath: root,
                     workspaceFolders: [{ uri: server.rootUri, name: basename(root) }],

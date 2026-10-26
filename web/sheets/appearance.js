@@ -15,6 +15,7 @@ import {
 import {
     assignTheme,
     BASE_LOOK,
+    DEFAULT_THEME,
     chooseLook,
     chooseMode,
     chooseTheme,
@@ -46,7 +47,9 @@ const MODES = [
 /** A theme as a card: tiny tiled windows, with mode controls on hover, keyboard focus or touch hold. */
 function ThemeCard({ id, index = 0, revealed, onReveal, active }) {
     const p = prefs();
-    const on = p.theme === id;
+    const current = paletteOf(p.theme);
+    const half = current.colors.mode === "light" ? "light" : "dark";
+    const on = p.theme === id || (current.pair && id === `${p.theme}@${half}`);
     const palette = paletteOf(id);
     const vars = varsStyle(themeVars(palette));
     const name = palette.name;
@@ -417,10 +420,8 @@ function DefaultTools() {
         ? p.look
         : BASE_LOOK;
     const colors = paletteOf(p.theme).id;
-    // Without a server default, new browsers use the bundled layout and Tokyo Night colors.
-    const same = current
-        ? current.look === look && current.colors === colors
-        : look === BASE_LOOK && p.theme === "tokyo-night";
+    const defaultChoice = current ?? DEFAULT_THEME;
+    const same = defaultChoice.look === look && defaultChoice.colors === colors;
     // A theme with its own colors is named once, rather than repeated as its own palette.
     const name = (look, colors) =>
         colors.split("@")[0] === look
@@ -433,13 +434,13 @@ function DefaultTools() {
                 "info",
                 value
                     ? `Browsers that have not chosen start with ${name(value.look, value.colors)}.`
-                    : "Browsers that have not chosen start with Pocket.",
+                    : "Browsers that have not chosen start with Tava.",
             );
         });
 
     return html`<div class="look-tools">
         <span class="muted small grow">
-            ${current ? `For new browsers: ${name(current.look, current.colors)}.` : `New browsers start with ${name(BASE_LOOK, "tokyo-night")}.`}
+            ${current ? `For new browsers: ${name(current.look, current.colors)}.` : `New browsers start with ${name(DEFAULT_THEME.look, DEFAULT_THEME.colors)}.`}
         </span>
         ${
             !same &&

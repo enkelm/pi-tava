@@ -1,16 +1,16 @@
 # Types for your editor
 
-[types/pocket.d.ts](../../../types/pocket.d.ts) has the types of Pi Pocket's public extension API. With it, your editor completes names and finds mistakes, and Pi reads the exact shapes. The reference pages give the same members in words.
+[types/pocket.d.ts](../../../types/pocket.d.ts) has the types of pi-tava's public extension API. With it, your editor completes names and finds mistakes, and Pi reads the exact shapes. The reference pages give the same members in words.
 
 ## Get the types
 
 Use one of these:
 
-1. **`_pocket.d.ts` in the drop-in folder.** Pi Pocket makes this link to its types file each time that it starts, beside the `node_modules` link. Its leading `_` keeps it from loading as a module. The same import then works on all machines. If you point the link at another readable file, such as your own checkout's types, Pi Pocket leaves it as it is. A file of your own with this name also stays.
-2. **The path in Pi Pocket's folder:** `/path/to/pi-pocket/types/pocket.d.ts`.
-3. **The copy on the documentation site:** `https://tannermidd.github.io/pi-pocket/docs/pocket.d.ts`. It is for the latest release.
+1. **`_pocket.d.ts` in the drop-in folder.** pi-tava makes this link to its types file each time that it starts, beside the `node_modules` link. Its leading `_` keeps it from loading as a module. The same import then works on all machines. If you point the link at another readable file, such as your own checkout's types, pi-tava leaves it as it is. A file of your own with this name also stays.
+2. **The path in pi-tava's folder:** `/path/to/pi-tava/types/pocket.d.ts`.
+3. **The upstream Pi Pocket copy:** `https://tannermidd.github.io/pi-pocket/docs/pocket.d.ts`. It describes upstream's latest release, not pi-tava's fork-specific API. Prefer this checkout's types for pi-tava.
 
-Where Pi Pocket cannot make links (on Windows, or when the system refuses them), `_pocket.d.ts` is a copy of the types file instead. Its first line says so, and Pi Pocket refreshes it at each start when the types change. Do not edit it.
+Where pi-tava cannot make links (on Windows, or when the system refuses them), `_pocket.d.ts` is a copy of the types file instead. Its first line says so, and pi-tava refreshes it at each start when the types change. Do not edit it.
 
 ## Import the types
 
@@ -67,7 +67,7 @@ interface Module {
 
 Since 0.1.0 · Stable
 
-A module: one `.ts` file that default-exports a setup function. [Modules, loading, and errors](../modules.md) tells you how Pi Pocket loads it.
+A module: one `.ts` file that default-exports a setup function. [Modules, loading, and errors](../modules.md) tells you how pi-tava loads it.
 
 ### `default`
 
@@ -87,7 +87,7 @@ pocketApi?: number;
 
 Since 0.14.0 · Stable
 
-The version of the extension API that the module needs. A Pi Pocket with an older version does not set up the module. See [API versions](api-versions.md#pocketapi).
+The version of the extension API that the module needs. A pi-tava instance with an older API version does not set up the module. See [API versions](api-versions.md#pocketapi).
 
 ### `durableToolApi`
 
@@ -142,9 +142,9 @@ Since 0.1.0 · Stable
 
 How important a notice is.
 
-## How Pi Pocket keeps the types correct
+## How pi-tava keeps the types correct
 
-Pi Pocket's checks fail when the types file and its code do not agree:
+pi-tava's checks fail when the types file and its code do not agree:
 
 - In `npm run check`, `test/public-types.ts` compares the real host, `web`, and command context with the public types, in both directions. It also fails for a new host member that is neither in the types file nor in its list of internal members.
 - In `npm run check`, `test/types-file.ts` checks the types file itself.

@@ -12,7 +12,7 @@ For an existing private imported Chat, the owner can choose **Share imported Cha
 
 Sharing uses authenticated project grants and exact-session invitations, never anonymous access. An unassigned shared Chat is not visible to project-only collaborators, even those granted all projects. Choose a project they can access or invite them to the Chat. Actual pinned machine restrictions still apply. The original archive and other branches remain owner-only. Existing private forks stay private; the Share action deliberately accepts direct imports only, not forks, linked threads, Work Items, named/private PiP or controllers. Legacy direct imports recovered as Worker remain eligible when their stored Pi provenance is intact; this does not change their type.
 
-Every new copied conversation is explicitly a Chat. The header's Imported from Pi label records origin, not a new thread type. Nothing in historical input starts work; the first new human submission uses Coop's current instructions and tools.
+Every new copied conversation is explicitly a Chat. The header's Imported from Pi label records origin, not a new thread type. Nothing in historical input starts work; the first new human submission uses pi-tava's current instructions and tools.
 
 ## Consolidation validation
 
@@ -139,11 +139,11 @@ One harness transaction creates the conversation, agent settings and app documen
 
 Import deduplication is distinct from prompt deduplication. Concurrent retries for the same source bytes and selected branch reuse the same conversation, including after restart; a different branch has a different key. Guests have person-specific keys, separate from the owner's, so a shared guest copy cannot publish or reuse an existing owner-private import. Stored `TakeoversDoc` records remain inert; no recovery route or startup stop operation consumes them.
 
-Historical entry writes do not create model/tool tasks or update `pi.usage`. Imported human messages are labeled `Imported user`, not assigned to the owner. Imported notes are distinguished from human prompts. The first new submission establishes the requester through Pocket's existing attribution path.
+Historical entry writes do not create model/tool tasks or update `pi.usage`. Imported human messages are labeled `Imported user`, not assigned to the owner. Imported notes are distinguished from human prompts. The first new submission establishes the requester through pi-tava's existing attribution path.
 
 Owner copies default to `ownerOnly` in their catalogue metadata. A shared copy requires explicit `visibility: "shared"`; guests must choose shared visibility and acknowledge the copy before creation. An explicit owner retry can promote a private import to shared, while owner-only retries do not downgrade a shared import. `canSee` applies it to the root session and its subagents; app-created forks propagate it. Both initial and live session lists use that access check. The full source archive is not a room document and is downloadable only by the owner. It can contain branches that were not imported.
 
-Other sessions still use Pocket's existing access rules. General per-conversation membership editing and multi-server connections remain separate work. Shell-capable collaborators and the machine owner are not isolated by these app checks.
+Other sessions still use pi-tava's existing access rules. General per-conversation membership editing and multi-server connections remain separate work. Shell-capable collaborators and the machine owner are not isolated by these app checks.
 
 Current behavior has focused fixtures in `test/pi-snapshot.test.ts`, `test/pi-sessions.test.ts`, `test/active-imports.test.ts`, the import/history/failure tests and `test/invite-{auth,permissions}.test.ts`. Browser flows live in `test/import-ui.test.ts` and the invite portion of `test/mobile-ui.test.ts`. This lists coverage owners, not current pass results. No test or browser run was performed for this documentation-only update.
 

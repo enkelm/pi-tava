@@ -1,5 +1,5 @@
 /**
- * One conversation's shared live view: the committed Pi Durable view plus Pi Pocket's own documents, projected into
+ * One conversation's shared live view: the committed Pi Durable view plus pi-tava's own documents, projected into
  * small updates for every browser tab attached to it, and who is here and typing (memory only).
  */
 import type { AttachedReplicatedState } from "@earendil-works/chord";

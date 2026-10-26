@@ -1,5 +1,5 @@
-// Pi Coop's service worker. It shows push notifications (Pi finished, an approval, a chat message), answers an
-// approval from its notification, opens the right session when one is tapped, and hands things shared to Pi Coop
+// pi-tava's service worker. It shows push notifications (Pi finished, an approval, a chat message), answers an
+// approval from its notification, opens the right session when one is tapped, and hands things shared to pi-tava
 // from other apps to the page. It caches none of the app: the app is edited live.
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -13,7 +13,7 @@ self.addEventListener("push", (event) => {
     try {
         data = event.data?.json() ?? {};
     } catch {
-        data = { title: "Pi Coop", body: event.data?.text() ?? "" };
+        data = { title: "pi-tava", body: event.data?.text() ?? "" };
     }
 
     const approval = data.approval;
@@ -27,11 +27,11 @@ self.addEventListener("push", (event) => {
 
     event.waitUntil(
         Promise.all([
-            self.registration.showNotification(data.title || "Pi Coop", {
+            self.registration.showNotification(data.title || "pi-tava", {
                 body: data.body || "",
                 tag: data.tag,
                 renotify: Boolean(data.tag),
-                icon: "/icon.svg",
+                icon: "/pi-tava-icon.svg",
                 actions,
                 data: { url: data.url || "/", approval },
             }),
@@ -59,7 +59,7 @@ async function answerApproval(approval, allow, data) {
                 `The server answered ${response.status}.`;
         }
     } catch {
-        problem = "Pi Coop could not be reached.";
+        problem = "pi-tava could not be reached.";
     }
 
     if (problem === undefined) {
@@ -68,7 +68,7 @@ async function answerApproval(approval, allow, data) {
 
     await self.registration.showNotification(`Could not ${allow ? "allow" : "deny"} the call`, {
         body: problem,
-        icon: "/icon.svg",
+        icon: "/pi-tava-icon.svg",
         data: { url: data.url },
     });
 }
@@ -114,7 +114,7 @@ self.addEventListener("notificationclick", (event) => {
 });
 
 /**
- * Something shared to Pi Coop from another app (the manifest's share target) arrives as a form post. Keep it until
+ * Something shared to pi-tava from another app (the manifest's share target) arrives as a form post. Keep it until
  * the page picks it up, then open the page to choose where it goes. Any website could post a form here too, and
  * nothing tells it apart from a share; it only fills in a message the person still reads and sends themselves.
  */

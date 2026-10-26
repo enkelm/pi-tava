@@ -513,7 +513,7 @@ type CourierState =
     | { phase: "hold" }
     | { phase: "send"; batch?: number; text?: string };
 
-/** What the courier asks Pi Pocket about spend limits. */
+/** What the courier asks pi-tava about spend limits. */
 type Limits = Pick<PocketHost, "heldBack" | "onLimitsChanged" | "notice">;
 
 type CourierTask = ReturnType<typeof courierFor>;

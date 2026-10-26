@@ -1682,7 +1682,9 @@ function AllSessions({ compact = false, home = false, active = true }) {
 
     return html`<div class=${`sessions ${compact ? "compact" : ""}`} data-part="session-list">
         <div class="sessions-head">
-            <span class="brand">π <span>Pocket</span></span>
+            <span class="brand">
+                <span class="tava-mark" aria-hidden="true"></span><span>pi-tava</span>
+            </span>
             <button
                 class="icon-button"
                 title="Launcher"
@@ -1983,7 +1985,7 @@ export function Rail() {
             aria-label="Unfold the sidebar"
             onClick=${() => setPrefs({ sidebar: "open" })}
         >
-            π
+            <span class="tava-mark" aria-hidden="true"></span>
         </button>
         ${
             canStart &&
@@ -2132,9 +2134,11 @@ function RailNavigation({ foldable = false, folded = false }) {
                       aria-label="Home"
                       onClick=${toSessions}
                   >
-                      π
+                      <span class="tava-mark" aria-hidden="true"></span>
                   </button>`
-                : html`<span class="rail-brand" data-part="brand-mark" aria-hidden="true">π</span>`
+                : html`<span class="rail-brand" data-part="brand-mark" aria-hidden="true">
+                      <span class="tava-mark"></span>
+                  </span>`
         }
         <span class="rail-gap"></span>
         ${

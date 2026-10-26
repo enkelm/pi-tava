@@ -10,13 +10,13 @@
  *
  * Pi trusts a project when its trust store (`trust.json` in Pi's folder) says so for the folder or one above it, or
  * says nothing and Pi's `defaultProjectTrust` setting is "always". Where it says nothing, the CLI asks when it starts.
- * Pi Pocket asks its owner (`readProjectTrust` says when) and saves the answer in the same store, with the three
+ * pi-tava asks its owner (`readProjectTrust` says when) and saves the answer in the same store, with the three
  * answers the CLI's `/trust` saves (`saveProjectTrust`); until then the project is not trusted, as when Pi runs without
- * a terminal. Pi also asks before it loads `.pi/skills/`: Pi Pocket loads those until it is told not to trust the
+ * a terminal. Pi also asks before it loads `.pi/skills/`: pi-tava loads those until it is told not to trust the
  * project (a saved "no", or `defaultProjectTrust` "never"), as it always has, and then leaves them out as Pi does.
  *
  * The search for `.agents/skills/` stops at the repository's root, as Pi's loading does; Pi's question also counts
- * folders above the root, whose skills it never loads, so Pi Pocket does not ask about those.
+ * folders above the root, whose skills it never loads, so pi-tava does not ask about those.
  *
  * This follows `addAutoDiscoveredResources` and `collectAncestorAgentsSkillDirs` in `dist/core/package-manager.js`,
  * `resolveProjectTrusted` in `dist/core/project-trust.js`, and `getProjectTrustOptions` in `dist/core/trust-manager.js`

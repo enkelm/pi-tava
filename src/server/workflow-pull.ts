@@ -449,7 +449,7 @@ async function fetchRemote(
                 output: [
                     {
                         type: "text" as const,
-                        text: `Fetched ${remote} on the Coop host and imported refs/remotes/${remote}/* into SSH · ${location!.host}. HEAD and working files were not integrated. Tags and pruning are not supported.`,
+                        text: `Fetched ${remote} on the pi-tava host and imported refs/remotes/${remote}/* into SSH · ${location!.host}. HEAD and working files were not integrated. Tags and pruning are not supported.`,
                     },
                 ],
             };

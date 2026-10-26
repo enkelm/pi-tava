@@ -1,6 +1,6 @@
 /**
  * Sharing a drop-in: whether it stands on its own (its files are all its own, and it imports only what every Pi Pocket
- * has), and a draft of its index entry, from its doc comment and its files' hashes. Pi Pocket makes no GitHub calls for
+ * has), and a draft of its index entry, from its doc comment and its files' hashes. pi-tava makes no GitHub calls for
  * it: the owner opens the pull request. A theme folder of the owner's is shared the same way (`shareThemeDraft`).
  */
 import { lstat, readdir, readFile } from "node:fs/promises";
@@ -63,7 +63,7 @@ function packageOf(spec: string): string {
 
 /**
  * What keeps a drop-in from standing on its own, in words: imports of files that are not among its own, of files by
- * where they are on this machine, of code from other sites, or of packages Pi Pocket does not have.
+ * where they are on this machine, of code from other sites, or of packages pi-tava does not have.
  */
 export function importProblems(
     name: string,
@@ -124,7 +124,7 @@ export function importProblems(
 
             if (!known) {
                 problems.push(
-                    `${file.name} imports the package ${spec}, which Pi Pocket does not have: others cannot load it.`,
+                    `${file.name} imports the package ${spec}, which pi-tava does not have: others cannot load it.`,
                 );
             }
         }
@@ -254,7 +254,7 @@ async function ownFiles(
 /**
  * Whether one of the owner's drop-ins stands on its own, and a draft of its index entry: its description from its doc
  * comment, its files' sizes and hashes, and, while it is on, what it declares. What only its author knows (where its
- * files are on GitHub) stays to fill in. `version` is this Pi Pocket's.
+ * files are on GitHub) stays to fill in. `version` is this pi-tava's.
  */
 export async function shareDraft(options: {
     root: string;

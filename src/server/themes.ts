@@ -112,7 +112,7 @@ export type ThemeFile = { css: string } | (FileStat & { type: string });
 export interface ThemesOptions {
     builtIn: string;
     dataDir: string;
-    /** Pi Pocket's version, for a theme's `minPocket`: its package's, unless a test says otherwise. */
+    /** The upstream Pi Pocket compatibility baseline for `minPocket`, unless explicitly overridden. */
     version?: string;
     /** Something about a theme only the owner can mend. */
     notify: (message: string) => void;
@@ -513,7 +513,7 @@ export class Themes {
             if (seen.has(id) || (!builtIn && this.#reserved.has(id))) {
                 misnamed.set(
                     dir,
-                    "its folder has the name of a theme or colors that come with Pi Pocket",
+                    "its folder has the name of a theme or colors that come with pi-tava",
                 );
                 continue;
             }

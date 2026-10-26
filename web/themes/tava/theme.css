@@ -1,0 +1,70 @@
+/* pi-tava: quiet working surfaces, warm orange wayfinding, and the icon's soft corners.
+ * Colors remain independent: choosing another palette or a UI font still belongs to the person. */
+:root {
+    --panel: var(--o-bg-dark);
+    --code-bg: var(--o-bg-dark);
+    --muted: color-mix(in oklab, var(--body) 82%, var(--bg));
+    --faint: color-mix(in oklab, var(--body) 76%, var(--bg));
+    --brand: var(--o-orange);
+    --spark: var(--o-orange);
+    --accent-fill: var(--accent);
+    --accent-ink: var(--bg);
+    --focus-ring: var(--accent);
+    --window-border-active: var(--accent);
+    --window-ring: none;
+
+    --r-mark: 4px;
+    --r-tag: 5px;
+    --r-seg: 8px;
+    --r-row: 8px;
+    --r-control: 10px;
+    --radius: var(--r-control);
+    --r-card: 12px;
+    --r-window: 14px;
+    --r-sheet: 18px;
+    --r-float: 18px;
+    --r-pill: 999px;
+    --checkbox-size: 16px;
+    --checkbox-radius: 4px;
+    --checkbox-border: var(--line-strong);
+    --border: 1px;
+    --gap-out: 8px;
+    --gap-in: 6px;
+    --shadow: none;
+    --pop: 0 12px 32px -16px rgb(0 0 0 / 0.32);
+}
+
+/* Dark workspaces keep large primary controls tonal; the orange stays in smaller accents. */
+:root[data-mode="dark"] {
+    --accent-fill: color-mix(in oklab, var(--accent) 40%, var(--bg));
+    --accent-ink: var(--text);
+}
+
+/* A solid focus border follows the curved windows; border images do not. */
+:is(
+    [data-part~="sidebar"],
+    [data-part~="pane"],
+    [data-part~="files-panel"],
+    [data-part~="browser-panel"],
+    [data-part~="people-panel"],
+    [data-part~="peeks"],
+    [data-part~="peek-tile"]
+) {
+    border-image: none;
+}
+
+[data-part~="session-button"][aria-current="page"] {
+    background: var(--accent-soft);
+}
+
+[data-part~="message-box"] {
+    border-color: var(--line-strong);
+}
+
+[data-part~="message-box"]:focus-within {
+    border-color: var(--accent);
+}
+
+input:is([type="checkbox"], [type="radio"], [type="range"]) {
+    accent-color: var(--accent-fill);
+}

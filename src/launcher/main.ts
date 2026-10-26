@@ -1,9 +1,9 @@
 /**
- * The Pi Coop launcher. Pick how your devices reach this server (this device only, the local network, a Cloudflare
+ * The pi-tava launcher. Pick how your devices reach this server (this device only, the local network, a Cloudflare
  * quick tunnel, or Tailscale), then it runs the server and the tunnel. The server restarts when the app asks (exit code
  * 75) or after a crash; the tunnel stays up across those restarts, so its address does not change.
  *
- *   pi-coop [--access local|lan|cloudflare|tailscale|tailscale-https] [-y] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
+ *   pi-tava [--access local|lan|cloudflare|tailscale|tailscale-https] [-y] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -227,7 +227,7 @@ async function pickAccess(current: AccessMode | undefined): Promise<AccessMode |
         options.findIndex((each) => each.mode === current),
     );
     const picked = await choose(
-        "How should your devices reach Pi Coop?",
+        "How should your devices reach pi-tava?",
         options.map((each) => each.choice),
         initial,
     );
@@ -254,7 +254,7 @@ async function ensureCloudflared(): Promise<string | undefined> {
     if (!interactive) {
         log(
             yellow(
-                "  cloudflared is not installed. Install it, or run pi-coop once in a terminal to download it.",
+                "  cloudflared is not installed. Install it, or run pi-tava once in a terminal to download it.",
             ),
         );
 
@@ -420,7 +420,7 @@ const KEYS_HINT = "q quit · r restart server · a access · o open here · s si
 async function showPanel(withQr: boolean): Promise<void> {
     const width = columns();
     const row = (label: string, value: string) => `  ${dim(label.padEnd(9))}${value}`;
-    const lines = ["", `  ${accent("π")} ${bold("Pi Coop")}  ${green("● running")}`, ""];
+    const lines = ["", `  ${accent("π")} ${bold("pi-tava")}  ${green("● running")}`, ""];
 
     lines.push(row("Access", `${modeLabel()}${modeNote() ? dim(` · ${modeNote()}`) : ""}`));
     lines.push(row("Open", cyan(appUrl())));
@@ -591,7 +591,7 @@ function startServer(first: boolean): void {
         }
 
         if (!state.everReady) {
-            log(red("  Pi Coop could not start (see above)."));
+            log(red("  pi-tava could not start (see above)."));
             void quit(code ?? 1);
 
             return;
@@ -838,7 +838,7 @@ async function quit(code: number): Promise<void> {
     quitting = true;
     shutdown.abort();
     release();
-    log(dim("  Stopping Pi Coop…"));
+    log(dim("  Stopping pi-tava…"));
     await stopTunnel();
     const proc = child;
 
@@ -878,7 +878,7 @@ async function main(): Promise<void> {
 
     if (interactive && mode === undefined && !options.yes) {
         log("");
-        log(`  ${accent("π")} ${bold("Pi Coop")}  ${dim(tilde(options.cwd))}`);
+        log(`  ${accent("π")} ${bold("pi-tava")}  ${dim(tilde(options.cwd))}`);
         log("");
     }
 
@@ -933,7 +933,7 @@ async function main(): Promise<void> {
         fail(`Missing ${SERVER}`);
     }
 
-    log(dim(`  Starting Pi Coop (${modeLabel()})…`));
+    log(dim(`  Starting pi-tava (${modeLabel()})…`));
     startServer(true);
 
     if (mode === "cloudflare" && binary !== undefined) {

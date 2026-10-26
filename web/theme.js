@@ -14,6 +14,9 @@ const FALLBACK = "tokyo-night";
 /** The app's own look, which every theme builds on: it loads no stylesheet. */
 export const BASE_LOOK = "pocket";
 
+/** New browsers follow Tava unless the owner chose a different shared default. */
+export const DEFAULT_THEME = { look: "tava", colors: "tava" };
+
 /** Local font stacks; code and terminals keep the bundled monospace face. */
 export const FONTS = {
     "jetbrains-mono": {
@@ -35,14 +38,14 @@ export const FONTS = {
 };
 
 const DEFAULTS = {
-    /** A key of the bundled THEMES. */
+    /** Legacy/unknown-palette fallback; new browsers inherit DEFAULT_THEME below. */
     theme: FALLBACK,
-    /** Optional theme-folder CSS; the standalone app loads no extra stylesheet by default. */
+    /** Legacy saves without an optional theme keep the app's base look. */
     look: BASE_LOOK,
     /** "system" activates saved palette choices as the device changes its color scheme. */
     mode: "dark",
-    darkTheme: FALLBACK,
-    lightTheme: "catppuccin-latte",
+    darkTheme: "tava@dark",
+    lightTheme: "tava@light",
     font: "jetbrains-mono",
     /** Wide screens: the sidebar and the conversation as tiled windows, with gaps and borders. */
     tiling: true,
@@ -183,7 +186,16 @@ function normalizePrefs(saved) {
 const following = localStorage.getItem(FOLLOW_DEFAULT);
 let followsDefault =
     following === "1" || (following === null && localStorage.getItem(KEY) === null);
-let own = normalizePrefs(readJson(KEY, {}));
+let own = normalizePrefs(
+    readJson(KEY, {
+        look: DEFAULT_THEME.look,
+        theme: DEFAULT_THEME.colors,
+        mode: "system",
+        systemPalette: DEFAULT_THEME.colors,
+        darkTheme: DEFAULTS.darkTheme,
+        lightTheme: DEFAULTS.lightTheme,
+    }),
+);
 
 // Resolve System in memory: startup must not rewrite this browser's saved preference record.
 if (own.mode === "system") {
@@ -198,15 +210,15 @@ if (followsDefault) {
 const ownerDefault = () => (store.state.server ? themeDefault() : readJson(DEFAULT_CACHE, null));
 
 function inForce() {
-    const current = followsDefault ? ownerDefault() : null;
+    const current = followsDefault ? (ownerDefault() ?? DEFAULT_THEME) : null;
 
     return current
         ? normalizePrefs({
               ...own,
               look: current.look,
               theme: current.colors,
-              mode: undefined,
-              systemPalette: undefined,
+              mode: current === DEFAULT_THEME ? "system" : undefined,
+              systemPalette: current === DEFAULT_THEME ? current.colors : undefined,
           })
         : own;
 }
@@ -434,12 +446,12 @@ export function lookIds() {
 export const colorsOnly = (each) =>
     each.css.length === 0 && each.colors !== undefined && each.usable;
 
-/** Theme folders' palettes, after the app's own: their ids. */
+/** Theme-folder palette choices: one card per explicit half, not a third automatic duplicate. */
 export function folderPaletteIds() {
     return (store.state.themeList ?? [])
         .filter((each) => each.usable && each.colors && each.id !== BASE_LOOK)
         .flatMap((each) =>
-            each.colorsLight ? [each.id, `${each.id}@dark`, `${each.id}@light`] : [each.id],
+            each.colorsLight ? [`${each.id}@dark`, `${each.id}@light`] : [each.id],
         );
 }
 

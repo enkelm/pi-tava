@@ -1,5 +1,5 @@
 /**
- * The theme ids Pi Pocket keeps for itself: its built-in themes' (the folders in `web/themes/`), its palettes'
+ * The theme ids pi-tava keeps for itself: its built-in themes' (the folders in `web/themes/`), its palettes'
  * (`web/themes.js`), `pocket`, and `desktop`. The owner's theme folders and the gallery's themes cannot take them. Read
  * from those files each time, so a theme or palette added to the app is reserved with no list to keep.
  */

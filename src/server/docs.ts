@@ -1,5 +1,5 @@
 /**
- * Pi Pocket's own durable documents. They live next to the transcripts in the same storage and change in the same
+ * pi-tava's own durable documents. They live next to the transcripts in the same storage and change in the same
  * commits, so a crash never leaves them disagreeing with the conversation.
  *
  * Kinds are part of the stored data: rename one and old sessions lose it.

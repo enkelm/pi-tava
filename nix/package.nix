@@ -30,7 +30,7 @@ let
   ++ lib.optionals stdenv.hostPlatform.isLinux [ chromium ];
 in
 stdenv.mkDerivation {
-  pname = "pi-pocket";
+  pname = "pi-tava";
   inherit (package) version;
 
   src = lib.fileset.toSource {
@@ -101,16 +101,19 @@ stdenv.mkDerivation {
     # npm's hidden lock contains build-time tarball paths, not runtime dependencies
     rm -f "$app/node_modules/.package-lock.json"
 
-    makeWrapper ${lib.getExe nodejs_24} "$out/bin/pi-pocket" \
-      --add-flags "$app/bin/pi-pocket.js" \
+    makeWrapper ${lib.getExe nodejs_24} "$out/bin/pi-tava" \
+      --add-flags "$app/bin/pi-coop.js" \
       --suffix PATH : "${lib.makeBinPath runtimePackages}"
+    # Keep existing launch scripts working after the display/package rebrand.
+    ln -s pi-tava "$out/bin/pi-coop"
+    ln -s pi-tava "$out/bin/pi-pocket"
     runHook postInstall
   '';
 
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    "$out/bin/pi-pocket" --help
+    "$out/bin/pi-tava" --help
     PI_POCKET_TEST_PACKAGE="$out" \
       PI_POCKET_TEST_EXTENSION=${./tests/extension.ts} \
       node --test ${./tests/installed.mjs}
@@ -120,7 +123,7 @@ stdenv.mkDerivation {
   meta = {
     inherit (package) description homepage;
     license = lib.licenses.mit;
-    mainProgram = "pi-pocket";
+    mainProgram = "pi-tava";
     platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 }

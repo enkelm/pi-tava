@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { APP_ROOT } from "./config.ts";
 
-/** Pi Pocket's own package: its version, and the packages a drop-in can import by name. */
+/** pi-tava's own package: its version, and the packages a drop-in can import by name. */
 export const pocketPackage: { version?: string; dependencies?: Record<string, string> } = (() => {
     try {
         return JSON.parse(readFileSync(join(APP_ROOT, "package.json"), "utf8")) as {
@@ -15,8 +15,11 @@ export const pocketPackage: { version?: string; dependencies?: Record<string, st
     }
 })();
 
-/** This Pi Pocket's version, from its package. */
-export const pocketVersion = (): string => pocketPackage.version ?? "0.0.0";
+/**
+ * The upstream Pi Pocket compatibility baseline for `minPocket`, not pi-tava's release number.
+ * Keep this tied to the upstream code/API baseline when pi-tava starts its own 0.1.x releases.
+ */
+export const pocketVersion = (): string => "0.14.0";
 
 /** A Pi Pocket version: `0.14.0`. */
 export const POCKET_VERSION = /^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$/;

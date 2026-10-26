@@ -18,8 +18,8 @@ A linked session is an ordinary session. The session list shows it under the ses
 
 - Without `title`, the title is the first line of the message.
 - `model` is `provider/modelId`. It must be the source's model, or a model that the owner allows for subagents (Menu → Providers → Models for subagents). Without it, the session uses the source's model.
-- `thinking` can be at most the source's level. Without it, the session uses the source's level. Pi Pocket lowers it to the highest level that the model has.
-- When a model cannot be used now, Pi Pocket refuses the call before it makes anything.
+- `thinking` can be at most the source's level. Without it, the session uses the source's level. pi-tava lowers it to the highest level that the model has.
+- When a model cannot be used now, pi-tava refuses the call before it makes anything.
 
 ## Send a message
 
@@ -42,11 +42,11 @@ Addresses belong to the session that has them. A fork starts with none, so it le
 
 `start` and `send` act for the person whom Pi works for in the source. They need that person's access and right to steer. To start a session, that person must also have access to all sessions.
 
-Pi Pocket refuses them while the source is in plan mode, past a spend limit, or while another person has the turn. `send` also needs the turn, and room under the spend limit, in the target session.
+pi-tava refuses them while the source is in plan mode, past a spend limit, or while another person has the turn. `send` also needs the turn, and room under the spend limit, in the target session.
 
 ## Limits of a team
 
-Pi Pocket keeps a team small. Past these limits ([Limits](reference/limits.md#linked-sessions)), it refuses the call with a plain error:
+pi-tava keeps a team small. Past these limits ([Limits](reference/limits.md#linked-sessions)), it refuses the call with a plain error:
 
 - A linked session can send messages to the other sessions of its team. It cannot start sessions.
 - A session can start a limited number of sessions.
@@ -56,6 +56,6 @@ Pi Pocket keeps a team small. Past these limits ([Limits](reference/limits.md#li
 
 ## Replays
 
-Give a `key` that stays the same when the call runs again: `${api.taskId}:${api.callId}`. A start or a send with a key that Pi Pocket saw before returns what the first call returned. So a replay makes one session, and sends one message. Pi Pocket keeps the record of a key for a limited time, and for a limited number of calls ([limits](reference/limits.md#linked-sessions)).
+Give a `key` that stays the same when the call runs again: `${api.taskId}:${api.callId}`. A start or a send with a key that pi-tava saw before returns what the first call returned. So a replay makes one session, and sends one message. pi-tava keeps the record of a key for a limited time, and for a limited number of calls ([limits](reference/limits.md#linked-sessions)).
 
 The errors say what is wrong. They do not tell Pi what to do about it: your tool tells Pi that.

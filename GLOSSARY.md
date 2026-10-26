@@ -1,6 +1,6 @@
-# Pi Coop collaboration
+# pi-tava collaboration
 
-The shared work people and agents organize in Pi Coop.
+The shared work people and agents organize in pi-tava.
 
 ## Language
 

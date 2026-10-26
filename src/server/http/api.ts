@@ -1012,7 +1012,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 if (here.protocol !== "https:" && !loopback) {
                     throw new HttpError(
                         403,
-                        "Password login needs HTTPS or localhost. Open Coop through a secure address.",
+                        "Password login needs HTTPS or localhost. Open pi-tava through a secure address.",
                     );
                 }
 
@@ -1517,7 +1517,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
             if (!app.supervised) {
                 throw new HttpError(
                     409,
-                    "Start Pi Coop with bin/pi-coop.js to restart from the app.",
+                    "Start pi-tava with bin/pi-coop.js to restart from the app.",
                 );
             }
 

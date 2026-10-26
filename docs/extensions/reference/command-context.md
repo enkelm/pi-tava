@@ -126,7 +126,7 @@ commit<T>(change: (tx: Tx) => T | Promise<T>): Promise<T>;
 
 Since 0.14.0 · Stable
 
-Changes documents in one commit: `await ctx.commit(async (tx) => …)`. It returns what `change` returns. Do work outside Pi Pocket before or after the commit, not in it.
+Changes documents in one commit: `await ctx.commit(async (tx) => …)`. It returns what `change` returns. Do work outside pi-tava before or after the commit, not in it.
 
 ## The result
 

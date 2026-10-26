@@ -21,10 +21,10 @@ import { atLeast, POCKET_VERSION, versionParts } from "../versions.ts";
 // Where they always were: the index repository's checks import them from here.
 export { atLeast, versionParts };
 
-/** The index format this Pi Pocket reads. */
+/** The index format this pi-tava reads. */
 export const INDEX_FORMAT = 1;
 
-/** How much Pi Pocket reads from the index and from an extension's repository. */
+/** How much pi-tava reads from the index and from an extension's repository. */
 export const LIMITS = {
     /** The index, in bytes. */
     index: 4 * 1024 * 1024,
@@ -95,7 +95,7 @@ export interface Entry {
     /** The oldest Pi Pocket it works with: `0.14.0`. */
     minPocket: string;
     declares: Declares;
-    /** Commits of it that must not be used: Pi Pocket warns where one is installed. */
+    /** Commits of it that must not be used: pi-tava warns where one is installed. */
     revoked: { commit: string; reason: string }[];
 }
 
@@ -144,7 +144,7 @@ export interface Index {
 /** Why something in the index is not valid. */
 export class EntryError extends Error {}
 
-/** The kinds of entry this Pi Pocket reads: an entry with no `kind` is an extension's. Others are for a newer one. */
+/** The kinds of entry this pi-tava reads: an entry with no `kind` is an extension's. Others are for a newer one. */
 const KINDS = ["extension", "theme"];
 
 // ─── Names ─────────────────────────────────────────────────────────────────────────
@@ -387,7 +387,7 @@ function declares(value: unknown, where: string): Declares {
 
     for (const command of result.commands ?? []) {
         if (command.length > 80 || BUILT_IN_COMMANDS.has(command.split(" ")[1]!)) {
-            throw new EntryError(`${where}.commands has ${command}, a command of Pi Pocket's own`);
+            throw new EntryError(`${where}.commands has ${command}, a command of pi-tava's own`);
         }
     }
 
@@ -415,7 +415,7 @@ function declares(value: unknown, where: string): Declares {
     for (const name of result.extensions) {
         if (RESERVED_EXTENSIONS.test(name)) {
             throw new EntryError(
-                `${where}.extensions has ${name}, a name Pi Pocket keeps for itself`,
+                `${where}.extensions has ${name}, a name pi-tava keeps for itself`,
             );
         }
     }
@@ -550,7 +550,7 @@ export function parseEntry(value: unknown): Entry {
     const name = text(shape.name, "name", 64, NAME);
 
     if (BUILT_IN_MODULES.has(name) || name.startsWith("pocket-")) {
-        throw new EntryError(`name ${name} is Pi Pocket's own: give it a name of its own`);
+        throw new EntryError(`name ${name} is pi-tava's own: give it a name of its own`);
     }
 
     const about = common(shape);
@@ -584,7 +584,7 @@ export function parseEntry(value: unknown): Entry {
 }
 
 /**
- * Ids a theme in the index may not have, as Pi Pocket keeps them for itself (`reservedThemeIds`): `pocket`, `desktop`
+ * Ids a theme in the index may not have, as pi-tava keeps them for itself (`reservedThemeIds`): `pocket`, `desktop`
  * (the desktop's colors), the themes that come with it (`web/themes/`), and its palettes (`web/themes.js`). Read from
  * this checkout, as the index's checks import this file from one.
  */
@@ -621,7 +621,7 @@ export function parseThemeEntry(value: unknown): ThemeEntry {
     const name = text(shape.name, "name", 48, THEME_ID);
 
     if (RESERVED_THEMES.has(name)) {
-        throw new EntryError(`name ${name} is Pi Pocket's own: give it a name of its own`);
+        throw new EntryError(`name ${name} is pi-tava's own: give it a name of its own`);
     }
 
     const about = common(shape);
@@ -730,7 +730,7 @@ export function pinOf(entry: Entry | ThemeEntry): string {
 }
 
 /**
- * Whether an entry is for this Pi Pocket: `newer` when it needs a newer extension API or Pi Pocket. Read loosely,
+ * Whether an entry is for this pi-tava: `newer` when it needs a newer extension API or Pi Pocket. Read loosely,
  * before the entry is checked whole, so an entry written for a newer Pi Pocket (with fields this one does not know)
  * counts as one for later, not as invalid.
  */
@@ -783,8 +783,8 @@ export function parseIndex(source: string, here: { api: number; version: string 
     ) {
         throw new EntryError(
             typeof value.format === "number" && value.format > INDEX_FORMAT
-                ? "The index is in a newer format: update Pi Pocket to read it"
-                : "The index is not in a format Pi Pocket reads",
+                ? "The index is in a newer format: update pi-tava to read it"
+                : "The index is not in a format pi-tava reads",
         );
     }
 

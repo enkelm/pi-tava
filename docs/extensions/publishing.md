@@ -1,6 +1,6 @@
 # Publishing to the gallery
 
-The gallery lists drop-ins that other people wrote. This page tells how Pi Pocket installs them, and how to share your own. The rules for entries, and their review, are in [Gallery review](policies/gallery-review.md). The fields of an entry are in [the gallery entry reference](reference/gallery-entry.md), and their limits in [Limits](reference/limits.md#gallery).
+The gallery lists drop-ins that other people wrote. This page tells how pi-tava installs them, and how to share your own. The rules for entries, and their review, are in [Gallery review](policies/gallery-review.md). The fields of an entry are in [the gallery entry reference](reference/gallery-entry.md), and their limits in [Limits](reference/limits.md#gallery).
 
 ## How the gallery works
 
@@ -13,12 +13,12 @@ Each entry gives the files of one drop-in, at one commit of a GitHub repository,
 
 The index lists themes too, with `"kind": "theme"` ([Themes](themes.md#themes-in-the-gallery)). A theme installs into the data folder's `themes/`, after the same checks as every theme folder, and each person chooses it in Appearance. A Pi Pocket before 0.14.0 counts a theme's entry as one it cannot read, so it never installs one as an extension.
 
-## What Pi Pocket checks
+## What pi-tava checks
 
-Pi Pocket trusts nothing in an entry. So it:
+pi-tava trusts nothing in an entry. So it:
 
 - **Reads it strictly** (`src/server/gallery/entry.ts`). It checks each field. Each field is one line of plain text, with no control, invisible, or direction characters. Names follow the rules of the drop-in folder. Sizes and lengths stay in the [limits](reference/limits.md#gallery): of the index, of the files, and of each field.
-    - It leaves out an entry that it cannot read, and hides an entry for a newer Pi Pocket or extension API. The list says how many.
+    - It leaves out an entry that it cannot read, and hides an entry for a newer pi-tava or extension API. The list says how many.
     - It shows all of an entry as text, and links only to the GitHub addresses that it makes itself.
 - **Downloads files only over https**, from the entry's repository on `raw.githubusercontent.com`, at the entry's commit. When the size or the SHA-256 of one file is different from the entry's, it installs nothing at all, and the same when a code file (ending in `.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, `.json`, or `.css`, in any case) is not plain UTF-8 text, or any text file holds characters that change the direction of text.
 - **Installs it off**, as each drop-in starts, also under a name that was on before. Only the owner turns it on.
@@ -55,13 +55,13 @@ The files of an entry belong to its drop-in, and have its name, so they never me
 - **`<name>.js` or `<name>.mjs`** beside it, or the folder **`<name>/`**, for its browser module: `web.client("<name>.js")`, or `web.client("<name>")`.
     - Helpers go in that folder too, for example `import { zones } from "./<name>/zones.ts"`. The folder serves no `.ts` files.
     - The folder has a depth limit ([limits](reference/limits.md#gallery)), no hidden files, and no `node_modules`.
-- **Imports**: only those files, Node's own modules, and the packages that Pi Pocket has (`@earendil-works/pi-durable`, `@earendil-works/pi-ai`, and others). Nothing by its place on this machine, and no code from other places. An `import type` is allowed, for example from `./_pocket.d.ts`: Node removes it when the module runs.
+- **Imports**: only those files, Node's own modules, and the packages that pi-tava has (`@earendil-works/pi-durable`, `@earendil-works/pi-ai`, and others). Nothing by its place on this machine, and no code from other places. An `import type` is allowed, for example from `./_pocket.d.ts`: Node removes it when the module runs.
 - **Description**: the first paragraph of its `/** … */` comment is the entry's description.
 
 ## Publish it
 
 1. Put the files in a public GitHub repository, with the same names as in your drop-in folder, at its top or in a folder. Commit them.
-2. In Menu → Extensions, tap **Share…** on your drop-in. Pi Pocket checks that the drop-in stands on its own, and writes a draft of its entry. The draft has the description from its comment, and the size and SHA-256 of each file. While the drop-in is on, it also has what the drop-in declares. Pi Pocket makes no GitHub calls for this.
+2. In Menu → Extensions, tap **Share…** on your drop-in. pi-tava checks that the drop-in stands on its own, and writes a draft of its entry. The draft has the description from its comment, and the size and SHA-256 of each file. While the drop-in is on, it also has what the drop-in declares. pi-tava makes no GitHub calls for this.
 3. Fill in what only you know: the repository (`owner/name`), the full ID of the commit with these files, the folder (if not the top), the tags, and your GitHub name.
 4. Tap **Open a pull request**. It shows when the entry would pass the index's checks. It opens GitHub's new-file page in the index repository, with the entry filled in as `entries/<name>.json`. The index's [CONTRIBUTING](https://github.com/TannerMidd/pi-pocket-extensions/blob/main/CONTRIBUTING.md) tells the rest.
 

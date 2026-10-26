@@ -1,7 +1,7 @@
 /**
  * Lancet Guard, borrowed from the user's Pi install.
  *
- * Pi Pocket runs its tools outside Pi, so Pi's extensions do not see them. This module loads the gate, rules, and
+ * pi-tava runs its tools outside Pi, so Pi's extensions do not see them. This module loads the gate, rules, and
  * classifier of the installed `specpi-lancet-guard` package and exposes one `judge()` call. The guard's own settings
  * file (`~/.pi/lancet-guard.json`) decides whether it is on, exactly as it does inside Pi.
  */

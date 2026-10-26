@@ -8,7 +8,7 @@ On the server, `web.client(entry, { access })` gives the module a browser module
 
 `entry` is the name of a file or a folder beside the module, not a link. The name has letters, digits, `.`, `_`, and `-`, and starts with a letter, a digit, or `_`.
 
-- **A `.js` or `.mjs` file.** Pi Pocket serves this file alone.
+- **A `.js` or `.mjs` file.** pi-tava serves this file alone.
 - **A folder.** Its `index.js` loads first, and can import the other files of the folder. A stylesheet, or any other file, needs a folder.
 
 ## The default export
@@ -57,7 +57,7 @@ Keep the top level of the module to declarations, and do its work in the default
 - It never serves `.ts` files, hidden files, `node_modules`, or a file through a link. A link could lead to such a file, or out of the folder.
 - It serves files up to a size [limit](reference/limits.md#browser-modules).
 - All the people that the browser module is for can read each file of those types in the folder. Keep no secret there. Keep the module's own data, such as a cache or settings, in another place: beside the module, or in a folder of its own in the data folder.
-- When the file or the folder goes, or becomes a link, Pi Pocket tells the owner. Tabs cannot load the browser module until it is back.
+- When the file or the folder goes, or becomes a link, pi-tava tells the owner. Tabs cannot load the browser module until it is back.
 
 ## New versions
 
@@ -66,7 +66,7 @@ When you save a file that the folder serves, the browser module gets a new addre
 - Only the types that the folder serves count. A `.log` or `.txt` file does not count, so a write to one loads nothing again. A `.json` file or an image counts.
 - The version in the address is only for this. Each version serves the files as they are now.
 - Only a [limited number](reference/limits.md#browser-modules) of files and folders count. An edit past those gives no new address, so open tabs keep their version until the page loads again.
-- Pi Pocket watches a [limited number](reference/limits.md#browser-modules) of folders. It sees an edit in a deeper folder at its next look: when something that it watches changes, or when the module loads again.
+- pi-tava watches a [limited number](reference/limits.md#browser-modules) of folders. It sees an edit in a deeper folder at its next look: when something that it watches changes, or when the module loads again.
 
 ## Rail buttons, menu rows, and launcher actions
 
@@ -137,9 +137,9 @@ The app draws what a module changed at the next frame, one time for all its chan
 - Values are the same only when they are the very same value. A new array or function is a change, each time.
 - Many changes at the same time draw one time.
 
-Change what the module added from an event, a timer, or an effect, not while a component draws. Give each effect its dependencies. A module that changes what it added each time it draws, or each time an effect of its drawing runs, redraws the app in each frame until the owner turns it off. Pi Pocket does not stop it.
+Change what the module added from an event, a timer, or an effect, not while a component draws. Give each effect its dependencies. A module that changes what it added each time it draws, or each time an effect of its drawing runs, redraws the app in each frame until the owner turns it off. pi-tava does not stop it.
 
-Pi Pocket stops a module in that browser, as one that failed ("was stopped in this browser: it redraws without end"), until the page loads again or the module changes, when:
+pi-tava stops a module in that browser, as one that failed ("was stopped in this browser: it redraws without end"), until the page loads again or the module changes, when:
 
 - One task makes too many calls to `pocket`, over more than one second ([limits](reference/limits.md#browser-modules)). All of `pocket` counts, but not `h`, `html`, `Fragment`, the hooks, and the components. This stops a loop of microtasks, which holds the page, and also a long batch with heavy work between its calls. Then its calls throw until the next task, `pocket.api` too, so an `await` loop rejects and a `.then` chain stops.
 - It opens and closes its pages or sheets too many times in one second, or again and again with no task between ([limits](reference/limits.md#browser-modules)).
@@ -152,7 +152,7 @@ Nothing outside a module can stop a loop that never yields and calls nothing of 
 - Use the app's colors, which follow the theme: `var(--text)`, `var(--muted)`, `var(--accent)`, `var(--bg)`, `var(--card)`, `var(--line)`, `var(--err)`, `var(--warn)`, and `var(--ok)`.
 - Use these classes: `button` (with `primary`), `error-box`, `muted`, `small`, `mono`, and `setting` (a row with a label and a control).
 
-Pi Pocket keeps these names. They are part of [the theme surface](reference/theme-surface.md#extensions-css-names), and a module can use its other tokens too. The rest of its CSS can change.
+pi-tava keeps these names. They are part of [the theme surface](reference/theme-surface.md#extensions-css-names), and a module can use its other tokens too. The rest of its CSS can change.
 
 To load a stylesheet of your own, put it in the module's folder, and call `pocket.style(path)`. The stylesheet goes in the app's own cascade layer: it wins and loses against the app's rules by specificity and order, and a theme's rules win over both. Do not add a `<link>` of your own: it would be outside the layers, and win over the app and the theme alike.
 

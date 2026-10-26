@@ -1,10 +1,10 @@
 # The public API and how it changes
 
-This page tells which interfaces of Pi Pocket are for extensions, what Pi Pocket promises about them, and how they change. [The reference](../reference/host.md) and the exact types in [types/pocket.d.ts](../../../types/pocket.d.ts) tell what each interface is, and the guides tell how to use it. This page does not repeat them.
+This page tells which interfaces of pi-tava are for extensions, what pi-tava promises about them, and how they change. [The reference](../reference/host.md) and the exact types in [types/pocket.d.ts](../../../types/pocket.d.ts) tell what each interface is, and the guides tell how to use it. This page does not repeat them.
 
 ## Terms
 
-- **Public:** an interface in the list below. Pi Pocket keeps it, or changes it only by the rules on this page.
+- **Public:** an interface in the list below. pi-tava keeps it, or changes it only by the rules on this page.
 - **Internal:** all other code and data. It can change in any release, with no notice.
 - **Stable:** public, and not experimental or deprecated. All public interfaces are stable unless the docs mark them.
 - **Experimental:** public, but it can change or go in any minor release, never in a patch release.
@@ -18,21 +18,21 @@ Each item below is public as the reference and the guides describe it: its names
 
 ### 1. The module
 
-- A `.ts` file in the drop-in folder (`extensions/` in the data folder), with the `node_modules` link to Pi Pocket's packages.
-- The default export `(host, web)`. It can be `async`. It returns one extension, a list, or nothing. Pi Pocket installs all of it or none of it.
+- A `.ts` file in the drop-in folder (`extensions/` in the data folder), with the `node_modules` link to pi-tava's packages.
+- The default export `(host, web)`. It can be `async`. It returns one extension, a list, or nothing. pi-tava installs all of it or none of it.
 - `export const pocketApi`, and the separate experimental `export const durableToolApi` for Durable tool-result participants.
 - The first sentence of the module's `/** … */` comment, which is its description.
 - Files that start with `_` or end in `.test.ts` are not modules.
 - Loading, reloading, and errors ([Modules, loading, and errors](../modules.md)), with the times in [Limits](../reference/limits.md#loading).
 - The types in [types/pocket.d.ts](../../../types/pocket.d.ts): `Module`, `Host`, `SafeText`, `LinkedSessions`, `LinkedSession`, `Web`, `WebRequest`, `WebHandler`, `WebAccess`, `WebMethod`, `Command`, `CommandContext`, `CommandResult`, `BrowserModule`, `Pocket`, the specs and props of what a browser module adds, `Person`, `Role`, and `NoticeLevel`. Import them with `import type` from `./_pocket.d.ts` in the drop-in folder ([Types for your editor](../reference/types.md)): the import goes away at run time.
-- `src/server/host.ts` is internal. Its types (`PocketHost`, `ExtensionWeb`, and the others) are Pi Pocket's own, and can change in any release. `test/public-types.ts` checks that they fit the public types.
+- `src/server/host.ts` is internal. Its types (`PocketHost`, `ExtensionWeb`, and the others) are pi-tava's own, and can change in any release. `test/public-types.ts` checks that they fit the public types.
 
 ### 2. Names
 
-- The names that Pi Pocket keeps for itself ([Names](../reference/names.md)): extension names that start with `pocket-`, the extension name `coding-tools`, the names of built-in modules, and the names of built-in tools.
+- The names that pi-tava keeps for itself ([Names](../reference/names.md)): extension names that start with `pocket-`, the extension name `coding-tools`, the names of built-in modules, and the names of built-in tools.
 - The rules for the names of modules, tools, commands, routes, and the IDs of what a browser module adds.
 - The paths of a module's routes, `/api/x/<module>/`, and of its browser files, `/x/<module>/`.
-- **Promises:** the names of Pi Pocket's own extensions start with `pocket-` (or are `coding-tools`). Its own commands never have a `-`. Its own document kinds, task names, and browser storage keys never start with `x.`.
+- **Promises:** the names of pi-tava's own extensions start with `pocket-` (or are `coding-tools`). Its own commands never have a `-`. Its own document kinds, task names, and browser storage keys never start with `x.`.
 
 ### 3. `host`
 
@@ -48,7 +48,7 @@ These members are public:
 - `text`: `quoted`, `defang`
 - `thinkingLevels`
 
-These members are on `host` for Pi Pocket's own built-in extensions: `guard`, `approvals`, `schedules`, `goals`, `browsers`, `memory`, `watches`, `repoWatches`, `gallery`, `pip`, and `pipCompaction`. They are **internal**. A drop-in can read them, but their shapes can change in any release. One of them becomes public only through a request for an extension point ([core-or-extension.md](core-or-extension.md#ask-for-a-new-extension-point)).
+These members are on `host` for pi-tava's own built-in extensions: `guard`, `approvals`, `schedules`, `goals`, `browsers`, `memory`, `watches`, `repoWatches`, `gallery`, `pip`, and `pipCompaction`. They are **internal**. A drop-in can read them, but their shapes can change in any release. One of them becomes public only through a request for an extension point ([core-or-extension.md](core-or-extension.md#ask-for-a-new-extension-point)).
 
 The host's members do not change while modules reload. Host changes need a restart; server and browser source target the same current API, without older-host fallback branches ([Using the host](../host.md)).
 
@@ -87,7 +87,7 @@ The host's members do not change while modules reload. Host changes need a resta
 ### 8. Events
 
 - `web.send(event, data, { to })` on the server and `pocket.on(event, run)` in the browser, with their limits.
-- A module's events are its own. An event goes only to the browser module of the module that sent it. Pi Pocket does not keep any event name for itself, and it reads none of them.
+- A module's events are its own. An event goes only to the browser module of the module that sent it. pi-tava does not keep any event name for itself, and it reads none of them.
 - The app's own events between the server and its tabs (`hello`, `view`, `chat`, `ext`, and the others) are internal.
 
 ### 9. Names for stored data
@@ -98,8 +98,8 @@ The host's members do not change while modules reload. Host changes need a resta
 ### 10. The gallery entry format
 
 - Index format 1, and the fields of an entry, as the index's [README](https://github.com/TannerMidd/pi-pocket-extensions#an-entry) gives them. Where the README and `src/server/gallery/entry.ts` do not agree, `entry.ts` is correct.
-- Pi Pocket refuses an entry with a field that it does not know. So an entry can use a new field only when its `minPocket` is a release that reads that field. Tools that make entries (**Share…**) leave a new field out when it is empty, as they do with `declares.commands`.
-- A change to the meaning of a field, or a new field that is necessary, needs a new index format. Pi Pocket reads only its own format.
+- pi-tava refuses an entry with a field that it does not know. So an entry can use a new field only when its `minPocket` is a release that reads that field. Tools that make entries (**Share…**) leave a new field out when it is empty, as they do with `declares.commands`.
+- A change to the meaning of a field, or a new field that is necessary, needs a new index format. pi-tava reads only its own format.
 - The `<name>.gallery.json` file next to an installed drop-in, the gallery's routes, and its screens are internal.
 
 ## What is internal
@@ -107,17 +107,17 @@ The host's members do not change while modules reload. Host changes need a resta
 - All files under `src/` and `web/`, and what they export, `src/server/host.ts` too. The public types are in `types/pocket.d.ts` ([The module](#1-the-module)).
 - The app's HTTP API, other than a module's own routes under `/api/x/<module>/` and `/api/c/:id/x/<module>/`. Public `pocket.submit` exposes normal human input, not arbitrary HTTP access.
 - The events between the server and its tabs, and the `pocket.*` keys in browser storage.
-- Pi Pocket's document kinds (`pocket.*`), and the shapes of its documents, entries, and tasks. A module can read them with `api.snapshot`, but their fields can change.
+- pi-tava's document kinds (`pocket.*`), and the shapes of its documents, entries, and tasks. A module can read them with `api.snapshot`, but their fields can change.
 - `config.json`, `pocket.sqlite`, and the rest of the data folder, except `extensions/`.
 - All CSS that is not in [CSS](#7-css).
 - The words of errors, notices, logs, and the system prompt.
 - The tools of built-in extensions: their arguments and results. Only their names are public, as reserved names.
 - The `host` members for built-in extensions ([host](#3-host)).
-- The test helpers in `test/`. The index's checks use them, and pin the Pi Pocket version they use.
+- The test helpers in `test/`. The upstream index's checks use them, and pin the Pi Pocket version they use.
 
 ## Packages from Earendil
 
-Extensions import `@earendil-works/pi-durable`, `@earendil-works/pi-ai`, and the other packages that Pi Pocket has. Earendil makes them, not Pi Pocket. Pi Durable is experimental, and its API can change between its releases. Pi Pocket pins their versions in `package.json`, and a drop-in gets the same versions through the `node_modules` link.
+Extensions import `@earendil-works/pi-durable`, `@earendil-works/pi-ai`, and the other packages that pi-tava has. Earendil makes them, not pi-tava. Pi Durable is experimental, and its API can change between its releases. pi-tava pins their versions in `package.json`, and a drop-in gets the same versions through the `node_modules` link.
 
 - **A1. The release notes name each update of a pinned package** in "For extension authors".\
   _Reason:_ an author can then find the cause when a module breaks after an update.
@@ -148,7 +148,7 @@ All public interfaces are stable, unless the docs mark them experimental or depr
 - **A5. An experimental member becomes stable when the release notes say so.**\
   _Reason:_ the change of status is then easy to find.
 - **A6. A gallery entry that uses an experimental member should say so in its description.**\
-  _Reason:_ the owner then knows that an update of Pi Pocket can break it.
+  _Reason:_ the owner then knows that an update of pi-tava can break it.
 
 The session/workflow additions for 0.15 are experimental, including request-bound scoped routes,
 conversation browser access, session snapshots, controls, input hints, submission/navigation and
@@ -168,15 +168,15 @@ See [Deprecation](#deprecation).
   _Reason:_ one number tells if a module can work, with no need to compare release numbers.
 - **A8. Additions do not change `pocketApi`. Changes to experimental members do not change it.**\
   _Reason:_ a number that moves for each addition says nothing about breaks.
-- A module's `pocketApi` export is the API version that the module was written for. Pi Pocket does not load a module that needs a newer API. It says so in the Extensions sheet. A gallery entry's `pocketApi` is the same number. The gallery hides an entry that needs a newer API.
-- **A9. Pi Pocket loads modules that were written for the previous `pocketApi` for at least the deprecation period ([A17](#minimum-time)).** After that, it refuses them with an error that tells the owner to update the module. A module with no `pocketApi` export counts as version 1.\
+- A module's `pocketApi` export is the API version that the module was written for. pi-tava does not load a module that needs a newer API. It says so in the Extensions sheet. A gallery entry's `pocketApi` is the same number. The gallery hides an entry that needs a newer API.
+- **A9. pi-tava loads modules that were written for the previous `pocketApi` for at least the deprecation period ([A17](#minimum-time)).** After that, it refuses them with an error that tells the owner to update the module. A module with no `pocketApi` export counts as version 1.\
   _Reason:_ authors get the same time to update as for one deprecated app member, and an old module fails with a clear message, not at its first use of a member that is gone. This does not admit an incompatible experimental Durable ABI: A2's separate check still applies.
 
 ### `minPocket` and additions
 
 - **A10. A module targets the current API of its server and browser source.** In the gallery it sets `minPocket` to the release it needs. Host changes require an owner-controlled restart, not compatibility aliases or runtime fallback branches.\
   _Reason:_ one source-level contract avoids duplicate behavior and misleading partial support.
-- **A11. `minPocket` names a release, such as `0.15.0`, not a pre-release.** Pi Pocket counts `0.15.0-beta.2` as `0.15.0`.\
+- **A11. `minPocket` names a release, such as `0.15.0`, not a pre-release.** pi-tava counts `0.15.0-beta.2` as `0.15.0`.\
   _Reason:_ a beta can change before the release, and an entry for a beta can break on the release.
 
 ### Breaking changes
@@ -189,9 +189,9 @@ These are breaking changes when they touch a stable member:
 - accept less than before: a stricter check, a lower limit, or a shorter time limit;
 - give a module less than before: fewer fields, or a narrower `access`;
 - change a default, such as the `owner` default of `access`;
-- change when Pi Pocket calls a module's code, where the docs say when;
+- change when pi-tava calls a module's code, where the docs say when;
 - change a naming rule for stored data, or the paths of routes;
-- change the gallery entry format so that Pi Pocket refuses a valid entry.
+- change the gallery entry format so that pi-tava refuses a valid entry.
 
 ### Additions
 
@@ -206,33 +206,33 @@ These can change in any release: the words of errors and notices, timing that th
 
 ### Reserved names
 
-- **A12. Pi Pocket can keep a new name for itself in any minor release:** a module, an extension, a tool, a command, or a theme id (a theme or a palette that comes with Pi Pocket). The release notes list it.\
+- **A12. pi-tava can keep a new name for itself in any minor release:** a module, an extension, a tool, a command, or a theme id (a theme or a palette that comes with pi-tava). The release notes list it.\
   _Reason:_ new built-in features need names. A module with its own prefix ([Names](../reference/names.md)) never meets them.
-- When a new reserved name is the name of a drop-in, Pi Pocket refuses the drop-in, and the Extensions sheet says why. For example, 0.14 keeps the tool `team` and the module `agent-teams`.
-- When a new reserved theme id is the id of a theme folder of the owner's, Pi Pocket does not read that folder, and tells the owner. The gallery does not accept a theme entry with a reserved id. For example, 0.14 keeps the theme `lantern`.
+- When a new reserved name is the name of a drop-in, pi-tava refuses the drop-in, and the Extensions sheet says why. For example, 0.14 keeps the tool `team` and the module `agent-teams`.
+- When a new reserved theme id is the id of a theme folder of the owner's, pi-tava does not read that folder, and tells the owner. The gallery does not accept a theme entry with a reserved id. For example, 0.14 keeps the theme `lantern`.
 
 ### Security fixes
 
-- **A13. A security fix can change or remove a stable member with no deprecation period, in any release, a patch included.** The release notes say so under "Security". Pi Pocket keeps the change as small as the fix permits.\
+- **A13. A security fix can change or remove a stable member with no deprecation period, in any release, a patch included.** The release notes say so under "Security". pi-tava keeps the change as small as the fix permits.\
   _Reason:_ owners must not stay at risk for the length of a deprecation period.
 
-### Pi Pocket's version and `pocketApi`
+### pi-tava's version and `pocketApi`
 
-- Pi Pocket's version is `0.Y.Z` before 1.0. `Y` is the minor release. `Z` is the patch.
+- pi-tava's version is `0.Y.Z` before 1.0. `Y` is the minor release. `Z` is the patch.
 - **A14. A patch release (`0.14.1`) has fixes only.** It has no additions, no breaking changes to stable members, and no new deprecations. Only a security fix (A13) can break.\
   _Reason:_ an owner must be able to take a patch with no risk to their extensions, and each `minPocket` is then a `.0` release.
 - **A15. A minor release (`0.15.0`) can add, deprecate, and change experimental members.** It can remove a deprecated member after its minimum time. Then `pocketApi` goes up.\
   _Reason:_ authors then read the notes of minor releases only, to know what changes.
 - **A16. Pre-releases (`0.15.0-beta.1`) have no promise.** Members can change from one beta to the next.\
   _Reason:_ betas are for tests of new interfaces before they become stable.
-- The two numbers move apart. Many releases of Pi Pocket can have `pocketApi` 1. `pocketApi` tells if a module can work. `minPocket` tells from which release.
+- The two numbers move apart. Many releases of pi-tava can have `pocketApi` 1. `pocketApi` tells if a module can work. `minPocket` tells from which release.
 
 ### Before 1.0
 
-- Pi Pocket is young. Its public API is small, and it will grow.
+- pi-tava is young. Its public API is small, and it will grow.
 - The rules on this page are in force before 1.0. They can change in a minor release. A change that gives authors less is told as a breaking change is.
 - Pi Durable is experimental (see Limitations in the [README](../../../README.md#limitations)).
-- At 1.0, Pi Pocket plans to follow semantic versioning: breaking changes only in a major release. This page will say so then.
+- At 1.0, pi-tava plans to follow semantic versioning: breaking changes only in a major release. This page will say so then.
 
 ## Deprecation
 
@@ -275,5 +275,5 @@ These can change in any release: the words of errors and notices, timing that th
 
 ## Warnings
 
-- Nothing is deprecated now, and Pi Pocket shows no deprecation warnings. The first release that deprecates a public member adds a warning that the owner sees when a module uses it. Its notes say so under "Deprecated".
+- Nothing is deprecated now, and pi-tava shows no deprecation warnings. The first release that deprecates a public member adds a warning that the owner sees when a module uses it. Its notes say so under "Deprecated".
 - The check for the oldest supported `pocketApi` (A9) comes with `pocketApi` 2. Until then, every version is supported.

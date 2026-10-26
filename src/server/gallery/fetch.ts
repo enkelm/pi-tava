@@ -38,7 +38,7 @@ export async function download(
         if (target.protocol !== "https:") {
             throw new HttpError(
                 502,
-                `${what}: Pi Pocket reads only https addresses, not ${target.protocol}//${target.host}`,
+                `${what}: pi-tava reads only https addresses, not ${target.protocol}//${target.host}`,
             );
         }
 
@@ -53,7 +53,7 @@ export async function download(
             response = await fetcher(address, {
                 redirect: "manual",
                 signal: stop,
-                headers: { "user-agent": "pi-pocket" },
+                headers: { "user-agent": "pi-tava" },
             });
         } catch (error) {
             const cause = (error as { cause?: unknown }).cause;

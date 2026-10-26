@@ -1,6 +1,6 @@
 /**
  * A session can work in a git worktree of its own: a checkout of the same repository, on a branch of its own, in
- * Pi Pocket's data folder. Its changes stay apart from the folder it came from and from other sessions, and a fork in
+ * pi-tava's data folder. Its changes stay apart from the folder it came from and from other sessions, and a fork in
  * a worktree tries another approach without touching the first. A worktree starts with the folder's files as they
  * are: the last commit, uncommitted changes, and new files. Ignored files, such as node_modules, are not copied.
  */

@@ -2,7 +2,7 @@
 
 What a theme may rely on, at theme API version 1: the tokens (CSS variables), the parts (`data-part` names), their states, and the page's own attributes. [../themes.md](../themes.md) is the guide. `web/theme-surface.js` lists the tokens and parts, and `test/theme-surface.test.ts` checks that each one is still there.
 
-This page is the one full list of the CSS names Pi Pocket keeps. Every name on it is there since 0.14.0, the first release with themes; a later one says since when. Everything else in the app's CSS and markup (class names, the order of elements) may change in any release.
+This page is the one full list of the CSS names pi-tava keeps. Every name on it is there since 0.14.0, the first release with themes; a later one says since when. Everything else in the app's CSS and markup (class names, the order of elements) may change in any release.
 
 ## Extensions' CSS names
 
@@ -50,7 +50,7 @@ Set by Colors (`colors.toml`, an Omarchy palette, or the desktop's). A theme rea
 | `--accent-fill`, `--accent-ink`                                                  | The accent under text (buttons, badges), and the text on it                          |
 | `--accent-soft`, `--accent-line`                                                 | The accent as a soft fill, and as a line                                             |
 | `--focus-ring`                                                                   | The keyboard's focus ring (`--accent`). Change its color; keep the ring              |
-| `--spark`, `--brand`                                                             | The second color of loaders and thoughts; the π mark                                 |
+| `--spark`, `--brand`                                                             | The second color of loaders and thoughts; the Tava mark                              |
 | `--ok`, `--ok-soft`                                                              | Done, worked                                                                         |
 | `--warn`, `--warn-soft`, `--warn-line`                                           | Waits for you, needs a look                                                          |
 | `--err`, `--err-soft`, `--err-line`                                              | Failed                                                                               |
@@ -81,7 +81,7 @@ Most corners in the app are these tokens, some a pixel or two from one (`calc(va
 
 ### Shared checkboxes
 
-The custom-drawn native checkboxes in shared forms, including subagent model choices, use these tokens. Browser-rendered checkboxes (such as the diff's Viewed control), radios, and ranges keep their own geometry. These tokens are available in Pi Coop 0.14.0.
+The custom-drawn native checkboxes in shared forms, including subagent model choices, use these tokens. Browser-rendered checkboxes (such as the diff's Viewed control), radios, and ranges keep their own geometry. These tokens are available in pi-tava 0.14.0.
 
 | Token               | Default and purpose                                                                        |
 | ------------------- | ------------------------------------------------------------------------------------------ |
@@ -111,7 +111,7 @@ Each is a `data-part` attribute. Some elements have two (`data-part="composer-bu
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `app`                                                               | The whole layout: the sidebar, the conversation, and the panels beside it, in a row                                                                                                            |
 | `boot`                                                              | The screen while the app starts                                                                                                                                                                |
-| `brand-mark`                                                        | The π: on the rail, and on the boot screen                                                                                                                                                     |
+| `brand-mark`                                                        | The Tava mark: on the rail, and on the boot screen                                                                                                                                             |
 | `sidebar`                                                           | The rail and the session list, on wide screens                                                                                                                                                 |
 | `drawer`                                                            | The rail and the session list sliding in, on narrow screens                                                                                                                                    |
 | `rail`, `rail-button`                                               | The column of buttons, and each of them (an extension's too)                                                                                                                                   |

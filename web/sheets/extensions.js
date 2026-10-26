@@ -27,7 +27,7 @@ function guardNote(module, guard) {
     if (!module.enabled) {
         return {
             warn: true,
-            text: "Off in Pi Coop: bash, write, and edit calls run unchecked here. Pi itself still uses it.",
+            text: "Off in pi-tava: bash, write, and edit calls run unchecked here. Pi itself still uses it.",
         };
     }
 
@@ -245,7 +245,7 @@ export function ExtensionsSettings() {
 
     return html`<${Fragment}>
         <p class="muted small">
-            Extensions give Pi its tools and checks in Pi Coop, and can add pages and buttons to the app. Most changes apply to every session right away; restart-only modules queue changes until you restart the server. Settings stay after restarts.${owner ? "" : " Only the owner can change them."}
+            Extensions give Pi its tools and checks in pi-tava, and can add pages and buttons to the app. Most changes apply to every session right away; restart-only modules queue changes until you restart the server. Settings stay after restarts.${owner ? "" : " Only the owner can change them."}
         </p>
         <${SafeMode} />
         ${

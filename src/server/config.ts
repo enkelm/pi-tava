@@ -10,7 +10,7 @@ import type { ProjectAccess } from "./project-access.ts";
 /** The repository root: `web/`, `src/`, and `node_modules/` live here. */
 export const APP_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
-/** Where Pi Pocket keeps its database, users, uploads, and logs. */
+/** Where pi-tava keeps its database, users, uploads, and logs. */
 export function dataDir(): string {
     return process.env.PI_POCKET_DIR ?? join(homedir(), ".pi-durable-app");
 }

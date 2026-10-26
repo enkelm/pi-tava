@@ -1,13 +1,13 @@
 # Making it built in
 
-A built-in module is a part of Pi Pocket itself, for each person who uses this copy. Make a module built in only when it changes Pi Pocket itself ([Core or extension](policies/core-or-extension.md)).
+A built-in module is a part of pi-tava itself, for each person who uses this copy. Make a module built in only when it changes pi-tava itself ([Core or extension](policies/core-or-extension.md)).
 
 ## Write it as a drop-in first
 
 The running server loads a new file in `src/server/extensions/` a moment after you first save it. It is on, for everyone. There is no way to try it there first. So:
 
 1. Write the module as a drop-in.
-2. Check it on a copy of Pi Pocket ([self-editing.md](../self-editing.md#check-it-on-a-copy)).
+2. Check it on a copy of pi-tava ([self-editing.md](../self-editing.md#check-it-on-a-copy)).
 3. Move it into `src/server/extensions/` when it works.
 
 ## Register it

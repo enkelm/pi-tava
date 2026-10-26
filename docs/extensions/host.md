@@ -4,7 +4,7 @@ The host is the first argument of a module's default export. A module gets the a
 
 ## Public and internal members
 
-[The host reference](reference/host.md) lists the public members, and the types file has them. The host has more members, for Pi Pocket's built-in modules only, such as `pip`, `gallery`, and `memory`. They are internal: they are not in the types file, and they can change in any release. Do not use them in a drop-in ([API stability](policies/api-stability.md)).
+[The host reference](reference/host.md) lists the public members, and the types file has them. The host has more members, for pi-tava's built-in modules only, such as `pip`, `gallery`, and `memory`. They are internal: they are not in the types file, and they can change in any release. Do not use them in a drop-in ([API stability](policies/api-stability.md)).
 
 ## Text from other places
 
@@ -15,7 +15,7 @@ Text from a web page, an issue, or a file that a person did not write can try to
 
 ## Keep source versions aligned
 
-Pi Pocket reloads extension modules while the server runs, but host changes need a restart. Server
+pi-tava reloads extension modules while the server runs, but host changes need a restart. Server
 and browser source target the same current public API. After changing host code, finish the change
 and ask the owner to restart; do not add compatibility aliases or older-host fallback branches.
 
@@ -25,7 +25,7 @@ There is no top-level linked-peer alias. See [the session reference](reference/h
 
 ## Types
 
-To get the types of the host in your editor, import them from `_pocket.d.ts`. Pi Pocket links this file into the drop-in folder:
+To get the types of the host in your editor, import them from `_pocket.d.ts`. pi-tava links this file into the drop-in folder:
 
 ```typescript
 import type { Host, Web } from "./_pocket.d.ts";

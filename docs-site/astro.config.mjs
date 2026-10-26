@@ -1,4 +1,4 @@
-// Pi Pocket's docs: Starlight, at https://tannermidd.github.io/pi-pocket/docs/, beside the product site (site/).
+// pi-tava's docs use Starlight. Deployment site/base below retain the upstream Pi Pocket defaults.
 import { copyFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { defineConfig } from "astro/config";
@@ -41,13 +41,13 @@ export default defineConfig({
         processor: satteri({ mdastPlugins: [repoMarkdown] }),
     },
     vite: {
-        // Pages and components get Pi Pocket's version this way: what they import is bundled, away from the repo.
+        // Pages and components get pi-tava's version this way: what they import is bundled, away from the repo.
         define: { __POCKET_VERSION__: JSON.stringify(VERSION) },
         server: { fs: { allow: [REPO] } },
     },
     integrations: [
         {
-            // A copy of the public types beside the docs, for editors outside a Pi Pocket: /pi-pocket/docs/pocket.d.ts.
+            // Public types beside the docs, for editors outside a pi-tava checkout: /pi-pocket/docs/pocket.d.ts.
             name: "pocket-types",
             hooks: {
                 "astro:build:done": ({ dir }) => {
@@ -60,16 +60,16 @@ export default defineConfig({
             },
         },
         starlight({
-            title: "Pi Pocket docs",
+            title: "pi-tava docs",
             description:
-                "Extend Pi Pocket: give Pi tools, rules, and checks, and add pages, buttons, and commands to the app.",
-            logo: { src: "./public/icon.svg", alt: "" },
-            favicon: "/icon.svg",
+                "Extend pi-tava: give Pi tools, rules, and checks, and add pages, buttons, and commands to the app.",
+            logo: { src: "./public/pi-tava-icon.svg", alt: "" },
+            favicon: "/pi-tava-icon.svg",
             social: [
                 {
                     icon: "github",
                     label: "GitHub",
-                    href: "https://github.com/TannerMidd/pi-pocket",
+                    href: "https://github.com/enkelm/pi-coop",
                 },
             ],
             components: {

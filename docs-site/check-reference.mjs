@@ -1,5 +1,5 @@
 // The docs build's reference check, alone, for the root `npm run check`: each member in types/pocket.d.ts and its
-// reference page must give the same Since line. It needs only TypeScript, which Pi Pocket's own packages have, so it
+// reference page must give the same Since line. It needs only TypeScript, which pi-tava's own packages have, so it
 // runs without the site's dependencies.
 import { fileURLToPath } from "node:url";
 import { checkReference } from "./src/reference-check.mjs";

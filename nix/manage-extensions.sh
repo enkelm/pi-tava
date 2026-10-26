@@ -8,12 +8,12 @@ sources=()
 names=()
 
 if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
-    echo "Pi Pocket will not manage extensions through a symlink or non-directory: $directory" >&2
+    echo "pi-tava will not manage extensions through a symlink or non-directory: $directory" >&2
     exit 1
 fi
 
 if [ -L "$manifest" ] || { [ -e "$manifest" ] && [ ! -f "$manifest" ]; }; then
-    echo "Pi Pocket requires a regular extensions manifest: $manifest" >&2
+    echo "pi-tava requires a regular extensions manifest: $manifest" >&2
     exit 1
 fi
 
@@ -41,7 +41,7 @@ for name in "${previous[@]}" "${names[@]}"; do
     esac
 
     if [ -e "$directory/$name" ] && [ ! -f "$directory/$name" ] && [ ! -L "$directory/$name" ]; then
-        echo "Pi Pocket will not replace an extension directory: $directory/$name" >&2
+        echo "pi-tava will not replace an extension directory: $directory/$name" >&2
         exit 1
     fi
 done
@@ -49,7 +49,7 @@ done
 for name in "${names[@]}"; do
     if { [ -e "$directory/$name" ] || [ -L "$directory/$name" ]; } &&
         ! { [ -f "$manifest" ] && grep -Fxq -- "$name" "$manifest"; }; then
-        echo "Pi Pocket will not overwrite unmanaged extension $directory/$name; move it aside before declaring it." >&2
+        echo "pi-tava will not overwrite unmanaged extension $directory/$name; move it aside before declaring it." >&2
         exit 1
     fi
 done

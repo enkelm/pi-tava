@@ -91,7 +91,7 @@ export function createStageUploadTool(app: PocketApp) {
                 output: [
                     {
                         type: "text",
-                        text: `Staged on SSH · ${app.locationOf(id)!.host}: ${destination}\nThe original remains on the Coop host. The remote temporary file is not automatically removed.`,
+                        text: `Staged on SSH · ${app.locationOf(id)!.host}: ${destination}\nThe original remains on the pi-tava host. The remote temporary file is not automatically removed.`,
                     },
                 ],
             };

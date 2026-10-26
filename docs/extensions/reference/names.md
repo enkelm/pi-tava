@@ -4,9 +4,9 @@ The rules for the names that a module gives. These are the names of its file, ex
 
 ## Extensions and tools
 
-To install an extension with the name of an installed extension replaces that extension. A tool with the name of another tool replaces it in all sessions. Thus Pi Pocket refuses a drop-in that would take a name that Pi Pocket keeps, or a name that another module has. Menu → Extensions says why.
+To install an extension with the name of an installed extension replaces that extension. A tool with the name of another tool replaces it in all sessions. Thus pi-tava refuses a drop-in that would take a name that pi-tava keeps, or a name that another module has. Menu → Extensions says why.
 
-- **Extension names that Pi Pocket keeps:** `coding-tools`, and all names that start with `pocket-`, such as `pocket-core`, `pocket-prompt`, and `pocket-guard`. This is true also when that built-in module is off.
+- **Extension names that pi-tava keeps:** `coding-tools`, and all names that start with `pocket-`, such as `pocket-core`, `pocket-prompt`, and `pocket-guard`. This is true also when that built-in module is off.
 - **Built-in tools:** `read`, `write`, `edit`, `bash`, `artifact`, `browser`, `host_skill`, `stage_upload`, `subagent`, `team`, `schedule`, `codemode`, and `memory`. The mandatory workflow core's tools: `handoff`, `publication`, `pull`, `research`, and `review_comment`. PiP's tools: `sessions`, `session_read`, `work_context`, `work_review`, `work_handoff`, `work_supervise`, `agent_charter`, `agent_work`, `agent_execution`, `session_start`, `session_send`, `session_follow`, `session_stop`, `session_archive`, `session_schedule`, `approvals`, `repo_watch`, and `session_watch_pr`. The triggers' tool: `watch_pr`.
 - **Names that another module has:** the first module to install an extension or tool keeps its name.
 
@@ -17,7 +17,7 @@ Give each extension and tool a name of your own, with a prefix: `example-clock`,
 - A module is a `.ts` file in the drop-in folder.
 - Files that start with `_`, or that end in `.test.ts`, are not modules. Use them for helpers and tests.
 - A drop-in with the name of a built-in module does not load. The built-in modules are `prompt`, `artifacts`, `browser`, `subagents`, `agent-teams`, `schedules`, `goals`, `plan`, `guard`, `codemode`, `memory`, `pip`, `triggers`, and `gallery`. The virtual `pi-providers` name is also reserved; that compatibility row is restart-only, not an importable or watched module.
-- `_pocket.d.ts` in the drop-in folder is Pi Pocket's link to its types. Do not use this name. See [Types for your editor](types.md).
+- `_pocket.d.ts` in the drop-in folder is pi-tava's link to its types. Do not use this name. See [Types for your editor](types.md).
 
 What a module adds to the app uses the name of its file without `.ts`: `server-status.ts` is `server-status`, at `/api/x/server-status/` and `/x/server-status/`. File names are unique across the two folders of modules, so these addresses never collide. A module that adds to the app needs a name of letters, digits, `-`, and `_` that starts with a letter or digit.
 
@@ -40,7 +40,7 @@ Each rail button, menu row, launcher action, page, and sheet has an `id` in its 
 
 - A command's name has lowercase letters, digits, `-`, and `_`. It starts with a letter, and it has at least one `-`: `acme-status`, not `status`. Give it without the `/`.
 - The app's own commands are one word each. Thus a new command of the app never takes your name.
-- Give the name a prefix of your own. When another module has a command with the name, Pi Pocket refuses yours: the first module keeps the name.
+- Give the name a prefix of your own. When another module has a command with the name, pi-tava refuses yours: the first module keeps the name.
 - When a prompt template has the same name, the template wins in the message box, except for the native `/handoff` command.
 
 ## Events

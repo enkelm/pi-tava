@@ -126,7 +126,7 @@ export class ProviderPackages {
             discoveries = await this.#discover();
         } catch {
             discoveryError =
-                "Installed Pi package metadata could not be read; retained Coop selections are still available.";
+                "Installed Pi package metadata could not be read; retained pi-tava selections are still available.";
         }
 
         const state = this.#config.providerPackages;

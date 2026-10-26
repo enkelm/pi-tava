@@ -1,5 +1,5 @@
 /**
- * The Pi Coop server core: one durable Harness over one SQLite file, shared by every session, every subagent, and
+ * The pi-tava server core: one durable Harness over one SQLite file, shared by every session, every subagent, and
  * every connected browser. Browsers attach to a conversation's committed view; nothing a browser sees exists only in
  * memory, except who is connected, who is typing, and which tool calls wait for approval.
  *
@@ -524,7 +524,7 @@ export class PocketApp {
                 } catch (cleanup) {
                     throw new AggregateError(
                         [error, cleanup],
-                        "Pi Coop startup and cleanup failed.",
+                        "pi-tava startup and cleanup failed.",
                     );
                 }
             }
@@ -659,7 +659,7 @@ export class PocketApp {
         try {
             prepareDropInFolder(dropIn, join(APP_ROOT, "node_modules"));
         } catch (error) {
-            this.#log(`Drop-in extensions cannot import Pi Coop's packages: ${describe(error)}`);
+            this.#log(`Drop-in extensions cannot import pi-tava's packages: ${describe(error)}`);
         }
 
         try {
@@ -2784,7 +2784,7 @@ export class PocketApp {
         return this.#agents.get(id)?.cwd ?? this.#sessions[String(id)]?.cwd ?? this.defaultCwd;
     }
 
-    /** When Pi's settings were last read: Pi's CLI, or a person, can change them while Pi Pocket runs. */
+    /** When Pi's settings were last read: Pi's CLI, or a person, can change them while pi-tava runs. */
     #settingsReadAt = Date.now();
 
     /**
@@ -2968,7 +2968,7 @@ export class PocketApp {
         return this.loader.enabled(GUARD_FILE);
     }
 
-    /** Lancet Guard as it applies here: Pi's own setting, unless the guard extension is off in Pi Coop. */
+    /** Lancet Guard as it applies here: Pi's own setting, unless the guard extension is off in pi-tava. */
     async guardStatus(): Promise<GuardStatus> {
         const status = await this.guard.status();
 
@@ -2979,7 +2979,7 @@ export class PocketApp {
         return {
             available: status.available,
             enabled: false,
-            detail: "Lancet Guard is off in Pi Coop: bash, write, and edit calls run unchecked here.",
+            detail: "Lancet Guard is off in pi-tava: bash, write, and edit calls run unchecked here.",
         };
     }
 
@@ -3519,7 +3519,7 @@ export class PocketApp {
 
                     return true;
                 } catch (error) {
-                    failures.push(new Error(`Pi Coop could not close ${name}.`, { cause: error }));
+                    failures.push(new Error(`pi-tava could not close ${name}.`, { cause: error }));
 
                     return false;
                 }
@@ -3624,7 +3624,7 @@ export class PocketApp {
             }
 
             if (failures.length > 0) {
-                throw new AggregateError(failures, "Pi Coop shutdown was incomplete.");
+                throw new AggregateError(failures, "pi-tava shutdown was incomplete.");
             }
         })();
 

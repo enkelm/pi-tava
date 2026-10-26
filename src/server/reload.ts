@@ -3,7 +3,7 @@
  * replaces them in one step: a tool call already running finishes on the old code, the next one uses the new code.
  * Web files only need the browsers to reload.
  *
- * Modules come from two folders: Pi Pocket's own (`src/server/extensions/`), and the owner's drop-ins
+ * Modules come from two folders: pi-tava's own (`src/server/extensions/`), and the owner's drop-ins
  * (`extensions/` in the data folder), which load after them and stay off until the owner turns them on. The owner
  * can turn modules off and on from the app. A module that is off is not loaded, and turning one off uninstalls what
  * it installed; a tool call already running still finishes. What a module adds to the app (routes, a browser module,
@@ -84,7 +84,7 @@ const TITLES: Record<string, string> = {
 };
 
 /**
- * Names Pi Pocket keeps for itself, whether the module that uses them is on or off. Installing an extension, or a tool,
+ * Names pi-tava keeps for itself, whether the module that uses them is on or off. Installing an extension, or a tool,
  * with a name already taken replaces it in place, so a drop-in that used one would quietly replace a built-in (or be
  * replaced by it when the built-in is turned on), and turning the drop-in off would remove the built-in too.
  */
@@ -134,7 +134,7 @@ export const BUILT_IN_TOOLS: ReadonlySet<string> = new Set([
     "review_comment",
 ]);
 
-/** Pi Pocket's own modules, or the owner's from the drop-in folder. */
+/** pi-tava's own modules, or the owner's from the drop-in folder. */
 export type ModuleSource = "built-in" | "drop-in";
 
 export interface ExtensionInfo {
@@ -187,7 +187,7 @@ function moduleFiles(directory: string): string[] {
 }
 
 /**
- * Make the drop-in folder, with a `node_modules` link to Pi Pocket's own packages. Drop-ins then import
+ * Make the drop-in folder, with a `node_modules` link to pi-tava's own packages. Drop-ins then import
  * `@earendil-works/pi-durable` and the rest as built-in modules do, and get the very modules the server runs. A
  * `node_modules` folder the owner made there stays as it is; a link to another place is replaced.
  */
@@ -616,7 +616,7 @@ export class ExtensionLoader {
 
         if (needs !== undefined && (typeof needs !== "number" || !(needs <= POCKET_API))) {
             throw new Error(
-                `the module needs version ${String(needs)} of Pi Pocket's extension API, and this Pi Pocket has ${POCKET_API}: update Pi Pocket`,
+                `the module needs version ${String(needs)} of Pi Pocket's extension API, and this pi-tava has ${POCKET_API}: update pi-tava`,
             );
         }
 
@@ -817,7 +817,7 @@ export class ExtensionLoader {
     }
 
     /**
-     * Refuse a drop-in that would take a name Pi Pocket keeps, or one another module installed: installing it would
+     * Refuse a drop-in that would take a name pi-tava keeps, or one another module installed: installing it would
      * replace that one. Throws before anything is installed, so a version that loaded before keeps running.
      */
     #checkNames(file: string, extensions: readonly Extension[]): void {
@@ -841,7 +841,7 @@ export class ExtensionLoader {
         for (const extension of extensions) {
             if (RESERVED_EXTENSIONS.test(extension.name)) {
                 throw new Error(
-                    `the extension name ${extension.name} is Pi Coop's own: give it a name of your own`,
+                    `the extension name ${extension.name} is pi-tava's own: give it a name of your own`,
                 );
             }
 

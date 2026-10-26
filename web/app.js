@@ -1,4 +1,4 @@
-// Pi Coop web app. No build step: edit a file under web/ and every open browser reloads.
+// pi-tava web app. No build step: edit a file under web/ and every open browser reloads.
 import { render } from "preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { canGoBack, goBack, replaceAddress, startHistory, useBack } from "./back.js";
@@ -248,8 +248,8 @@ function App() {
 
     useEffect(() => {
         document.title = state.view.conversation?.title
-            ? `${state.view.conversation.title} · Pi Coop`
-            : "Pi Coop";
+            ? `${state.view.conversation.title} · pi-tava`
+            : "pi-tava";
     }, [state.view.conversation?.title]);
 
     if (state.me === undefined) {

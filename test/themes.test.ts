@@ -93,6 +93,40 @@ test("every built-in theme passes its checks", () => {
     }
 });
 
+test("Tava's dark and light palettes keep text and actionable color legible", () => {
+    const theme = readTheme(join(APP_ROOT, "web", "themes", "tava"), "tava", true, pocketVersion());
+
+    const luminance = (hex: string) => {
+        assert.match(hex, /^#[0-9a-f]{6}$/i);
+
+        const channels = [1, 3, 5].map((start) => {
+            const channel = parseInt(hex.slice(start, start + 2), 16) / 255;
+
+            return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+        });
+
+        return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
+    };
+
+    for (const [mode, colors] of [
+        ["dark", theme.colors],
+        ["light", theme.colorsLight],
+    ] as const) {
+        assert.ok(colors, `the ${mode} half is available for system appearance`);
+        assert.equal(colors.mode, mode);
+
+        for (const ground of ["background", "dark_background", "lighter_background"]) {
+            for (const ink of ["foreground", "bright_foreground", "accent"]) {
+                const a = luminance(colors[ground]!);
+                const b = luminance(colors[ink]!);
+                const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+
+                assert.ok(ratio >= 4.5, `${mode} ${ink} on ${ground}: ${ratio.toFixed(2)}:1`);
+            }
+        }
+    }
+});
+
 test("an owner's theme loads when the data folder is reached through a link", async () => {
     const data = join(root, "real-data");
     const linked = join(root, "linked-data");

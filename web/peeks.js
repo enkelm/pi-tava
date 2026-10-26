@@ -545,7 +545,7 @@ function PeekLine({ line, location }) {
             </div>`;
         case "text":
             return html`<div class="peek-line text">
-                <span class="peek-mark pi">π</span>
+                <span class="peek-mark pi" aria-hidden="true"><span class="tava-mark"></span></span>
                 <span class="peek-text">${line.text}</span>
             </div>`;
 

@@ -2024,7 +2024,15 @@ function TreeNode({ node, depth, current, viewed, onPick }) {
         >
             <span class=${`change-kind ${file.kind}`}>${KIND_LETTERS[file.kind]}</span>
             <span class="dr-name">${file.path.split("/").pop()}</span>
-            ${file.byPi && html`<span class="dr-pi" title="Pi edited it">π</span>`}
+            ${
+                file.byPi &&
+                html`<span
+                class="dr-pi"
+                role="img"
+                aria-label="Pi edited it"
+                title="Pi edited it"
+            ><span class="tava-mark" aria-hidden="true"></span></span>`
+            }
             <span class="dr-tail">${viewed(file) ? html`<${Icon} name="check" size=${13} />` : html`<${ChangeCounts} added=${file.added ?? 0} removed=${file.removed ?? 0} />`}</span>
         </button>`,
     )}`;
@@ -2805,7 +2813,7 @@ export function DiffReview({ active = true, autoFocus = false, covering = false 
                         title="Only the files Pi edited"
                         onClick=${() => setOnlyPi(!onlyPi)}
                     >
-                        π only
+                        <span class="tava-mark" aria-hidden="true"></span> Pi only
                     </button>`
                 }
                 <${WrapToggle} />

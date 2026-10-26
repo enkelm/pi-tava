@@ -18,11 +18,11 @@ export default function createNoForcePush() {
 ```
 
 - `section(name, render, { tag })`. `render(input, context)` returns the text of the section. To leave the section out, return `undefined`.
-- Pi Pocket puts the text between `<name>` and `</name>`. With `{ tag: false }`, it puts the text without the tags.
+- pi-tava puts the text between `<name>` and `</name>`. With `{ tag: false }`, it puts the text without the tags.
 
 ## Keep the text the same
 
-Sections render before each request. Pi Pocket sends again only the sections that changed, and the model provider can then use its cache.
+Sections render before each request. pi-tava sends again only the sections that changed, and the model provider can then use its cache.
 
 - Return the same text while nothing changed.
 - Put the date in a section, not the time.

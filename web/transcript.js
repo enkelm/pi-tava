@@ -2896,7 +2896,7 @@ export function Transcript() {
                                   agentId=${namedAgent.agentId}
                                   size=${48}
                               />`
-                            : html`<div class="pi">π</div>`
+                            : html`<div class="pi" aria-hidden="true"><span class="tava-mark"></span></div>`
                     }
                     <p>
                         ${conversation.kind === "subagent" ? "This subagent has no messages yet." : "Ask anything. Pi works in this session's folder, and keeps working if the server restarts."}

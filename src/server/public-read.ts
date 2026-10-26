@@ -97,7 +97,7 @@ export async function readPublicDocument(
                     family: 4,
                     lookup: (_host, _options, done) => done(null, address, 4),
                     headers: {
-                        "user-agent": "Pi-Coop-Research/1.0",
+                        "user-agent": "pi-tava",
                         accept: "text/html,text/plain,text/markdown,application/json;q=0.8",
                         "accept-encoding": "identity",
                     },

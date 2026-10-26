@@ -1,0 +1,21 @@
+# pi-tava: warm enamel and cream, with a quieter copper orange for dark working surfaces.
+mode = "dark"
+
+accent = "#E98A58"
+selection = "#653321"
+background = "#241B17"
+dark_background = "#1D1612"
+darker_background = "#17110E"
+lighter_background = "#30241D"
+foreground = "#EDDFCD"
+dark_foreground = "#BFA891"
+light_foreground = "#F5EAD9"
+bright_foreground = "#FFF7E8"
+
+red = "#F2907E"
+yellow = "#EAC078"
+orange = "#E98A58"
+green = "#B2C58D"
+cyan = "#92C3B7"
+blue = "#A3BEDB"
+magenta = "#D6A9BC"

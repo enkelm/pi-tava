@@ -1,6 +1,6 @@
 # Cleanups
 
-A cleanup stops what a version of your module started, when that version goes. Pi Pocket starts the module again at each reload, so without a cleanup, the old version's timers continue to run.
+A cleanup stops what a version of your module started, when that version goes. pi-tava starts the module again at each reload, so without a cleanup, the old version's timers continue to run.
 
 ## On the server
 

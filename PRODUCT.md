@@ -12,7 +12,7 @@ The owner works with existing local Herdr agents and shells on desktop, and view
 
 ## Product purpose
 
-Pi Coop is a self-hosted Pi collaboration app built from Pocket. Keep existing private work running where it is, and make a selected conversation shared through an explicit import into Pi Durable.
+pi-tava is a self-hosted Pi collaboration app built from Pi Pocket. Keep existing private work running where it is, and make a selected conversation shared through an explicit import into Pi Durable.
 
 ## Operating context
 
@@ -44,7 +44,7 @@ The user chose Herdr GPUI as the model for private desktop terminal behavior, na
 
 ## Brand commitments
 
-Use Pi Coop as the display name and `pi-coop` as the package and command name. Retain upstream attribution and licenses. The private desktop interface should closely follow the user's Herdr GPUI reference. Public conversations retain Pocket's existing interface. This is not a redesign of the whole app.
+Use **pi-tava** as the display name. The supplied orange app icon is the favicon and installed-app artwork; its background-free pot mark replaces the colored π glyphs in the interface. Tava is an optional orange-and-cream theme with dark and light palettes. Preserve saved appearance choices, conversation behavior and the Herdr desktop interaction model during this first branding pass. Use `pi-tava` for the package and primary command, retaining `pi-coop` as a compatibility command alias. Retain storage paths, environment variables, internal Pocket identifiers, upstream attribution and licenses.
 
 ## Evidence on hand
 

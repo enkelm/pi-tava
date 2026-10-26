@@ -100,7 +100,7 @@ function probe(port: number, v6only: boolean): Promise<{ title: string } | undef
 
 /**
  * Web servers running on this machine, such as a dev server, for the Browser panel to offer: ports from 1024 to 32767
- * that answer http, without `exclude` (Pi Pocket's own). Linux only.
+ * that answer http, without `exclude` (pi-tava's own). Linux only.
  */
 export async function localServers(
     exclude: readonly number[] = [],

@@ -35,14 +35,14 @@ const stop = pocket.on("load", ({ load }) => setLoad(load));
 
 ## Limits
 
-A version of a module can send a limited number of events, and of bytes, in each second ([limits](reference/limits.md#events)). Pi Pocket drops the rest of that second's events. Send what changed, or a summary, not each tick.
+A version of a module can send a limited number of events, and of bytes, in each second ([limits](reference/limits.md#events)). pi-tava drops the rest of that second's events. Send what changed, or a summary, not each tick.
 
-Pi Pocket cuts off a tab that is far behind, and the tab connects again with a new view. It does not keep the events for it. It cuts off ([limits](reference/limits.md#events)):
+pi-tava cuts off a tab that is far behind, and the tab connects again with a new view. It does not keep the events for it. It cuts off ([limits](reference/limits.md#events)):
 
 - a tab that is behind and takes nothing for some time: it does not read its stream, or it polls and acknowledges nothing;
 - any tab that is very far behind.
 
-Below the second limit, Pi Pocket does not cut off a tab that continues to take events. So a slow phone gets all of them.
+Below the second limit, pi-tava does not cut off a tab that continues to take events. So a slow phone gets all of them.
 
 ## Errors
 

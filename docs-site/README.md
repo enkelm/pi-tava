@@ -1,6 +1,6 @@
-# Pi Pocket docs site
+# pi-tava docs site
 
-The site at https://tannermidd.github.io/pi-pocket/docs/. It renders the repository's `docs/**/*.md`, `SECURITY.md`, and `CONTRIBUTING.md` where they are, with [Starlight](https://starlight.astro.build): there is no copy of any page here. Pi reads the same files, so they stay plain Markdown, without front matter.
+The pi-tava documentation site is inherited from upstream Pi Pocket's site at https://tannermidd.github.io/pi-pocket/docs/. Its deployment URL and `/pi-pocket/docs/` base are still the upstream defaults; rebranding the text does not deploy it or move those routes. It renders the repository's `docs/**/*.md`, `SECURITY.md`, and `CONTRIBUTING.md` where they are, with [Starlight](https://starlight.astro.build): there is no copy of any page here. Pi reads the same files, so they stay plain Markdown, without front matter.
 
 This folder has its own dependencies. Install them here, never at the repository's root:
 
@@ -9,7 +9,7 @@ cd docs-site
 npm ci
 npm run dev -- --host 127.0.0.1 --port 4321   # http://127.0.0.1:4321/pi-pocket/docs/
 npm run build                                 # into dist/
-npm run check                                 # as CI builds it, with every check
+npm run check                                 # full local docs validation
 ```
 
 ## How it works
@@ -23,6 +23,6 @@ npm run check                                 # as CI builds it, with every chec
 
 ## Publishing
 
-`.github/workflows/pages.yml` builds this site and copies `site/` beside it, on each push to `main` that changes them, and deploys both to GitHub Pages. It publishes `main` only: a run by hand (`npm run site:publish`) publishes `main` again. `.github/workflows/docs.yml` builds the docs on pull requests. Both install with `npm ci --ignore-scripts`: no package runs code at install.
+This fork has no GitHub Actions workflows. The inherited Pages deployment and pull-request docs checks have been removed. Local build and validation commands above remain available.
 
-The owner sets, once: Settings → Pages → Source: GitHub Actions, and Settings → Environments → `github-pages` → required reviewers, with its deployment branches kept to `main`.
+A pi-tava deployment target and publishing process have not been configured. The site URL and base in `astro.config.mjs` remain upstream defaults; choose the fork's own settings before publishing. Removing the workflows does not change GitHub Pages settings or an already published site.

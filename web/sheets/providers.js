@@ -198,7 +198,7 @@ export function ProvidersSettings() {
 
     return html`<${Fragment}>
         <p class="muted small">
-            Pi Coop shares Pi's sign-ins (<span class="mono">~/.pi/agent/auth.json</span>). ${owner ? "" : "Only the owner can change them."}
+            pi-tava shares Pi's sign-ins (<span class="mono">~/.pi/agent/auth.json</span>). ${owner ? "" : "Only the owner can change them."}
         </p>
         ${owner && store.state.server?.providerPackages >= 1 && html`<${ProviderPackagesSettings} />`}
         <${RefreshModels} />

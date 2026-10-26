@@ -154,7 +154,9 @@ async function appearance(page: BrowserPage) {
         theme: string;
         preferences: {
             theme: string;
+            look: string;
             mode: string;
+            systemPalette?: string;
             darkTheme: string;
             lightTheme: string;
             font: string;
@@ -890,8 +892,10 @@ test(
     browserOptions,
     async () => {
         await withAppearance(async ({ page, base, themeRequests }) => {
-            assert.equal((await appearance(page)).theme, "tokyo-night", "standalone default");
+            assert.equal((await appearance(page)).theme, "tava", "standalone default");
             await page.evaluate(`
+                // This saved browser predates default inheritance, unlike the fresh fixture.
+                localStorage.removeItem('pocket.followThemeDefault');
                 localStorage.setItem('pocket.appearance', JSON.stringify({
                     theme: 'desktop', wallpaper: true, text: 16, tiling: true, motion: 'reduced',
                 }));
@@ -909,6 +913,7 @@ test(
             const migrated = await appearance(page);
 
             assert.equal(migrated.theme, "tokyo-night");
+            assert.equal(migrated.preferences.look, "pocket");
             assert.deepEqual(
                 migrated.saved,
                 { theme: "desktop", wallpaper: true, text: 16, tiling: true, motion: "reduced" },
@@ -1072,12 +1077,12 @@ test(
             const before = liveLook(await appearance(page));
 
             await nativeCards(page);
-            await assignments(page, "Tokyo Night", "Catppuccin Latte");
+            await assignments(page, "Tava · dark", "Tava · light");
             await modesVisible(page, "Gruvbox", false);
             await page.hover({ selector: `${card("Gruvbox")} .tc-select` });
             await modesVisible(page, "Gruvbox", true);
             await page.click({ selector: assignment("Gruvbox", "Dark") });
-            await assignments(page, "Gruvbox", "Catppuccin Latte");
+            await assignments(page, "Gruvbox", "Tava · light");
             assert.equal(saved(await appearance(page)).darkTheme, "gruvbox");
             assert.deepEqual(
                 liveLook(await appearance(page)),
@@ -1200,12 +1205,21 @@ test(
                 `${base}/login?token=${encodeURIComponent(app.config.ownerToken)}`,
             );
             await present(other, ".sidebar");
+            await until(
+                async () => (await appearance(other)).bg === "#241B17",
+                "the fresh browser renders Tava Dark",
+            );
             const isolated = await appearance(other);
 
-            assert.equal(isolated.theme, "tokyo-night");
-            assert.equal(isolated.preferences.mode, "dark");
-            assert.equal(isolated.preferences.darkTheme, "tokyo-night");
-            assert.equal(isolated.preferences.lightTheme, "catppuccin-latte");
+            assert.equal(isolated.theme, "tava");
+            assert.equal(isolated.preferences.look, "tava");
+            assert.equal(isolated.preferences.mode, "system");
+            assert.equal(isolated.preferences.systemPalette, "tava");
+            assert.equal(isolated.preferences.darkTheme, "tava@dark");
+            assert.equal(isolated.preferences.lightTheme, "tava@light");
+            assert.equal(isolated.mode, "dark");
+            assert.equal(isolated.colors["--o-fg"], "#EDDFCD");
+            assert.equal(isolated.colors["--o-accent"], "#E98A58");
             assert.equal(isolated.preferences.font, "jetbrains-mono");
             assert.equal(
                 isolated.saved,
@@ -1213,6 +1227,25 @@ test(
                 "startup does not persist defaults as a personal choice",
             );
             assert.match(isolated.bodyFont, /Pocket Mono/);
+            await openAppearance(other);
+            await assignments(other, "Tava · dark", "Tava · light");
+            await other.evaluate(`window.fixtureColorScheme(false)`);
+            await until(
+                async () => (await appearance(other)).bg === "#FFF7E8",
+                "the fresh browser follows the device to Tava Light",
+            );
+            const isolatedLight = await appearance(other);
+
+            assert.equal(isolatedLight.theme, "tava");
+            assert.equal(isolatedLight.preferences.mode, "system");
+            assert.equal(isolatedLight.mode, "light");
+            assert.equal(isolatedLight.colors["--o-fg"], "#49372A");
+            assert.equal(isolatedLight.colors["--o-accent"], "#B93912");
+            assert.equal(
+                isolatedLight.saved,
+                null,
+                "a device scheme change is not a personal edit",
+            );
 
             // The device changes while this app is closed: bootstrap must resolve System afresh,
             // rather than leaving the last saved Light palette from the previous page.
@@ -1316,7 +1349,7 @@ test(
             await pointer(page, select, "pointerdown");
             await touchClick(page, select);
             await activated(page, "gruvbox", "dark", "dark", "#282828");
-            await assignments(page, "Tokyo Night", "Catppuccin Latte");
+            await assignments(page, "Tava · dark", "Tava · light");
 
             await page.setViewport(VIEWPORTS.desktop);
             await page.hover({ selector: `${settings} .theme-mode-hint` });
@@ -1471,6 +1504,14 @@ test(
     browserOptions,
     async (t) => {
         await withAppearance(async ({ page, base, deviceSchemeForReload }) => {
+            // This scenario exercises explicit older choices, not the shipped default slots.
+            await page.evaluate(`
+                (await import('/theme.js')).setPrefs({
+                    look: 'pocket', theme: 'tokyo-night', mode: 'dark',
+                    darkTheme: 'tokyo-night', lightTheme: 'catppuccin-latte',
+                });
+            `);
+
             for (const [theme, name, bg] of [
                 ["nord", "Nord", "#2e3440"],
                 ["tokyo-night", "Tokyo Night", "#1a1b26"],

@@ -10,10 +10,10 @@
         <meta name="theme-color" content="#13141c" />
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <title>Pi Coop</title>
+        <title>pi-tava</title>
         <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
-        <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+        <link rel="icon" href="/pi-tava-icon.svg" type="image/svg+xml" />
+        <link rel="apple-touch-icon" href="/pi-tava-apple-touch-icon.png" />
         <link rel="preload" href="/style.css" as="style" />
         <link rel="preload" href="/reviews.css" as="style" />
         <!--
@@ -125,7 +125,9 @@
         <!-- The same boot screen the app shows while it starts (Boot in ui.js), so nothing jumps when the script takes over. -->
         <div id="app">
             <div class="boot" data-part="boot" role="status">
-                <div class="boot-mark" data-part="brand-mark" aria-hidden="true">π</div>
+                <div class="boot-mark" data-part="brand-mark" aria-hidden="true">
+                    <span class="tava-mark"></span>
+                </div>
                 <div class="boot-bar" aria-hidden="true"><span></span></div>
                 <div class="boot-caption">starting</div>
             </div>

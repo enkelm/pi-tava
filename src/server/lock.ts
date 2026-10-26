@@ -1,4 +1,4 @@
-/** One Pi Coop process per data directory, with cleanup bound to the acquired file generation. */
+/** One pi-tava process per data directory, with cleanup bound to the acquired file generation. */
 import {
     closeSync,
     constants,
@@ -33,7 +33,7 @@ function openedLock(fd: number): Lock {
     const stat = fstatSync(fd, { bigint: true });
 
     if (!stat.isFile()) {
-        throw new Error("Pi Coop's data-directory lock is not a regular file.");
+        throw new Error("pi-tava's data-directory lock is not a regular file.");
     }
 
     const bytes = Buffer.alloc(1024);
@@ -149,7 +149,7 @@ function lockHolder(lockFile: string, lock: Lock): boolean {
     if (!Number.isSafeInteger(lock.pid) || lock.pid <= 0 || lock.pid > MAX_PID) {
         if (Date.now() - lock.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
             throw new Error(
-                `Pi Coop's lock is incomplete or damaged and still recent: ${lockFile}. Try again shortly.`,
+                `pi-tava's lock is incomplete or damaged and still recent: ${lockFile}. Try again shortly.`,
             );
         }
 
@@ -212,7 +212,7 @@ export function takeLock(lockFile: string): () => void {
     if (previous !== undefined) {
         if (lockHolder(lockFile, previous)) {
             throw new Error(
-                `Pi Coop is already running on this data directory (pid ${previous.pid}). Stop that holder before trying again.`,
+                `pi-tava is already running on this data directory (pid ${previous.pid}). Stop that holder before trying again.`,
             );
         }
 
@@ -229,7 +229,7 @@ export function takeLock(lockFile: string): () => void {
         }
 
         throw new Error(
-            "Pi Coop is already running on this data directory: another one started at the same moment.",
+            "pi-tava is already running on this data directory: another one started at the same moment.",
         );
     }
 
@@ -263,7 +263,7 @@ export function takeLock(lockFile: string): () => void {
         }
 
         if (!matches(readLock(lockFile), owned)) {
-            throw new Error("Pi Coop's data-directory lock changed during acquisition.");
+            throw new Error("pi-tava's data-directory lock changed during acquisition.");
         }
     } catch (error) {
         release(lockFile, owned);

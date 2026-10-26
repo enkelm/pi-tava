@@ -1,6 +1,6 @@
 # host
 
-The host is the first argument of a module's default export. A module uses it to read from Pi Pocket and to report to it. To add to the app, a module uses [`web`](web.md), the second argument.
+The host is the first argument of a module's default export. A module uses it to read from pi-tava and to report to it. To add to the app, a module uses [`web`](web.md), the second argument.
 
 The host does not change when a module reloads. It changes only when the server restarts. Server and browser source target the same current API; restart after changing host code rather than adding older-host aliases or fallback branches. See [Using the host](../host.md).
 
@@ -16,7 +16,7 @@ readonly dataDir: string;
 
 Since 0.1.0 · Stable
 
-Pi Pocket's data folder. It is `~/.pi-pocket`, unless `PI_POCKET_DIR` or the `--data` option gives another folder. The drop-in folder is `extensions/` in it.
+pi-tava's data folder. It is `~/.pi-durable-app`, unless `PI_POCKET_DIR` or the `--data` option gives another folder. The drop-in folder is `extensions/` in it. Upstream Pi Pocket uses `~/.pi-pocket`.
 
 ### `agentDir`
 
@@ -58,7 +58,7 @@ globalSkills(): Skill[];
 
 Since 0.14.0 · Stable
 
-The Coop host’s configured global skills, without consulting a project directory or project trust. SSH threads use this list with `host_skill` to read host resources without treating their paths as remote files.
+The pi-tava host’s configured global skills, without consulting a project directory or project trust. SSH threads use this list with `host_skill` to read host resources without treating their paths as remote files.
 
 ### `projectResources`
 
@@ -68,7 +68,7 @@ projectResources(conversationId: ConversationId, context: Context): Promise<{ sk
 
 Since 0.15.0 · Experimental
 
-The thread’s trusted project skills merged with the Coop host’s global skills, in normal project-first precedence. SSH resources are read through the pinned execution environment and require explicit host-owned project trust; their `sourceInfo.source` identifies the remote filesystem. Host-global paths remain host paths. Use `read` for remote resources and `host_skill` for registered host-global resources. The supplied context cancels remote reads. Remote failures never substitute a host-local project namesake.
+The thread’s trusted project skills merged with the pi-tava host’s global skills, in normal project-first precedence. SSH resources are read through the pinned execution environment and require explicit host-owned project trust; their `sourceInfo.source` identifies the remote filesystem. Host-global paths remain host paths. Use `read` for remote resources and `host_skill` for registered host-global resources. The supplied context cancels remote reads. Remote failures never substitute a host-local project namesake.
 
 ### `workspace`
 
@@ -81,7 +81,7 @@ workspace(conversationId: ConversationId): {
 
 Since 0.14.0 · Stable
 
-A conversation’s actual file namespace and policy-gated execution environment. An omitted location means the Coop host, not the browser device. Subagents inherit their root thread’s location. Remote failures never return a local environment. Managed commands require native offline confinement on the target; unavailable confinement fails that operation without unrestricted fallback. Cached environments retain live requester, access, writer and publication controls. Trusted extensions must use this environment for project operations rather than interpreting remote cwd strings with Node filesystem APIs.
+A conversation’s actual file namespace and policy-gated execution environment. An omitted location means the pi-tava host, not the browser device. Subagents inherit their root thread’s location. Remote failures never return a local environment. Managed commands require native offline confinement on the target; unavailable confinement fails that operation without unrestricted fallback. Cached environments retain live requester, access, writer and publication controls. Trusted extensions must use this environment for project operations rather than interpreting remote cwd strings with Node filesystem APIs.
 
 ## Models
 
@@ -118,7 +118,7 @@ modelProblem(ref: ModelRef, fresh?: boolean): Promise<string | undefined>;
 
 Since 0.13.1 · Stable
 
-Why Pi cannot use a model now, in words that Pi can tell a person. For example, Pi Pocket does not know the model, its provider is not signed in, or its sign-in expired. It is `undefined` when Pi can use the model. With `fresh: true`, it asks the provider about the sign-in again first.
+Why Pi cannot use a model now, in words that Pi can tell a person. For example, pi-tava does not know the model, its provider is not signed in, or its sign-in expired. It is `undefined` when Pi can use the model. With `fresh: true`, it asks the provider about the sign-in again first.
 
 ### `thinkingLevels`
 
@@ -334,7 +334,7 @@ A linked session, as `list` gives it.
 
 ## Internal members
 
-The host has more members, for Pi Pocket's built-in modules only. They are not in the types file, and they can change in any release without notice. Do not use them in a drop-in. [API stability](../policies/api-stability.md) tells you what this means.
+The host has more members, for pi-tava's built-in modules only. They are not in the types file, and they can change in any release without notice. Do not use them in a drop-in. [API stability](../policies/api-stability.md) tells you what this means.
 
 - `approvals`: tool calls that wait for a person to allow them.
 - `guard`: Lancet Guard.

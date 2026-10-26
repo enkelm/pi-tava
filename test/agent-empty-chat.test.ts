@@ -200,11 +200,9 @@ function assertPiWelcome(tree: unknown, copy = ask) {
 
     assert.ok(hint, "the standard empty welcome remains visible");
     assert.equal(avatars(tree).length, 0);
-    assert.deepEqual(
-        piMarks(hint).map((node) => text(node)),
-        ["π"],
-    );
-    assert.equal(text(hint).replace(/\s+/g, " ").trim(), `π${copy}`);
+    assert.equal(piMarks(hint).length, 1, "ordinary chats retain the decorative app mark");
+    assert.equal(piMarks(hint)[0]!.props["aria-hidden"], "true");
+    assert.equal(text(hint).replace(/\s+/g, " ").trim(), copy);
 }
 
 test("unloaded named and ordinary saved chats share the native thread loading surface, not an empty welcome", () => {
@@ -272,7 +270,7 @@ test("unavailable named and ordinary saved chats show the route error rather tha
     }
 });
 
-test("the exact selected saved identity replaces π with its keyed native avatar, not a catalogue chat-list match", () => {
+test("the exact selected saved identity replaces the app mark with its keyed native avatar, not a catalogue chat-list match", () => {
     reset();
     const tree = Transcript();
     const hint = welcome(tree);
@@ -298,7 +296,7 @@ test("the exact selected saved identity replaces π with its keyed native avatar
 });
 
 for (const kind of ["session", "subagent"]) {
-    test(`an ordinary ${kind} keeps π and its existing welcome text`, () => {
+    test(`an ordinary ${kind} keeps the app mark and its existing welcome text`, () => {
         reset();
         fixture.store.state.view.conversation = { id: 19, kind };
         assertPiWelcome(

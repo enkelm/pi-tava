@@ -266,7 +266,7 @@ export class SshAuthentication {
                 if (!result.ok || !credential.wasPrompted()) {
                     throw new HttpError(
                         409,
-                        "SSH password login failed. Check the username and password, and ensure this host's key is already trusted on Coop. No new login was saved.",
+                        "SSH password login failed. Check the username and password, and ensure this host's key is already trusted on pi-tava. No new login was saved.",
                     );
                 }
 

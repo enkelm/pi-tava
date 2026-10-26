@@ -1,6 +1,6 @@
 /**
  * Model providers: which ones Pi knows, whether each is signed in, and sign-ins run from the app. A sign-in asks its
- * questions (an API key, a code, a choice) through the tabs of the person who started it. Pi Pocket shares Pi's own
+ * questions (an API key, a code, a choice) through the tabs of the person who started it. pi-tava shares Pi's own
  * sign-ins (`~/.pi/agent/auth.json`).
  *
  * A subscription's sign-in (OAuth) counts as signed in for as long as it is stored, even once it can no longer be

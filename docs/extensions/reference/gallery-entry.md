@@ -2,12 +2,12 @@
 
 The extension gallery reads an index: one JSON file, the `index.json` that the index repository makes. The index has an entry for each extension and each theme. An entry names the files of one drop-in at a pinned commit of a GitHub repository, with the SHA-256 of each file. It also declares what the module installs. A theme's entry names the files of one theme folder in the same way ([A theme's entry](#a-themes-entry)). [Publishing to the gallery](../publishing.md) tells you how to share yours.
 
-Pi Pocket reads the index strictly, because all of it comes from other people. The code is `src/server/gallery/entry.ts`. The index repository's checks use the same code, so Pi Pocket can read each entry that the checks let in.
+pi-tava reads the index strictly, because all of it comes from other people. The code is `src/server/gallery/entry.ts`. The upstream index repository checks entries against its pinned Pi Pocket version; pi-tava also applies its own reader and compatibility checks.
 
 - Each text field is one plain line, with no space at its ends. It has no control, invisible, or direction characters.
 - A list has no item two times.
 - A field that is not on this page makes the entry not valid.
-- An entry that Pi Pocket cannot read is left out. An entry for a newer Pi Pocket, or for a newer extension API, is hidden. The gallery says how many it left out.
+- An entry that pi-tava cannot read is left out. An entry for a newer pi-tava, or for a newer extension API, is hidden. The gallery says how many it left out.
 
 [Limits](limits.md#gallery) gives each length, count, and size.
 
@@ -21,7 +21,7 @@ format: 1;
 
 Since 0.14.0 · Stable
 
-The format of the index. Pi Pocket reads format 1. For a newer format, it says that you must update Pi Pocket.
+The format of the index. pi-tava reads format 1. For a newer format, it says that you must update pi-tava.
 
 ### `name`
 
@@ -113,7 +113,7 @@ version: string;
 
 Since 0.14.0 · Stable
 
-The author's version, for people: letters, digits, `.`, `+`, and `-`. Pi Pocket goes by the commit, not by this version.
+The author's version, for people: letters, digits, `.`, `+`, and `-`. pi-tava goes by the commit, not by this version.
 
 ### `source`
 
@@ -158,7 +158,7 @@ pocketApi: number;
 
 Since 0.14.0 · Stable
 
-The version of the extension API that the extension needs, such as `1`. For a newer version than Pi Pocket's, the gallery hides the entry.
+The version of the extension API that the extension needs, such as `1`. For a newer version than pi-tava's, the gallery hides the entry.
 
 ### `minPocket`
 
@@ -168,7 +168,7 @@ minPocket: string;
 
 Since 0.14.0 · Stable
 
-The oldest Pi Pocket that the extension works with, such as `0.14.0`. For an older Pi Pocket, the gallery hides the entry. A pre-release counts as its release: `0.14.0-beta.3` is `0.14.0`.
+The oldest pi-tava that the extension works with, such as `0.14.0`. For an older pi-tava, the gallery hides the entry. A pre-release counts as its release: `0.14.0-beta.3` is `0.14.0`.
 
 ### `declares`
 
@@ -188,7 +188,7 @@ revoked?: { commit: string; reason: string }[];
 
 Since 0.14.0 · Stable
 
-Commits of the extension that people must not use, each with the reason. Where such a commit is installed, the gallery and the Extensions sheet say so, and offer to turn it off. When the entry's own `source.commit` is revoked, the gallery does not offer it. Pi Pocket reads `revoked` also from an entry that is otherwise not valid, or that is for a newer Pi Pocket.
+Commits of the extension that people must not use, each with the reason. Where such a commit is installed, the gallery and the Extensions sheet say so, and offer to turn it off. When the entry's own `source.commit` is revoked, the gallery does not offer it. pi-tava reads `revoked` also from an entry that is otherwise not valid, or that is for a newer pi-tava.
 
 ## What an entry declares
 
@@ -202,7 +202,7 @@ extensions: string[];
 
 Since 0.14.0 · Stable
 
-The names of the extensions that the module installs. None can be a name that Pi Pocket keeps.
+The names of the extensions that the module installs. None can be a name that pi-tava keeps.
 
 ### `tools`
 
@@ -296,7 +296,7 @@ Its commands, each as its scope and name, as a route has its method: `conversati
 
 ## A theme's entry
 
-A theme's entry has the fields of an extension's entry, with these differences. It has no `pocketApi` and no `declares`, because a theme runs no code. When Pi Pocket installs it, it checks the files as it checks every theme folder ([Themes](../themes.md#themes-in-the-gallery)). A Pi Pocket before 0.14.0, and its betas, cannot read a theme's entry: they leave it out, and never install it as an extension.
+A theme's entry has the fields of an extension's entry, with these differences. It has no `pocketApi` and no `declares`, because a theme runs no code. When pi-tava installs it, it checks the files as it checks every theme folder ([Themes](../themes.md#themes-in-the-gallery)). A Pi Pocket before 0.14.0, and its betas, cannot read a theme's entry: they leave it out, and never install it as an extension.
 
 ### `kind`
 
@@ -316,7 +316,7 @@ name: string;
 
 Since 0.14.0 · Stable
 
-The theme's id: the name of its folder in `themes/`. 2 to 48 characters: lowercase letters, digits, and `-`, starting with a letter or digit. It cannot be an id that Pi Pocket keeps: `desktop`, a theme that comes with Pi Pocket (`pocket`, `lantern`), or one of its palettes (`tokyo-night`, `gruvbox`, and the others in `web/themes.js`).
+The theme's id: the name of its folder in `themes/`. 2 to 48 characters: lowercase letters, digits, and `-`, starting with a letter or digit. It cannot be an id that pi-tava keeps: `desktop`, a theme that comes with pi-tava (`pocket`, `lantern`), or one of its palettes (`tokyo-night`, `gruvbox`, and the others in `web/themes.js`).
 
 ### `files` (theme)
 
@@ -331,7 +331,7 @@ files: {
 
 Since 0.14.0 · Stable
 
-The theme folder's files, each as `<name>/<path>`. Pi Pocket installs them in `themes/<name>/`.
+The theme folder's files, each as `<name>/<path>`. pi-tava installs them in `themes/<name>/`.
 
 - `theme.json`, `colors.toml`, and `colors-light.toml`, at the top of the folder, 8 KB each at most.
 - Stylesheets (`.css`), 256 KB together at most.
@@ -348,4 +348,4 @@ themeApi: number;
 
 Since 0.14.0 · Stable
 
-The version of the theme surface (tokens, parts, and states) that the theme needs, such as `1`. For a newer version than Pi Pocket's, the gallery hides the entry.
+The version of the theme surface (tokens, parts, and states) that the theme needs, such as `1`. For a newer version than pi-tava's, the gallery hides the entry.

@@ -1,5 +1,5 @@
 /**
- * The system prompt: who the agent is, how to behave on a phone-sized screen, where Pi Coop's documentation is, the
+ * The system prompt: who the agent is, how to behave on a phone-sized screen, where pi-tava's documentation is, the
  * project's AGENTS.md files, Pi's skills, and the working directory. Sections render before every request; only
  * changed sections are sent again, so everything here is stable between requests unless a file on disk changed.
  *
@@ -23,7 +23,7 @@ import {
     type ContextFile,
 } from "../remote-context.ts";
 
-const PREAMBLE = `You are Pi, a coding agent running inside Pi Coop: a durable, multiplayer web app built on Pi Durable. People talk to you from a browser, often a phone, and several people can share one conversation. When more than one person uses this server, each message starts with [from: Name].
+const PREAMBLE = `You are Pi, a coding agent running inside pi-tava: a durable, multiplayer web app built on Pi Durable. People talk to you from a browser, often a phone, and several people can share one conversation. When more than one person uses this server, each message starts with [from: Name].
 
 You work in the conversation's working directory with the tools you are given. Your work is durable: if the server restarts, you continue where you left off. A tool call cut off by a restart comes back as an "interrupted" error when it was not safe to repeat; check what actually happened before you retry it.`;
 
@@ -35,17 +35,17 @@ const GUIDELINES = `- Keep replies short and easy to read on a small screen. Lea
 - Do not commit, push, publish, or deploy unless asked.`;
 
 /**
- * Where Pi Coop's documentation for agents is, as Pi's prompt says where Pi's is: to read only when it is
+ * Where pi-tava's documentation for agents is, as Pi's prompt says where Pi's is: to read only when it is
  * needed.
  */
 function docs(dataDir: string): string {
     const code = resolve(APP_ROOT);
     const folder = join(code, "docs");
 
-    return `Pi Coop documentation (read only when someone asks about Pi Coop itself: how it works, changing how you behave in it, extending it, or changing its code):
+    return `pi-tava documentation (read only when someone asks about pi-tava itself: how it works, changing how you behave in it, extending it, or changing its code):
 - Start here: ${join(folder, "index.md")}
-- Pi Coop's code is in ${code}; its data (people, settings, sessions) in ${dataDir}. Change the data through the app, never by editing its files, except extensions/ in it, where drop-in extensions go.
-- When asked about: changing how you behave without code, such as instructions, AGENTS.md, skills, or prompt templates (docs/customizing.md); a new tool, prompt section, hook, page, button, or route (docs/extensions.md, with guides in docs/extensions/, working examples in docs/examples/ and exact types in types/pocket.d.ts); themes (docs/extensions/themes.md and docs/extensions/reference/theme-surface.md); changing Pi Coop's own code while it runs (docs/self-editing.md); where its code is (docs/map.md); how its parts depend on each other (docs/architecture.md); what a feature does (docs/features.md)
+- pi-tava's code is in ${code}; its data (people, settings, sessions) in ${dataDir}. Change the data through the app, never by editing its files, except extensions/ in it, where drop-in extensions go.
+- When asked about: changing how you behave without code, such as instructions, AGENTS.md, skills, or prompt templates (docs/customizing.md); a new tool, prompt section, hook, page, button, or route (docs/extensions.md, with guides in docs/extensions/, working examples in docs/examples/ and exact types in types/pocket.d.ts); themes (docs/extensions/themes.md and docs/extensions/reference/theme-surface.md); changing pi-tava's own code while it runs (docs/self-editing.md); where its code is (docs/map.md); how its parts depend on each other (docs/architecture.md); what a feature does (docs/features.md)
 - Resolve docs/... and types/... under ${code}, not the working directory. Read a doc completely, and follow its relevant links, before changing anything.
 - Pi's own documentation (skills, prompt templates, models, providers, settings): ${getDocsPath()}`;
 }
@@ -80,7 +80,7 @@ export default function createPrompt(host: PocketHost) {
     const hostSkill = defineTool({
         name: "host_skill",
         description:
-            "Read a registered host-global skill or a relative text resource inside it. For SSH threads only; this reads on the Coop host, not the SSH machine. Never executes or stages scripts. Maximum 50KB per resource and 2000 lines per reply.",
+            "Read a registered host-global skill or a relative text resource inside it. For SSH threads only; this reads on the pi-tava host, not the SSH machine. Never executes or stages scripts. Maximum 50KB per resource and 2000 lines per reply.",
         parameters: Type.Object({
             name: Type.String({ description: "Registered host-global skill name" }),
             resource: Type.Optional(
@@ -176,7 +176,7 @@ export default function createPrompt(host: PocketHost) {
             ),
             section("pocket_docs", (input) =>
                 remoteOf(input).location?.kind === "ssh"
-                    ? "Pi Coop and provider configuration live on the Coop host, not this SSH machine. Remote read/bash cannot directly access host documentation or uploads. Use stage_upload(path) to copy an attached file to the remote before a remote script needs it; the original remains host-local. Host scripts and global skill resources cannot be staged by this tool. Use a local thread for host app documentation. Do not copy provider credentials or whole host settings directories to the remote."
+                    ? "pi-tava and provider configuration live on the pi-tava host, not this SSH machine. Remote read/bash cannot directly access host documentation or uploads. Use stage_upload(path) to copy an attached file to the remote before a remote script needs it; the original remains host-local. Host scripts and global skill resources cannot be staged by this tool. Use a local thread for host app documentation. Do not copy provider credentials or whole host settings directories to the remote."
                     : docs(host.dataDir),
             ),
             section("project_context", async (input, context) => {
@@ -263,7 +263,7 @@ export default function createPrompt(host: PocketHost) {
                     );
 
                     blocks.push(
-                        `Host-global skills: read them with host_skill(name), and relative resources with host_skill(name, resource). Their paths are on the Coop host, not the remote; never pass host paths to remote read/bash. Host skill scripts cannot be run or staged remotely by host_skill.\n\n${visibleGlobal.map((skill) => `- ${host.text.defang(skill.name)}: ${host.text.defang(skill.description)}`).join("\n")}`,
+                        `Host-global skills: read them with host_skill(name), and relative resources with host_skill(name, resource). Their paths are on the pi-tava host, not the remote; never pass host paths to remote read/bash. Host skill scripts cannot be run or staged remotely by host_skill.\n\n${visibleGlobal.map((skill) => `- ${host.text.defang(skill.name)}: ${host.text.defang(skill.description)}`).join("\n")}`,
                     );
 
                     return blocks.join("\n\n");
@@ -277,7 +277,7 @@ export default function createPrompt(host: PocketHost) {
                 const workspace = remoteOf(input);
 
                 if (workspace.location?.kind === "ssh") {
-                    return `Working directory: ${cwdOf(input)}\nLocation: SSH · ${host.text.defang(workspace.location.host)}\nPlatform: remote POSIX; bash required (remote OS not detected).\nAll agents, subagents, model calls and history run on the Coop host. Files and bash target this one SSH workspace; host paths are not remote paths. No local fallback or automatic replay of uncertain remote mutations.\nToday: ${today}`;
+                    return `Working directory: ${cwdOf(input)}\nLocation: SSH · ${host.text.defang(workspace.location.host)}\nPlatform: remote POSIX; bash required (remote OS not detected).\nAll agents, subagents, model calls and history run on the pi-tava host. Files and bash target this one SSH workspace; host paths are not remote paths. No local fallback or automatic replay of uncertain remote mutations.\nToday: ${today}`;
                 }
 
                 return `Working directory: ${cwdOf(input)}\nPlatform: ${process.platform}\nToday: ${today}`;

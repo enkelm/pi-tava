@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Pi Coop server. Run it through `bin/pi-coop.js`, which restarts it when the app asks to (exit code 75).
+ * pi-tava server. Run it through `bin/pi-coop.js`, which restarts it when the app asks to (exit code 75).
  *
  *   node bin/pi-coop.js [--host 127.0.0.1] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
  *
@@ -62,7 +62,7 @@ function parseArgs(argv: string[]) {
             options.tailscaleHttps = true;
         } else if (arg === "--help" || arg === "-h") {
             console.log(
-                "pi-coop [--host 127.0.0.1] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token] [--tailscale-https] (opt-in: certificate issuance publicly logs this device's .ts.net name)",
+                "pi-tava [--host 127.0.0.1] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token] [--tailscale-https] (opt-in: certificate issuance publicly logs this device's .ts.net name)",
             );
             process.exit(0);
         } else {
@@ -160,7 +160,7 @@ const requestListener: RequestListener = (request, response) => {
         "retry-after": "2",
         "cache-control": "no-store",
     });
-    response.end("Pi Coop is starting…");
+    response.end("pi-tava is starting…");
 };
 
 let server:
@@ -220,7 +220,7 @@ try {
     await tls?.close();
     console.error(
         code === "EADDRINUSE"
-            ? `Port ${options.port} is already in use on ${options.host}. Is Pi Coop already running? Pick another with --port.`
+            ? `Port ${options.port} is already in use on ${options.host}. Is pi-tava already running? Pick another with --port.`
             : `Could not listen on ${options.host}:${options.port}: ${(error as Error).message}`,
     );
     process.exit(CONFIG_ERROR_CODE);
@@ -306,7 +306,7 @@ if (launcher) {
         }
     }
 
-    console.log("\nPi Coop is running.");
+    console.log("\npi-tava is running.");
     console.log(`  data:     ${options.data}`);
     console.log(`  sessions: new sessions start in ${options.cwd}`);
     console.log(

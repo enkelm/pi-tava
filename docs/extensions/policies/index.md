@@ -1,6 +1,6 @@
 # Policies for extension authors and contributors
 
-The guides tell how to do a thing. These policies tell what is permitted, and what Pi Pocket promises. They are for people who write extensions, share them in the gallery, review them, or change Pi Pocket itself.
+The guides tell how to do a thing. These policies tell what is permitted, and what pi-tava promises. They are for people who write extensions, share them in the gallery, review them, or change pi-tava itself.
 
 ## How to read them
 
@@ -11,7 +11,7 @@ The guides tell how to do a thing. These policies tell what is permitted, and wh
 
 ## The policies
 
-**[Core or extension](core-or-extension.md).** Where a change goes. Core keeps what must work the same for all people and all extensions: who may act, stored data and how it lasts, spend and the choice of models, and security. Extensions keep optional workflows, integrations, presentation preferences, and the process of one team. The page gives examples from Pi Pocket, such as linked sessions in core and Agent Teams as an extension, and tells how to ask for a new extension point.
+**[Core or extension](core-or-extension.md).** Where a change goes. Core keeps what must work the same for all people and all extensions: who may act, stored data and how it lasts, spend and the choice of models, and security. Extensions keep optional workflows, integrations, presentation preferences, and the process of one team. The page gives examples from pi-tava, such as linked sessions in core and Agent Teams as an extension, and tells how to ask for a new extension point.
 
 **[The public API and how it changes](api-stability.md).** Which interfaces are for extensions: `host`, `web`, `pocket`, a command's `ctx`, some CSS names, events, the names for stored data, and the gallery entry format. All other code is internal. The page tells what `pocketApi` means, what is a breaking change, how a member is deprecated and removed, and how the release notes tell authors.
 

@@ -1,7 +1,7 @@
 {
-    "name": "pi-pocket-docs",
+    "name": "pi-tava-docs",
     "private": true,
-    "description": "Pi Pocket's documentation site: renders the repository's docs/ in place with Starlight",
+    "description": "pi-tava's documentation site: renders the repository's docs/ in place with Starlight",
     "type": "module",
     "engines": {
         "node": ">=22.19"

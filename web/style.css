@@ -1,5 +1,5 @@
 /*
- * Pi Coop's theme. theme.js sets the --o-* variables from a bundled palette; surfaces mix the foreground over the
+ * pi-tava's theme. theme.js sets the --o-* variables from a bundled palette; surfaces mix the foreground over the
  * background for quiet fills. Square tiles, 2px window borders, no shadows or blur; JetBrains Mono is the default.
  */
 /*
@@ -466,8 +466,19 @@ code {
 }
 
 .pi {
-    font-family: Georgia, "Times New Roman", serif;
     color: var(--brand);
+}
+
+/* The supplied background-free artwork, tinted by its context so it works in every palette.
+ * Its transparent margins are cropped optically, without altering the source SVG. */
+.tava-mark {
+    display: inline-block;
+    flex: none;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.15em;
+    background: currentColor;
+    mask: url("/pi-tava-mark.svg") center / 132% no-repeat;
 }
 
 /* ─── Motion ───────────────────────────────────────────────── */
@@ -566,7 +577,7 @@ code {
 
 /* ─── Loaders ───────────────────────────────────────────────── */
 
-/* The boot screen: π over a flat square bar that eases toward 70% while it waits. */
+/* The boot screen: the Tava mark over a flat bar that eases toward 70% while it waits. */
 .boot {
     display: flex;
     flex-direction: column;
@@ -723,8 +734,8 @@ code {
     background: var(--bg);
 }
 
-/* The sidebar and the session are windows. On wide screens with tiling on, they have gaps over the background,
- * a 2px inactive border, and the active border on the one in focus. */
+/* The sidebar and the session are windows. Wherever the docked sidebar fits, tiling adds gaps over the background,
+ * an inactive border, and the active border on the one in focus. */
 .window {
     position: relative;
     min-width: 0;
@@ -861,7 +872,7 @@ code {
     }
 }
 
-@media (min-width: 960px) {
+@media (min-width: 768px) {
     :root[data-tiling="on"] .layout {
         padding: var(--gap-out) calc(var(--gap-out) + var(--safe-right)) var(--gap-out)
             calc(var(--gap-out) + var(--safe-left));
@@ -4351,7 +4362,7 @@ button.chip:active:not(:disabled):not(.on) {
 
 .brand {
     display: inline-flex;
-    align-items: baseline;
+    align-items: center;
     gap: 0.3rem;
     font:
         1.6rem/1 Georgia,
@@ -4361,7 +4372,7 @@ button.chip:active:not(:disabled):not(.on) {
     white-space: nowrap;
 }
 
-.brand span {
+.brand > span:not(.tava-mark) {
     font: 700 1rem var(--font);
     color: var(--text);
 }
@@ -5218,7 +5229,7 @@ button.chip:active:not(:disabled):not(.on) {
     opacity: 0.55;
 }
 
-/* Pi Pocket's spinner, in the folder's color: one lit quadrant stepping around the four. */
+/* pi-tava's spinner, in the folder's color: one lit quadrant stepping around the four. */
 .state-mark.working {
     overflow: hidden;
     --dim: color-mix(in oklab, currentColor 28%, transparent);
@@ -6001,7 +6012,7 @@ button.chip:active:not(:disabled):not(.on) {
     }
 }
 
-/* ─── The home screen on wide screens: a fastfetch for Pi Pocket ─── */
+/* ─── The home screen on wide screens: a fastfetch for pi-tava ─── */
 
 /* One centered column, 640px at most. */
 .splash {
@@ -10964,9 +10975,12 @@ textarea.notes {
     overflow-wrap: anywhere;
 }
 
-@media (max-width: 420px) {
+@media (max-width: 699px) {
+    /* Keep the mode group below its label, without competing flex sizing on narrow screens. */
     .setting-row:has(.color-modes) {
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 8px;
     }
 
     .color-modes {
@@ -10975,6 +10989,7 @@ textarea.notes {
 
     .color-modes button {
         flex: 1;
+        min-width: 0;
     }
 }
 
@@ -11617,7 +11632,7 @@ textarea.notes {
     color: var(--accent);
 }
 
-/* Pi's own words: its mark in Georgia, as everywhere. */
+/* Pi's own words use the same Tava mark as the rail and welcome screen. */
 .peek-mark.pi {
     color: var(--brand);
     font:
@@ -12589,8 +12604,8 @@ textarea.notes {
 }
 
 .dr-pi {
-    color: var(--spark);
-    font-size: 11px;
+    color: var(--brand);
+    font-size: 16px;
 }
 
 .dr-tail {
@@ -14548,6 +14563,7 @@ textarea.notes {
     padding: 0 0.8rem;
     background: var(--panel);
     border: 1px solid var(--line-strong);
+    border-radius: var(--r-control);
     color: var(--muted);
     font-size: 0.82rem;
     box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);

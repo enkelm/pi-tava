@@ -1,38 +1,38 @@
 # Themes
 
-A theme changes how Pi Pocket looks and how it is laid out, without a change to the app's code. A theme is a folder of CSS, colors, fonts, and images. It cannot run code. [reference/theme-surface.md](reference/theme-surface.md) lists every token and part a theme can use.
+A theme changes how pi-tava looks and how it is laid out, without a change to the app's code. A theme is a folder of CSS, colors, fonts, and images. It cannot run code. [reference/theme-surface.md](reference/theme-surface.md) lists every token and part a theme can use.
 
 ## Theme and colors
 
 Appearance has two choices:
 
 - **Theme**: the look and the layout. **Pocket** is the app's own look. Each theme folder adds one.
-- **Colors**: the palette. The Omarchy palettes that come with the app, **Desktop** (the Omarchy theme of the machine Pi Pocket runs on), and each theme folder that has a `colors.toml`.
+- **Colors**: the palette. The Omarchy palettes that come with the app, **Desktop** (the Omarchy theme of the machine pi-tava runs on), and each theme folder that has a `colors.toml`.
 
 They are separate, so a theme's layout stays when the colors change, as they do when you follow the desktop. A theme with colors of its own changes Colors to them when you choose it. You can choose other colors after.
 
-A theme can bring a pair of palettes, dark and light. Colors then shows three cards for it: the pair, which follows the system's light or dark setting (the one a theme brings when you choose it), and each half alone.
+A theme can bring a pair of palettes, dark and light. Colors shows two cards for it, one for each half. Choosing the theme itself still brings the pair and follows the system's light or dark setting; existing saved pair selections keep working without a duplicate Colors card.
 
-Each person chooses for each browser, as for the rest of Appearance. Guests choose too. Only the owner adds, changes, and removes themes. The owner can also choose the theme and colors that browsers start with: in Appearance, **Use these for new browsers** makes the ones in use the default for every browser whose person has not chosen their own, guests' included (**Reset** goes back to Pocket and the desktop's colors).
+Each person chooses for each browser, as for the rest of Appearance. Guests choose too. Only the owner adds, changes, and removes themes. The owner can also choose the theme and colors that browsers start with: in Appearance, **Use these for new browsers** makes the ones in use the default for every browser whose person has not chosen their own, guests' included (**Reset** restores the shipped Tava default, with paired Dark/Light colors).
 
 Besides Appearance: the launcher's **Themes** (Ctrl/⌘+K, then `#`) lists the themes before the colors, and `/theme <name>` in the message box chooses a theme by its name (`/theme paper`), or else colors (`/theme gruvbox`, `/theme desktop`).
 
 ## Make a theme
 
 1. Open Appearance: the palette button on the rail, Menu → **Appearance**, or **Appearance** in the launcher (Ctrl/⌘+K).
-2. Choose the theme to start from, and tap **Duplicate**. Give it a name. Pi Pocket copies it into a folder of its own and chooses it. **Duplicate colors** does the same for the colors in use.
+2. Choose the theme to start from, and tap **Duplicate**. Give it a name. pi-tava copies it into a folder of its own and chooses it. **Duplicate colors** does the same for the colors in use.
 3. Tap **Edit with Pi**. A session starts in the theme's folder, with a message ready that tells Pi where this guide is. Say what you want: "make my messages bubbles on the right", "a warmer accent", "a square message box".
 
 Each save shows at once in every tab that uses the theme. The page does not reload, so nothing you typed is lost.
 
-You can also edit the folder yourself: `~/.pi-pocket/themes/<id>/` (or `themes/` in `PI_POCKET_DIR`). It is the one place in the data folder, with `extensions/`, that you edit by hand. **Remove** moves a theme's folder to `themes/.removed/`, so you can get it back from there. Pi Pocket never deletes what is in `.removed/`, so it grows: delete the folders there you no longer want.
+You can also edit the folder yourself: `~/.pi-durable-app/themes/<id>/` (or `themes/` in `PI_POCKET_DIR`). It is the one place in the data folder, with `extensions/`, that you edit by hand. **Remove** moves a theme's folder to `themes/.removed/`, so you can get it back from there. pi-tava never deletes what is in `.removed/`, so it grows: delete the folders there you no longer want.
 
 A copy of Pocket starts with a `theme.css` that lists every token with its value, commented out. Take the comment marks off a token and change its value. Leave the others commented out, so they follow the app's updates.
 
 ## The folder
 
 ```
-~/.pi-pocket/themes/paper/
+~/.pi-durable-app/themes/paper/
     theme.json
     theme.css
     layout.css        (theme.css imports it)
@@ -43,7 +43,7 @@ A copy of Pocket starts with a `theme.css` that lists every token with its value
     images/grain.webp
 ```
 
-The folder's name is the theme's id: lowercase letters, digits, and `-` ([Limits](reference/limits.md#themes) gives the lengths). A theme cannot take the name of one that comes with Pi Pocket, of a palette, or `desktop`.
+The folder's name is the theme's id: lowercase letters, digits, and `-` ([Limits](reference/limits.md#themes) gives the lengths). A theme cannot take the name of one that comes with pi-tava, of a palette, or `desktop`.
 
 `theme.json` is needed when the folder has CSS:
 
@@ -58,13 +58,13 @@ The folder's name is the theme's id: lowercase letters, digits, and `-` ([Limits
 }
 ```
 
-| Field                   | What                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------- |
-| `themeApi`              | Required. The version of the theme surface it uses: 1. A newer one is not loaded.           |
-| `name`                  | Required. One line.                                                                         |
-| `description`, `author` | Optional. One line each.                                                                    |
-| `version`               | Optional. The theme's own version, for people.                                              |
-| `minPocket`             | Optional. The oldest Pi Pocket it works with, for parts and tokens added in later releases. |
+| Field                   | What                                                                                                              |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `themeApi`              | Required. The version of the theme surface it uses: 1. A newer one is not loaded.                                 |
+| `name`                  | Required. One line.                                                                                               |
+| `description`, `author` | Optional. One line each.                                                                                          |
+| `version`               | Optional. The theme's own version, for people.                                                                    |
+| `minPocket`             | Optional. The oldest upstream Pi Pocket compatibility baseline it needs, independent of pi-tava's release number. |
 
 `colors.toml` is Omarchy's format, as it is: `key = "value"` lines, with `background` and `foreground` at least, and `mode = "light"` for a light palette. A folder with only a `colors.toml` needs no `theme.json`, so you can drop in an Omarchy theme folder and it shows under Colors. Its other files are not read. `colors-light.toml` beside it, in the same format, is the light half of a pair; alone, it is the folder's palette.
 
@@ -184,7 +184,7 @@ A theme is CSS. It runs no code, reads nothing, and sends nothing anywhere. It i
 From 0.14.0, the gallery lists themes with extensions: Menu → Extensions → **Find extensions**, then the **Themes** filter. Each theme has a **Theme** tag.
 
 - A theme's page shows its files, who made it, and where they are on GitHub. **View source** shows each file before you install it.
-- **Install** gets its files from the commit the index pins and checks each one against its SHA-256. Then Pi Pocket checks the theme as it checks every theme folder (the CSS check too), in a hidden folder. A theme that fails a check is not installed, and the gallery says why. A theme that passes goes into `themes/<id>/`.
+- **Install** gets its files from the commit the index pins and checks each one against its SHA-256. Then pi-tava checks the theme as it checks every theme folder (the CSS check too), in a hidden folder. A theme that fails a check is not installed, and the gallery says why. A theme that passes goes into `themes/<id>/`.
 - Installing applies nothing. The theme shows in Appearance → Theme, and each person chooses it there.
 - **Update** shows a diff of every file before you apply it. The version you had goes to `themes/.removed/`, so your own edits are not lost.
 - **Remove** moves the folder to `themes/.removed/`, as Remove in Appearance does. Browsers that used it go back to Pocket.
@@ -192,11 +192,11 @@ From 0.14.0, the gallery lists themes with extensions: Menu → Extensions → *
 
 Where a theme came from is in `.gallery.json` in its folder. It is a hidden file, so it is never served.
 
-To share one of your own themes, choose it in Appearance and tap **Share…**. Pi Pocket checks it, and drafts its entry: the files the theme loads, with their sizes and SHA-256 hashes, and its name and description from `theme.json`. Put the folder in a public GitHub repository as `<id>/` (at the top, or in a folder that you name in the entry), and open the pull request as for an extension ([Sharing yours](publishing.md#sharing-yours)). A theme's entry has `"kind": "theme"` and `themeApi`, and no `declares`.
+To share one of your own themes, choose it in Appearance and tap **Share…**. pi-tava checks it, and drafts its entry: the files the theme loads, with their sizes and SHA-256 hashes, and its name and description from `theme.json`. Put the folder in a public GitHub repository as `<id>/` (at the top, or in a folder that you name in the entry), and open the pull request as for an extension ([Sharing yours](publishing.md#sharing-yours)). A theme's entry has `"kind": "theme"` and `themeApi`, and no `declares`.
 
-## Themes that come with Pi Pocket
+## Themes that come with pi-tava
 
-Two come with it: **Pocket**, the app's own look, and **Lantern**, a calm, warm dark theme with colors of its own (`web/themes/lantern/`: `frame.css` is its frame, `direction.css` and `colors.toml` its turns and palette). Lantern carries its rounded corners through sidebar actions, Settings categories, role tags (including PiP), review-comment controls, editor status controls and shared switches, and uses its palette for shared checkboxes and native selection controls. Peek tiles keep solid borders on hover and keyboard focus, so those borders follow the rounded corners. Built-in themes are folders in `web/themes/<id>/`, in the same format. They cannot be edited or removed from the app: duplicate one to change it. A change to one is a change to Pi Pocket's code ([self-editing.md](../self-editing.md)).
+Three come with it: **Tava**, an orange-and-cream theme based on the pi-tava artwork, with paired light/dark palettes and soft corners (`web/themes/tava/`); **Pocket**, the app's own look, and **Lantern**, a calm, warm dark theme with colors of its own (`web/themes/lantern/`: `frame.css` is its frame, `direction.css` and `colors.toml` its turns and palette). Lantern carries its rounded corners through sidebar actions, Settings categories, role tags (including PiP), review-comment controls, editor status controls and shared switches, and uses its palette for shared checkboxes and native selection controls. Peek tiles keep solid borders on hover and keyboard focus, so those borders follow the rounded corners. Built-in themes are folders in `web/themes/<id>/`, in the same format. They cannot be edited or removed from the app: duplicate one to change it. A change to one is a change to pi-tava's code ([self-editing.md](../self-editing.md)).
 
 ## Stability
 

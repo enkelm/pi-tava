@@ -167,10 +167,10 @@ test("the names reference names every built-in tool and extension a drop-in must
     }
 });
 
-test("the system prompt says where Pi Coop's docs are, and every file it names exists", () => {
+test("the system prompt says where pi-tava's docs are, and every file it names exists", () => {
     const section = sections.pocket_docs ?? "";
 
-    assert.match(section, /^<pocket_docs>\nPi Coop documentation \(read only when/);
+    assert.match(section, /^<pocket_docs>\npi-tava documentation \(read only when/);
     // Every absolute path in it (the code, its docs, the data folder, Pi's docs), and every doc it names.
     const paths = [...section.matchAll(/(?<=\s)\/[^\s;,()]+/g)].map((match) =>
         match[0].replace(/\.$/, ""),

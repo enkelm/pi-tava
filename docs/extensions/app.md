@@ -39,4 +39,4 @@ The three parts install and go with the module's extensions:
 
 - An edit replaces them in one step.
 - When a new version does not load, the parts of the version before stay.
-- When the owner turns the module off, Pi Pocket removes them, and closes a page of the module that is open.
+- When the owner turns the module off, pi-tava removes them, and closes a page of the module that is open.

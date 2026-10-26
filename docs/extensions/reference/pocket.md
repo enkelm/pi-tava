@@ -1020,9 +1020,9 @@ Since 0.14.0 · Stable
 - `onChange`: runs when a person turns the switch. Set `on` again from it.
 - `disabled`: with `true`, nobody can turn the switch.
 
-## CSS names Pi Pocket keeps
+## CSS names pi-tava keeps
 
-To look like the app, use its colors and classes. The colors follow the theme. Pi Pocket keeps these names. The rest of its CSS can change. These names are a subset of [the theme surface](theme-surface.md#extensions-css-names), the one full list of the tokens, parts, and states Pi Pocket keeps.
+To look like the app, use its colors and classes. The colors follow the theme. pi-tava keeps these names. The rest of its CSS can change. These names are a subset of [the theme surface](theme-surface.md#extensions-css-names), the one full list of the tokens, parts, and states pi-tava keeps.
 
 - Colors: `var(--text)`, `var(--muted)`, `var(--accent)`, `var(--bg)`, `var(--card)`, `var(--line)`, `var(--err)`, `var(--warn)`, and `var(--ok)`.
 - Classes: `button` (with `primary`), `error-box`, `muted`, `small`, `mono`, and `setting` (a row with a label and a control).

@@ -63,7 +63,7 @@
     border-image: none;
 }
 
-/* The π, quieter: the brand's color, a little toward the ground. */
+/* The brand mark, quieter: its color, a little toward the ground. */
 [data-part~="brand-mark"] {
     color: color-mix(in oklab, var(--brand) 82%, var(--bg));
 }

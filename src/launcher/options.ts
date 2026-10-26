@@ -4,9 +4,9 @@ import { join, resolve } from "node:path";
 import { ACCESS_MODES, type AccessMode, isAccessMode } from "./access.ts";
 import { restoreTerminal } from "./term.ts";
 
-const HELP = `Pi Coop: a durable, multiplayer, mobile-first web app for Pi agents.
+const HELP = `pi-tava: a durable, multiplayer, mobile-first web app for Pi agents.
 
-Usage: pi-coop [options]
+Usage: pi-tava [options]
 
   -a, --access MODE   How other devices reach this server:
                         local       this device only

@@ -230,7 +230,7 @@ export function ProviderPackagesSettings() {
             <div class="browser-profile-settings">
                 <div class="group">
                     <p class="muted small">
-                        Discovered on the server, not this device. Pi Coop's selection is independent of Pi's own package enablement.
+                        Discovered on the server, not this device. pi-tava's selection is independent of Pi's own package enablement.
                     </p>
                     <p class="warn small">
                         Third-party packages run with the server's rights and can access provider credentials. Only enable packages you trust.

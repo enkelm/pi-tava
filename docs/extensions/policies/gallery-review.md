@@ -8,7 +8,7 @@ The gallery lists drop-ins that other people wrote. Each entry in the index, [Ta
 
 None of them replaces the owner's own read. SECURITY.md says so too ("The extension gallery").
 
-This page is for the default index. An owner can read another index, with its own rules.
+This page records the upstream Pi Pocket rules for the default index. pi-tava inherits the installation protections, but the upstream index's CI does not validate pi-tava's fork-specific APIs. An owner can read another index, with its own rules.
 
 Sources: the index's [README](https://github.com/TannerMidd/pi-pocket-extensions#readme), [CONTRIBUTING](https://github.com/TannerMidd/pi-pocket-extensions/blob/main/CONTRIBUTING.md), `schema/`, and `scripts/validate.ts`; Pi Pocket's `src/server/gallery/entry.ts`. Where they do not agree, `entry.ts` is correct.
 

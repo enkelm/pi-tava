@@ -1,6 +1,8 @@
 # Design: a documentation site for extensions
 
-Status: **built**, on branch `pocket/docs-site` for 0.14.0: `docs-site/`, the two workflows, the split guides, the reference (`docs-reference`), and the policies (`extension-guidelines`). This page is the design as the owner approved it; where the build differs, a note says so. `docs-site/README.md` tells how the site works now.
+Status: **built upstream**, on branch `pocket/docs-site` for 0.14.0: `docs-site/`, the two workflows, the split guides, the reference (`docs-reference`), and the policies (`extension-guidelines`). This page records the upstream design as approved; where the build differs, a note says so.
+
+**pi-tava fork:** the inherited Pages and pull-request docs workflows have been removed. Deployment commands and workflow descriptions below are historical, not active instructions for this fork. Local docs tooling remains; `docs-site/README.md` tells how the site works now.
 
 Built differently, after the security and quality reviews:
 

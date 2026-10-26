@@ -1,4 +1,4 @@
-# Pi Coop
+# pi-tava
 
 Terms for continuing private and shared Pi work through multiple interfaces.
 

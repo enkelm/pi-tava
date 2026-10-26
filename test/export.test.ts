@@ -67,7 +67,7 @@ test("a transcript reads in order, with authors, files, folded tool calls, and n
 
     assert.match(
         markdown,
-        /^# Build fix\n\n_Exported from Pi Coop on 2026-10-04 12:30 UTC\. Folder `~\/app`, model `faux\/faux-1`\._/,
+        /^# Build fix\n\n_Exported from pi-tava on 2026-10-04 12:30 UTC\. Folder `~\/app`, model `faux\/faux-1`\._/,
     );
     assert.match(
         markdown,

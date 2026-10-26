@@ -68,11 +68,11 @@ What the handler returns goes back as JSON. `undefined` goes back as `{}`.
 The app checks each request before your route gets it:
 
 - The person must be signed in.
-- The request must have the `X-Pocket` header. A link or a form on another site cannot send it. Your routes need it for `GET` too, so no other site can make a `GET` to them. `pocket.api` always sends it. Anything else that calls your routes must send it too, for example `curl -H 'X-Pocket: 1'`. Without the header, Pi Pocket looks up nothing.
+- The request must have the `X-Pocket` header. A link or a form on another site cannot send it. Your routes need it for `GET` too, so no other site can make a `GET` to them. `pocket.api` always sends it. Anything else that calls your routes must send it too, for example `curl -H 'X-Pocket: 1'`. Without the header, pi-tava looks up nothing.
 
 ## Text from outside
 
-A `:name` part is text from outside. Pi Pocket decodes the address before it splits it. So it answers 400 for a part that decodes to `..` (for example `..%2F`), or that has a `\` or a NUL in it. A `.` or `..` written as it is never gets to your route: the address resolves it first. But still check a part before you make a file path from it.
+A `:name` part is text from outside. pi-tava decodes the address before it splits it. So it answers 400 for a part that decodes to `..` (for example `..%2F`), or that has a `\` or a NUL in it. A `.` or `..` written as it is never gets to your route: the address resolves it first. But still check a part before you make a file path from it.
 
 ## Time
 

@@ -85,7 +85,7 @@ function blocker() {
     }
 
     if (!supported) {
-        return "This browser cannot receive notifications. On iPhone and iPad, add Pi Coop to the home screen first, then open it from there.";
+        return "This browser cannot receive notifications. On iPhone and iPad, add pi-tava to the home screen first, then open it from there.";
     }
 
     if (Notification.permission === "denied") {

@@ -1,15 +1,15 @@
 # Core or extension
 
-This page tells where a change goes: into Pi Pocket's core, or into an extension. Read it before you write code, and before you open a pull request. [extensions.md](../../extensions.md) tells how to write an extension.
+This page tells where a change goes: into pi-tava's core, or into an extension. Read it before you write code, and before you open a pull request. [extensions.md](../../extensions.md) tells how to write an extension.
 
 ## Terms
 
-- **Core** is the code that Pi Coop keeps for all people and all extensions. It includes application-owned server modules, browser presentation and the interfaces that extensions use: `host`, `web`, and `pocket`. Optional extension modules live under `src/server/extensions/`. First-party Work Items has no entry or source module there; its browser assets live in `src/server/work-items/browser/`.
-- An **extension** is a module that Pi Pocket loads through its extension loader. The owner can turn each one off in **Menu → Extensions**, except the system prompt (`prompt.ts`). There are three types:
-    - A **built-in extension** is a module in `src/server/extensions/`. It comes with Pi Pocket.
+- **Core** is the code that pi-tava keeps for all people and all extensions. It includes application-owned server modules, browser presentation and the interfaces that extensions use: `host`, `web`, and `pocket`. Optional extension modules live under `src/server/extensions/`. First-party Work Items has no entry or source module there; its browser assets live in `src/server/work-items/browser/`.
+- An **extension** is a module that pi-tava loads through its extension loader. The owner can turn each one off in **Menu → Extensions**, except the system prompt (`prompt.ts`). There are three types:
+    - A **built-in extension** is a module in `src/server/extensions/`. It comes with pi-tava.
     - A **gallery extension** is a drop-in that its author keeps in their own repository. The gallery lists it ([gallery-review.md](gallery-review.md)).
-    - A **drop-in** is a module in the owner's `~/.pi-pocket/extensions/` folder.
-- An **extension point** is a part of the public API that lets an extension add to Pi Pocket or change it. [api-stability.md](api-stability.md) lists them.
+    - A **drop-in** is a module in the owner's `~/.pi-durable-app/extensions/` folder (`~/.pi-pocket/extensions/` in upstream Pi Pocket).
+- An **extension point** is a part of the public API that lets an extension add to pi-tava or change it. [api-stability.md](api-stability.md) lists them.
 
 ## The decision
 
@@ -44,13 +44,13 @@ Ask these questions in this order. The first "yes" gives the answer.
 - **C11. Make a drop-in when one person or one machine needs it.**\
   _Reason:_ it survives updates, and nobody else has to keep it.
 - **C12. Make a gallery extension when other people can use it.** Its author keeps it in their own repository.\
-  _Reason:_ people can share it with no change to Pi Pocket.
-- **C13. Make a built-in extension only when Pi Pocket must ship it.** It is part of the default experience, or it is the interface to a part of core (as the gallery is).\
+  _Reason:_ people can share it with no change to pi-tava.
+- **C13. Make a built-in extension only when pi-tava must ship it.** It is part of the default experience, or it is the interface to a part of core (as the gallery is).\
   _Reason:_ the maintainers keep each built-in extension for all people.
 - **C14. A new built-in extension uses only `host` and `web` at run time.** Type imports from core are permitted. Agent Teams obeys this rule. The built-in extensions from before 0.14 do not have to change.\
   _Reason:_ the module then shows that the public API is sufficient, and it can move to the gallery later.
 
-## Examples from Pi Pocket
+## Examples from pi-tava
 
 ### First-party Work Items
 
@@ -75,7 +75,7 @@ Ask these questions in this order. The first "yes" gives the answer.
 
 - **Core: the trust rules** (`src/server/gallery/`, `host.gallery`). Core reads the index strictly. It downloads files only over https, from the pinned commit. It checks each SHA-256. It installs everything off, and it never updates by itself. It warns about revoked versions.
 - **Built-in extension: the gallery** (`gallery.ts`, `pocket-gallery`). Its routes and its screens. When the owner turns it off, it reads nothing.
-- **Why:** the checks protect the owner (C4). The screens are optional (C6), but Pi Pocket must ship them (C13).
+- **Why:** the checks protect the owner (C4). The screens are optional (C6), but pi-tava must ship them (C13).
 
 ### Subscription usage
 
@@ -92,15 +92,15 @@ Ask these questions in this order. The first "yes" gives the answer.
 ### Themes (#90, 0.14.0)
 
 - **Core:** the theme surface, which every theme can change: tokens (CSS variables), the `data-part` names of the parts of the screen, and their documented states. Also the loading and the checks of theme folders.
-- **Not core:** each theme, as a folder in `~/.pi-pocket/themes/`. Duplicate the Pocket theme, change the copy, and choose it in settings.
-- **Why:** the tokens and the parts must be the same for every theme (C5). The look is a preference (C6). The default theme stays the one that Pi Pocket ships.
+- **Not core:** each theme, as a folder in `themes/` under the data folder. Duplicate the Pocket theme, change the copy, and choose it in settings.
+- **Why:** the tokens and the parts must be the same for every theme (C5). The look is a preference (C6). The default theme stays the one that pi-tava ships.
 - The theme guide and the theme surface reference tell what a theme can change.
 
 ## Ask for a new extension point
 
 When the public API cannot do what you need, ask for an extension point. Do not keep a patch to core in a fork if you can stop.
 
-1. Open an issue in [TannerMidd/pi-pocket](https://github.com/TannerMidd/pi-pocket/issues). Use the title "Extension point: <what it lets an extension do>".
+1. For an upstream extension point, open an issue in [TannerMidd/pi-pocket](https://github.com/TannerMidd/pi-pocket/issues). Use the title "Extension point: <what it lets an extension do>".
 2. Show the patch that your fork has today: a link to the commit, or the diff. Mark the lines that are the extension point, and the lines that are your workflow.
 3. Tell what your extension does, in one paragraph.
 4. Tell which parts of the public API you tried, and why they are not sufficient.
@@ -120,7 +120,7 @@ A maintainer answers with one of these:
 ### Rules for extension points
 
 - **C15. Each new extension point has a user when it ships:** a built-in extension, a gallery extension, or a tested example in [docs/examples/](../../examples/). `host.sessions.linked` and `pocket.toolCall` serve Agent Teams, and `web.command` serves the clock example. The session/workflow interfaces originally shipped with Work Items; its promotion to core retains those public contracts and the shared scoped-route/browser mechanisms.\
-  _Reason:_ an interface with no user is a guess, and a wrong guess becomes a public API that Pi Pocket must keep.
+  _Reason:_ an interface with no user is a guess, and a wrong guess becomes a public API that pi-tava must keep.
 
 ## Pull requests
 

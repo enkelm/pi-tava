@@ -1,6 +1,6 @@
 # API versions
 
-This page tells how Pi Pocket marks the age and the stability of each part of the extension API. Server and browser source target the same current API. [API stability](../policies/api-stability.md) gives the rules for changes and for removals.
+This page tells how pi-tava marks the age and the stability of each part of the extension API. Server and browser source target the same current API. [API stability](../policies/api-stability.md) gives the rules for changes and for removals.
 
 ## The API version
 
@@ -17,13 +17,13 @@ A module can export `pocketApi`: the server module, the browser module, or both.
 export const pocketApi = 1;
 ```
 
-A Pi Pocket with an older API version does not set up such a module. It says why in the Extensions sheet.
+A pi-tava instance with an older API version does not set up such a module. It says why in the Extensions sheet.
 
 The browser reads `pocketApi` after it imports the browser module. Thus keep the browser module's top level to declarations, and do its work in the default export.
 
 ## Pi Durable 1.4 cutover (unreleased)
 
-This is a breaking source migration in the pending upgrade, not a deployed release. Pi Coop keeps
+This is a breaking source migration in the pending upgrade, not a deployed release. pi-tava keeps
 `pocketApi`, `web.api` and `pocket.version` at **1**: no upstream API-2 browser features are implied.
 Existing absent/version-1 declarations still load compatible web-only modules. Raising `pocketApi`
 alone would not refuse old tools, because both loaders accept older declarations.
@@ -34,7 +34,7 @@ A server drop-in providing tools, tool wrappers or `afterTool` hooks must now de
 export const durableToolApi = 2;
 ```
 
-The number 2 versions Coop's loader declaration, not the persisted ToolTask format or upstream
+The number 2 versions pi-tava's loader declaration, not the persisted ToolTask format or upstream
 `pocketApi`. Only this value is supported. A missing declaration on a tool-result participant, or an unsupported
 declared value on any drop-in, produces an actionable load error. A failed edit leaves the old
 extension and web registrations installed. Web-only modules and `beforeTool`-only guards need no
@@ -60,22 +60,22 @@ checks. Source edits and declarations alone do not establish compatibility.
 
 Each member in the reference and in [types/pocket.d.ts](../../../types/pocket.d.ts) has two marks:
 
-- **Since 0.14.0**: the first release of Pi Pocket that has the member. A pre-release counts as its release. In the types file, this is `@since`.
+- **Since 0.14.0**: the first app release that has the member, retaining upstream Pi Pocket release numbers for inherited members. A pre-release counts as its release. In the types file, this is `@since`.
 - **Stable**: the member changes only as the stability policy says.
 - **Experimental**: the member can change, or go, in any minor release (`0.15.0`), but never in a patch release (`0.14.1`). See A4 and A14 in [API stability](../policies/api-stability.md#experimental). In the types file, this is `@experimental`. The 0.15 session/workflow and browser-presentation additions are experimental.
 
-Some members of the host are **internal**: only Pi Pocket's built-in modules use them. They are not in the types file. They can change in any release. [host](host.md#internal-members) lists them.
+Some members of the host are **internal**: only pi-tava's built-in modules use them. They are not in the types file. They can change in any release. [host](host.md#internal-members) lists them.
 
 ## Keep source versions aligned
 
-Pi Pocket reloads extension modules when edited, but host changes need an owner-controlled restart.
+pi-tava reloads extension modules when edited, but host changes need an owner-controlled restart.
 Server and browser source target the same current API. The session/workflow cutover provides no
 older-host guards, linked-peer aliases or legacy summary-admission branches. Version metadata marks
 requirements; it does not add a second compatibility implementation.
 
 ### Gallery entries
 
-A gallery entry gives `pocketApi` and `minPocket`: the API version and the oldest Pi Pocket that the extension needs. The gallery hides an entry that needs a newer API or a newer Pi Pocket. See [Gallery entry](gallery-entry.md#pocketapi).
+A gallery entry gives `pocketApi` and `minPocket`: the API version and the oldest pi-tava that the extension needs. The gallery hides an entry that needs a newer API or a newer pi-tava. See [Gallery entry](gallery-entry.md#pocketapi).
 
 ## When each part came
 

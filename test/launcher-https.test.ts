@@ -143,7 +143,7 @@ async function fixture(mode: string, failing = false, missingReadyUrl = false) {
 
             child.stdin.write("a");
             await wait(() =>
-                output.slice(before).includes("How should your devices reach Pi Coop?"),
+                output.slice(before).includes("How should your devices reach pi-tava?"),
             );
             child.stdin.write(mode === "https" ? "4\r" : "5\r");
         },

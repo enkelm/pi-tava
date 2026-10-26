@@ -272,7 +272,7 @@ function IndexAddress({ address, onChanged }) {
     </form>`;
 }
 
-/** Browse: search, tag pills, and the entries for this Pi Pocket. */
+/** Browse: search, tag pills, and the entries for this pi-tava. */
 export function GallerySheet() {
     const { data, problem, loading, load } = useListing();
     const [query, setQuery] = useState("");
@@ -349,7 +349,7 @@ export function GallerySheet() {
             data &&
             offered.length === 0 &&
             !data.error &&
-            html`<p class="muted">The index has nothing for this Pi Pocket yet.</p>`
+            html`<p class="muted">The index has nothing for this pi-tava yet.</p>`
         }
         ${
             matches.length > 0 &&
@@ -393,7 +393,7 @@ export function GallerySheet() {
             data &&
             (hidden.incompatible > 0 || hidden.invalid.length > 0) &&
             html`<div class="muted small gallery-hidden">
-                ${hidden.incompatible > 0 && html`<span>${plural(hidden.incompatible, "entry")} ${hidden.incompatible === 1 ? "needs" : "need"} a newer Pi Pocket.</span>`}
+                ${hidden.incompatible > 0 && html`<span>${plural(hidden.incompatible, "entry")} ${hidden.incompatible === 1 ? "needs" : "need"} a newer pi-tava.</span>`}
                 ${
                     hidden.invalid.length > 0 &&
                     html`<button class="link small" onClick=${() => setShowInvalid(!showInvalid)}>
@@ -631,7 +631,7 @@ export function GalleryEntrySheet({ name }) {
         <${EntryFacts}
             entry=${entry}
             installed=${installed}
-            needs=${entry && `Pi Pocket ${entry.minPocket} or newer · extension API ${entry.pocketApi}`}
+            needs=${entry && `pi-tava ${entry.minPocket} or newer · extension API ${entry.pocketApi}`}
         />
         ${
             installed?.changed.length > 0 &&
@@ -820,7 +820,7 @@ function ThemeEntry({ name, entry, installed, problem, busy, run }) {
         <${EntryFacts}
             entry=${entry}
             installed=${installed}
-            needs=${entry && `Pi Pocket ${entry.minPocket} or newer · theme API ${entry.themeApi}`}
+            needs=${entry && `pi-tava ${entry.minPocket} or newer · theme API ${entry.themeApi}`}
         />
         ${
             installed?.problem &&
@@ -1247,7 +1247,7 @@ export function GalleryShareSheet({ file, theme = false }) {
 
     return html`<${Sheet} title=${`Share ${shareName}`} onClose=${closeSheet} wide=${true} className="gallery">
         <p class="muted small">
-            To share it, add its entry to the gallery's index with a pull request. Pi Pocket makes no GitHub calls: you put its files on GitHub and open the pull request yourself.
+            To share it, add its entry to the gallery's index with a pull request. pi-tava makes no GitHub calls: you put its files on GitHub and open the pull request yourself.
         </p>
         ${
             data.problems.length > 0

@@ -62,7 +62,7 @@ A restart of the server can stop a tool call while it runs. Then the call is rep
 
 ## Plan mode
 
-`annotations: { readOnlyHint: true }`, as in Pi's tool definitions, says that the tool does not change files or other state. Plan mode lets such a tool run. Pi Pocket does not check this: it is your promise. A tool that only changes the conversation, such as context management, can also use it. Plan mode ignores the hint on a built-in tool, so a wrap cannot let a built-in tool run in plan mode.
+`annotations: { readOnlyHint: true }`, as in Pi's tool definitions, says that the tool does not change files or other state. Plan mode lets such a tool run. pi-tava does not check this: it is your promise. A tool that only changes the conversation, such as context management, can also use it. Plan mode ignores the hint on a built-in tool, so a wrap cannot let a built-in tool run in plan mode.
 
 Pi Durable's type for `defineTool` does not have `annotations` yet. TypeScript reports it as an unknown property, but the module loads and works, because Node does not check types. To keep the type checker quiet, add it after `defineTool`:
 
@@ -73,7 +73,7 @@ const lookup = Object.assign(defineTool({ … }), { annotations: { readOnlyHint:
 ## Files, documents, and the session
 
 - `api.env` gives the files and the shell of the session's folder. `(await api.agent(context)).cwd` is the folder.
-- `api.snapshot(Doc, api.conversationId, context)` reads a document, for example one of Pi Pocket's in `src/server/docs.ts`.
+- `api.snapshot(Doc, api.conversationId, context)` reads a document, for example one of pi-tava's in `src/server/docs.ts`.
 
 ## See also
 

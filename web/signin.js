@@ -35,10 +35,10 @@ export function SignIn() {
     };
 
     return html`<div class="signin" data-part="sign-in">
-        <div class="pi big">π</div>
-        <h1>Pi Coop</h1>
+        <div class="pi big" aria-hidden="true"><span class="tava-mark"></span></div>
+        <h1>pi-tava</h1>
         <p class="muted">
-            Open the sign-in link Pi Coop printed when it started, or an invite from a signed-in device. You can also paste the link, the token, or an invite code here.
+            Open the sign-in link pi-tava printed when it started, or an invite from a signed-in device. You can also paste the link, the token, or an invite code here.
         </p>
         <div class="row">
             <input

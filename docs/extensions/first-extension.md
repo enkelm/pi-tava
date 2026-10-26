@@ -4,11 +4,11 @@ In this tutorial, you write a drop-in extension. It gives Pi a tool that counts 
 
 ## Before you start
 
-- You must be the owner of the Pi Pocket. Only the owner can turn on an extension.
+- You must be the owner of the pi-tava server. Only the owner can turn on an extension.
 - This tool example targets the pending Pi Durable 1.4 cutover. Do not load it into a 1.1 host; see [migration notes](reference/api-versions.md#pi-durable-14-cutover-unreleased).
-- You must be able to write a file on the machine where Pi Pocket runs. You can also ask Pi to write the file for you.
+- You must be able to write a file on the machine where pi-tava runs. You can also ask Pi to write the file for you.
 
-Drop-ins go in the drop-in folder: `~/.pi-pocket/extensions/`, or `extensions/` in `PI_POCKET_DIR`. Menu → **Extensions** shows the path at the bottom of the sheet.
+Drop-ins go in the drop-in folder: `~/.pi-durable-app/extensions/`, or `extensions/` in `PI_POCKET_DIR`. Upstream Pi Pocket uses `~/.pi-pocket/extensions/`. Menu → **Extensions** shows the path at the bottom of the sheet.
 
 ## 1. Write the module
 
@@ -55,7 +55,7 @@ export default function createMyWords(_host: unknown, web: Web) {
 }
 ```
 
-Each name starts with `my`. Change `my` to a prefix of your own, for example your initials. Pi Pocket does not load a module that uses a name that another module has ([Names](reference/names.md)).
+Each name starts with `my`. Change `my` to a prefix of your own, for example your initials. pi-tava does not load a module that uses a name that another module has ([Names](reference/names.md)).
 
 What each part does:
 
@@ -63,10 +63,10 @@ What each part does:
 - **`import type`** gives your editor the types of `web`. Node removes this line when the module runs, so the module works without it. See [Types for your editor](reference/types.md).
 - **`durableToolApi = 2`** declares the output-based Durable tool ABI, independently of the app's web/browser API version.
 - **`defineTool`** makes the tool. Pi gets its `name`, `description`, and `parameters` with each request, so keep them short.
-- **`replay: "safe"`** tells Pi Pocket that the tool can run again after a restart. A count does not change anything, so this is safe. See [Tools](tools.md).
+- **`replay: "safe"`** tells pi-tava that the tool can run again after a restart. A count does not change anything, so this is safe. See [Tools](tools.md).
 - **`execute`** gets the arguments that Pi gives, and returns the text that Pi reads.
 - **`web.command`** adds the command `/my-words`. The command runs on the server, and does not ask Pi. See [Slash commands](commands.md).
-- **The default export** returns the extension. Pi Pocket installs it when the owner turns on the module.
+- **The default export** returns the extension. pi-tava installs it when the owner turns on the module.
 
 ## 2. Turn it on
 
@@ -74,7 +74,7 @@ What each part does:
 2. Find **my-words** in the group **Yours**. It is off: a new drop-in always starts off.
 3. Turn it on, and confirm.
 
-If the module does not load, the sheet shows "failed to load", and the error. Correct the file, and save it. Pi Pocket loads it again a moment after you save.
+If the module does not load, the sheet shows "failed to load", and the error. Correct the file, and save it. pi-tava loads it again a moment after you save.
 
 ## 3. Ask Pi to use the tool
 
@@ -93,7 +93,7 @@ In the message box, type `/my-words the quick brown fox`, and send it. A notice 
 2. Save the file.
 3. Send `/my-words the quick brown fox` again. The notice shows "4 words in total".
 
-Pi Pocket loads the new version of the module a moment after you save. A tool call that runs at that time finishes with the old version. If the new version does not load, the old version stays on, and the sheet shows the error.
+pi-tava loads the new version of the module a moment after you save. A tool call that runs at that time finishes with the old version. If the new version does not load, the old version stays on, and the sheet shows the error.
 
 ## 6. Turn it off, or remove it
 
@@ -106,4 +106,4 @@ To stop the module, turn it off in Menu → **Extensions**. To remove it, delete
 - Add a page or a button to the app: see [Adding to the app](app.md).
 - Share the module with other people: see [Publishing to the gallery](publishing.md).
 
-The tests of Pi Pocket load this module, and use its tool: [examples/my-words.ts](../examples/my-words.ts).
+The tests of pi-tava load this module, and use its tool: [examples/my-words.ts](../examples/my-words.ts).

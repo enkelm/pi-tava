@@ -6,7 +6,7 @@ One word for each thing. The extension docs and the policies use these words. Wh
 
 ### owner
 
-The person who runs Pi Pocket on their machine. The owner can do all things. Only the owner turns modules on and off. Code: the role `"owner"`.
+The person who runs pi-tava on their machine. The owner can do all things. Only the owner turns modules on and off. Code: the role `"owner"`.
 
 ### guest
 
@@ -18,7 +18,7 @@ A person who can see sessions, but cannot steer them. Code: the role `"viewer"`.
 
 ### person
 
-Anyone who signs in to Pi Pocket: the owner, a guest, or a viewer. Code: `user`, as in `request.user`. Say "person" and "people", not "user".
+Anyone who signs in to pi-tava: the owner, a guest, or a viewer. Code: `user`, as in `request.user`. Say "person" and "people", not "user".
 
 ### steer
 
@@ -94,15 +94,15 @@ What a module returns: a name, with tools, prompt sections, hooks, and tasks. Pi
 
 ### drop-in
 
-A module in the drop-in folder. It is the owner's. It stays when Pi Pocket updates, and it is off until the owner turns it on.
+A module in the drop-in folder. It is the owner's. It stays when pi-tava updates, and it is off until the owner turns it on.
 
 ### built-in
 
-A module in `src/server/extensions/`. It is part of Pi Pocket.
+A module in `src/server/extensions/`. It is part of pi-tava.
 
 ### data folder
 
-Pi Pocket's folder for its data: `~/.pi-pocket` by default. Code: `host.dataDir`.
+pi-tava's folder for its data: `~/.pi-durable-app` by default. Upstream Pi Pocket uses `~/.pi-pocket`. Code: `host.dataDir`.
 
 ### drop-in folder
 
@@ -224,7 +224,7 @@ A tab opened with `?noext=1` at the end of the app's address loads no browser mo
 
 ### Pi Durable
 
-The library that runs Pi's sessions as durable work. Pi Pocket is built on it. Extensions are Pi Durable's.
+The library that runs Pi's sessions as durable work. pi-tava is built on it. Extensions are Pi Durable's.
 
 ### task
 
@@ -276,11 +276,11 @@ The version of the extension API: `web.api` and `pocket.version`. See [API versi
 
 ### Since
 
-The first release of Pi Pocket that has a member.
+The first app release that has a member. Inherited members keep their upstream Pi Pocket release numbers.
 
 ### release
 
-A version of Pi Pocket, such as 0.14.0. It is not the API version. "Since 0.14.0" names the first release that has a member.
+A version of pi-tava, such as 0.14.0. It is not the API version. "Since 0.14.0" names the first release that has a member.
 
 ### Stable
 
@@ -292,7 +292,7 @@ A member that can change, or go, in any minor release, but never in a patch rele
 
 ### Internal
 
-A member of the host that only Pi Pocket's built-in modules use. It is not in the types file.
+A member of the host that only pi-tava's built-in modules use. It is not in the types file.
 
 ## Other names
 
@@ -300,13 +300,13 @@ A member of the host that only Pi Pocket's built-in modules use. It is not in th
 
 The agent: the AI that works in sessions.
 
-### Pi Pocket
+### pi-tava
 
-This app, which runs Pi in a browser, for one or more people.
+This app, which runs Pi in a browser, for one or more people. It is a fork of Pi Pocket.
 
 ### PiP
 
-The owner's assistant in Pi Pocket, which runs the owner's other sessions.
+The owner's assistant in pi-tava, which runs the owner's other sessions.
 
 ### Lancet Guard
 

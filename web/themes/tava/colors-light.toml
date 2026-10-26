@@ -1,0 +1,21 @@
+# Cream from the supplied mark; deeper burnt orange keeps small controls readable.
+mode = "light"
+
+accent = "#B93912"
+selection = "#F5DAC1"
+background = "#FFF7E8"
+dark_background = "#F4E8D5"
+darker_background = "#E9D9C1"
+lighter_background = "#FFFCF5"
+foreground = "#49372A"
+dark_foreground = "#796451"
+light_foreground = "#38271E"
+bright_foreground = "#2B1E17"
+
+red = "#A52F24"
+yellow = "#805912"
+orange = "#B93912"
+green = "#48612D"
+cyan = "#2E665A"
+blue = "#3B6085"
+magenta = "#83506C"

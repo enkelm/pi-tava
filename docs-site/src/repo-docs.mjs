@@ -1,4 +1,4 @@
-// Pi Pocket's docs, read where they are in the repository, with no copies: docs/**/*.md (not docs/design/),
+// pi-tava's docs, read where they are in the repository, with no copies: docs/**/*.md (not docs/design/),
 // SECURITY.md, and CONTRIBUTING.md. Pi reads the same files, and GitHub shows them, so they stay plain Markdown
 // without front matter.
 //
@@ -20,7 +20,7 @@ import { checkReference } from "./reference-check.mjs";
 import { MOVED } from "./sidebar.mjs";
 
 export const REPO = resolve(fileURLToPath(new URL("../../", import.meta.url)));
-export const GITHUB = "https://github.com/TannerMidd/pi-pocket";
+export const GITHUB = "https://github.com/enkelm/pi-coop";
 export const BASE = "/pi-pocket/docs";
 
 /** The commit code links point at: DOCS_REF, or this checkout's. */
@@ -37,7 +37,7 @@ export const REF =
         }
     })();
 
-/** Pi Pocket's version, as the footer says it. */
+/** pi-tava's version, as the footer says it. */
 export const VERSION = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).version;
 
 const ROOT_PAGES = ["SECURITY.md", "CONTRIBUTING.md"];
