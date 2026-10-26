@@ -62,6 +62,8 @@ const hooks = {
 };
 const fixture = {
     app: null as Node | null,
+    roomy: false,
+    phoneList: (props: Props) => h("native-phone-list", props),
     hooks,
     html: htm.bind(h),
     icon: (props: Props) => h("native-icon", props),
@@ -102,7 +104,7 @@ for (const [name, value] of Object.entries({
     localStorage: { getItem: () => null, setItem: noop },
     addEventListener: events.addEventListener.bind(events),
     removeEventListener: events.removeEventListener.bind(events),
-    matchMedia: () => ({ matches: false }),
+    matchMedia: (query: string) => ({ matches: query === "(min-width: 768px)" && fixture.roomy }),
     HTMLElement: class {},
     ResizeObserver: class {
         observe() {}
@@ -164,6 +166,7 @@ const sources: Record<string, string> = {
         export const NamedAgents=()=>null;`,
     "named-agent-avatar.js": "export const NamedAgentAvatar=()=>null;",
     "project-view.js": "export const ProjectView=globalThis.groupNavigationFixture.projectView;",
+    "session-navigation.js": "export const PhoneSessionList=globalThis.groupNavigationFixture.phoneList;",
     "project.js":
         "export const ProjectForm=props=>globalThis.groupNavigationFixture.html`<native-project-form ...${props} />`;",
     "session-projects.js":
@@ -390,6 +393,8 @@ const classHas = (node: Node, name: string) => String(node.props.class).split(" 
 // setup widened onto Home must not acquire a second blank creation page under its dialog.
 test("App mounts one creation model and retains only a real unfinished page beneath child sheets", () => {
     const previous = fixture.store.state;
+
+    fixture.roomy = true;
     const App = fixture.app!.type as (props: Props) => unknown;
 
     try {
@@ -421,7 +426,11 @@ test("App mounts one creation model and retains only a real unfinished page bene
                 sheet ? 0 : 1,
                 "a native creation opening owns the sole form instead of duplicating blank Home",
             );
-            assert.ok(tree.some((node) => node.props.class === "home-list"));
+            assert.equal(
+                tree.filter((node) => node.type === SessionList).length,
+                1,
+                "roomy Home has only the real sidebar, not a second CSS-hidden list",
+            );
             effects = [];
         }
 
@@ -435,6 +444,56 @@ test("App mounts one creation model and retains only a real unfinished page bene
     } finally {
         effects = [];
         fixture.store.state = previous;
+        fixture.roomy = false;
+    }
+});
+
+// The caller, not CSS visibility, decides whether a navigation tree or creation model exists.
+test("App lazily mounts only its active-width navigation and creation owners", () => {
+    const previous = fixture.store.state;
+    const App = fixture.app!.type as (props: Props) => unknown;
+
+    try {
+        for (const roomy of [false, true]) {
+            fixture.roomy = roomy;
+
+            for (const conversationId of [null, 10]) {
+                fixture.store.state = {
+                    me: { id: "shell-owner", role: "owner" },
+                    server: {},
+                    conversationId,
+                    projectId: null,
+                    privateId: null,
+                    agentDraft: null,
+                    board: false,
+                    page: null,
+                    view: {},
+                    sheet: null,
+                    homeCreation: null,
+                };
+                current = { slots: [], cursor: 0 };
+                const tree = nodes(App({}));
+                const phone = tree.filter((node) => node.type === fixture.phoneList);
+
+                assert.equal(tree.filter((node) => node.type === SessionList).length, roomy ? 1 : 0);
+                assert.equal(phone.length, roomy ? 0 : 1);
+
+                if (!roomy) {
+                    assert.equal(phone[0].props.active, conversationId === null);
+                    assert.equal(phone[0].key, "shell-owner", "warm rows cannot cross accounts");
+                }
+
+                assert.equal(
+                    tree.filter((node) => node.type === HomeCreationPage).length,
+                    roomy && conversationId === null ? 1 : 0,
+                );
+                effects = [];
+            }
+        }
+    } finally {
+        fixture.store.state = previous;
+        fixture.roomy = false;
+        effects = [];
     }
 });
 

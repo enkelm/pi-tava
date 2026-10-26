@@ -17,6 +17,8 @@ import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
 const layers = [];
 /** How many layers the current history entry stands for. Entries from before this app wrote any count none. */
 const depth = () => history.state?.pocket?.layers ?? 0;
+/** Installed iOS has no browser page behind the root for its system swipe to reveal. */
+const homeScreen = () => navigator.standalone === true;
 /** How long to wait for layers that open and close together (one sheet swapped for another) before writing history. */
 const SETTLE_MS = 40;
 /** How long a traversal this module asked for may take to arrive; one that cannot happen never does. */
@@ -94,6 +96,8 @@ async function reconcile() {
             for (let count = at + 1; count <= layers.length; count++) {
                 history.pushState(entry(count), "", location.href);
             }
+
+            guardRoot();
 
             return;
         }
@@ -187,6 +191,8 @@ addEventListener("popstate", (event) => {
     if (at > layers.length) {
         settle();
     }
+
+    guardRoot();
 });
 
 // ─── Taps that land on what just moved ─────────────────────────────────────────────
@@ -324,14 +330,54 @@ let shownBack = history.state?.pocket?.back;
 let routeTimer = 0;
 let homeRequest = 0;
 
-/**
- * Which way the last route change went, for the screen it brings to slide in from that side (style.css): `forward` to
- * a session, `back` to the one before or up to the list. Only while it slides.
- */
-function heading(way) {
-    document.documentElement.dataset.route = way;
+/** A bounded list entry under the installed-iOS root; normal browser tabs retain their normal exit. */
+function guardRoot() {
+    if (
+        !homeScreen() ||
+        location.pathname !== HOME ||
+        layers.length > 0 ||
+        history.state?.pocket?.guard
+    ) {
+        return;
+    }
+
+    history.pushState({ pocket: { layers: 0, back: 0, guard: true } }, "", location.href);
+    shownBack = 0;
+}
+
+/** Mark only the window whose route slides, not every sidebar, overlay and avatar on the page. */
+let routeWindow = null;
+
+function landed() {
     clearTimeout(routeTimer);
-    routeTimer = setTimeout(() => delete document.documentElement.dataset.route, 600);
+    routeWindow?.removeEventListener("animationend", slid);
+    delete routeWindow?.dataset.route;
+    routeWindow = null;
+}
+
+const slid = (event) => /^route-(forward|back)$/.test(event.animationName) && landed();
+
+function heading(way) {
+    landed();
+    const motion = document.documentElement.dataset.motion;
+
+    if (
+        !matchMedia("(max-width: 767px)").matches ||
+        motion === "reduced" ||
+        (motion === undefined && matchMedia("(prefers-reduced-motion: reduce)").matches)
+    ) {
+        return;
+    }
+
+    routeWindow = document.querySelector(".pane");
+
+    if (routeWindow === null) {
+        return;
+    }
+
+    routeWindow.dataset.route = way;
+    routeWindow.addEventListener("animationend", slid);
+    routeTimer = setTimeout(landed, 600);
 }
 
 /**
@@ -433,14 +479,28 @@ export function startHistory({ home }) {
 
     if (location.pathname === HOME) {
         history.replaceState({ pocket: { layers: 0, back: 0 } }, "", location.href);
+        guardRoot();
     } else if (home) {
-        listUnderOnFirstTap();
+        if (homeScreen()) {
+            listUnderNow();
+        } else {
+            listUnderOnFirstTap();
+        }
     } else {
         history.replaceState({ pocket: { layers: 0 } }, "", location.href);
     }
 
     shownBack = history.state.pocket.back;
     settle();
+}
+
+/** Installed iOS must have a list to swipe to even before the first interaction. */
+function listUnderNow() {
+    const here = location.pathname + location.search + location.hash;
+
+    history.replaceState({ pocket: { layers: 0, back: 0 } }, "", HOME);
+    guardRoot();
+    history.pushState({ pocket: { layers: 0, back: 1 } }, "", here);
 }
 
 /**
@@ -457,6 +517,7 @@ function listUnderOnFirstTap() {
         }
 
         removeEventListener("click", put, true);
+        removeEventListener("pointerup", put, true);
         removeEventListener("keydown", put, true);
 
         // Gone to another route already: history stays as it is.
@@ -472,6 +533,7 @@ function listUnderOnFirstTap() {
     };
 
     addEventListener("click", put, true);
+    addEventListener("pointerup", put, true);
     addEventListener("keydown", put, true);
 }
 

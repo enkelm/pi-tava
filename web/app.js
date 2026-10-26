@@ -9,7 +9,8 @@ import { Composer, openingByAlt } from "./composer.js";
 import { FilesPanel, filesAvailable, setFilesOpen, toggleFiles } from "./files-panel.js";
 import { ExtensionPage } from "./extension-ui.js";
 import { startEdgeBack, startSwipes, useDragToClose } from "./gestures.js";
-import { HomeCreationPage } from "./home.js";
+import { HomeCreationPage, useRoomyLayout } from "./home.js";
+import { PhoneSessionList } from "./session-navigation.js";
 import { ProjectView } from "./project-view.js";
 import { Launcher } from "./launcher.js";
 import { registerWorker, updateBadge } from "./notify.js";
@@ -243,6 +244,7 @@ function PanelHost({ shown, panel }) {
 
 function App() {
     const state = store.state;
+    const roomy = useRoomyLayout();
 
     useEffect(() => {
         document.title = state.view.conversation?.title
@@ -287,16 +289,21 @@ function App() {
     // The column takes the place beside the conversation when Browser and People leave it free; otherwise a strip,
     // which only shows when there are tiles.
     const peekColumn = peeking && PEEK_WIDE.matches && !browsing && !filing && !people;
+    const atHome = !(inConversation || inAgentDraft || inPrivate || inProject || placed);
 
     return html`<div
-        class=${`layout ${inConversation || inAgentDraft || inPrivate || inProject || placed ? "" : "home"} ${inPrivate ? "private-layout" : ""} ${state.me.role === "owner" && state.sidebarTab === "private" ? "private-sidebar" : ""} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
+        class=${`layout ${atHome ? "home" : ""} ${inPrivate ? "private-layout" : ""} ${state.me.role === "owner" && state.sidebarTab === "private" ? "private-sidebar" : ""} ${browsing ? "browsing" : ""} ${filing ? "filing" : ""}`}
         data-part="app"
     >
-        <aside class="sidebar window" data-part="sidebar">
-            ${rail ? html`<${Rail} />` : html`<${SessionList} />`}
-            ${!rail && html`<${ResizeHandle} />`}
-        </aside>
+        ${
+            roomy &&
+            html`<aside class="sidebar window" data-part="sidebar">
+                ${rail ? html`<${Rail} />` : html`<${SessionList} />`}
+                ${!rail && html`<${ResizeHandle} />`}
+            </aside>`
+        }
         <div class=${`pane window ${placed ? "boarded" : ""}`} data-part="pane">
+            ${!roomy && html`<${PhoneSessionList} key=${state.me.id} active=${atHome} />`}
             ${
                 inPrivate
                     ? state.me.role === "owner"
@@ -339,8 +346,9 @@ function App() {
                                     projectId=${state.projectId}
                                     onBack=${toSessions}
                                 />`
-                              : html`<div class="home-list"><${SessionList} home=${true} /></div>
-                                  ${!creationOverHome && html`<${HomeCreationPage} key=${`${state.me.id}:${state.homeCreation?.id ?? "home"}`} />`}`
+                              : !creationOverHome &&
+                                (roomy || state.homeCreation) &&
+                                html`<${HomeCreationPage} key=${`${state.me.id}:${state.homeCreation?.id ?? "home"}`} />`
             }
         </div>
         ${

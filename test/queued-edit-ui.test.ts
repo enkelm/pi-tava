@@ -189,7 +189,7 @@ async function open(
     await until(
         async () =>
             await inPage<boolean>(
-                "return JSON.stringify(document.documentElement.dataset.route === undefined)",
+                "return JSON.stringify(document.querySelector('.pane')?.dataset.route === undefined)",
             ),
         "the route to finish sliding",
     );

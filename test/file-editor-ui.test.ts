@@ -96,7 +96,7 @@ async function open(
             await inPage<boolean>(`
                 const { store } = await import('/store.js');
 
-                return JSON.stringify(store.state.conversationId === ${Number(f.id)} && !!store.state.view && document.documentElement.dataset.route === undefined);
+                return JSON.stringify(store.state.conversationId === ${Number(f.id)} && !!store.state.view && document.querySelector('.pane')?.dataset.route === undefined);
             `),
         "the isolated conversation",
         20_000,

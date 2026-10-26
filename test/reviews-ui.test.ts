@@ -434,7 +434,7 @@ test(
                     async () =>
                         inPage<boolean>(
                             on,
-                            `return JSON.stringify(document.documentElement.dataset.route === undefined);`,
+                            `return JSON.stringify(document.querySelector('.pane')?.dataset.route === undefined);`,
                         ),
                     "the route transition to finish",
                 );

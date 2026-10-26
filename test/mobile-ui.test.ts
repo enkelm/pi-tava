@@ -111,7 +111,7 @@ const setup = `${creation} [data-part="home"]`;
 async function openSessions(): Promise<void> {
     if (
         !(await inPage<boolean>(
-            `return JSON.stringify(!!document.querySelector('.home-list > .sessions'))`,
+            `return JSON.stringify(!!document.querySelector('.home-list:not([hidden]) > .sessions'))`,
         ))
     ) {
         await page.click({ selector: '.topbar [aria-label="Back to sessions"]' });
@@ -120,7 +120,7 @@ async function openSessions(): Promise<void> {
     await until(
         () =>
             inPage<boolean>(
-                `return JSON.stringify(!!document.querySelector('.home-list > .sessions .session-items'))`,
+                `return JSON.stringify(!!document.querySelector('.home-list:not([hidden]) > .sessions .session-items'))`,
             ),
         "the phone landing session list, without opening a drawer",
     );
@@ -172,7 +172,7 @@ const slid = () =>
     until(
         async () =>
             (await inPage<boolean>(
-                `return JSON.stringify(document.documentElement.dataset.route === undefined)`,
+                `return JSON.stringify(document.querySelector(".pane")?.dataset.route === undefined)`,
             )) === true,
         "the slide's end",
     );
@@ -953,6 +953,61 @@ test("a session opened from the landing list: Back returns to that list", real, 
         true,
         "the catalogue is the full-width main screen without another navigation gesture",
     );
+});
+
+// This is rendered acceptance for the warm shell and CSS; the offline DOM test does not claim geometry.
+test("phone Back keeps its list DOM, also with reduced motion", real, async () => {
+    const previousMotion = await inPage<string>(
+        `return JSON.stringify((await import("/theme.js")).prefs().motion)`,
+    );
+
+    try {
+        for (const motion of ["full", "reduced"]) {
+            await fresh();
+            await page.evaluate(`
+                const { setPrefs } = await import('/theme.js');
+                setPrefs({ motion: ${JSON.stringify(motion)} });
+                const list = document.querySelector('.home-list');
+                window.warmNavigation = { list, search: list.querySelector('input'),
+                    row: list.querySelector('.session-row[data-id="${first}"] .session') };
+                window.warmNavigation.search.value = ' ';
+                window.warmNavigation.search.dispatchEvent(new Event('input', { bubbles: true }));
+            `);
+            await goTo(first);
+            await reach({ path: `/s/${first}` }, "Chat opens above the retained list");
+            await slid();
+            assert.equal(
+                await inPage<boolean>(`
+                    return JSON.stringify(!document.querySelector('.sidebar, [data-part="home"]')
+                        && document.querySelector('.home-list[hidden][inert]') === window.warmNavigation.list
+                        && getComputedStyle(document.querySelector('.transcript')).animationName === 'none'
+                        && document.documentElement.dataset.route === undefined);
+                `),
+                true,
+                "phone has no unused sidebar/Home and no second transcript entrance",
+            );
+            await back();
+            await reach({ path: "/" }, "Back to the warm list");
+            await slid();
+            assert.equal(
+                await inPage<boolean>(`
+                    const { list, search, row } = window.warmNavigation;
+                    return JSON.stringify(list === document.querySelector('.home-list:not([hidden])')
+                        && search === list.querySelector('input') && search.value === ' '
+                        && row === list.querySelector('.session-row[data-id="${first}"] .session')
+                        && [...list.querySelectorAll('.session-row')].every(element =>
+                            getComputedStyle(element).animationName === 'none'));
+                `),
+                true,
+                "Back keeps the real controls rather than replaying staggered rows",
+            );
+        }
+    } finally {
+        await page.evaluate(`
+            (await import("/theme.js")).setPrefs({ motion: ${JSON.stringify(previousMotion)} });
+            delete window.warmNavigation;
+        `);
+    }
 });
 
 // The rendered boundary owns landing geometry, native modal focus and return targets. Store tests

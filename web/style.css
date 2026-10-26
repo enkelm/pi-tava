@@ -787,6 +787,18 @@ code {
     margin: 0 auto;
 }
 
+/* A warm phone list stays mounted, but cannot take focus, touches or layout room under a route. */
+.home-list[hidden] {
+    display: none;
+}
+
+/* A short touch viewport uses the available safe width, not a desktop-style centered column. */
+@media (max-height: 500px) and (min-width: 600px) and (pointer: coarse) {
+    .home-list > .sessions {
+        max-width: none;
+    }
+}
+
 /* A short screen (a phone on its side): the rail drops its marks (Pi, and the sessions it is on) so its buttons fit,
  * and the home list puts its search and tabs side by side, so more sessions show (where they fit). */
 @media (max-height: 500px) {
@@ -5012,8 +5024,6 @@ button.chip:active:not(:disabled):not(.on) {
 .session-row {
     position: relative;
     padding-inline-start: calc(var(--linked-depth, 0) * 14px);
-    animation: rise-in 0.38s var(--ease-out) backwards;
-    animation-delay: calc(min(var(--i, 0), 14) * 18ms);
 }
 
 /*
@@ -14444,7 +14454,7 @@ textarea.notes {
 
 /*
  * Phones: a session opened slides in from the right, and going back brings the list (or the session before) in from
- * the left, so where back goes is where things came from. `data-route` is set while it slides (back.js).
+ * the left, so where back goes is where things came from. Only that pane is marked while it slides (back.js).
  */
 @media (max-width: 767px) {
     /* Held inside the window: a scroller sliding in from the right (a route, a swipe's lean) would make the page wider
@@ -14452,12 +14462,16 @@ textarea.notes {
     .pane {
         overflow-x: clip;
     }
-    :root[data-route="forward"] .pane > .scroller {
+    .pane[data-route="forward"] > .scroller {
         animation: route-forward 0.32s var(--ease-out);
     }
-    :root[data-route="back"] .pane > .scroller,
-    :root[data-route="back"] .home-list {
+    .pane[data-route="back"] > .scroller,
+    .pane[data-route="back"] > .home-list {
         animation: route-back 0.32s var(--ease-out);
+    }
+    /* The route already brings the transcript in. Do not add a second entrance or restart it on landing. */
+    .pane > .scroller > .transcript {
+        animation: none;
     }
 }
 

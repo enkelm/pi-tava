@@ -61,6 +61,8 @@ class Element {
     listeners = new Map<string, (this: Element, event: Props) => void>();
     nodeType = 1;
     data = "";
+    value = "";
+    scrollTop = 0;
     namespaceURI = "http://www.w3.org/1999/xhtml";
     style = { setProperty() {} };
     localName: string;
@@ -70,6 +72,18 @@ class Element {
     }
     get ownerDocument() {
         return document;
+    }
+    get isConnected(): boolean {
+        return this === document.body || Boolean(this.parentNode?.isConnected);
+    }
+    contains(node: Element | null): boolean {
+        return node !== null && (node === this || this.childNodes.some((child) => child.contains(node)));
+    }
+    matches(selector: string) {
+        return selector.split(",").some((tag) => tag.trim() === this.localName);
+    }
+    focus() {
+        document.activeElement = this;
     }
     get firstChild(): Element | null {
         return this.childNodes[0] ?? null;
@@ -122,6 +136,8 @@ class Element {
     }
 }
 const document = {
+    body: null as Element | null,
+    activeElement: null as Element | null,
     documentElement: { dataset: {} },
     createElementNS: (_namespace: string, name: string) => new Element(name),
     createTextNode(data: string) {
@@ -133,6 +149,8 @@ const document = {
         return text;
     },
 };
+document.body = new Element("body");
+document.activeElement = document.body;
 const descriptors = new Map<string, PropertyDescriptor | undefined>();
 
 for (const [name, value] of Object.entries({
@@ -180,6 +198,19 @@ const sources: Record<string, string> = {
 
 registerHooks({
     resolve(specifier, context, next) {
+        if (context.parentURL?.endsWith("/web/session-navigation.js")) {
+            if (specifier === "./sessions.js") {
+                return next(new URL("../web/sessions.js?native-render", import.meta.url).href, context);
+            }
+
+            if (specifier === "./ui.js") {
+                return {
+                    url: `data:text/javascript,${encodeURIComponent(sources["ui.js"]!)}`,
+                    shortCircuit: true,
+                };
+            }
+        }
+
         const sessions = context.parentURL?.split("?")[0]?.endsWith("/web/sessions.js");
         const nativeHooks =
             context.parentURL?.endsWith("?native-render") && specifier === "preact/hooks";
@@ -194,6 +225,7 @@ registerHooks({
     },
 });
 const { SessionList } = await import(new URL("../web/sessions.js", import.meta.url).href);
+const { PhoneSessionList } = await import(new URL("../web/session-navigation.js", import.meta.url).href);
 const { SessionList: NativeSessionList } = await import(
     new URL("../web/sessions.js?native-render", import.meta.url).href
 );
@@ -1292,5 +1324,66 @@ test("PiPs is a native secondary button beside primary New Session in sidebar an
                 list.dispose();
             }
         }
+    }
+});
+
+// The shell owner must retain the actual Preact list, not reconstruct its query/scroll from mocks.
+// Hidden catalogue updates are withheld until return; row ownership/activity remains the real consumer's job.
+test("phone navigation retains rows, search, scroll and focus without hidden redraws", async () => {
+    setup();
+    const root = new Element("root");
+
+    document.body!.appendChild(root);
+    const all = (node: Element): Element[] => [node, ...node.childNodes.flatMap(all)];
+    const has = (node: Element, name: string) => String(node.attributes.class).split(" ").includes(name);
+    const update = (active: boolean, key = "owner") =>
+        act(() => render(h(PhoneSessionList, { active, key }), root as unknown as HTMLElement));
+
+    try {
+        await update(false);
+        assert.equal(
+            all(root).some((node) => node.localName === "input"),
+            false,
+            "a direct Chat open must not mount a CSS-hidden list",
+        );
+        await update(true);
+        const search = all(root).find((node) => node.localName === "input")!;
+        const scroller = all(root).find((node) => has(node, "session-items"))!;
+        const row = all(root).find((node) => has(node, "session"))!;
+
+        assert.ok(search);
+        assert.ok(scroller);
+        assert.ok(row);
+        await act(() => {
+            search.value = "Arbitrary";
+            search.listeners.get("inputfalse")!.call(search, { currentTarget: search });
+        });
+        scroller.scrollTop = 137;
+        row.focus();
+        await update(false);
+        assert.ok("hidden" in root.firstChild!.attributes);
+        assert.ok("inert" in root.firstChild!.attributes);
+        fixture.state.sessions = [{ ...fixture.state.sessions[0], title: "Arbitrary refreshed" }];
+        await update(false);
+        assert.equal(
+            root.textContent.includes("refreshed"),
+            false,
+            "hidden catalogue must not redraw",
+        );
+        document.activeElement = document.body;
+        await update(true);
+        assert.equal(all(root).find((node) => node.localName === "input"), search);
+        assert.equal(all(root).find((node) => has(node, "session")), row);
+        assert.equal(search.value, "Arbitrary");
+        assert.equal(scroller.scrollTop, 137);
+        assert.equal(document.activeElement, row, "Back restores the surviving keyboard row");
+        assert.ok(root.textContent.includes("refreshed"), "return receives the current catalogue");
+        await update(false);
+        await update(false, "another-owner");
+        assert.equal(search.isConnected, false, "retention cannot cross the account-keyed shell");
+    } finally {
+        await act(() => render(null, root as unknown as HTMLElement));
+        root.remove();
+        document.activeElement = document.body;
     }
 });

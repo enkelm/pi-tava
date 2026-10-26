@@ -26,7 +26,7 @@ import { projectAgentContext } from "./project-groups.js";
 
 // Navigation needs room for a 260px list and a usable stacked setup pane, including iPad portrait.
 // Touch and OS identity do not decide whether that room is available.
-function useRoomyLayout() {
+export function useRoomyLayout() {
     const [roomy, setRoomy] = useState(() => matchMedia("(min-width: 768px)").matches);
 
     useEffect(() => {

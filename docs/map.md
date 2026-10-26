@@ -269,6 +269,21 @@ The menu in `sheets/menu.js` keeps `Sheet`'s focus, Escape, drag-to-close, and t
 
 `sheets/settings.js` hosts the Settings popup with responsive category tabs and retained, lazily mounted panels. `style.css` gives it a near-full-height phone sheet, a larger centered tablet/desktop workspace and container-width-based control wrapping. Appearance and Providers come from `sheets/appearance.js` and `sheets/providers.js`; Agents from `sheets/agents.js`; PiP from `sheets/pip.js`; Notifications from `notify.js`; Extensions & safety from `sheets/extensions.js`; Account & access from `sheets/account.js` and the access list in `sheets/people.js`; Usage & limits from `sheets/spend.js`. Provider sign-in prompts remain in `providers.js`, and invitations remain a separate flow in `people.js`. Legacy settings sheet types route into the same popup in `sheets.js`.
 
+`session-navigation.js` owns the lazy, account-keyed warm phone list used by `app.js`. It mounts only on the first list visit, retains controls across routes, withholds hidden redraws and restores a surviving keyboard focus target without reopening a touch keyboard. `sessions.js` receives its active state to release selection Back/Escape and hold/drag handlers; a hidden Herdr list unmounts its native read owner. `home.js` shares the 768px layout hook with App, so unused phone sidebar/default Home trees are not mounted. `back.js` marks only the sliding pane and protects the installed-iOS root; ordinary browser tabs keep normal exit behavior. `test/back-navigation.test.ts` runs without package dependencies; `group-navigation` owns App caller placement and `sidebar-navigation` uses real Preact for retained controls. Rendered viewport/notch/device checks remain separate.
+
+## Icons
+
+`web/icon.svg` retains the existing app artwork; adjacent PNGs are its raster variants. XML comments cannot contain double hyphens, so keep command flags here rather than inside the SVG. With `rsvg-convert` installed, regeneration uses:
+
+```sh
+rsvg-convert -w 180 -h 180 web/icon.svg -o web/apple-touch-icon.png
+rsvg-convert -w 192 -h 192 web/icon.svg -o web/icon-192.png
+rsvg-convert -w 512 -h 512 web/icon.svg -o web/icon-512.png
+rsvg-convert -w 352 -h 352 --page-width 512 --page-height 512 --left 80 --top 80 -b "#13141c" web/icon.svg -o web/icon-maskable-512.png
+```
+
+The item #3 XML repair changed only a comment; no raster regeneration was needed or performed.
+
 ## How a message travels
 
 1. `POST /api/c/:id/submit` → `commands.submit`: checks access, turns, and spend, expands a template, then `conversation.submit()` with request id `u:<userId>:<clientId>`. The request id makes a retry a no-op and names the author.

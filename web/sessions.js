@@ -177,11 +177,11 @@ function optionsAt(event) {
 }
 
 /** Project navigation, disclosure and creation are separate native controls. */
-function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart, trouble }) {
+function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart, trouble, active }) {
     const ref = useRef(null);
     const options = (at) => openSidebarOptions("project", group.project.id, at);
 
-    useSidebarContext(ref, options, { longPress: canStart, enabled: canStart });
+    useSidebarContext(ref, options, { longPress: canStart, enabled: canStart && active });
 
     return html`<div class="project-group-head" ref=${ref}>
         <button
@@ -527,6 +527,7 @@ function SessionRow({
     dnd,
     chosen,
     member = false,
+    active = true,
     closed,
     onToggle,
 }) {
@@ -536,7 +537,7 @@ function SessionRow({
     const [orchestrationBusy, setOrchestrationBusy] = useState(false);
     const options = (at) => onOptions(session.id, at, session.members ? "work-item" : "thread");
 
-    useSidebarContext(ref, options);
+    useSidebarContext(ref, options, { enabled: active });
     const pinned = session.members
         ? session.members.some((member) => isPinned(member.id))
         : isPinned(session.id);
@@ -560,7 +561,7 @@ function SessionRow({
     const canDrag = !member && canMoveSessions() && !moving && !dnd.busy;
     const { hold, consumeClick } = useSessionHold({
         ref,
-        enabled: !moving && !dnd.busy,
+        enabled: active && !moving && !dnd.busy,
         canDrag,
         onOptions: options,
         onDragStart: (point) => dnd.startTouch(point, session.id, chosen),
@@ -995,7 +996,7 @@ const TABS = [
  */
 const listKept = { query: "", scroll: 0 };
 
-function AllSessions({ compact = false, home = false }) {
+function AllSessions({ compact = false, home = false, active = true }) {
     const { sessions, sessionsLoaded, server, me, pinned, projects, projectsLoaded } = store.state;
     const organized = projectsAvailable();
     const tabChoices = organized ? PROJECT_TABS : TABS;
@@ -1253,7 +1254,7 @@ function AllSessions({ compact = false, home = false }) {
     const tapping = tapSelects && chosen.length > 0;
     const numbers = new Map(workspaceOrder().map((session, index) => [session.id, index]));
     const dnd = useSessionDrag({
-        enabled: organized && canStart && !privateTab,
+        enabled: active && organized && canStart && !privateTab,
         list,
         selected: picked,
         onMoved: (ids) =>
@@ -1486,10 +1487,10 @@ function AllSessions({ compact = false, home = false }) {
     const selecting = selected.size > 0;
 
     // On a touch screen, so does back.
-    useBack(tapping, clearSelection);
+    useBack(active && tapping, clearSelection);
 
     useEffect(() => {
-        if (!selecting) {
+        if (!active || !selecting) {
             return;
         }
 
@@ -1511,7 +1512,7 @@ function AllSessions({ compact = false, home = false }) {
         addEventListener("keydown", onKey);
 
         return () => removeEventListener("keydown", onKey);
-    }, [selecting]);
+    }, [active, selecting]);
 
     const toggleGroup = (key) => {
         const next = new Set(needle ? searchClosed : closed);
@@ -1536,6 +1537,7 @@ function AllSessions({ compact = false, home = false }) {
     const renderRow = ({ session, branches }) => html`<${session.members ? WorkItemRow : SessionRow}
         key=${session.workItemId ?? session.id}
         session=${session}
+        active=${active}
         closed=${groupClosed({ key: `work:${session.workItemId}` })}
         onToggle=${() => toggleGroup(`work:${session.workItemId}`)}
         branches=${branches}
@@ -1613,6 +1615,7 @@ function AllSessions({ compact = false, home = false }) {
                     needle=${needle}
                     onToggle=${() => toggleGroup(group.key)}
                     canStart=${canStart}
+                    active=${active}
                     trouble=${trouble}
                 />`
                     : (group.key !== "flat" || (needle && !hierarchical)) &&
@@ -1703,7 +1706,7 @@ function AllSessions({ compact = false, home = false }) {
         <${PrivateTabs} />
         ${
             privateTab
-                ? html`<${PrivateList} compact=${compact} home=${home} />`
+                ? active && html`<${PrivateList} compact=${compact} home=${home} />`
                 : html`
                       <label class=${`search ${query ? "filled" : ""}`} data-part="session-search">
                           <${Icon} name="search" size=${14} />
