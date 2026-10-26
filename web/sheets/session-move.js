@@ -1,11 +1,12 @@
 // The non-drag alternative uses exactly the same placement action as the sidebar drop targets.
 import { useRef, useState } from "preact/hooks";
-import { canMoveSessions, moveSessions, samePlacement } from "../session-moves.js";
+import { canMoveSessions, movableSessions, moveSessions, samePlacement } from "../session-moves.js";
 import { closeSheet, handoffsAvailable, store } from "../store.js";
 import { html, Sheet } from "../ui.js";
 
 export function SessionMoveSheet({ ids }) {
-    const sessions = ids.map((id) => store.state.sessions.find((session) => session.id === id));
+    const catalogue = movableSessions();
+    const sessions = ids.map((id) => catalogue.find((session) => session.id === id));
     const first = sessions[0];
     const workItem = ids.length === 1 && handoffsAvailable() && first?.workItemId;
     const common = sessions.every(

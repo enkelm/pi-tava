@@ -47,7 +47,14 @@ export function projectGroups(
         }
     }
 
-    const savedChats = [...chatById.values()].filter((chat) => Boolean(chat.archived) === archived);
+    const chatPins = new Map(pinned.map((id, index) => [id, index]));
+    const savedChats = [...chatById.values()]
+        .filter((chat) => Boolean(chat.archived) === archived)
+        .sort(
+            (left, right) =>
+                (chatPins.get(left.id) ?? pinned.length) -
+                (chatPins.get(right.id) ?? pinned.length),
+        );
 
     // A saved Chat appears once, in its actual project (or flat when unavailable/unassigned).
     // Control may nest co-located work, never duplicate a Chat or reclassify work placed elsewhere.

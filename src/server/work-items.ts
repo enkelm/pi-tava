@@ -16,7 +16,7 @@ import type { Context } from "@earendil-works/chord";
 import { WorkContext, type WorkReadInput } from "./work-items/context.ts";
 import type { PocketApp } from "./app.ts";
 import { APP_ROOT, type User } from "./config.ts";
-import { PipWorkDoc, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
+import { PipWorkDoc, type SessionMeta, SessionsDoc, SubagentsDoc, TurnsDoc } from "./docs.ts";
 import { AgentIdentitiesDoc } from "./agent-identity-docs.ts";
 import { HttpError } from "./errors.ts";
 import { Handoffs, humanDirection } from "./handoffs.ts";
@@ -1140,6 +1140,47 @@ export class WorkItems {
         item.archived = archived;
     }
 
+    /** Placement and Close share the exact saved-Chat boundary, rechecked on transactional documents. */
+    async #requireSavedNamedChat(
+        tx: Tx,
+        id: ConversationId,
+        user: User,
+        meta: SessionMeta,
+    ): Promise<void> {
+        const identities = await tx.doc(AgentIdentitiesDoc);
+        const identity =
+            meta.pipAgentId === undefined ? undefined : identities.items[meta.pipAgentId];
+        const pending = Object.values(identities.requests).find(
+            (request) =>
+                request.chatId === Number(id) &&
+                request.firstInputRequestId !== undefined &&
+                !request.accepted,
+        );
+        const saved =
+            pending === undefined ||
+            (await tx.submissionByRequest(id, pending.firstInputRequestId!))?.type === "input";
+
+        if (
+            user.role !== "owner" ||
+            meta.pip !== user.id ||
+            meta.ownerOnly !== true ||
+            meta.pipAgent !== true ||
+            meta.pipWorkItemId !== undefined ||
+            meta.workItemId !== undefined ||
+            this.#app.rootOf(id) !== id ||
+            identity === undefined ||
+            identity.deletedAt !== undefined ||
+            identity.ownerId !== user.id ||
+            !identity.chatIds.includes(Number(id)) ||
+            !saved
+        ) {
+            throw new HttpError(
+                409,
+                "Only a current owner's bound saved named Chat can be moved, archived or restored here.",
+            );
+        }
+    }
+
     /** Projects validates the destination; WorkItems keeps the complete group together in the same commit. */
     async assignProject(
         tx: Tx,
@@ -1163,6 +1204,10 @@ export class WorkItems {
             throw new HttpError(404, "No such session");
         }
 
+        if (meta.pip !== undefined || meta.pipAgent === true || meta.pipWorkItemId !== undefined) {
+            await this.#requireSavedNamedChat(tx, id, user, meta);
+        }
+
         for (const memberId of members) {
             const member = sessions.items[String(memberId)];
 
@@ -1171,6 +1216,16 @@ export class WorkItems {
             }
 
             this.#app.requireSee(user, memberId as ConversationId);
+
+            if (
+                memberId !== Number(id) &&
+                (member.pip !== undefined ||
+                    member.pipAgent === true ||
+                    member.pipWorkItemId !== undefined)
+            ) {
+                await this.#requireSavedNamedChat(tx, memberId as ConversationId, user, member);
+            }
+
             const memberTurns = await tx.doc(TurnsDoc, memberId as ConversationId);
 
             if (memberTurns.on && memberTurns.driver !== user.id) {
@@ -1249,35 +1304,9 @@ export class WorkItems {
         }
 
         if (meta.pip !== undefined || meta.pipAgent === true || meta.pipWorkItemId !== undefined) {
-            const identities = await tx.doc(AgentIdentitiesDoc);
-            const identity =
-                meta.pipAgentId === undefined ? undefined : identities.items[meta.pipAgentId];
-            const pending = Object.values(identities.requests).find(
-                (request) =>
-                    request.chatId === Number(id) &&
-                    request.firstInputRequestId !== undefined &&
-                    !request.accepted,
-            );
-            const saved =
-                pending === undefined ||
-                (await tx.submissionByRequest(id, pending.firstInputRequestId!))?.type === "input";
+            await this.#requireSavedNamedChat(tx, id, user, meta);
 
-            if (
-                user.role !== "owner" ||
-                meta.pip !== user.id ||
-                meta.ownerOnly !== true ||
-                meta.pipAgent !== true ||
-                meta.pipWorkItemId !== undefined ||
-                meta.workItemId !== undefined ||
-                this.#app.rootOf(id) !== id ||
-                identity === undefined ||
-                identity.deletedAt !== undefined ||
-                identity.ownerId !== user.id ||
-                !identity.chatIds.includes(Number(id)) ||
-                !saved ||
-                patch.archived === undefined ||
-                patch.title !== undefined
-            ) {
+            if (patch.archived === undefined || patch.title !== undefined) {
                 throw new HttpError(
                     409,
                     "Only a current owner's bound saved named Chat can be archived or restored here.",

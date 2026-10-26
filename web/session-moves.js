@@ -10,6 +10,26 @@ export function canMoveSessions() {
     return projectsAvailable() && store.state.me?.role === "owner";
 }
 
+/** Private saved Chats participate in placement without entering the shared session catalogue. */
+export function movableSessions() {
+    const { sessions, me, server, namedAgents } = store.state;
+    const result = [...sessions];
+    const seen = new Set(sessions.map((session) => session.id));
+
+    if (me?.role === "owner" && server?.privateAgents >= 4) {
+        for (const agent of namedAgents ?? []) {
+            for (const chat of agent.chats ?? []) {
+                if (Number.isSafeInteger(chat.id) && chat.id > 0 && !seen.has(chat.id)) {
+                    seen.add(chat.id);
+                    result.push(chat);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
 export function samePlacement(session, destination) {
     return (session.projectId ?? null) === destination.projectId;
 }
@@ -24,13 +44,12 @@ export async function moveSessions(ids, destination) {
         };
     }
 
-    const targets = organizationTargets(ids, store.state.sessions, handoffsAvailable()).filter(
-        ({ id }) => {
-            const session = store.state.sessions.find((each) => each.id === id);
+    const sessions = movableSessions();
+    const targets = organizationTargets(ids, sessions, handoffsAvailable()).filter(({ id }) => {
+        const session = sessions.find((each) => each.id === id);
 
-            return !session || !samePlacement(session, destination);
-        },
-    );
+        return !session || !samePlacement(session, destination);
+    });
     const results = await Promise.allSettled(
         targets.map(async ({ id, workItemId }) => {
             const key = workItemId ?? id;

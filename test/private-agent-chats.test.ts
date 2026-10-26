@@ -4,11 +4,14 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { after, test } from "node:test";
 import { join } from "node:path";
+import { mkdirSync } from "node:fs";
 import { type ConversationId } from "@earendil-works/pi-durable";
-import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { TITLE_PROMPT } from "../src/server/titles.ts";
 import { createHandler } from "../src/server/http.ts";
 import { SessionsDoc } from "../src/server/docs.ts";
+import { privateAgentRequest } from "./private-agent-http.ts";
+import { AgentIdentitiesDoc } from "../src/server/agent-identity-docs.ts";
 import {
     cleanUp,
     context,
@@ -19,6 +22,8 @@ import {
     lastText,
     recordCost,
     say,
+    work,
+    newSession,
 } from "./helpers.ts";
 
 after(cleanUp);
@@ -123,6 +128,277 @@ test("independent chat titles follow their own first input, survive identity edi
     );
     assert.equal(reasoningRequests, 2, "only the two accepted human turns request reasoning");
     assert.equal(titleRequests, 0, "long private input cannot open an unbound title-model lane");
+});
+
+test("owner moves only the exact saved named Chat through the native session route", async (t) => {
+    const app = await openApp(
+        scriptedModel((input) => {
+            const system = JSON.stringify(
+                input.messages.filter((message) => message.role === "system"),
+            );
+            const last = lastText(input);
+
+            if (
+                system.includes("the owner's persistent private agent") &&
+                last.role === "user" &&
+                last.text.includes("Create a bounded child")
+            ) {
+                return fauxAssistantMessage(
+                    [
+                        fauxToolCall("handoff", {
+                            action: "start",
+                            targetType: "researcher",
+                            relationship: "new-work",
+                            summary: "Keep independent child placement when the parent Chat moves.",
+                        }),
+                    ],
+                    { stopReason: "toolUse" },
+                );
+            }
+
+            if (system.includes("the private supervisor for Work Item")) {
+                return fauxAssistantMessage(
+                    [
+                        fauxToolCall("work_supervise", {
+                            action: "wait",
+                            text: "Wait for owner input.",
+                        }),
+                    ],
+                    { stopReason: "toolUse" },
+                );
+            }
+
+            return fauxAssistantMessage("Retained Chat answer.");
+        }),
+        join(root, "named-chat-placement"),
+    );
+
+    t.after(() => app.close());
+    app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
+    const user = owner(app);
+    const cwd = join(work, "named-chat-origin");
+    const otherCwd = join(work, "named-chat-destination");
+
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(otherCwd, { recursive: true });
+    const original = await app.projects.create(user, {
+        name: "Chat origin",
+        cwd,
+        requestId: "chat-origin",
+    });
+    const destination = await app.projects.create(user, {
+        name: "Chat destination",
+        cwd: otherCwd,
+        requestId: "chat-destination",
+    });
+    const agent = await app.pip.agents.createIdentity(user, {
+        name: "Movable Chat owner",
+        projectId: original.id,
+        requestId: "movable-identity",
+    });
+    const first = await app.pip.agents.submitDraft(agent.agentId, user, {
+        text: "Keep the exact saved Chat history and working folder",
+        requestId: "first-saved-chat",
+    });
+    const second = await app.pip.agents.submitDraft(agent.agentId, user, {
+        text: "A sibling retains its own placement",
+        requestId: "sibling-saved-chat",
+    });
+
+    await (await app.harness.submission(first.submissionId, context))!.wait(context);
+    await (await app.harness.submission(second.submissionId, context))!.wait(context);
+    const chat = first.id as ConversationId;
+
+    await say(app, chat, "Create a bounded child Researcher Work Item in this Chat's project.");
+    const child = app.sessions(user).find((session) => session.threadType === "researcher")!
+        .id as ConversationId;
+    const childPlacement = app.sessionMeta(child)?.projectId;
+    const identity = app.pip.agents.identity(chat);
+    const before = app.sessionMeta(chat)!;
+    const history = (await (await app.conversation(chat)).context(context)).entries;
+    const model = await app.agentState(chat);
+    const request = (path: string, body?: unknown, token?: string) =>
+        privateAgentRequest(app, path, body, token);
+
+    assert.equal(before.projectId, original.id);
+    assert.equal(childPlacement, original.id);
+    assert.equal(
+        app.sessions(user).some((session) => session.id === Number(chat)),
+        false,
+    );
+    const moved = await request(`sessions/${chat}`, { projectId: destination.id });
+
+    assert.equal(moved.status, 200, await moved.text());
+    assert.equal(app.sessionMeta(chat)?.projectId, destination.id);
+    assert.equal(
+        app.pip.agents
+            .list(user)
+            .find((item) => item.agentId === agent.agentId)!
+            .chats.find((item) => item.id === Number(chat))!.projectId,
+        destination.id,
+        "the private catalogue reports actual Chat placement",
+    );
+    assert.equal(app.sessionMeta(second.id as ConversationId)?.projectId, original.id);
+    assert.equal(app.sessionMeta(child)?.projectId, childPlacement);
+    assert.deepEqual(app.pip.agents.identity(chat), identity, "moving is not an identity edit");
+    assert.deepEqual(await app.agentState(chat), model, "moving cannot reconfigure the agent");
+    assert.deepEqual((await (await app.conversation(chat)).context(context)).entries, history);
+    const { projectId: _projectId, updatedAt: _updatedAt, ...preserved } = before;
+    const { projectId: _movedProject, updatedAt: _movedAt, ...after } = app.sessionMeta(chat)!;
+
+    assert.deepEqual(after, preserved, "privacy, type, cwd and all other metadata stay unchanged");
+    assert.equal(app.cwdOf(chat), cwd);
+
+    for (const patch of [
+        { projectId: "missing-project" },
+        { projectId: 12 },
+        { projectId: null, title: "Not identity settings" },
+        { projectId: null, archived: true },
+    ]) {
+        const denied = await request(`sessions/${chat}`, patch);
+
+        assert.ok([400, 404, 409].includes(denied.status), await denied.text());
+        assert.equal(app.sessionMeta(chat)?.projectId, destination.id);
+    }
+
+    for (const role of ["guest", "owner"] as const) {
+        const outsider = app.config.addUser(`Other ${role}`, role);
+        const denied = await request(`sessions/${chat}`, { projectId: null }, outsider.token);
+
+        assert.equal(denied.status, 404, await denied.text());
+    }
+
+    const cleared = await request(`sessions/${chat}`, { projectId: null });
+
+    assert.equal(cleared.status, 200, await cleared.text());
+    assert.equal(app.sessionMeta(chat)?.projectId, undefined);
+    assert.equal(app.cwdOf(chat), cwd);
+    assert.equal(app.sessionMeta(second.id as ConversationId)?.projectId, original.id);
+    assert.equal(app.sessionMeta(child)?.projectId, childPlacement);
+    assert.deepEqual(app.pip.agents.identity(chat), identity);
+    assert.deepEqual((await (await app.conversation(chat)).context(context)).entries, history);
+});
+
+test("both placement routes reject private non-Chats, unsaved reservations and stale Chat bindings", async (t) => {
+    const app = await openApp(scriptedModel(), join(root, "named-chat-placement-guards"));
+
+    t.after(() => app.close());
+    app.config.lastModel = { provider: "faux", modelId: "faux-1", thinkingLevel: "off" };
+    const user = owner(app);
+    const destination = await app.projects.create(user, {
+        name: "Guarded destination",
+        cwd: work,
+        requestId: "guarded-project",
+    });
+    const agent = await app.pip.agents.create(user, {
+        name: "Bound identity",
+        requestId: "bound-identity",
+    });
+    const chat = agent.id as ConversationId;
+    const otherIdentity = await app.pip.agents.createIdentity(user, {
+        name: "Other identity",
+        requestId: "other-identity",
+    });
+    const generic = await app.pip.ensure(user);
+    const source = await newSession(app, work, "worker");
+    const controller = (await app.pip.orchestration.control(source, user, { action: "open" }))
+        .orchestration!.conversationId as ConversationId;
+    const paths = (id: number) => [`sessions/${id}`, `c/${id}/x/work-items/work-item`];
+    const patch = { projectId: destination.id };
+
+    const denied = async (id: number, label: string) => {
+        const before = app.sessionMeta(id as ConversationId);
+
+        for (const path of paths(id)) {
+            const response = await privateAgentRequest(app, path, patch);
+
+            assert.equal(response.status, 409, `${label}: ${path}: ${await response.text()}`);
+            assert.deepEqual(app.sessionMeta(id as ConversationId), before);
+        }
+    };
+
+    await denied(Number(generic), "global PiP is not saved Chat history");
+    await denied(Number(controller), "a Work Item controller is not a named Chat");
+    await app.pip.agents.setBudget(chat, user, 0);
+    await assert.rejects(
+        app.pip.agents.submitDraft(agent.agentId, user, {
+            text: "Rejected first input",
+            requestId: "unsaved-placement",
+        }),
+        /spend limit/,
+    );
+    const reservation = Object.values(
+        (await app.harness.snapshot(AgentIdentitiesDoc, context))!.requests,
+    ).find((entry) => entry.firstInputRequestId?.endsWith(":unsaved-placement"))!;
+
+    assert.ok(reservation.chatId, "native rejected admission retained an unsaved reservation");
+    await denied(reservation.chatId, "a reservation must not become saved history by moving");
+    await app.pip.agents.setBudget(chat, user, undefined);
+    const meta = structuredClone(app.sessionMeta(chat)!);
+    const identity = structuredClone(app.pip.agents.identity(chat)!);
+
+    for (const binding of [
+        "unbound legacy",
+        "deleted identity",
+        "wrong owner",
+        "wrong identity",
+        "not a member",
+        "not owner-private",
+        "work-item member",
+        "controller flag",
+    ]) {
+        await app.harness.commit(async (tx) => {
+            const sessions = await tx.doc(SessionsDoc);
+            const identities = await tx.doc(AgentIdentitiesDoc);
+
+            sessions.items[String(chat)] = structuredClone(meta);
+            identities.items[agent.agentId] = structuredClone(identity);
+            const current = sessions.items[String(chat)]!;
+            const bound = identities.items[agent.agentId]!;
+
+            switch (binding) {
+                case "unbound legacy":
+                    delete current.pipAgentId;
+                    break;
+                case "deleted identity":
+                    bound.deletedAt = Date.now();
+                    break;
+                case "wrong owner":
+                    bound.ownerId = "another-owner";
+                    break;
+                case "wrong identity":
+                    current.pipAgentId = otherIdentity.agentId;
+                    break;
+                case "not a member":
+                    bound.chatIds = [];
+                    break;
+                case "not owner-private":
+                    current.ownerOnly = false;
+                    break;
+                case "work-item member":
+                    current.workItemId = "not-a-real-group";
+                    break;
+                case "controller flag":
+                    current.pipWorkItemId = "not-a-real-controller";
+                    break;
+            }
+        }, context);
+        await denied(Number(chat), binding);
+    }
+
+    await app.harness.commit(async (tx) => {
+        (await tx.doc(SessionsDoc)).items[String(chat)] = meta;
+        (await tx.doc(AgentIdentitiesDoc)).items[agent.agentId] = identity;
+    }, context);
+
+    for (const path of paths(Number(chat))) {
+        for (const mixed of [{ title: "Do not rename" }, { archived: true }]) {
+            const response = await privateAgentRequest(app, path, { ...patch, ...mixed });
+
+            assert.equal(response.status, 400, `${path}: ${await response.text()}`);
+            assert.deepEqual(app.sessionMeta(chat), meta);
+        }
+    }
 });
 
 test("owner creates distinct chats with one persistent identity and one cost-free welcome across retry/restart", async () => {

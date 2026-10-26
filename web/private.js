@@ -764,7 +764,7 @@ export function PrivateList({ compact = false, home = false }) {
                 }
             </div>
         </section>
-        <p class="private-list-footer small muted" role="status" title=${notice || undefined}>${notice || html`<${Icon} name="terminal" size=${14} /> Only you · Herdr`}</p>
+        ${notice && html`<p class="private-list-footer small muted" role="status">${notice}</p>`}
     </div>`;
 }
 

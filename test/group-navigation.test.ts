@@ -829,6 +829,16 @@ test("both folded rails open and select the private controller without changing 
             const buttons = nodes(rail.render()).filter((node) => classHas(node, "ws"));
 
             assert.equal(buttons.length, 2);
+            assert.match(
+                textOf(buttons[0]),
+                /Build app/,
+                "collapsed navigation identifies work without memorizing its position",
+            );
+            assert.match(
+                buttons[0]!.props.title,
+                /Alt\+1/,
+                "the existing jump shortcut remains discoverable",
+            );
             assert.equal(buttons[0]!.key, 2);
             buttons[0]!.props.onClick(click);
             assert.equal(fixture.navigated.pop(), 99, `${component.name} activation`);
@@ -837,6 +847,57 @@ test("both folded rails open and select the private controller without changing 
             if (component === RailNav) {
                 assert.equal(buttons[0]!.props["aria-current"], "page");
             }
+        } finally {
+            rail.dispose();
+        }
+    }
+});
+
+// Collapsing hides only named Chats, not the ordinary work those identities control. Rail
+// shortcuts must retain the workspace order used by the real keyboard consumer, even across gaps.
+test("both compact rails omit named Chats without renumbering ordinary thread shortcuts", () => {
+    for (const component of [Rail, RailNav]) {
+        setup();
+        fixture.store.state.namedAgents = [
+            { agentId: "nora", name: "Nora", chats: [{ id: 11, title: "Catalogue-only Chat" }] },
+        ];
+        fixture.store.state.sessions.unshift({
+            id: 10,
+            title: "Named private Chat",
+            pipAgent: true,
+            updatedAt: 20,
+        });
+        fixture.store.state.sessions.push(
+            { id: 11, title: "Catalogue-only Chat", threadType: "chat", updatedAt: 2 },
+            { id: 12, title: "Identity-tagged Chat", pipAgentId: "other", updatedAt: 0 },
+        );
+        fixture.store.state.sessions[1].supervisor.agentId = "nora";
+        fixture.store.state.sessions[2].supervisor.agentId = "nora";
+        const rail = mount(component, { foldable: true, folded: true });
+
+        try {
+            const buttons = nodes(rail.render()).filter((node) => classHas(node, "ws"));
+
+            assert.deepEqual(
+                buttons.map((button) => button.key),
+                [2, 3],
+                "only named Chats disappear; their controlled Work Item and ordinary Chat remain",
+            );
+            assert.match(textOf(buttons[0]), /Build app/);
+            assert.match(textOf(buttons[1]), /Other chat/);
+            assert.match(buttons[0]!.props.title, /Alt\+2/);
+            assert.match(buttons[1]!.props.title, /Alt\+4/);
+            buttons[0]!.props.onClick(click);
+            buttons[1]!.props.onClick(click);
+            assert.deepEqual(fixture.navigated, [99, 3]);
+            fixture.store.state.conversationId = 10;
+            assert.equal(
+                nodes(rail.render()).some(
+                    (node) => classHas(node, "ws") && classHas(node, "active"),
+                ),
+                false,
+                "an omitted named Chat cannot select a different ordinary tile",
+            );
         } finally {
             rail.dispose();
         }

@@ -21,6 +21,33 @@ function loadBlobatar() {
 export function NamedAgentAvatar({ agentId, size = 28, animated = false, thinking = false }) {
     const [loaded, setLoaded] = useState(null);
     const [failed, setFailed] = useState(false);
+    const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+
+    useEffect(() => {
+        let departed = false;
+        const update = () => setVisible(!departed && document.visibilityState !== "hidden");
+
+        const hide = () => {
+            departed = true;
+            update();
+        };
+
+        const show = () => {
+            departed = false;
+            update();
+        };
+
+        document.addEventListener("visibilitychange", update);
+        addEventListener("pagehide", hide);
+        addEventListener("pageshow", show);
+        update();
+
+        return () => {
+            document.removeEventListener("visibilitychange", update);
+            removeEventListener("pagehide", hide);
+            removeEventListener("pageshow", show);
+        };
+    }, []);
 
     useEffect(() => {
         let mounted = true;
@@ -43,6 +70,7 @@ export function NamedAgentAvatar({ agentId, size = 28, animated = false, thinkin
         };
     }, []);
 
+    // Idle/hidden identities use Blobatar's single-image path, not ambient SVG loops.
     return html`<span
         class="named-agent-avatar"
         aria-hidden="true"
@@ -53,7 +81,7 @@ export function NamedAgentAvatar({ agentId, size = 28, animated = false, thinkin
             !failed &&
             html`<${loaded.Blobatar}
                 name=${`pip:${agentId}`}
-                animate=${animated ? "always" : undefined}
+                animate=${animated && thinking && visible ? "always" : undefined}
                 expression=${thinking ? loaded.thinking : loaded.idle}
                 size=${size}
                 alt=""

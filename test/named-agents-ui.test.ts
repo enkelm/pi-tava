@@ -1,6 +1,7 @@
 // Exercise the exported private-agent UI with deferred API responses and memory-only hooks.
 // This covers drafts, revision/retry admission and stale openings, not browser layout or device focus.
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { registerHooks } from "node:module";
 import { after, test, type TestContext } from "node:test";
 import { h } from "preact";
@@ -709,7 +710,7 @@ test("genuine Blobatar images keep their identity through rename and remount and
     );
 });
 
-test("animated identity uses genuine inline Blobatar thinking and returns to its idle face", async (t) => {
+test("named identities stay static at idle and animate genuine Blobatar only while working", async (t) => {
     const { NamedAgentAvatar } = await import(
         new URL("../web/named-agent-avatar.js", import.meta.url).href
     );
@@ -719,33 +720,118 @@ test("animated identity uses genuine inline Blobatar thinking and returns to its
         NamedAgents: () =>
             h(NamedAgentAvatar, {
                 agentId: "agent-reviewer",
-                animated: true,
+                animated: active.state.motionAllowed !== false,
                 thinking: active.state.thinking === true,
             }),
     });
 
     await f.settle();
-    const idle = f.find("svg");
+    const idle = f.find("img");
+
+    assert.match(idle.props.src, /^data:image\/svg\+xml,/);
+    assert.equal(idle.props.width, 28);
+    assert.equal(idle.props["aria-hidden"], "true");
+    f.patch({ thinking: true });
+    await f.settle();
+    const thinking = f.find("svg");
 
     assert.match(f.find("g").props.className, /mo-always/);
-    assert.equal(idle.props["aria-hidden"], "true");
+    assert.match(f.find("g").props.className, /mo-expr/);
+    assert.equal(thinking.props.width, idle.props.width);
+    assert.equal(thinking.props["aria-hidden"], "true");
     assert.equal(
-        idle.props.role,
+        thinking.props.role,
         undefined,
         "the face is decoration; callers announce actual activity",
     );
-    const body = f.find("g").props.dangerouslySetInnerHTML.__html;
-
-    f.patch({ thinking: true });
+    f.patch({ motionAllowed: false });
     await f.settle();
-    const thinking = f.find("g");
+    assert.notEqual(
+        f.find("img").props.src,
+        idle.props.src,
+        "the static face keeps its working pose",
+    );
+    f.patch({ thinking: false, motionAllowed: true });
+    await f.settle();
+    assert.equal(
+        f.find("img").props.src,
+        idle.props.src,
+        "finishing work restores the same idle identity",
+    );
+});
 
-    assert.match(thinking.props.className, /mo-expr/);
-    assert.notDeepEqual(f.find("svg").props.style, idle.props.style);
+test("working avatars suspend while hidden or departed and clean up their lifecycle listeners", async (t) => {
+    const { NamedAgentAvatar } = await import(
+        new URL("../web/named-agent-avatar.js", import.meta.url).href
+    );
+    const original = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    const events = [
+        [document, "visibilitychange"],
+        [browserEvents, "pagehide"],
+        [browserEvents, "pageshow"],
+    ] as const;
+    const before = events.map(([target, type]) => getEventListeners(target, type).length);
+
+    const visibility = (value: "visible" | "hidden") => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value });
+        document.dispatchEvent(new Event("visibilitychange"));
+    };
+
+    t.after(() => {
+        if (original) {
+            Object.defineProperty(document, "visibilityState", original);
+        } else {
+            Reflect.deleteProperty(document, "visibilityState");
+        }
+    });
+    visibility("hidden");
+    const f = fixture(t, {
+        NamedAgentSheet,
+        openAgentSettings,
+        NamedAgents: () =>
+            active.state.avatarMounted === false
+                ? null
+                : h(NamedAgentAvatar, {
+                      agentId: "agent-reviewer",
+                      animated: true,
+                      thinking: active.state.thinking !== false,
+                  }),
+    });
+
+    await f.settle();
+    const stillWorking = f.find("img").props.src;
+
+    visibility("visible");
+    await f.settle();
+    assert.match(f.find("g").props.className, /mo-expr/);
+    visibility("hidden");
+    await f.settle();
+    assert.equal(f.find("img").props.src, stillWorking);
+    browserEvents.dispatchEvent(new Event("pageshow"));
+    await f.settle();
+    assert.equal(f.find("img").props.src, stillWorking, "pageshow cannot animate a hidden page");
+    visibility("visible");
+    await f.settle();
+    f.find("svg");
+    browserEvents.dispatchEvent(new Event("pagehide"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    await f.settle();
+    assert.equal(f.find("img").props.src, stillWorking, "visibility alone cannot undo departure");
     f.patch({ thinking: false });
     await f.settle();
-    assert.equal(f.find("g").props.dangerouslySetInnerHTML.__html, body);
-    assert.deepEqual(f.find("svg").props.style, idle.props.style);
+    assert.notEqual(f.find("img").props.src, stillWorking, "activity still updates while paused");
+    f.patch({ thinking: true });
+    await f.settle();
+    assert.equal(f.find("img").props.src, stillWorking);
+    browserEvents.dispatchEvent(new Event("pageshow"));
+    await f.settle();
+    f.find("svg");
+    f.patch({ avatarMounted: false });
+    assert.deepEqual(
+        events.map(([target, type]) => getEventListeners(target, type).length),
+        before,
+        "unmount releases visibility and page lifecycle subscriptions",
+    );
 });
 
 test("settings have charter and Memory without inbox or attachment configuration", async (t) => {

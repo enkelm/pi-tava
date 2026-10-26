@@ -869,28 +869,28 @@ export class Commands {
 
         const placing = Object.hasOwn(patch, "projectId");
 
-        if (
-            (namedChat || before?.pip !== undefined || before?.pipWorkItemId !== undefined) &&
-            (!namedChat ||
-                app.pip.agents.scope(id)?.ownerId !== user.id ||
-                patch.archived === undefined ||
-                patch.title !== undefined ||
-                placing)
-        ) {
-            throw new HttpError(
-                409,
-                "Use PiP settings for other changes. Only a bound saved named Chat can be archived or restored here.",
-            );
-        }
-
         if (placing) {
             if (patch.title !== undefined || patch.archived !== undefined) {
                 throw new HttpError(400, "Move a thread separately from renaming or archiving it.");
             }
 
+            // Placement rechecks private Chat binding and saved history in the shared transaction.
             await app.projects.assign(user, id, patch);
 
             return;
+        }
+
+        if (
+            (namedChat || before?.pip !== undefined || before?.pipWorkItemId !== undefined) &&
+            (!namedChat ||
+                app.pip.agents.scope(id)?.ownerId !== user.id ||
+                patch.archived === undefined ||
+                patch.title !== undefined)
+        ) {
+            throw new HttpError(
+                409,
+                "Use PiP settings for other changes. Only a bound saved named Chat can be archived or restored here.",
+            );
         }
 
         let unchanged = false;

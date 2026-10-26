@@ -13,6 +13,7 @@ type Opening = {
     kind: "named-agent";
     id: string;
     userId?: string;
+    chatId?: number;
     at?: { x: number; y: number; keyboard?: boolean; touch?: boolean };
 };
 
@@ -44,7 +45,11 @@ const globals: Record<string, unknown> = {
         setItem: (key: string, value: string) => storage.set(key, value),
         removeItem: (key: string) => storage.delete(key),
     },
-    localStorage: { getItem: () => null },
+    localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+        removeItem: (key: string) => storage.delete(key),
+    },
     matchMedia: (query: string) =>
         Object.defineProperty(new EventTarget(), "matches", {
             get() {
@@ -166,6 +171,8 @@ function reset(chatless = false) {
         view: { ...initial.view, conversation: { id: 19, pipAgentId: "active-agent" } },
         conversationId: 19,
         sidebarTab: "private",
+        pinned: [],
+        unread: [],
         sheet,
     };
 
@@ -192,6 +199,72 @@ function menu(sheet: Opening) {
         },
     };
 }
+
+test("saved Chat Options offers exact project placement without targeting the selected sibling", () => {
+    const sheet = reset();
+
+    sheet.chatId = 73;
+    store.state.server.projects = 1;
+    store.state.namedAgents[1].chats = [{ id: 73, projectId: "build" }];
+    store.state.sessions = [{ id: 19, pipAgentId: "active-agent" }];
+    const move = menu(sheet).button("Move Chat to project…");
+
+    move.onClick();
+    assert.deepEqual(store.state.sheet, { type: "move-sessions", ids: [73] });
+    assert.equal(store.state.conversationId, 19);
+    store.state.sheet = sheet;
+    store.state.namedAgents[1].chats = [];
+    move.onClick();
+    assert.equal(store.state.sheet, sheet, "a retained menu cannot move a removed Chat");
+    assert.equal(menu(sheet).labels.includes("Move Chat to project…"), false);
+    assert.deepEqual(requests, [], "opening placement does not send or create a Chat");
+});
+
+// Saved-Chat Options is the non-hover route to the same browser-local pin/read actions.
+// Exercise the real theme/store owners: an identity-only menu cannot expose this exact target.
+test("touch Chat Options pins and marks only its source and refuses stale Chat actions", () => {
+    for (const viewport of [699, 820]) {
+        const sheet = reset();
+
+        width = viewport;
+        sheet.at = { x: 150, y: 220, touch: true };
+        sheet.chatId = 73;
+        store.state.namedAgents[1].chats = [{ id: 73 }, { id: 74 }];
+        store.state.pinned = [19];
+        store.state.unread = [19];
+        const sessions = store.state.sessions;
+        const agents = store.state.namedAgents;
+        const rendered = menu(sheet);
+
+        assert.equal(Boolean(rendered.frame.props.bottom), viewport < 700);
+        rendered.button("Pin to the top").onClick();
+        rendered.button("Mark unread").onClick();
+        assert.deepEqual(store.state.pinned, [19, 73]);
+        assert.deepEqual(store.state.unread, [19, 73]);
+        assert.equal(store.state.conversationId, 19, "source actions never open a sibling Chat");
+        menu(sheet).button("Unpin").onClick();
+        menu(sheet).button("Mark read").onClick();
+        assert.deepEqual(store.state.pinned, [19]);
+        assert.deepEqual(store.state.unread, [19]);
+        assert.equal(store.state.sessions, sessions);
+        assert.equal(store.state.namedAgents, agents);
+        const stale = [
+            menu(sheet).button("Pin to the top").onClick,
+            menu(sheet).button("Mark unread").onClick,
+        ];
+
+        for (const chats of [[{ id: 73, archived: true }], [{ id: 74 }]]) {
+            store.state.namedAgents[1].chats = chats;
+            stale.forEach((callback) => callback());
+            assert.deepEqual(store.state.pinned, [19]);
+            assert.deepEqual(store.state.unread, [19]);
+            assert.equal(menu(sheet).labels.includes("Pin to the top"), false);
+            assert.equal(menu(sheet).labels.includes("Mark unread"), false);
+        }
+
+        assert.deepEqual(requests, [], "pin/read actions do not submit or create any Chat");
+    }
+});
 
 const labels = ["New chat", "Memory", "Rename…", "Agent settings…"];
 
@@ -283,8 +356,12 @@ const revocations: [string, (sheet: Opening) => void][] = [
 
 for (const [reason, revoke] of revocations) {
     test(`${reason} hides options and refuses every retained action callback`, () => {
-        for (const label of labels) {
+        for (const label of [...labels, "Pin to the top", "Mark unread", "Move Chat to project…"]) {
             const sheet = reset();
+
+            sheet.chatId = 73;
+            store.state.server.projects = 1;
+            store.state.namedAgents[1].chats = [{ id: 73 }];
             const callback = menu(sheet).button(label).onClick;
 
             revoke(sheet);

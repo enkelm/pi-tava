@@ -71,7 +71,10 @@
 /* ─── The session list ─── */
 
 /* The open session: a raised row, not the accent's fill. The others' titles in the body color, a step below it. */
-[data-part~="session-button"][aria-current="page"] {
+:is(
+    [data-part~="session-button"][aria-current="page"]:not(.project-chat-open),
+    .project-chat-head:has(> .project-chat-open[aria-current="page"])
+) {
     background: var(--card-2);
 }
 

@@ -2,11 +2,15 @@
 import { useEffect, useRef } from "preact/hooks";
 import { openSheet, store } from "./store.js";
 
-export function openSidebarOptions(kind, id, at, { keepDrawer = false, userId } = {}) {
+export function openSidebarOptions(kind, id, at, { keepDrawer = false, userId, chatId } = {}) {
     const sheet = { type: "sidebar-options", kind, id, at };
 
     if (userId !== undefined) {
         sheet.userId = userId;
+    }
+
+    if (chatId !== undefined) {
+        sheet.chatId = chatId;
     }
 
     if (keepDrawer) {

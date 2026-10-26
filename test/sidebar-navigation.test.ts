@@ -17,13 +17,15 @@ type Fiber = { slots: Slot[]; cursor: number };
 let current: Fiber;
 let effects: (() => void)[] = [];
 
-const noop = () => {};
+const noop = (): void => {};
 
 const storage = new Map<string, string>();
 const fixture = {
     state: {} as Props,
     navigations: [] as Props[],
     sheets: [] as Props[],
+    drags: [] as Props[],
+    touchDrags: [] as Props[],
     html: template,
     hooks: {
         useState(initial: any) {
@@ -59,6 +61,7 @@ class Element {
     childNodes: Element[] = [];
     attributes: Props = {};
     listeners = new Map<string, (this: Element, event: Props) => void>();
+    eventListeners = new Map<string, Set<(this: Element, event: Props) => void>>();
     nodeType = 1;
     data = "";
     value = "";
@@ -83,7 +86,25 @@ class Element {
         );
     }
     matches(selector: string) {
-        return selector.split(",").some((tag) => tag.trim() === this.localName);
+        return selector.split(",").some((part) => {
+            const value = part.trim();
+
+            if (value.startsWith(".")) {
+                return String(this.attributes.class).split(" ").includes(value.slice(1));
+            }
+
+            if (value.startsWith("[")) {
+                return Object.hasOwn(this.attributes, value.slice(1, -1));
+            }
+
+            return value === this.localName;
+        });
+    }
+    closest(selector: string): Element | null {
+        return this.matches(selector) ? this : (this.parentNode?.closest(selector) ?? null);
+    }
+    getBoundingClientRect() {
+        return { left: 0, right: 320, top: 0, bottom: 44, width: 320, height: 44 };
     }
     focus() {
         document.activeElement = this;
@@ -110,12 +131,27 @@ class Element {
     addEventListener(
         type: string,
         handler: (this: Element, event: Props) => void,
-        capture = false,
+        options: boolean | { capture?: boolean; passive?: boolean } = false,
     ) {
-        this.listeners.set(`${type}${capture}`, handler);
+        const key = `${type}${typeof options === "boolean" ? options : !!options.capture}`;
+        const handlers = this.eventListeners.get(key) ?? new Set();
+
+        handlers.add(handler);
+        this.eventListeners.set(key, handlers);
+        this.listeners.set(key, handler);
     }
-    removeEventListener(type: string, _handler: unknown, capture = false) {
-        this.listeners.delete(`${type}${capture}`);
+    removeEventListener(
+        type: string,
+        handler: (this: Element, event: Props) => void,
+        options: boolean | { capture?: boolean } = false,
+    ) {
+        const key = `${type}${typeof options === "boolean" ? options : !!options.capture}`;
+
+        this.eventListeners.get(key)?.delete(handler);
+
+        if (this.listeners.get(key) === handler) {
+            this.listeners.delete(key);
+        }
     }
     insertBefore(child: Element, before: Element | null) {
         child.parentNode?.removeChild(child);
@@ -138,7 +174,10 @@ class Element {
         child.parentNode = null;
     }
 }
+const documentEvents = new Element("document");
 const document = {
+    addEventListener: documentEvents.addEventListener.bind(documentEvents),
+    removeEventListener: documentEvents.removeEventListener.bind(documentEvents),
     body: null as Element | null,
     activeElement: null as Element | null,
     documentElement: { dataset: {} },
@@ -165,6 +204,7 @@ for (const [name, value] of Object.entries({
         setItem: (key: string, value: string) => storage.set(key, value),
     },
     matchMedia: () => ({ matches: false }),
+    getSelection: (): null => null,
     addEventListener: noop,
     removeEventListener: noop,
 })) {
@@ -178,7 +218,7 @@ const sources: Record<string, string> = {
         export const store={get state(){return f.state},set:patch=>Object.assign(f.state,typeof patch==='function'?patch(f.state):patch)};
         export const navigate=(id,options)=>f.navigations.push({id,options}),openSheet=sheet=>f.sheets.push(sheet);
         export const actions={},attempt=run=>run(),notify=()=>{},canSteer=()=>store.state.me.role!=='viewer',collab=()=>false,handoffsAvailable=()=>true,projectsAvailable=()=>true,scoped=()=>!!store.state.me.sessionId;
-        export const isUnread=()=>false,sessionUnread=()=>false,setUnread=()=>{},stillMoving=m=>m,workspaceOrder=()=>[];`,
+        export const isUnread=id=>f.state.unread.has(id),sessionUnread=()=>false,setUnread=(id,value)=>value?f.state.unread.add(id):f.state.unread.delete(id),stillMoving=m=>m,workspaceOrder=()=>[];`,
     "ui.js": `export const html=globalThis.sidebarNavigationFixture.html;
         export const apartFromViews=c=>c,Icon=p=>html\`<native-icon ...\${p} />\`,Spinner=()=>html\`<native-spinner />\`;
         export const APPLE=false,Slide=()=>null,shortPath=p=>p??'',timeAgo=()=>'',railState=()=>'',scrimPress=()=>()=>{},usePresence=()=>[],useSide=()=>'',useSlide=()=>null;`,
@@ -192,12 +232,12 @@ const sources: Record<string, string> = {
     "named-agent-avatar.js": `export const NamedAgentAvatar=props=>globalThis.sidebarNavigationFixture.html\`<native-blobatar ...\${props} />\`;`,
     "named-agents.js": `export const NamedAgents=()=>globalThis.sidebarNavigationFixture.html\`<obsolete-pips-row />\`;`,
     "session-hold.js": `export const useSessionHold=()=>({hold:null,consumeClick:()=>false});`,
-    "session-moves.js": `export const canMoveSessions=()=>false,useSessionDrag=()=>({busy:false,consumeClick:()=>false});`,
+    "session-moves.js": `const f=globalThis.sidebarNavigationFixture; export const canMoveSessions=()=>f.state.me?.role==='owner'&&!!f.state.server?.projects,useSessionDrag=()=>({busy:false,consumeClick:()=>false,start:(event,id,chosen)=>f.drags.push({id,chosen})});`,
     "session-seen.js": `export const sessionResultUnread=()=>false;`,
     "ssh-status.js": `export const RemoteProjectIcon=()=>null;`,
-    "sidebar-context.js": `export const openSidebarOptions=()=>{},useSidebarContext=()=>{};`,
+    "sidebar-context.js": `export const openSidebarOptions=(kind,id,at,options)=>globalThis.sidebarNavigationFixture.sheets.push({kind,id,at,...options}),useSidebarContext=()=>{};`,
     "thread-type.js": `export const ThreadTypeTag=()=>null,threadTypeLabel=()=>'';`,
-    "theme.js": `export const isPinned=()=>false,prefs=()=>({projectGroup:'projects'}),setPrefs=()=>{},togglePin=()=>{};`,
+    "theme.js": `const f=globalThis.sidebarNavigationFixture; export const isPinned=id=>f.state.pinned.includes(id),prefs=()=>({projectGroup:'projects'}),setPrefs=()=>{},togglePin=id=>f.state.pinned=f.state.pinned.includes(id)?f.state.pinned.filter(each=>each!==id):[id,...f.state.pinned];`,
 };
 
 registerHooks({
@@ -218,12 +258,34 @@ registerHooks({
             }
         }
 
-        const sessions = context.parentURL?.split("?")[0]?.endsWith("/web/sessions.js");
+        const owner = context.parentURL?.split("?")[0];
+        const sessions = owner?.endsWith("/web/sessions.js");
+        const holdIntegration = context.parentURL?.endsWith("?hold-render");
+
+        if (
+            holdIntegration &&
+            (specifier === "./session-hold.js" || specifier === "./sidebar-context.js")
+        ) {
+            return next(new URL(`${specifier}?hold-render`, context.parentURL).href, context);
+        }
+
         const nativeHooks =
-            context.parentURL?.endsWith("?native-render") && specifier === "preact/hooks";
+            (context.parentURL?.endsWith("?native-render") || holdIntegration) &&
+            specifier === "preact/hooks";
+        const integrationDependency =
+            holdIntegration &&
+            (owner?.endsWith("/web/session-hold.js") || owner?.endsWith("/web/sidebar-context.js"));
         const source =
-            sessions && !nativeHooks
-                ? (sources[specifier] ?? sources[specifier.split("/").at(-1)!])
+            (sessions || integrationDependency) && !nativeHooks
+                ? holdIntegration && specifier === "./session-moves.js"
+                    ? `const f=globalThis.sidebarNavigationFixture;
+                        export const canMoveSessions=()=>f.state.me?.role==='owner'&&!!f.state.server?.projects;
+                        export const useSessionDrag=()=>({busy:false,consumeClick:()=>false,
+                            startTouch:(point,id,chosen)=>{f.touchDrags.push({phase:'start',id,chosen,point});return true},
+                            moveTouch:point=>f.touchDrags.push({phase:'move',point}),
+                            endTouch:point=>f.touchDrags.push({phase:'end',point}),
+                            cancelTouch:()=>f.touchDrags.push({phase:'cancel'})});`
+                    : (sources[specifier] ?? sources[specifier.split("/").at(-1)!])
                 : undefined;
 
         return source === undefined
@@ -237,6 +299,9 @@ const { PhoneSessionList } = await import(
 );
 const { SessionList: NativeSessionList } = await import(
     new URL("../web/sessions.js?native-render", import.meta.url).href
+);
+const { SessionList: HeldSessionList } = await import(
+    new URL("../web/sessions.js?hold-render", import.meta.url).href
 );
 
 after(() => {
@@ -308,6 +373,8 @@ function setup(role = "owner") {
     storage.clear();
     fixture.sheets = [];
     fixture.navigations = [];
+    fixture.drags = [];
+    fixture.touchDrags = [];
     fixture.state = {
         me: { id: role, role },
         conversationId: null,
@@ -328,6 +395,7 @@ function setup(role = "owner") {
         projectsLoaded: true,
         namedAgents: [{ agentId: "nora", name: "Nora", chats: [] }],
         pinned: [],
+        unread: new Set(),
         moving: {},
     };
 }
@@ -467,6 +535,122 @@ test("a freshly linked identity appears in its project without inventing a Chat 
             false,
             "owner identity links are never exposed to collaborators",
         );
+    } finally {
+        list.dispose();
+    }
+});
+
+// Row actions must address the hovered Chat/identity, not the selected sibling. The old row
+// had no actions; existing exact-navigation coverage could not catch that omission or stale clicks.
+test("named Chat quick actions target their source and pinned Chats rise within their project", () => {
+    setup();
+    fixture.state.conversationId = 11;
+    fixture.state.namedAgents[0].chats = [
+        { id: 11, title: "Selected sibling", projectId: "build" },
+        { id: 10, title: "Hovered Chat", projectId: "build" },
+    ];
+    const list = mount();
+    const row = () =>
+        nodes(list.render()).find(
+            (node) => classHas(node, "project-chat") && node.props["data-chat-id"] === 10,
+        )!;
+    const action = (label: string) =>
+        nodes(row()).find((node) => node.props["aria-label"] === label)!;
+    const event = {
+        detail: 1,
+        pointerType: "mouse",
+        currentTarget: { getBoundingClientRect: () => ({ left: 80, bottom: 120 }) },
+    };
+
+    try {
+        assert.ok(action("Options for Nora"), "saved named Chats expose quick actions");
+        action("Options for Nora").props.onClick(event);
+        assert.deepEqual(fixture.sheets, [
+            {
+                kind: "named-agent",
+                id: "nora",
+                userId: "owner",
+                chatId: 10,
+                at: { x: 80, y: 120, touch: false, keyboard: false },
+            },
+        ]);
+        action("Pin").props.onClick(click);
+        assert.deepEqual(fixture.state.pinned, [10]);
+        assert.deepEqual(
+            nodes(list.render())
+                .filter((node) => classHas(node, "project-chat"))
+                .map((node) => node.props["data-chat-id"]),
+            [10, 11],
+        );
+        action("Mark unread").props.onClick(click);
+        assert.deepEqual([...fixture.state.unread], [10]);
+        assert.ok(classHas(row(), "marked-unread"));
+        action("Mark read").props.onClick(click);
+        action("Unpin").props.onClick(click);
+        assert.deepEqual([...fixture.state.unread], []);
+        assert.deepEqual(fixture.state.pinned, []);
+        assert.deepEqual(fixture.navigations, [], "quick actions do not open the Chat");
+        nodes(list.render())
+            .find((node) => node.props.role === "tab" && node.props.children === "Recent")!
+            .props.onClick(click);
+        action("Pin").props.onClick(click);
+        const pinnedGroup = nodes(list.render()).find(
+            (node) =>
+                classHas(node, "session-group") &&
+                nodes(node).some((child) => child.props.children === "Pinned"),
+        );
+
+        assert.ok(pinnedGroup, "a named Chat pin works in Recent as well as within its project");
+        assert.ok(nodes(pinnedGroup).some((node) => node.props["data-chat-id"] === 10));
+        action("Unpin").props.onClick(click);
+        const dragSource = nodes(row()).find((node) => classHas(node, "project-chat-open"))!;
+
+        assert.equal(dragSource.props.draggable, true);
+        dragSource.props.onDragStart(click);
+        assert.deepEqual(
+            fixture.drags,
+            [{ id: 10, chosen: [] }],
+            "dragging the hovered Chat never moves its selected sibling",
+        );
+
+        const stale = [
+            action("Options for Nora"),
+            action("Pin"),
+            action("Mark unread"),
+            dragSource,
+        ];
+
+        for (const revoke of [
+            () => {
+                fixture.state.me = { id: "other", role: "owner" };
+            },
+            () => {
+                fixture.state.me.role = "guest";
+            },
+            () => {
+                fixture.state.server.privateAgents = 0;
+            },
+            () => {
+                fixture.state.namedAgents[0].chats[1].archived = true;
+            },
+            () => {
+                fixture.state.namedAgents = [];
+            },
+        ]) {
+            setup();
+            fixture.state.namedAgents[0].chats = [{ id: 11 }, { id: 10 }];
+            revoke();
+
+            for (const button of stale) {
+                button.props.onClick(event);
+                button.props.onDragStart?.(event);
+            }
+
+            assert.deepEqual(fixture.drags, []);
+            assert.deepEqual(fixture.state.pinned, []);
+            assert.deepEqual([...fixture.state.unread], []);
+            assert.deepEqual(fixture.sheets, []);
+        }
     } finally {
         list.dispose();
     }
@@ -621,7 +805,7 @@ test("saved Chats retain exact placement and activity while unassigned Chats rem
 });
 
 // Chronology is owned by the real list consumer, not the project-only projection. Chat wrappers
-// must never become generic session IDs for selection, pinning, drag or organization operations.
+// must never become generic session IDs for bulk selection or organization operations.
 test("Recent interleaves exact saved Chats by own/owned-work recency without session-target aliases", () => {
     setup();
     const now = Date.now();
@@ -652,7 +836,6 @@ test("Recent interleaves exact saved Chats by own/owned-work recency without ses
             supervisor: { conversationId: 99, status: "reclaimed" },
         },
     ];
-    fixture.state.pinned = [11]; // A Chat ID is not a valid ordinary pin/organization target.
     const list = mount();
 
     try {
@@ -1136,6 +1319,253 @@ test("nested Work Item buttons open their orchestrators while execution links re
     } finally {
         list.dispose();
     }
+});
+
+// The callback-only test above cannot detect a missing hold binding on the named header.
+// Real hooks and contact propagation own recognition/exclusion/click consumption here; the
+// existing drag owner tests own destination hit-testing and placement after startTouch succeeds.
+// This DOM host supplies geometry, not browser gesture/device acceptance.
+test("named Chat real hold requires fresh intent and preserves exact Options and touch drag boundaries", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    setup();
+    fixture.state.conversationId = 11;
+    fixture.state.namedAgents[0].chats = [
+        { id: 10, title: "Held source", projectId: "build" },
+        { id: 11, title: "Selected sibling", projectId: "build" },
+    ];
+    fixture.state.sessions = [
+        {
+            id: 2,
+            title: "Owned work",
+            projectId: "build",
+            groupingParentChatId: 10,
+            workItemId: "owned",
+            activeThreadId: 2,
+            updatedAt: 1,
+        },
+    ];
+    const root = new Element("root");
+    const all = (node: Element): Element[] => [node, ...node.childNodes.flatMap(all)];
+    const has = (node: Element, name: string) =>
+        String(node.attributes.class).split(" ").includes(name);
+    const chat = () => all(root).find((node) => node.attributes["data-chat-id"] === "10")!;
+    const control = (name: string) => all(chat()).find((node) => has(node, name))!;
+    const overlay = () => all(chat()).find((node) => has(node, "session-hold"));
+    const tick = (ms: number) => act(() => t.mock.timers.tick(ms));
+
+    // Dispatch document/ancestor capture before target/bubble listeners, including native
+    // listeners installed by the real recognizer and Preact's normal event proxy.
+    const dispatch = (target: Element, type: string, values: Props = {}) => {
+        const ancestors: Element[] = [];
+
+        for (let node: Element | null = target; node; node = node.parentNode) {
+            ancestors.push(node);
+        }
+
+        const path = [documentEvents, ...ancestors.reverse()];
+        let stopped = false;
+        let immediate = false;
+        const event: Props = {
+            type,
+            target,
+            currentTarget: target,
+            cancelable: true,
+            defaultPrevented: false,
+            detail: 1,
+            preventDefault() {
+                this.defaultPrevented = true;
+            },
+            stopPropagation() {
+                stopped = true;
+            },
+            stopImmediatePropagation() {
+                stopped = immediate = true;
+            },
+            ...values,
+        };
+
+        for (const capture of [true, false]) {
+            for (const node of capture ? path : [...path].reverse()) {
+                event.currentTarget = node;
+                const handlers = node.eventListeners.get(`${type}${capture}`);
+
+                for (const handler of [...(handlers ?? [])]) {
+                    if (handlers?.has(handler)) {
+                        handler.call(node, event);
+                    }
+
+                    if (immediate) {
+                        break;
+                    }
+                }
+
+                if (stopped) {
+                    return event;
+                }
+            }
+        }
+
+        return event;
+    };
+
+    const contact = (target: Element, type: string, x = 100): void => {
+        const finger = { clientX: x, clientY: 22, identifier: 7 };
+        const released = type === "touchend" || type === "touchcancel";
+
+        dispatch(target, type, {
+            touches: released ? [] : [finger],
+            changedTouches: [finger],
+        });
+    };
+
+    const release = async (target: Element, type = "touchend", x = 100) => {
+        await act(() => contact(target, type, x));
+        let event: Props = {};
+
+        await act(() => {
+            event = dispatch(target, "click", { sourceCapabilities: { firesTouchEvents: true } });
+        });
+
+        assert.equal(event.defaultPrevented, true, "a held release cannot activate its source");
+        assert.deepEqual(fixture.navigations, []);
+    };
+
+    const start = async (target: Element, x = 100) => {
+        await act(() => contact(target, "touchstart", x));
+        await tick(450);
+        assert.ok(overlay(), "holding the named Chat header reveals its native chooser");
+    };
+
+    const slide = async (target: Element, x: number) => {
+        await act(() => contact(target, "touchmove", x));
+        await tick(600);
+        await tick(140);
+    };
+
+    document.body!.appendChild(root);
+
+    try {
+        await act(() => render(h(HeldSessionList, {}), root as unknown as HTMLElement));
+        const open = control("project-chat-open");
+        const title = all(open).find((node) => has(node, "project-chat-name"))!;
+
+        await act(() => contact(title, "touchstart"));
+        await tick(449);
+        assert.equal(overlay(), undefined, "a short press does not reveal actions");
+        await tick(1);
+        assert.ok(overlay(), "holding the named Chat header reveals its native chooser");
+        await tick(1500);
+        assert.deepEqual(fixture.sheets, [], "a stationary hold cannot commit Options");
+        assert.deepEqual(fixture.touchDrags, [], "a stationary hold cannot start a drag");
+        await release(title);
+        assert.equal(overlay(), undefined);
+
+        await start(title);
+        await act(() => contact(title, "touchmove", 260));
+        await tick(599);
+        assert.deepEqual(fixture.sheets, []);
+        await tick(1);
+        await tick(139);
+        assert.deepEqual(fixture.sheets, [], "Options waits for the complete dwell");
+        await tick(1);
+        assert.deepEqual(fixture.sheets, [
+            {
+                type: "sidebar-options",
+                kind: "named-agent",
+                id: "nora",
+                userId: "owner",
+                chatId: 10,
+                at: { x: 260, y: 22, touch: true },
+            },
+        ]);
+        await release(title, "touchend", 260);
+        fixture.sheets = [];
+
+        for (const ending of ["touchend", "touchcancel"]) {
+            await start(title);
+            await act(() => contact(title, "touchmove", 260));
+            await tick(100);
+            await release(title, ending, 260);
+            await tick(1000);
+            assert.equal(overlay(), undefined);
+            assert.deepEqual(fixture.sheets, [], `${ending} cancels a pending Options choice`);
+            assert.deepEqual(fixture.touchDrags, []);
+        }
+
+        await act(() => contact(title, "touchstart"));
+        await tick(100);
+        await act(() => contact(title, "touchend"));
+        await tick(1000);
+        assert.equal(overlay(), undefined, "early lift never reaches the hold gate");
+        await act(() => {
+            dispatch(title, "click");
+        });
+        assert.deepEqual(fixture.navigations, [{ id: 10, options: undefined }]);
+        fixture.navigations = [];
+
+        for (const name of ["project-chat-disclosure", "session-pin"]) {
+            const button = control(name);
+            const icon = button.firstChild!;
+
+            await act(() => contact(icon, "touchstart"));
+            await tick(1500);
+            assert.equal(overlay(), undefined, `${name}'s descendants must not arm a hold`);
+            assert.deepEqual(fixture.sheets, []);
+            assert.deepEqual(fixture.touchDrags, []);
+            await act(() => contact(icon, "touchend"));
+            await act(() => {
+                dispatch(icon, "click");
+            });
+            assert.deepEqual(fixture.navigations, []);
+        }
+
+        assert.equal(control("project-chat-disclosure").attributes["aria-expanded"], "false");
+        assert.deepEqual(fixture.state.pinned, [10], "the excluded pin still activates normally");
+
+        await start(title, 230);
+        await slide(title, 40);
+        assert.deepEqual(
+            fixture.touchDrags,
+            [
+                {
+                    phase: "start",
+                    id: 10,
+                    chosen: [],
+                    point: { x: 40, y: 22, identifier: 7, source: title },
+                },
+            ],
+            "fresh drag intent hands only the held Chat to the list-level drag owner",
+        );
+        await act(() => contact(title, "touchmove", 60));
+        await release(title, "touchend", 60);
+        assert.deepEqual(
+            fixture.touchDrags.map(({ phase }) => phase),
+            ["start", "move", "end"],
+        );
+        assert.deepEqual(fixture.sheets, []);
+        fixture.touchDrags = [];
+        await start(title, 230);
+        await slide(title, 40);
+        await release(title, "touchcancel", 40);
+        assert.deepEqual(
+            fixture.touchDrags.map(({ phase }) => phase),
+            ["start", "cancel"],
+            "a cancelled activated drag reaches its owner instead of dropping",
+        );
+    } finally {
+        await act(() => render(null, root as unknown as HTMLElement));
+        root.remove();
+        document.activeElement = document.body;
+    }
+
+    assert.equal(
+        [...documentEvents.eventListeners.values()].reduce(
+            (count, handlers) => count + handlers.size,
+            0,
+        ),
+        0,
+        "contact and row listeners settle on unmount",
+    );
 });
 
 // The manual VNode consumer above cannot prove Preact keeps each Avatar in its own keyed row.

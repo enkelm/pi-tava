@@ -469,6 +469,15 @@ export class Projects {
             throw new HttpError(404, "No such session");
         }
 
+        if (
+            (meta.pip !== undefined ||
+                meta.pipAgent === true ||
+                meta.pipWorkItemId !== undefined) &&
+            (Object.hasOwn(request, "title") || Object.hasOwn(request, "archived"))
+        ) {
+            throw new HttpError(400, "Move a thread separately from renaming or archiving it.");
+        }
+
         const projectId =
             request.projectId === undefined
                 ? undefined

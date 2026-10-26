@@ -53,7 +53,11 @@
     border-image: none;
 }
 
-[data-part~="session-button"][aria-current="page"] {
+/* Named Chat selection belongs to the complete row, including its disclosure. */
+:is(
+    [data-part~="session-button"][aria-current="page"]:not(.project-chat-open),
+    .project-chat-head:has(> .project-chat-open[aria-current="page"])
+) {
     background: var(--accent-soft);
 }
 

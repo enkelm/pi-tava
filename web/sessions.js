@@ -1,7 +1,7 @@
 // The sidebar: the rail (Pi, the tools, and you; folded, numbered sessions too) and the session list beside it, in the
 // sidebar, the drawer, and a phone's home screen; and the order and archiving of sessions.
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
-import { Avatar, folderColor, initials } from "./avatar.js";
+import { Avatar, folderColor } from "./avatar.js";
 import { goHome, useBack } from "./back.js";
 import { ExtensionRailButtons } from "./extension-ui.js";
 import { useDragToClose } from "./gestures.js";
@@ -261,10 +261,90 @@ function ProjectGroupHead({ group, closed, archived, needle, onToggle, canStart,
     </div>`;
 }
 
+/** The same touch hold/slide chooser serves ordinary threads and saved named Chats. */
+function SessionHoldChoices({ hold, id, canDrag, onOptions }) {
+    if (!hold) {
+        return null;
+    }
+
+    return html`<div
+        class="session-hold"
+        data-choice=${hold.choice ?? undefined}
+        data-phase=${hold.phase}
+        style=${`--hold-expand:${hold.expandMs}ms;--hold-fill:${hold.fillMs}ms`}
+        role="group"
+        aria-label="Slide to Drag or Options, then hold"
+    >
+        <button
+            class=${`session-hold-choice drag ${hold.choice === "drag" ? "selected" : ""}`}
+            data-session-hold-action="true"
+            disabled=${!canDrag}
+            onClick=${() => openSheet({ type: "move-sessions", ids: [id] })}
+        >
+            <span class="session-hold-label">
+                <${Icon} name="hand-swipe" size=${20} /> Drag
+            </span>
+        </button>
+        <button
+            class=${`session-hold-choice options ${hold.choice === "options" ? "selected" : ""}`}
+            data-session-hold-action="true"
+            onPointerDown=${optionsPointerDown}
+            onPointerCancel=${optionsPointerCancel}
+            onClick=${(event) => onOptions(optionsAt(event))}
+        >
+            <span class="session-hold-label">
+                <${Icon} name="settings" size=${20} /> Options
+            </span>
+        </button>
+    </div>`;
+}
+
 /** One saved named Chat owns its own face, activity and exact controlled Work Items. */
-function ProjectChatRow({ chat, closed, onToggle, children }) {
+function ProjectChatRow({ chat, closed, onToggle, children, dnd, chosen, active }) {
     const { me, conversationId } = store.state;
     const { agent } = chat;
+    const ref = useRef(null);
+
+    const current = () => {
+        const state = store.state;
+
+        return (
+            state.me?.role === "owner" &&
+            state.me.id === me?.id &&
+            state.server?.privateAgents >= 4 &&
+            state.namedAgents?.some(
+                (identity) =>
+                    identity.agentId === agent.agentId &&
+                    identity.chats?.some(
+                        (source) => source.id === chat.id && !source.archived === !chat.archived,
+                    ),
+            )
+        );
+    };
+
+    const options = (at) => {
+        if (current()) {
+            openSidebarOptions("named-agent", agent.agentId, at, {
+                userId: me.id,
+                chatId: chat.id,
+            });
+        }
+    };
+
+    useSidebarContext(ref, options, { enabled: active });
+    const canDrag = canMoveSessions() && !chat.archived && !dnd.busy && current();
+    const { hold, consumeClick } = useSessionHold({
+        ref,
+        enabled: active && !dnd.busy,
+        canDrag,
+        onOptions: options,
+        onDragStart: (point) => current() && dnd.startTouch(point, chat.id, chosen),
+        onDragMove: (point) => dnd.moveTouch(point),
+        onDragEnd: (point) => dnd.endTouch(point),
+        onDragCancel: () => dnd.cancelTouch(),
+    });
+    const pinned = isPinned(chat.id);
+    const marked = isUnread(chat.id);
     const working = Boolean(chat.busy || chat.managing);
     const activity = chat.managing ? "Managing work" : chat.busy ? "Working" : "";
     const hasItems = chat.rows.length > 0;
@@ -276,17 +356,22 @@ function ProjectChatRow({ chat, closed, onToggle, children }) {
     />`;
 
     return html`<section
-        class=${`project-chat ${hasItems ? "has-items" : ""} ${closed ? "closed" : ""}`}
+        class=${`project-chat ${hasItems ? "has-items" : ""} ${closed ? "closed" : ""} ${marked ? "marked-unread" : ""}`}
         data-chat-id=${chat.id}
         data-agent-id=${agent.agentId}
         aria-label=${`Chat ${chat.title}${chat.contextLabel ? ` · ${chat.contextLabel}` : ""}`}
     >
-        <div class="project-chat-head">
+        <div
+            class=${`project-chat-head ${hold ? "pressing" : ""} ${dnd.drag?.ids.includes(chat.id) ? "dragging" : ""}`}
+            ref=${ref}
+            style=${`--chat-actions-width:${chat.archived ? 26 : 86}px`}
+        >
             ${
                 hasItems &&
                 html`<button
                     class="icon-button project-chat-disclosure"
                     type="button"
+                    data-session-hold-action="true"
                     aria-label=${`${closed ? "Expand" : "Collapse"} work for ${chat.title}`}
                     aria-expanded=${!closed}
                     onClick=${onToggle}
@@ -299,23 +384,14 @@ function ProjectChatRow({ chat, closed, onToggle, children }) {
                 class="project-chat-open"
                 type="button"
                 data-part="session-button"
+                draggable=${canDrag && !matchMedia("(pointer: coarse)").matches}
+                onDragStart=${(event) => current() && dnd.start(event, chat.id, chosen)}
                 data-id=${chat.id}
                 title=${`${agent.name} · ${chat.title}${chat.contextLabel ? ` · ${chat.contextLabel}` : ""}${activity ? ` · ${activity}` : ""}`}
                 aria-description=${activity || undefined}
                 aria-current=${conversationId === chat.id ? "page" : undefined}
-                onClick=${() => {
-                    const current = store.state;
-                    const identity = current.namedAgents?.find(
-                        (each) => each.agentId === agent.agentId,
-                    );
-                    const source = identity?.chats?.find((each) => each.id === chat.id);
-
-                    if (
-                        current.me?.role === "owner" &&
-                        current.me.id === me?.id &&
-                        current.server?.privateAgents >= 4 &&
-                        source
-                    ) {
+                onClick=${(event) => {
+                    if (!consumeClick(event) && !dnd.consumeClick(event) && current()) {
                         navigate(chat.id);
                     }
                 }}
@@ -326,6 +402,46 @@ function ProjectChatRow({ chat, closed, onToggle, children }) {
                     ${chat.contextLabel && html`<span class="project-chat-context">${chat.contextLabel}</span>`}
                 </span>
             </button>
+            <span class="session-actions project-chat-actions">
+                <button
+                    class="session-act project-chat-options"
+                    type="button"
+                    data-session-hold-action="true"
+                    title="Agent options"
+                    aria-label=${`Options for ${agent.name}`}
+                    aria-haspopup="menu"
+                    onPointerDown=${optionsPointerDown}
+                    onPointerCancel=${optionsPointerCancel}
+                    onClick=${(event) => options(optionsAt(event))}
+                >
+                    <${Icon} class="project-chat-options-desktop" name="settings" size=${16} />
+                    <${Icon} class="project-chat-options-touch" name="more" size=${16} />
+                </button>
+                ${
+                    !chat.archived &&
+                    html`<button
+                        class=${`session-act session-pin ${pinned ? "on" : ""}`}
+                        type="button"
+                        data-session-hold-action="true"
+                        title=${pinned ? "Unpin" : "Pin to the top"}
+                        aria-label=${pinned ? "Unpin" : "Pin"}
+                        onClick=${() => current() && togglePin(chat.id)}
+                    >
+                        <${Icon} name="pin" size=${14} />
+                    </button>
+                    <button
+                        class=${`session-act session-unread ${marked ? "on" : ""}`}
+                        type="button"
+                        data-session-hold-action="true"
+                        title=${marked ? "Mark read" : "Mark unread"}
+                        aria-label=${marked ? "Mark read" : "Mark unread"}
+                        onClick=${() => current() && setUnread(chat.id, !marked)}
+                    >
+                        <${Icon} name=${marked ? "check" : "unread"} size=${14} />
+                    </button>`
+                }
+            </span>
+            <${SessionHoldChoices} hold=${hold} id=${chat.id} canDrag=${canDrag} onOptions=${options} />
         </div>
         ${
             hasItems &&
@@ -860,41 +976,7 @@ function SessionRow({
                       </button>`
             }
         </span>
-        ${
-            hold &&
-            html`<div
-                class="session-hold"
-                data-choice=${hold.choice ?? undefined}
-                data-phase=${hold.phase}
-                style=${`--hold-expand:${hold.expandMs}ms;--hold-fill:${hold.fillMs}ms`}
-                role="group"
-                aria-label="Slide to Drag or Options, then hold"
-            >
-                <button
-                    class=${`session-hold-choice drag ${hold.choice === "drag" ? "selected" : ""}`}
-                    data-session-hold-action="true"
-                    disabled=${!canDrag}
-                    onClick=${() => openSheet({ type: "move-sessions", ids: [session.id] })}
-                >
-                    <span class="session-hold-label">
-                        <${Icon} name="hand-swipe" size=${20} />
-                        Drag
-                    </span>
-                </button>
-                <button
-                    class=${`session-hold-choice options ${hold.choice === "options" ? "selected" : ""}`}
-                    data-session-hold-action="true"
-                    onPointerDown=${optionsPointerDown}
-                    onPointerCancel=${optionsPointerCancel}
-                    onClick=${(event) => options(optionsAt(event))}
-                >
-                    <span class="session-hold-label">
-                        <${Icon} name="settings" size=${20} />
-                        Options
-                    </span>
-                </button>
-            </div>`
-        }
+        <${SessionHoldChoices} hold=${hold} id=${session.id} canDrag=${canDrag} onOptions=${options} />
     </div>`;
 }
 
@@ -944,6 +1026,7 @@ function groupsOf(shown, { tab, needle, home, pinned }) {
 
     const groups = [];
     const rowPinned = (entry) =>
+        (entry.chat && pinned.includes(entry.chat.id)) ||
         (entry.chat?.rows ?? [entry]).some(
             (session) =>
                 pinned.includes(session.id) ||
@@ -1153,7 +1236,7 @@ function AllSessions({ compact = false, home = false, active = true }) {
             ? catalogueGroups.flatMap((group) => group.rows).filter((row) => !nested.has(row.id))
             : matching;
     const forest = sessionForest(recentRows, { pinned: rowPins, folders: tab === "folders" });
-    // Chat entries participate in chronology, never in session selection/moves or organization IDs.
+    // Chats participate in chronology and pins; bulk selection remains ordinary-session-only.
     // A waiting manager's real visible work can be newer than the Chat's last own message.
     const entries = [
         ...forest.roots,
@@ -1195,7 +1278,14 @@ function AllSessions({ compact = false, home = false, active = true }) {
 
         if (flat) {
             const rank = (chat) => {
-                const index = rowPins.findIndex((id) => chat.rows.some((row) => row.id === id));
+                const index = pinned.findIndex(
+                    (id) =>
+                        chat.id === id ||
+                        chat.rows.some(
+                            (row) =>
+                                row.id === id || row.members?.some((member) => member.id === id),
+                        ),
+                );
 
                 return index === -1 ? Infinity : index;
             };
@@ -1556,6 +1646,9 @@ function AllSessions({ compact = false, home = false, active = true }) {
     const renderChat = (chat) => html`<${ProjectChatRow}
         key=${chat.key}
         chat=${chat}
+        dnd=${dnd}
+        chosen=${chosen}
+        active=${active}
         closed=${groupClosed({ key: chat.key })}
         onToggle=${() => toggleGroup(chat.key)}
     >
@@ -1970,13 +2063,9 @@ export const toggleBoard = () =>
             : { board: true, drawer: false, page: null },
     );
 
-/** The sidebar folded: Pi, new, the launcher, then numbered sessions like Waybar's workspaces. */
+/** The sidebar folded: Pi, new, the launcher, then compact labeled session tiles. */
 export function Rail() {
-    const { conversationId } = store.state;
     const canStart = canSteer() && !scoped();
-    const items = useRef(null);
-    const order = workspaceOrder();
-    const indicator = useSlide(items, ".ws.active");
 
     return html`<div class="rail">
         <button
@@ -2017,25 +2106,10 @@ export function Rail() {
                     setPrefs({ sidebar: "open" });
                 }}
             >
-                <${Icon} name="terminal" size=${18} />
+                <span class="icon herdr-icon" aria-hidden="true"></span>
             </button>`
         }
-        <div class="rail-items" ref=${items}>
-            <${Slide} box=${indicator} />
-            ${order.map(
-                (session, index) =>
-                    html`<button
-                        key=${session.id}
-                        class=${`ws ${rowIsOpen(session, conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
-                        style=${`--i:${index}`}
-                        title=${`${session.title ?? "New session"}${index < 9 ? `  (Alt ${index + 1})` : ""}`}
-                        onClick=${() => navigate(rowOpenId(session))}
-                    >
-                        ${index < 9 ? index + 1 : initials(session.title ?? "New session")}
-                        ${collab() && sessionUnread(session) && html`<span class="unread-dot"></span>`}
-                    </button>`,
-            )}
-        </div>
+        <${RailTiles} />
         <div class="rail-foot">
             <${PeeksRailButton} />
             <${PipRailButton} />
@@ -2075,36 +2149,54 @@ export function Rail() {
     </div>`;
 }
 
-/** The folded sidebar's sessions, numbered like Waybar's workspaces. */
+/** Compact ordinary-thread tiles omit named Chats without changing workspace shortcut indices. */
 function RailTiles() {
-    const { conversationId } = store.state;
+    const { conversationId, namedAgents = [] } = store.state;
     const items = useRef(null);
     const order = workspaceOrder();
+    const namedChats = new Set(
+        namedAgents.flatMap((agent) => [
+            agent.id,
+            ...(agent.chatIds ?? []),
+            ...(agent.chats ?? []).map((chat) => chat.id),
+        ]),
+    );
     const indicator = useSlide(items, ".ws.active");
 
     return html`<div class="rail-items" ref=${items}>
         <${Slide} box=${indicator} />
-        ${order.map(
-            (session, index) =>
-                html`<button
-                    key=${session.id}
-                    class=${`ws ${rowIsOpen(session, conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
-                    style=${`--i:${index}`}
-                    title=${`${session.title ?? "New session"}${index < 9 ? ` (Alt+${index + 1})` : ""}`}
-                    aria-label=${`${session.title ?? "New session"}${session.waiting ? ", needs you" : session.busy ? ", working" : ""}`}
-                    aria-current=${rowIsOpen(session, conversationId) ? "page" : undefined}
-                    onClick=${() => navigate(rowOpenId(session))}
-                >
-                    ${index < 9 ? index + 1 : initials(session.title ?? "New session")}
-                    ${
-                        (session.members ?? [session]).some(
-                            (member) =>
-                                member.id !== conversationId &&
-                                ((collab() && sessionUnread(member)) || isUnread(member.id)),
-                        ) && html`<span class="unread-dot"></span>`
-                    }
-                </button>`,
-        )}
+        ${order.map((session, index) => {
+            if (
+                session.pipAgent === true ||
+                typeof session.pipAgentId === "string" ||
+                namedChats.has(session.id)
+            ) {
+                return null;
+            }
+
+            return html`<button
+                key=${session.id}
+                class=${`ws ${rowIsOpen(session, conversationId) ? "active" : ""} ${session.busy ? "busy" : ""} ${session.waiting ? "waiting" : ""}`}
+                style=${`--i:${index}`}
+                title=${`${session.title ?? "New session"}${index < 9 ? ` (Alt+${index + 1})` : ""}`}
+                aria-label=${`${session.title ?? "New session"}${session.waiting ? ", needs you" : session.busy ? ", working" : ""}`}
+                aria-current=${rowIsOpen(session, conversationId) ? "page" : undefined}
+                onClick=${() => navigate(rowOpenId(session))}
+            >
+                <span class="ws-symbol" aria-hidden="true">
+                    <${ThreadTypeTag} session=${session} iconOnly=${true} />
+                </span>
+                <span class="ws-title" aria-hidden="true">${session.title ?? "New session"}</span>
+                ${index < 9 && html`<kbd class="ws-key" aria-hidden="true">${index + 1}</kbd>`}
+                ${
+                    (session.members ?? [session]).some(
+                        (member) =>
+                            member.id !== conversationId &&
+                            ((collab() && sessionUnread(member)) || isUnread(member.id)),
+                    ) && html`<span class="unread-dot"></span>`
+                }
+            </button>`;
+        })}
     </div>`;
 }
 
