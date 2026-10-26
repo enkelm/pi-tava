@@ -38,6 +38,22 @@ pi-tava uses the native Tailscale CLI to obtain a matched certificate/key in mem
 
 Opening HTTPS changes browser origin: sign in again and add the new URL to your bookmarks/home screen. Existing HTTP-origin drafts and browser preferences are not automatically moved. On iPhone/iPad, open the HTTPS URL in Safari, **Add to Home Screen**, reopen the installed app, then use **Settings → Notifications → This device** and allow notifications. Permission and a real device push test remain your actions; HTTPS does not enable notifications automatically.
 
+## Stable Cloudflare hostname
+
+Keep `--access cloudflare` for a temporary, account-free quick tunnel. For a stable hostname on a domain in your Cloudflare account, press `a` in the running terminal launcher and choose **Cloudflare custom domain**, or start it directly:
+
+```sh
+npm start -- --access cloudflare-custom
+```
+
+Cloudflare opens in your browser so you can select a domain. pi-tava verifies the selected domain with a read-only API request, then suggests `pi-coop-<device>.<domain>`, for example `pi-coop-macbook.enkelm.com`. Edit the hostname if needed. A flat name works with standard Universal SSL on a root-domain zone; nested names may need an additional edge certificate.
+
+Setup previews the exact address and asks before creating a dedicated named tunnel and DNS record. It never forces replacement of existing DNS records or adopts an unrelated tunnel. If setup stops after creating a tunnel, its saved attempt can finish DNS setup after another confirmation. For a DNS conflict, choose an unused hostname on retry; pi-tava keeps the tunnel and leaves the conflicting record alone. An uncertain create is not automatically repeated, and stopping setup does not delete account resources.
+
+After setup, `npm start -- --access cloudflare-custom -y` reuses the saved UUID and hostname without account queries or DNS changes. `-y` prevents first-time provisioning during startup, but an explicit `a` menu selection can still open the interactive setup. The server still listens on loopback, and normal pi-tava sign-in remains required. Authorization, tunnel credentials and the private setup log live under `<data>/cloudflare-custom/`; your personal `~/.cloudflared/` is untouched. Keep that data directory private. Setup fails without provisioning if the installed cloudflared authorization format or selected-zone API permission cannot be verified.
+
+Launcher changes require a full quit and relaunch, not Menu → Restart server. No live Cloudflare account provisioning is performed by development tests.
+
 ## Private Herdr sessions
 
 Open **Private** in the sidebar to see local Herdr instances, workspaces, tabs and every pane, including shells and other agents. Only the app owner can access this list or its contents. The same tab is available in the mobile session list and drawer.

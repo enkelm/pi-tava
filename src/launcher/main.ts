@@ -1,9 +1,10 @@
 /**
  * The pi-tava launcher. Pick how your devices reach this server (this device only, the local network, a Cloudflare
- * quick tunnel, or Tailscale), then it runs the server and the tunnel. The server restarts when the app asks (exit code
- * 75) or after a crash; the tunnel stays up across those restarts, so its address does not change.
+ * quick or custom-domain tunnel, or Tailscale), then it runs the server and the tunnel. The server restarts
+ * when the app asks (exit code 75) or after a crash; the tunnel stays up across those restarts, so its address
+ * does not change.
  *
- *   pi-tava [--access local|lan|cloudflare|tailscale|tailscale-https] [-y] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
+ *   pi-tava [--access local|lan|cloudflare|cloudflare-custom|tailscale|tailscale-https] [-y] [--port 8787] [--cwd DIR] [--data DIR] [--rotate-token]
  */
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -18,17 +19,21 @@ import {
     bindHost,
     chooseAccess,
     CloudflareTunnel,
+    type NamedTunnel,
     cloudflaredSource,
     downloadCloudflared,
     findCloudflared,
     isAccessMode,
+    isCloudflareMode,
     lanAddresses,
     tailscaleAddress,
 } from "./access.ts";
+import { prepareCustomCloudflare } from "./cloudflare-custom.ts";
 import { fail, parseArgs } from "./options.ts";
 import { loadTailscaleCertificate } from "../server/tailscale-https.ts";
 import {
     accent,
+    ask,
     bold,
     type Choice,
     choose,
@@ -57,6 +62,9 @@ const options = parseArgs(process.argv.slice(2));
 
 mkdirSync(options.data, { recursive: true, mode: 0o700 });
 const settingsFile = join(options.data, "launcher.json");
+const setupAbort = new AbortController();
+let customTunnel: NamedTunnel | undefined;
+let setupTask: Promise<NamedTunnel | undefined> | undefined;
 
 function loadSettings(): { access?: AccessMode } {
     try {
@@ -150,6 +158,14 @@ function accessChoices(): { mode: AccessMode; choice: Choice }[] {
             },
         },
         {
+            mode: "cloudflare-custom",
+            choice: {
+                label: ACCESS_LABELS["cloudflare-custom"],
+                detail: "stable https hostname · your Cloudflare account and domain",
+                disabled: cloudflared === undefined && !("url" in source),
+            },
+        },
+        {
             mode: "tailscale-https",
             choice: {
                 label: ACCESS_LABELS["tailscale-https"],
@@ -177,16 +193,50 @@ function accessChoices(): { mode: AccessMode; choice: Choice }[] {
     ];
 }
 
-/** Get `mode` ready to use: false, having said what is wrong, when it cannot be; the cloudflared to run for a tunnel. */
-async function prepareAccess(mode: AccessMode, requestedHost?: string): Promise<boolean | string> {
+/** Get `mode` ready. Only an explicit access-menu action may override -y's setup restriction. */
+async function prepareAccess(
+    mode: AccessMode,
+    requestedHost?: string,
+    fromMenu = false,
+): Promise<boolean | string> {
     if ((mode === "tailscale" || mode === "tailscale-https") && tailscaleAddress() === undefined) {
         log(yellow("  Tailscale is not connected on this machine. Connect it with: tailscale up"));
 
         return false;
     }
 
-    if (mode === "cloudflare") {
-        return (await ensureCloudflared()) ?? false;
+    if (isCloudflareMode(mode)) {
+        const binary = await ensureCloudflared();
+
+        if (binary === undefined) {
+            return false;
+        }
+
+        if (mode === "cloudflare-custom") {
+            const pending = prepareCustomCloudflare(binary, options.data, {
+                interactive: interactive && (fromMenu || !options.yes),
+                ask,
+                confirm,
+                show: (line) => process.stdout.write(`  ${line}\n`),
+                signal: setupAbort.signal,
+            });
+
+            setupTask = pending;
+
+            try {
+                customTunnel = await pending;
+            } finally {
+                if (setupTask === pending) {
+                    setupTask = undefined;
+                }
+            }
+
+            if (customTunnel === undefined) {
+                return false;
+            }
+        }
+
+        return binary;
     }
 
     if (mode === "tailscale-https") {
@@ -221,6 +271,10 @@ async function prepareAccess(mode: AccessMode, requestedHost?: string): Promise<
 }
 
 async function pickAccess(current: AccessMode | undefined): Promise<AccessMode | undefined> {
+    if (quitting) {
+        return undefined;
+    }
+
     const options = accessChoices();
     const initial = Math.max(
         0,
@@ -336,7 +390,7 @@ function appUrl(): string {
     const port = options.port;
 
     if (
-        (state.mode === "cloudflare" || state.mode === "tailscale-https") &&
+        (isCloudflareMode(state.mode) || state.mode === "tailscale-https") &&
         state.publicUrl !== undefined
     ) {
         return state.publicUrl;
@@ -378,6 +432,8 @@ function modeNote(): string {
             return state.publicUrl === undefined
                 ? "tunnel not up yet"
                 : "public https link, new each launch";
+        case "cloudflare-custom":
+            return state.publicUrl === undefined ? "tunnel not up yet" : "stable https hostname";
         case "tailscale":
             return "HTTP on your tailnet · password entry and phone notifications need HTTPS";
         case "tailscale-https":
@@ -389,7 +445,7 @@ function modeNote(): string {
 
 /** Other devices can open the app at `appUrl()`. */
 function reachable(): boolean {
-    if (state.mode === "cloudflare") {
+    if (isCloudflareMode(state.mode)) {
         return state.publicUrl !== undefined;
     }
 
@@ -404,7 +460,7 @@ function sendAccess(): void {
     const access = {
         mode: state.mode,
         label: modeLabel(),
-        ...((state.mode === "cloudflare" || state.mode === "tailscale-https") &&
+        ...((isCloudflareMode(state.mode) || state.mode === "tailscale-https") &&
         state.publicUrl !== undefined
             ? { url: state.publicUrl }
             : {}),
@@ -456,7 +512,7 @@ async function showPanel(withQr: boolean): Promise<void> {
                 dim(
                     interactive
                         ? `  Only this machine can connect. Press ${bold("a")} to let your phone in.`
-                        : "  Only this machine can connect. Use --access lan, cloudflare, or tailscale to let other devices in.",
+                        : "  Only this machine can connect. Use --access lan, cloudflare, cloudflare-custom, or tailscale to let other devices in.",
                 ),
                 "",
             );
@@ -478,7 +534,7 @@ function maybeShowPanel(): void {
         return;
     }
 
-    if (state.mode === "cloudflare" && state.publicUrl === undefined && !state.tunnelTrouble) {
+    if (isCloudflareMode(state.mode) && state.publicUrl === undefined && !state.tunnelTrouble) {
         return;
     }
 
@@ -658,7 +714,11 @@ function restartServer(): void {
 // ─── The tunnel ─────────────────────────────────────────────────────────
 
 function startTunnel(binary: string): void {
-    log(dim("  Starting a Cloudflare quick tunnel…"));
+    log(
+        dim(
+            `  Starting a Cloudflare ${state.mode === "cloudflare-custom" ? "named" : "quick"} tunnel…`,
+        ),
+    );
     const current: CloudflareTunnel = new CloudflareTunnel(
         binary,
         options.port,
@@ -713,20 +773,35 @@ function startTunnel(binary: string): void {
                 }, delay);
             },
         },
+        state.mode === "cloudflare-custom" ? customTunnel : undefined,
     );
 
     tunnel = current;
     current.start();
 }
 
-async function stopTunnel(): Promise<void> {
+let stoppingTunnel: Promise<void> | undefined;
+
+function stopTunnel(): Promise<void> {
+    if (stoppingTunnel !== undefined) {
+        return stoppingTunnel;
+    }
+
     const current = tunnel;
 
     tunnel = undefined;
     state.publicUrl = undefined;
     state.tunnelTrouble = false;
     state.tunnelFailures = 0;
-    await current?.stop();
+    const pending = (current?.stop() ?? Promise.resolve()).finally(() => {
+        if (stoppingTunnel === pending) {
+            stoppingTunnel = undefined;
+        }
+    });
+
+    stoppingTunnel = pending;
+
+    return pending;
 }
 
 /** Switch to `mode`: start or stop the tunnel, and restart the server when it has to listen somewhere else. */
@@ -734,6 +809,11 @@ async function applyAccess(mode: AccessMode, binary: string | undefined): Promis
     const transportChanged = (state.mode === "tailscale-https") !== (mode === "tailscale-https");
 
     await stopTunnel();
+
+    if (quitting) {
+        return;
+    }
+
     state.mode = mode;
     saveSettings(mode);
     const host = mode === "tailscale-https" ? preparedTls!.address : bindHost(mode);
@@ -748,7 +828,7 @@ async function applyAccess(mode: AccessMode, binary: string | undefined): Promis
         sendAccess();
     }
 
-    if (mode === "cloudflare" && binary !== undefined) {
+    if (isCloudflareMode(mode) && binary !== undefined) {
         startTunnel(binary);
     }
 
@@ -789,7 +869,7 @@ async function changeAccess(): Promise<void> {
             return;
         }
 
-        const ready = await prepareAccess(next);
+        const ready = await prepareAccess(next, undefined, true);
 
         if (ready === false || quitting) {
             return;
@@ -837,8 +917,10 @@ async function quit(code: number): Promise<void> {
 
     quitting = true;
     shutdown.abort();
+    setupAbort.abort();
     release();
     log(dim("  Stopping pi-tava…"));
+    await setupTask;
     await stopTunnel();
     const proc = child;
 
@@ -893,6 +975,10 @@ async function main(): Promise<void> {
             prepare: (selected) => prepareAccess(selected, options.host),
         });
 
+        if (quitting) {
+            return;
+        }
+
         if (chosen === "closed") {
             restoreTerminal();
             process.exit(0);
@@ -936,7 +1022,7 @@ async function main(): Promise<void> {
     log(dim(`  Starting pi-tava (${modeLabel()})…`));
     startServer(true);
 
-    if (mode === "cloudflare" && binary !== undefined) {
+    if (isCloudflareMode(mode) && binary !== undefined) {
         startTunnel(binary);
     }
 

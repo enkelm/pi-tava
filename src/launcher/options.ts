@@ -12,6 +12,7 @@ Usage: pi-tava [options]
                         local       this device only
                         lan         devices on the same network (http)
                         cloudflare  anywhere, through a Cloudflare quick tunnel (https)
+                        cloudflare-custom  stable hostname on your Cloudflare domain (https)
                         tailscale   devices on your tailnet (http)
                         tailscale-https  private https using a Tailscale certificate
                       HTTPS needs MagicDNS and HTTPS certificates enabled in Tailscale.

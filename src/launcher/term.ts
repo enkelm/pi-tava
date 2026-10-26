@@ -216,6 +216,38 @@ export function confirm(question: string, fallback: boolean): Promise<boolean> {
     });
 }
 
+/** An editable single-line answer. Escape cancels; Enter accepts the suggested value. */
+export function ask(question: string, initial = ""): Promise<string | undefined> {
+    return new Promise((resolve) => {
+        let value = initial;
+        const draw = () => process.stdout.write(`\r\x1b[2K  ${question} ${value}`);
+
+        draw();
+        const previous = onKeys((key) => {
+            if (key === "enter") {
+                finish(value.trim());
+            } else if (key === "escape" || key === "ctrl-c") {
+                finish(undefined);
+            } else if (key === "\x15") {
+                value = "";
+                draw();
+            } else if (key === "\x7f" || key === "\b") {
+                value = value.slice(0, -1);
+                draw();
+            } else if (key.length === 1 && key >= " " && value.length < 253) {
+                value += key;
+                draw();
+            }
+        });
+
+        function finish(result: string | undefined) {
+            onKeys(previous);
+            process.stdout.write("\n");
+            resolve(result);
+        }
+    });
+}
+
 export async function qrLines(text: string): Promise<string[]> {
     const out = await QRCode.toString(text, {
         type: "terminal",

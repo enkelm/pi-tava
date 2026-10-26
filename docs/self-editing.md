@@ -10,6 +10,7 @@ Before you start, read [map.md](map.md) to find the code that you need, and the 
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | A file in `web/`                     | Each open browser loads again, at once. A syntax error makes the app blank for everyone, you too.                                           |
 | A module in `src/server/extensions/` | The server installs it again about 300 ms later. If it does not load, the previous version continues to run, and the app reports the error. |
+| `src/launcher/`                      | Nothing, until pi-tava's whole launcher is quit and relaunched.                                                                             |
 | Any other file in `src/server/`      | Nothing, until the server restarts.                                                                                                         |
 | `docs/`, `test/`                     | Nothing runs it, except `npm test`.                                                                                                         |
 
@@ -83,6 +84,8 @@ Stop the copy with the `kill <id>` that it printed. This also deletes its data; 
 The copy listens on `127.0.0.2:8899`. Browsers keep cookies for each host, not for each port: a sign-in to a copy on `127.0.0.1` or `localhost` would sign the same browser out of the real server. macOS answers only on `127.0.0.1`. There, run `node test/serve.ts 8899 127.0.0.1`, and open the real server as `localhost` at the same time.
 
 ## Restarting
+
+Launcher changes in `src/launcher/` require quitting and relaunching the whole pi-tava process from its terminal, with the same arguments and data directory. Menu → **Restart server** and the terminal's `r` key restart only the server child, not the launcher. A full relaunch creates a new Cloudflare quick-tunnel address.
 
 Server changes outside `extensions/` need a restart. Only the owner can, from Menu → **Restart server** (shown when pi-tava runs under its launcher, as `pi-tava` does; `pi-coop` remains a compatibility alias).
 

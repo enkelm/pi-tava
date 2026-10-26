@@ -57,7 +57,7 @@ This fork's default data directory is `~/.pi-durable-app`; the files and the `PI
 
 ## Processes
 
-`bin/pi-coop.js` checks Node, then runs `src/launcher/main.ts`. The launcher reads its options (`options.ts`), asks how devices connect (`access.ts`: this device, LAN, Cloudflare quick tunnel, Tailscale), runs the server (`src/server/main.ts`) as a child, restarts it on exit code 75 or a crash, and keeps the tunnel up. `term.ts` draws its menu, panel, and QR code in the terminal. The server takes the data folder's lock, opens one `PocketApp`, and serves it with `http.ts`.
+`bin/pi-coop.js` checks Node, then runs `src/launcher/main.ts`. The launcher reads its options (`options.ts`), asks how devices connect (`access.ts`: this device, LAN, Cloudflare quick/custom tunnels, Tailscale), runs the server (`src/server/main.ts`) as a child, restarts it on exit code 75 or a crash, and keeps the tunnel up. `term.ts` draws its menu, panel, and QR code in the terminal. Quick tunnels use the generated `<data>/cloudflared-quick.yml` empty YAML mapping, passed explicitly with `--config`, instead of the user's default cloudflared configuration. `cloudflare-custom.ts` owns browser sign-in in an isolated home, selected-zone verification, confirmed named-tunnel/DNS setup and resumable private state under `<data>/cloudflare-custom/`. The saved custom mode uses `cloudflared-custom.yml` with exact-host ingress and the saved credential file. The server takes the data folder's lock, opens one `PocketApp`, and serves it with `http.ts`.
 
 ## Data (`~/.pi-durable-app/`, or `PI_POCKET_DIR`)
 

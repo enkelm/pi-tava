@@ -3,7 +3,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { type AccessChoice, type AccessMode, chooseAccess } from "../src/launcher/access.ts";
+import {
+    type AccessChoice,
+    type AccessMode,
+    bindHost,
+    chooseAccess,
+    isAccessMode,
+    isCloudflareMode,
+} from "../src/launcher/access.ts";
+import { parseArgs } from "../src/launcher/options.ts";
 
 /** A launch where only `ready` modes can be used. */
 function launch(
@@ -32,7 +40,7 @@ function launch(
             }
 
             return choice.ready.includes(mode)
-                ? mode === "cloudflare"
+                ? isCloudflareMode(mode)
                     ? "/bin/cloudflared"
                     : true
                 : false;
@@ -96,8 +104,18 @@ test("Tailscale HTTPS is an explicit CLI choice and saved HTTP access is not sil
 });
 
 test("a ready mode starts, with the cloudflared to run for a tunnel", async () => {
-    assert.deepEqual(await launch({ given: "cloudflare", ready: ["cloudflare"] }).result, {
-        mode: "cloudflare",
-        binary: "/bin/cloudflared",
-    });
+    for (const mode of ["cloudflare", "cloudflare-custom"] as const) {
+        assert.deepEqual(await launch({ given: mode, ready: [mode] }).result, {
+            mode,
+            binary: "/bin/cloudflared",
+        });
+    }
+});
+
+test("custom domains are a separate CLI mode that keeps the app on loopback", () => {
+    assert.equal(parseArgs(["--access", "cloudflare-custom"]).access, "cloudflare-custom");
+    assert.equal(isAccessMode("cloudflare-custom"), true);
+    assert.equal(isCloudflareMode("cloudflare-custom"), true);
+    assert.equal(isCloudflareMode("local"), false);
+    assert.equal(bindHost("cloudflare-custom"), "127.0.0.1");
 });

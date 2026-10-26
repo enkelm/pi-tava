@@ -1,4 +1,4 @@
-// How other devices reach pi-tava: this device only, the local network, a Cloudflare quick tunnel, or Tailscale.
+// How other devices reach pi-tava: this device only, LAN, Cloudflare quick/custom tunnels, or Tailscale.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
@@ -10,16 +10,19 @@ import {
     mkdirSync,
     renameSync,
     rmSync,
+    writeFileSync,
 } from "node:fs";
 import { networkInterfaces } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
-export type AccessMode = "local" | "lan" | "cloudflare" | "tailscale" | "tailscale-https";
+export type AccessMode =
+    "local" | "lan" | "cloudflare" | "cloudflare-custom" | "tailscale" | "tailscale-https";
 export const ACCESS_MODES: readonly AccessMode[] = [
     "local",
     "lan",
     "cloudflare",
+    "cloudflare-custom",
     "tailscale",
     "tailscale-https",
 ];
@@ -27,7 +30,8 @@ export const ACCESS_MODES: readonly AccessMode[] = [
 export const ACCESS_LABELS: Record<AccessMode, string> = {
     local: "This device only",
     lan: "Local network",
-    cloudflare: "Cloudflare Tunnel",
+    cloudflare: "Cloudflare quick tunnel",
+    "cloudflare-custom": "Cloudflare custom domain",
     tailscale: "Tailscale (HTTP)",
     "tailscale-https": "Tailscale (HTTPS)",
 };
@@ -263,6 +267,24 @@ export async function downloadCloudflared(
     return target;
 }
 
+/** A saved, locally managed tunnel. Its credential file is private; the hostname and UUID are not secrets. */
+export interface NamedTunnel {
+    hostname: string;
+    tunnelId: string;
+    credentialsFile: string;
+}
+
+/** App-owned tunnels must not inherit credentials, routing overrides, or forced DNS replacement. */
+export function cloudflaredEnvironment(): NodeJS.ProcessEnv {
+    return Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !/^TUNNEL_/i.test(key)),
+    );
+}
+
+export function isCloudflareMode(mode: string): boolean {
+    return mode === "cloudflare" || mode === "cloudflare-custom";
+}
+
 export interface TunnelEvents {
     /** The tunnel is registered and serving at this address. */
     ready(url: string): void;
@@ -273,22 +295,30 @@ export interface TunnelEvents {
 }
 
 /**
- * A Cloudflare quick tunnel: a random https://….trycloudflare.com address, no account needed. The address is new for
- * every cloudflared process, so the launcher keeps one running across server restarts. Its log goes to `logFile`.
+ * A Cloudflare tunnel with either a generated quick URL or a saved named-tunnel hostname and credential file.
+ * The launcher keeps it running across server restarts. Its private log goes to `logFile`.
  */
 export class CloudflareTunnel {
     readonly #binary: string;
     readonly #port: number;
     readonly #logFile: string;
     readonly #events: TunnelEvents;
+    readonly #named: NamedTunnel | undefined;
     #child: ChildProcess | undefined;
     url: string | undefined;
 
-    constructor(binary: string, port: number, logFile: string, events: TunnelEvents) {
+    constructor(
+        binary: string,
+        port: number,
+        logFile: string,
+        events: TunnelEvents,
+        named?: NamedTunnel,
+    ) {
         this.#binary = binary;
         this.#port = port;
         this.#logFile = logFile;
         this.#events = events;
+        this.#named = named;
     }
 
     start(): void {
@@ -297,16 +327,43 @@ export class CloudflareTunnel {
             mode: 0o600,
         });
         chmodSync(this.#logFile, 0o600);
+        // Default named-tunnel ingress rules override --url. Both modes use app-owned configurations.
+        const named = this.#named;
+        const configFile = join(
+            dirname(this.#logFile),
+            named === undefined ? "cloudflared-quick.yml" : "cloudflared-custom.yml",
+        );
+        const origin = `http://127.0.0.1:${this.#port}`;
+        const config =
+            named === undefined
+                ? {}
+                : {
+                      tunnel: named.tunnelId,
+                      "credentials-file": named.credentialsFile,
+                      ingress: [
+                          { hostname: named.hostname, service: origin },
+                          { service: "http_status:404" },
+                      ],
+                  };
+
+        writeFileSync(configFile, `${JSON.stringify(config)}\n`, { mode: 0o600 });
         const child = spawn(
             this.#binary,
-            ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${this.#port}`],
+            [
+                "tunnel",
+                "--config",
+                configFile,
+                "--no-autoupdate",
+                ...(named === undefined ? ["--url", origin] : ["run", named.tunnelId]),
+            ],
             {
                 stdio: ["ignore", "pipe", "pipe"],
+                env: cloudflaredEnvironment(),
             },
         );
 
         this.#child = child;
-        let candidate: string | undefined;
+        let candidate = named === undefined ? undefined : `https://${named.hostname}`;
 
         const onLine = (line: string) => {
             appendFileSync(this.#logFile, `${line}\n`);

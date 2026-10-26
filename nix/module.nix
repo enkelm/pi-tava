@@ -67,11 +67,14 @@ in
         "local"
         "lan"
         "cloudflare"
+        "cloudflare-custom"
         "tailscale"
       ];
       default = "local";
       description = ''
-        Access mode: loopback only, LAN, a Cloudflare quick tunnel, or Tailscale.
+        Access mode: loopback only, LAN, a Cloudflare quick tunnel, a saved Cloudflare
+        custom domain, or Tailscale. Custom domains require interactive setup as the
+        service user with the same dataDir before starting the service.
         Tailscale mode requires Tailscale to be connected separately.
       '';
     };

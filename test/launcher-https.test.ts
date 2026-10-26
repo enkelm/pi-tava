@@ -145,7 +145,7 @@ async function fixture(mode: string, failing = false, missingReadyUrl = false) {
             await wait(() =>
                 output.slice(before).includes("How should your devices reach pi-tava?"),
             );
-            child.stdin.write(mode === "https" ? "4\r" : "5\r");
+            child.stdin.write(mode === "https" ? "5\r" : "6\r");
         },
         async close() {
             if (child.exitCode === null) {
