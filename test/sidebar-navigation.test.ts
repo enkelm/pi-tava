@@ -77,7 +77,10 @@ class Element {
         return this === document.body || Boolean(this.parentNode?.isConnected);
     }
     contains(node: Element | null): boolean {
-        return node !== null && (node === this || this.childNodes.some((child) => child.contains(node)));
+        return (
+            node !== null &&
+            (node === this || this.childNodes.some((child) => child.contains(node)))
+        );
     }
     matches(selector: string) {
         return selector.split(",").some((tag) => tag.trim() === this.localName);
@@ -149,6 +152,7 @@ const document = {
         return text;
     },
 };
+
 document.body = new Element("body");
 document.activeElement = document.body;
 const descriptors = new Map<string, PropertyDescriptor | undefined>();
@@ -200,7 +204,10 @@ registerHooks({
     resolve(specifier, context, next) {
         if (context.parentURL?.endsWith("/web/session-navigation.js")) {
             if (specifier === "./sessions.js") {
-                return next(new URL("../web/sessions.js?native-render", import.meta.url).href, context);
+                return next(
+                    new URL("../web/sessions.js?native-render", import.meta.url).href,
+                    context,
+                );
             }
 
             if (specifier === "./ui.js") {
@@ -225,7 +232,9 @@ registerHooks({
     },
 });
 const { SessionList } = await import(new URL("../web/sessions.js", import.meta.url).href);
-const { PhoneSessionList } = await import(new URL("../web/session-navigation.js", import.meta.url).href);
+const { PhoneSessionList } = await import(
+    new URL("../web/session-navigation.js", import.meta.url).href
+);
 const { SessionList: NativeSessionList } = await import(
     new URL("../web/sessions.js?native-render", import.meta.url).href
 );
@@ -1335,7 +1344,8 @@ test("phone navigation retains rows, search, scroll and focus without hidden red
 
     document.body!.appendChild(root);
     const all = (node: Element): Element[] => [node, ...node.childNodes.flatMap(all)];
-    const has = (node: Element, name: string) => String(node.attributes.class).split(" ").includes(name);
+    const has = (node: Element, name: string) =>
+        String(node.attributes.class).split(" ").includes(name);
     const update = (active: boolean, key = "owner") =>
         act(() => render(h(PhoneSessionList, { active, key }), root as unknown as HTMLElement));
 
@@ -1372,8 +1382,14 @@ test("phone navigation retains rows, search, scroll and focus without hidden red
         );
         document.activeElement = document.body;
         await update(true);
-        assert.equal(all(root).find((node) => node.localName === "input"), search);
-        assert.equal(all(root).find((node) => has(node, "session")), row);
+        assert.equal(
+            all(root).find((node) => node.localName === "input"),
+            search,
+        );
+        assert.equal(
+            all(root).find((node) => has(node, "session")),
+            row,
+        );
         assert.equal(search.value, "Arbitrary");
         assert.equal(scroller.scrollTop, 137);
         assert.equal(document.activeElement, row, "Back restores the surviving keyboard row");

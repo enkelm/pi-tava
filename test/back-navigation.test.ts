@@ -33,9 +33,11 @@ async function browser(t: { after: (run: () => Promise<void>) => void }, standal
     const entries = [{ state: null as any, path: location.href }];
     let at = 0;
     const saved = new Map<string, PropertyDescriptor | undefined>();
+
     const visit = (path: string) => {
         location.href = new URL(path, location).href;
     };
+
     const history = {
         get state() {
             return entries[at]!.state;
@@ -85,7 +87,9 @@ async function browser(t: { after: (run: () => Promise<void>) => void }, standal
         Object.defineProperty(globalThis, name, { configurable: true, value });
     }
 
-    const back = await import(new URL(`../web/back.js?case=${++browserCase}`, import.meta.url).href);
+    const back = await import(
+        new URL(`../web/back.js?case=${++browserCase}`, import.meta.url).href
+    );
     const settle = () => new Promise((resolve) => setTimeout(resolve, 65));
 
     t.after(async () => {
@@ -169,7 +173,9 @@ test("route marks honor effective motion before the OS fallback and only animate
         assert.equal(pane.dataset.route, mode.mark, mode.name);
         assert.equal(root.dataset.route, undefined, mode.name);
         assert.equal(history.state.pocket.layers, 0);
-        pane.dispatchEvent(Object.assign(new Event("animationend"), { animationName: "route-forward" }));
+        pane.dispatchEvent(
+            Object.assign(new Event("animationend"), { animationName: "route-forward" }),
+        );
         assert.equal(pane.dataset.route, undefined, "completed route marks are released");
     }
 });

@@ -166,7 +166,8 @@ const sources: Record<string, string> = {
         export const NamedAgents=()=>null;`,
     "named-agent-avatar.js": "export const NamedAgentAvatar=()=>null;",
     "project-view.js": "export const ProjectView=globalThis.groupNavigationFixture.projectView;",
-    "session-navigation.js": "export const PhoneSessionList=globalThis.groupNavigationFixture.phoneList;",
+    "session-navigation.js":
+        "export const PhoneSessionList=globalThis.groupNavigationFixture.phoneList;",
     "project.js":
         "export const ProjectForm=props=>globalThis.groupNavigationFixture.html`<native-project-form ...${props} />`;",
     "session-projects.js":
@@ -475,12 +476,15 @@ test("App lazily mounts only its active-width navigation and creation owners", (
                 const tree = nodes(App({}));
                 const phone = tree.filter((node) => node.type === fixture.phoneList);
 
-                assert.equal(tree.filter((node) => node.type === SessionList).length, roomy ? 1 : 0);
+                assert.equal(
+                    tree.filter((node) => node.type === SessionList).length,
+                    roomy ? 1 : 0,
+                );
                 assert.equal(phone.length, roomy ? 0 : 1);
 
                 if (!roomy) {
-                    assert.equal(phone[0].props.active, conversationId === null);
-                    assert.equal(phone[0].key, "shell-owner", "warm rows cannot cross accounts");
+                    assert.equal(phone[0]!.props.active, conversationId === null);
+                    assert.equal(phone[0]!.key, "shell-owner", "warm rows cannot cross accounts");
                 }
 
                 assert.equal(
